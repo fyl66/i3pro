@@ -184,7 +184,12 @@ function run(hash) {
     devicePixelRatio: 1,
     _handlers: {},
     addEventListener(type, fn) { (this._handlers[type] = this._handlers[type] || []).push(fn); },
-    dispatch(type, event) { (this._handlers[type] || []).forEach((fn) => fn(event)); },
+    removeEventListener(type, fn) {
+      const list = this._handlers[type] || [];
+      const i = list.indexOf(fn);
+      if (i >= 0) list.splice(i, 1);
+    },
+    dispatch(type, event) { (this._handlers[type] || []).slice().forEach((fn) => fn(event)); },
   };
   const location = { hash: hash ? "#" + hash : "", origin: "http://localhost", pathname: "/x" };
   const navigator = { clipboard: { writeText: async () => {} } };
@@ -224,6 +229,19 @@ try {
 const window = ctx.window;
 const registry = ctx.registry;
 const api = ctx.api;
+
+/** Find the component element the app created for a component id. */
+function SHEETEl(root, id) {
+  let found = null;
+  (function walk(node) {
+    if (found || !node || !node._children) return;
+    for (const child of node._children) {
+      if (child.dataset && child.dataset.id === id) { found = child; return; }
+      walk(child);
+    }
+  })(root);
+  return found;
+}
 
 if (expectTemplate) {
   const body = ctx.document.body.innerHTML;
@@ -447,6 +465,104 @@ if (api) {
     "the worksheet did not survive a link round trip");
   check(decoded && decoded.map((c) => c.type).join(",") === state.components.map((c) => c.type).join(","),
     "the worksheet link round trip lost or reordered components");
+
+  // 17. clicking a lap must jump the view to that lap
+  const lapTableEl = registry.get("lapTable");
+  const lapRows = lapTableEl && lapTableEl._rows ? lapTableEl._rows : [];
+  const completeLap = (api.data.laps || []).find((l) => l.complete);
+  if (lapRows.length && completeLap) {
+    const row = lapRows.find((r) => r.dataset.lap === String(completeLap.lap)) || lapRows[0];
+    key("F2");                                  // start from the full session
+    check(state.view === null, "F2 did not clear the window before the lap click test");
+    debug("lap test: rows=" + lapRows.length + " want=" + completeLap.lap
+      + " got=" + (row && row.dataset.lap) + " handlers=" + (row ? Object.keys(row._handlers).join(",") : "-")
+      + " ref=" + state.ref + " cmp=" + state.cmp + " mode=" + state.mode);
+    row.dispatch("click", { target: row, shiftKey: false, ctrlKey: false });
+    debug("lap test after click: view=" + JSON.stringify(state.view)
+      + " ref=" + state.ref + " cmp=" + state.cmp);
+    check(Array.isArray(state.view), "clicking a lap did not zoom to it");
+    check(state.view && Math.abs(state.view[0] - completeLap.start_time) < 0.01
+      && Math.abs(state.view[1] - completeLap.end_time) < 0.01,
+      "clicking a lap zoomed to the wrong time range");
+    check(String(state.ref) === String(completeLap.lap),
+      "clicking a lap did not make it the reference (Main) lap");
+    check(state.cmp === null, "a plain lap click should clear the comparison lap");
+
+    // Ctrl+click on a *different* lap must arm the comparison and switch to overlay
+    const other = (api.data.laps || []).find((l) => l.complete && l.lap !== completeLap.lap);
+    const otherRow = other && lapRows.find((r) => r.dataset.lap === String(other.lap));
+    if (otherRow) {
+      otherRow.dispatch("click", { target: otherRow, shiftKey: false, ctrlKey: true });
+      check(String(state.cmp) === String(other.lap), "ctrl+click did not set the comparison lap");
+      check(state.mode === "overlay", "ctrl+click did not switch to the overlay comparison");
+      key("F4");   // no-op safety: unknown keys must not throw
+    }
+  }
+
+  // 18. datum cursor: space must produce a visible delta
+  state.cursor = null;
+  key("d");
+  key(" ");
+  check(state.datumOn && state.datum !== null, "space did not place the datum cursor");
+  const mid2 = (api.lane()[0] + api.lane()[1]) / 2;
+  state.cursor = mid2;
+  api.renderAll();
+  const statusNow = String(registry.get("statusLine").innerHTML || "");
+  check(statusNow.indexOf("基准光标") >= 0, "the status line does not report the datum cursor");
+  check(statusNow.indexOf("Δ") >= 0, "the status line does not report the delta");
+  const deltaCells = [];
+  (function walk(node) {
+    if (!node || !node._children) return;
+    for (const child of node._children) {
+      if (String(child.className || "").indexOf("ldelta") >= 0) deltaCells.push(child);
+      walk(child);
+    }
+  })(worksheet);
+  check(deltaCells.some((cell) => String(cell.textContent).indexOf("Δ") === 0
+    && /[-+]?\d/.test(String(cell.textContent))),
+    "the graph header does not show the datum delta");
+  key("d");                                     // back to a clean state
+
+  // 19. gauges: every subtype must render something
+  const gaugeSubtypes = ["numeric", "list", "bar", "dial", "wheel"];
+  const beforeGauge = state.components.length;
+  for (const subtype of gaugeSubtypes) {
+    const comp = { id: "gauge-test-" + subtype, type: "gauge", x: 0, y: 0, w: 4, h: 13,
+                   config: { subtype: subtype, channels: [] } };
+    state.components.push(comp);
+    api.buildWorksheet();
+    api.syncScatterSelectors();
+    const fills = calls.fillText;
+    api.renderAll();
+    check(calls.fillText > fills, "gauge subtype " + subtype + " drew no text");
+  }
+  while (state.components.length > beforeGauge) {
+    api.componentAction(state.components[state.components.length - 1], "close");
+  }
+  check(state.components.length === beforeGauge, "cleaning up the gauge test components failed");
+
+  // 20. free layout: drag to move, drag the corner to resize, both snap
+  const target = state.components.find((c) => c.type === "scatter") || state.components[0];
+  const element = SHEETEl(worksheet, target.id);
+  check(!!element, "could not find the component element for the layout test");
+  if (element) {
+    const bar = element._children[0];
+    const startX = target.x, startY = target.y;
+    bar.dispatch("mousedown", { clientX: 100, clientY: 100, preventDefault() {}, stopPropagation() {} });
+    window.dispatch("mousemove", { clientX: 260, clientY: 160 });
+    window.dispatch("mouseup", {});
+    check(target.x !== startX || target.y !== startY, "dragging a component did not move it");
+
+    const beforeW = target.w, beforeH = target.h;
+    const handle = element._children[element._children.length - 1];
+    handle.dispatch("mousedown", { clientX: 100, clientY: 100, preventDefault() {}, stopPropagation() {} });
+    window.dispatch("mousemove", { clientX: 200, clientY: 200 });
+    window.dispatch("mouseup", {});
+    check(target.w !== beforeW || target.h !== beforeH, "dragging the corner did not resize it");
+    check(target.x % 0.25 === 0 && target.y % 0.5 === 0 &&
+          target.w % 0.25 === 0 && target.h % 0.5 === 0,
+          "component geometry is not on the grid (snapping broken)");
+  }
 }
 
 /* --------------------------------------------------------------- DOM checks */

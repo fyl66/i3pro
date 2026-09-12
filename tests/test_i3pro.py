@@ -325,6 +325,24 @@ class TestServer(unittest.TestCase):
             track = get_json(f"/api/session/{quoted}/track")
             self.assertGreater(len(track["x"]), 100)
 
+            overview = get_json(f"/api/session/{quoted}/overview")
+            self.assertEqual(overview["name"], "Vx KF")
+            self.assertGreater(len(overview["time"]), 100)
+
+            points = get_json(
+                f"/api/session/{quoted}/points?channels=Vx%20KF,G%20Force%20Lat&from=200&to=210"
+            )
+            self.assertEqual(sorted(points["values"]), ["G Force Lat", "Vx KF"])
+            self.assertEqual(len(points["time"]), len(points["values"]["Vx KF"]))
+            self.assertGreaterEqual(min(points["time"]), 200.0)
+            self.assertLessEqual(max(points["time"]), 210.0)
+
+            with self.assertRaises(urllib.error.HTTPError) as missing_channel:
+                urllib.request.urlopen(
+                    base + f"/api/session/{quoted}/points", timeout=15
+                )
+            self.assertEqual(missing_channel.exception.code, 400)
+
             laps = get_json(f"/api/session/{quoted}/laps")
             self.assertGreaterEqual(len([l for l in laps if l["complete"]]), 5)
 
@@ -335,6 +353,60 @@ class TestServer(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
             library.close()
+
+
+class TestChannelGroups(unittest.TestCase):
+    """i2 Pro groups channels that share a unit so they can share one axis."""
+
+    @_needs(HILL)
+    def test_every_channel_lands_in_exactly_one_group(self):
+        with ld.LogFile.read(HILL) as log:
+            channel_groups, status = render.groups(log)
+            total = len(log.channels)
+            units = {c.name: c.unit for c in log.channels}
+        flat = [n for g in channel_groups for n in g["channels"]] + list(status)
+        self.assertEqual(len(flat), total)
+        self.assertEqual(len(set(flat)), total)
+        for group in channel_groups:
+            self.assertEqual({units[n] for n in group["channels"]}, {group["unit"]}, group["label"])
+
+    @_needs(HILL)
+    def test_speed_group_comes_first_and_status_is_detected(self):
+        with ld.LogFile.read(HILL) as log:
+            channel_groups, status = render.groups(log)
+        self.assertIn(channel_groups[0]["unit"], ("km/h", "m/s"))
+        # this car logs Motor/Inverter/Cell status bits; they belong in the band
+        self.assertGreater(len(status), 10)
+        self.assertTrue(all("error" in n.lower() or "temp" not in n for n in status))
+        self.assertIn("MCU1 FR Error", status)
+        self.assertNotIn("MCU1 FR TempMotor", status)
+
+
+class TestPoints(unittest.TestCase):
+    """The scatter component needs raw samples, never min/max decimation."""
+
+    @_needs(HILL)
+    def test_points_are_raw_and_windowed(self):
+        with ld.LogFile.read(HILL) as log:
+            time = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
+            payload = render.points(
+                log, ["Vx KF", "G Force Lat"], time, start=200.0, end=210.0, max_points=100000
+            )
+        self.assertEqual(sorted(payload["values"]), ["G Force Lat", "Vx KF"])
+        self.assertEqual(payload["stride"], 1)
+        self.assertEqual(len(payload["values"]["Vx KF"]), len(payload["time"]))
+        self.assertGreaterEqual(min(payload["time"]), 200.0)
+        self.assertLessEqual(max(payload["time"]), 210.0)
+        # 10 s at 100 Hz must come back complete, not decimated to a few points
+        self.assertGreater(len(payload["time"]), 900)
+
+    @_needs(HILL)
+    def test_points_stride_when_the_window_is_huge(self):
+        with ld.LogFile.read(HILL) as log:
+            time = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
+            payload = render.points(log, ["Vx KF"], time, max_points=100)
+        self.assertGreater(payload["stride"], 1)
+        self.assertLessEqual(len(payload["time"]), 200)
 
 
 class TestIndependentParsers(unittest.TestCase):

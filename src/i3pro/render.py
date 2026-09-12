@@ -31,6 +31,8 @@ __all__ = [
     "downsample",
     "channel_index",
     "trace",
+    "points",
+    "groups",
     "pick_channels",
     "track_payload",
 ]
@@ -78,9 +80,112 @@ OVERLAY_PRIORITY = (
 
 SPEED_FOR_COLORING = ("Vx KF", "Ground Speed", "GPS Speed", "SpeedFR", "SpeedFL")
 
+#: MoTeC-style status/error channels: binary or state flags drawn in a band
+#: under the graph rather than as traces (i2 Pro's "Status and Errors" panel).
+STATUS_HINTS = (
+    "error", "warning", "warn", "status", "flag", "fault", "ready", "derating",
+    "inverteron", "dcon", "enable", "quit", "systemready", "valid", "clipping",
+    "selftest", "switch", "sign ",
+)
+
+#: Order the unit groups the way an engineer reads them, best first.
+GROUP_UNIT_ORDER = (
+    "km/h", "m/s", "rpm", "G", "deg", "deg/s", "deg/s/s", "%", "kW", "Nm", "NM",
+    "V", "mV", "A", "mA", "C", "mm", "bar", "kPa", "psi", "MPa", "m/s/s", "m",
+    "s", "us", "ms", "l", "Pa", "y", "h", "min",
+)
+
+GROUP_LABELS = {
+    "km/h": "速度", "m/s": "速度", "rpm": "转速", "G": "加速度", "deg": "角度",
+    "deg/s": "角速度", "deg/s/s": "角加速度", "%": "百分比", "kW": "功率",
+    "Nm": "扭矩", "NM": "扭矩", "V": "电压", "mV": "电压", "A": "电流",
+    "mA": "电流", "C": "温度", "mm": "位移", "bar": "压力", "kPa": "压力",
+    "psi": "压力", "MPa": "压力", "m/s/s": "加速度", "m": "距离", "s": "时间",
+    "us": "时间", "ms": "时间", "l": "燃油", "Pa": "压力",
+}
+
 
 def _finite(values: np.ndarray) -> np.ndarray:
     return np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def is_status_channel(ch) -> bool:
+    """Cheap name-based guess, used to sort channels into the status band."""
+    lowered = ch.name.lower()
+    if not any(hint in lowered for hint in STATUS_HINTS):
+        return False
+    # a real measurement that merely mentions "switch" (e.g. "Switch voltage")
+    # is not a status channel; MoTeC status channels are unitless.
+    return not ch.unit
+
+
+def groups(log: ldmod.LogFile) -> tuple[list[dict], list[str]]:
+    """Split channels into unit groups, exactly the way i2 Pro groups them.
+
+    Channels in a group share one y-axis, because comparing a wheel speed to a
+    GPS speed only makes sense on a common scale. Returns the groups plus the
+    names of the status/error channels, which i2 draws as a band instead.
+    """
+    buckets: dict[str, list[str]] = {}
+    status: list[str] = []
+    for ch in log.channels:
+        if is_status_channel(ch):
+            status.append(ch.name)
+            continue
+        key = ch.unit.strip() or "无单位"
+        buckets.setdefault(key, []).append(ch.name)
+
+    def rank(item: tuple[str, list[str]]) -> tuple[int, int, str]:
+        unit, channels = item
+        try:
+            position = GROUP_UNIT_ORDER.index(unit)
+        except ValueError:
+            position = len(GROUP_UNIT_ORDER)
+        return (position, -len(channels), unit)
+
+    out = []
+    for unit, channels in sorted(buckets.items(), key=rank):
+        label = GROUP_LABELS.get(unit, unit)
+        name = f"{label} [{unit}]" if unit != "无单位" else label
+        out.append(
+            {
+                "key": unit,
+                "unit": "" if unit == "无单位" else unit,
+                "label": name,
+                "channels": channels,
+            }
+        )
+    return out, status
+
+
+def points(
+    log: ldmod.LogFile,
+    names: list[str],
+    time: np.ndarray,
+    start: float | None = None,
+    end: float | None = None,
+    max_points: int = 30000,
+) -> dict:
+    """Raw samples over a window, for the scatter component.
+
+    Min/max decimation would move points away from the trajectory, so the
+    scatter takes every n-th real sample instead and only ever reads the
+    currently zoomed window.
+    """
+    lo = 0 if start is None else max(0, int(np.searchsorted(time, start)))
+    hi = time.size if end is None else min(time.size, int(np.searchsorted(time, end)))
+    if hi <= lo:
+        return {"time": [], "values": {}, "stride": 1}
+    stride = max(1, int(np.ceil((hi - lo) / max(1, max_points))))
+    index = np.arange(lo, hi, stride)
+    out = {"time": np.round(time[index], 4).tolist(), "values": {}, "stride": stride}
+    for name in names:
+        if not log.has(name):
+            continue
+        values = derive.hold_to_master(log, name)[: time.size]
+        out["values"][name] = np.round(_finite(values)[index], 5).tolist()
+        out.setdefault("units", {})[name] = log.channel(name).unit
+    return out
 
 
 def downsample(
@@ -272,6 +377,7 @@ def build_payload(
     api_base: str | None = None,
     step: float = 1.0,
     with_track: bool = True,
+    overview_buckets: int = 900,
 ) -> dict:
     """Everything the workbench needs. Traces are only embedded in static mode."""
     time = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
@@ -289,10 +395,22 @@ def build_payload(
         for name in selected:
             traces[name] = trace(log, name, time, distance, buckets)
 
+    # The outing strip always needs one cheap whole-session series. Prefer the
+    # speed channel, because that is the shape a driver/engineer scans for.
+    overview_name = next(
+        (n for n in SPEED_FOR_COLORING if log.has(n)),
+        selected[0] if selected else None,
+    )
+    overview = None
+    if overview_name is not None:
+        overview = trace(log, overview_name, time, distance, overview_buckets)
+        overview["name"] = overview_name
+
     overlay = None
     if chosen_ref is not None and chosen_cmp is not None:
         overlay = build_overlay(log, [chosen_ref, chosen_cmp], overlay_channels(log), step)
 
+    channel_groups, status_channels = groups(log)
     speed_name = derive.speed_channel(log)
     return {
         "meta": {
@@ -300,10 +418,14 @@ def build_payload(
             "speed_channel": speed_name,
             "has_distance": distance is not None,
             "lap_labels": [l.label for l in recognized],
+            "duration": log.duration,
         },
         "channels": channel_index(log),
+        "groups": channel_groups,
+        "status": status_channels,
         "selected": selected,
         "traces": traces,
+        "overview": overview,
         "laps": lapsmod.lap_table(log, recognized) if recognized else [],
         "overlay": overlay,
         "ref": None if chosen_ref is None else chosen_ref.label,
@@ -311,6 +433,7 @@ def build_payload(
         "track": track_payload(log) if with_track else None,
         "api": api_base,
         "buckets": buckets,
+        "session": log.path.stem,
     }
 
 

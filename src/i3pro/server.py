@@ -262,6 +262,36 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                     )
                 return self._json(out)
 
+            if action == "points":
+                # raw samples for the scatter component (never min/max decimated)
+                names = _csv_arg(query, "channels")
+                if not names:
+                    return self._error(400, "points requires ?channels=")
+                time = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
+                return self._json(
+                    render.points(
+                        log,
+                        names,
+                        time,
+                        start=_float_arg(query, "from"),
+                        end=_float_arg(query, "to"),
+                        max_points=_int_arg(query, "max", 30000),
+                    )
+                )
+
+            if action == "overview":
+                name = (query.get("channel") or [None])[0] or (
+                    next((n for n in render.SPEED_FOR_COLORING if log.has(n)), None)
+                )
+                if name is None or not log.has(name):
+                    return self._json(None)
+                time = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
+                payload = render.trace(
+                    log, name, time, None, _int_arg(query, "buckets", 900)
+                )
+                payload["name"] = name
+                return self._json(payload)
+
             if action == "overlay":
                 laps = render.detect(log)
                 by_label = {l.label: l for l in laps}

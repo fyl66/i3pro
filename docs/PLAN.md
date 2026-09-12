@@ -85,13 +85,32 @@ i2pro_data/*.ld ──► i3pro.ld (mmap 原生解析) ──┬──► i3pro.
 
 | 交付物 | 位置 |
 | --- | --- |
-| 多通道波形：同步光标 / 滚轮缩放 / 拖动平移 / Min-Max 降采样 | `src/i3pro/web/viewer.html` |
+| 多通道波形：同步光标 / Min-Max 降采样 | `src/i3pro/web/viewer.html` |
 | 时间轴 / 距离轴 / 双圈对比三种模式 | 同上 |
 | 全通道搜索与勾选（342–437 个） | 同上 |
 | 圈速表点选基准圈 / 对比圈，即时重算对比 | 同上 |
 | 赛道轨迹按速度着色 + 光标联动 | 同上 |
 | 导出 PNG、复制可分享链接 | 同上 |
 | 自包含 HTML 快照 / 本地服务两种分发 | `render.py` / `server.py` |
+
+### M4 — i2 Pro 交互对齐（已完成）
+
+需求来自实际使用反馈："双击放大具体时间段没有实现"、"没有散点显示"。
+对照 MoTeC i2 Pro 帮助文件的 `Components` / `Keyboard Shortcuts` 两章逐条实现：
+
+| 交付物 | i2 Pro 对应功能 | 位置 |
+| --- | --- | --- |
+| 双击拖拽框选缩放（横向 / `Alt` 纵向 / `Ctrl` 框选） | `Double-click, move, click` | `viewer.html` |
+| 双击放大、`F2` 全出、`W` 默认一圈、`Z` 缩到光标、`H` 居中、`F`/`B` 翻页 | Zoom / Pan 一节 | 同上 |
+| 横向滚动条 + 可拖拽全程概览条 | Outing Graph | 同上 |
+| 基准（Datum）光标 + `Δ` 时间/数值 | Datum Cursor | 同上 |
+| 可见区间 min/max/avg 测量 | Measurements（`M`） | 同上 |
+| 光标处全通道数值面板 | Values 窗口（`V`） | 同上 |
+| 点样式 / 线样式（`S`） | Trace Style | 同上 |
+| 按同单位分组的共享纵轴，分栏 / 重叠（`G`） | Channel Groups / Overlapped | `render.groups` + 同上 |
+| 状态与故障带（`E`） | Status and Errors | 同上 |
+| 散点组件：X×Y、按第三通道着色、跟随缩放区间、光标联动、趋势线 | Scatter Plot | `render.points` + `server.py` `/points` |
+| 缩放即重新按可见区间取全分辨率数据 | （i2 本地全量数据） | `server.py` `/trace?from=&to=` |
 
 ### M3 — 工程化（已完成）
 
@@ -135,16 +154,24 @@ i2pro_data/*.ld ──► i3pro.ld (mmap 原生解析) ──┬──► i3pro.
 
 **v1.5（按真实反馈排序，不急）**
 
-1. 手动打点切圈（GPS 失效时兜底）
-2. G-G 散点图、直方图、频谱
-3. 通用数学通道（白名单表达式 + 结果缓存）
-4. 三电极值报表（电机温度 / 母线功率 / 能耗）
+1. **Track Editor / 区段定义** —— 有了区段才能做「双击区段名放大到该弯/直道」（i2 Pro 的
+   `To Zoom to a Range: double-click on the range band`）、区段报表、Eclectic 理论最快圈
+2. 手动打点切圈（GPS 失效时兜底）
+3. Histogram / Suspension Histogram / FFT（i2 Pro 的其余组件）
+4. Channel Report / Time Report（表格化统计 + Eclectic）
+5. 通用数学通道（白名单表达式 + 结果缓存）—— 有了它才能给直方图/散点配 gating 通道
+6. Gauges（表盘 / 条形 / 方向盘 / 状态灯）+ 动画播放
+7. 三电极值报表（电机温度 / 母线功率 / 能耗）
 
 **v2（需要新硬件或新数据源才做）**
 
 1. 边缘 CAN 记录仪 + DBC 解码 → 与 `.ld` 同 schema 入库
 2. 写回 `.ld` 供 i2 Pro 打开
 3. 实时遥测看板（Grafana，不自研）
+
+**已明确不做**（第一轮 Q4 确认）：视频组件、Alarms 告警、外部数学插件（VB.net）、
+Setup Sheets（依赖 Excel）、Matlab 导出、Mixture Map / 发动机调校组件、
+Drag（直线加速）项目模式、多 Workbook 工程体系。
 
 ---
 

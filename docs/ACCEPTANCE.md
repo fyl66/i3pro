@@ -159,13 +159,132 @@ $env:I3PRO_HASH="mode=overlay"; node tools\smoke_viewer.js out\demo.html; Remove
 
 ---
 
+## A9 · 缩放模型（对齐 i2 Pro）
+
+i2 Pro 的缩放不是"滚轮放大"这么简单，它是一整套鼠标 + 键盘分工。照搬后必须逐条成立：
+
+```powershell
+.\i3pro.cmd render "i2pro_data\20260908-cjh 高避5圈.ld" --out out\demo.html
+node tools\smoke_viewer.js out\demo.html
+```
+
+无头脚本会真的驱动这些交互并断言视图真的变了：
+
+| 操作 | 期望 |
+| --- | --- |
+| `双击→拖拽→松开` | 横向框选放大到该时间区间 |
+| `Alt` + 同上 | 纵向放大到框选值域 |
+| `Ctrl` + 同上 | 同时放大 X 和 Y |
+| 双击（不拖拽） | 以点击处为中心放大 2 倍 |
+| 滚轮 | 以指针处为中心缩放 |
+| `↑` `↓` | 横向放大 / 缩小 |
+| `Alt`+`↑`/`↓` | 纵向放大 / 缩小 |
+| `F2` | 横向全出 |
+| `W` | 缩放到默认（一圈） |
+| `Z` | 缩放到基准光标与主光标之间 |
+| `H` | 以光标为中心 |
+| `F` / `B` | 向前 / 向后翻页 |
+| 拖拽图内或坐标轴 | 平移 |
+| 双击横向滚动条 | 全出 |
+| `Esc` | 取消框选 |
+
+**通过判据**：`PASS - ... interactions verified`，且 15 项交互断言无失败。
+
+**概览条**：主图下方有一条全程缩略图，窗口矩形可拖拽平移、可拖两端改宽度、双击全出。
+
+---
+
+## A10 · 光标与测量
+
+| 操作 | 期望 |
+| --- | --- |
+| 鼠标移动 | 所有图 + 赛道图 + 散点同步高亮同一时刻 |
+| `←` `→` | 光标步进 0.01 s；`Ctrl`+方向键 步进 1 s |
+| `D` | 打开基准（Datum）光标 |
+| `空格` | 在当前位置放置基准光标 |
+| `X` | 交换主光标与基准光标 |
+
+**通过判据**：左侧「光标值」面板在打开基准光标后，每行除了当前值还显示 `Δ`（两光标处数值之差），
+表头显示 `Δ 时间`。右侧图例在每个通道名旁显示**当前可见区间的** min / max / avg（按 `M` 开关），
+与 i2 Pro 的 Measurements 行为一致。
+
+---
+
+## A11 · 散点（Scatter）
+
+i2 Pro 的散点有两个关键性质，缺一不可：**两个通道互相对照**、**只画当前缩放区间的数据**并与时间图共享光标。
+
+```powershell
+.\i3pro.cmd serve --data i2pro_data --open
+```
+
+打开任一场次后：
+
+1. 右上角散点区有三个下拉框：`X` / `Y` / `色`；选 `G Force Lat` 与 `G Force Long` 得到 G-G 图。
+2. 在波形图上框选一段时间 → 散点只显示该区间的点。
+3. 移动鼠标 → 散点上对应时间的那一点被白色圆圈高亮。
+4. 双击散点 → 在「散点」和「散点+趋势线」之间切换。
+
+**通过判据**：`/api/session/<场次>/points?channels=...&from=...&to=...` 返回**原始样本**
+（不经过 min/max 抽稀，`stride=1` 时点数 = 窗口内样本数），10 s 窗口 < 10 ms。
+
+> 快照（`render` 出的单个 HTML）不内嵌散点数据，散点区会提示"散点需要 serve 模式"。
+> 这是刻意的：散点必须用全分辨率数据，否则形状是假的。
+
+---
+
+## A12 · 通道分组
+
+i2 Pro 原话：*"The channels are arranged in groups which should normally have the same units as
+they will share axis values."*
+
+**通过判据**：
+
+```powershell
+python -m unittest tests.test_i3pro.TestChannelGroups -v
+```
+
+两条都 `ok`：每个通道恰好落在一个分组里（不重不漏），且同一分组内所有通道单位一致；
+速度组排在最前；状态位通道被识别为状态通道而不是普通测量通道。
+
+界面上：通道列表按单位分组显示，每组标题右侧有「全选」；按 `G` 在「分栏」与「重叠」之间切换。
+
+---
+
+## A13 · 状态与故障带
+
+**通过判据**：在通道列表底部「状态与故障」分组里勾选若干通道，按 `E` 打开状态带——
+每个通道一行，值非零处画成彩色段（i2 Pro 的 Status and Errors 面板）。
+`E` 在没有选中任何状态通道时只给出提示，不会一次性塞进几十条通道。
+
+---
+
+## A14 · 交互式缩放（serve 模式）
+
+快照模式的数据是预先抽稀好的，放大不会增加细节；`serve` 模式每次缩放都按可见区间重新取样，
+所以在任意缩放级别都是全分辨率。
+
+```powershell
+.\i3pro.cmd serve --data i2pro_data --open
+```
+
+**通过判据**：
+
+| 请求 | 期望 |
+| --- | --- |
+| `trace?channels=Vx KF&buckets=1200`（全程） | 秒级返回，约 1200 桶 |
+| `trace?channels=Vx KF&from=200&to=201`（1 秒） | **返回 100 个原始样本**，不是折线 |
+| 连续缩放 / 平移 | 无明显卡顿（每个请求 < 30 ms） |
+
+---
+
 ## 全量回归
 
 ```powershell
 python -m unittest discover -s tests -v
 ```
 
-**通过判据**：`Ran 21 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）。
+**通过判据**：`Ran 25 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）。
 
 测试覆盖：
 
@@ -177,7 +296,9 @@ python -m unittest discover -s tests -v
 | `TestLaps` | 两种赛道的切圈、距离轴重叠、Δ 收敛 |
 | `TestStore` | Parquet 往返、列式裁剪、SQL 查询 |
 | `TestCsvReader` | i2 Pro CSV 导出结构解析 |
+| `TestChannelGroups` | 通道按单位分组：不重不漏、单位一致、状态通道识别 |
+| `TestPoints` | 散点原始样本、时间窗裁剪、超窗口自动 stride |
 | `TestRender` | 静态/服务两种 payload、自包含性 |
-| `TestServer` | HTTP 端到端：场次列表、工作台页、通道、时间窗、对比圈、赛道、404 |
+| `TestServer` | HTTP 端到端：场次列表、工作台页、通道、时间窗、散点、概览、对比圈、赛道、404 |
 | `TestIndependentParsers` | 第二套实现交叉验证、213 通道 CSV 全量对照 |
-| `TestViewerScript` | 无头跑前端脚本，时间轴与双圈两条渲染路径 |
+| `TestViewerScript` | 无头驱动前端：15 项交互断言 + 时间轴 / 双圈两条渲染路径 |

@@ -22,9 +22,13 @@ cd E:\桌面\i3pro
 
 .\i3pro.cmd info i2pro_data\*.ld                  # 看一眼有哪些场次
 .\i3pro.cmd laps "i2pro_data\20260908-cjh 高避5圈.ld"   # 圈速表
-.\i3pro.cmd render "i2pro_data\20260908-cjh 高避5圈.ld" # 生成 out\<场次>.html，双击即开
-.\i3pro.cmd serve --data i2pro_data --open        # 或起本地服务，链接直接发群里
+.\i3pro.cmd serve --data i2pro_data --open        # 推荐：本地服务，可任意缩放、链接发群里
+.\i3pro.cmd render "i2pro_data\20260908-cjh 高避5圈.ld" # 或导出单个 HTML 快照，双击即开
 ```
+
+`serve` 和 `render` 的区别只有一条：**缩放时会不会补细节**。
+快照里的波形是提前抽稀好的一次性数据，放大看到的是折线；`serve` 每次缩放都按可见区间
+重新取全分辨率数据（1 秒窗口 = 100 个原始样本，单次请求 3 ms）。
 
 `i3pro.cmd` / `i3pro.ps1` 只是把 `src/` 加进 `PYTHONPATH` 再调 `python -m i3pro`，
 不需要 `pip install`。
@@ -46,7 +50,9 @@ MoTeC 自己导出的两个 CSV（182 MB / 425 MB）。
 | **GPS 自动切圈** | C125 的 beacon 没接线、`.ldx` 里 `Total Laps = 1`，i2 Pro 切不出圈。i3pro 用起终点门 + 航向判据切：`高避5圈` → **5 个完整圈**（40.4–51.2 s，806–816 m），`耐久正赛` → **23 个完整圈**（最快 54.900 s） |
 | **距离轴双圈对比** | 两圈按 1 m 步长插值到同一距离轴，输出 Δ 曲线、最大损失点；Δ 终点与圈速差一致（< 0.6 s） |
 | **浏览器工作台** | 单文件 HTML（约 0.7 MB，数据全内嵌），多通道同步光标 + 缩放平移 + 时间轴/距离轴/双圈三模式 + 赛道速度着色 + 全通道搜索 + PNG 导出 + 分享链接。无服务器、无 CDN、双击即开 |
-| **工程化** | 21 项单测全绿（真实数据回归 + HTTP 端到端 + 无头 JS 冒烟），零第三方运行期依赖 |
+| **i2 Pro 级交互** | 双击拖拽框选缩放（`Alt` 纵向 / `Ctrl` 框选）· 概览条与滚动条 · 基准光标与 Δ 测量 · 可见区间 min/max/avg · 光标处全通道数值 · 点/线样式 · 按同单位分组的共享纵轴 · 状态故障带 · 散点组件（X×Y、第三通道着色、跟随缩放、光标联动） |
+| **缩放不丢细节（serve 模式）** | 快照是预先抽稀的；`serve` 模式每次缩放按可见区间重新取样：1 秒窗口返回 100 个原始样本，单次请求 3 ms |
+| **工程化** | 25 项单测全绿（真实数据回归 + HTTP 端到端 + 无头驱动前端 15 项交互断言），零第三方运行期依赖 |
 
 完整验收清单与复现命令见 **[`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md)**；
 规划、里程碑与风险见 **[`docs/PLAN.md`](docs/PLAN.md)**。
@@ -68,6 +74,30 @@ MoTeC 自己导出的两个 CSV（182 MB / 425 MB）。
 | `export <file> --out x.csv` | 导出选中通道为 CSV |
 | `render <file> [--channels a,b] [--ref 2] [--cmp 5]` | 生成自包含 HTML 工作台 |
 | `serve [--data dir] [--host 0.0.0.0] [--port 8731] [--open]` | 本地/局域网 Web 工作台 |
+
+---
+
+## 快捷键（对齐 MoTeC i2 Pro 的键位）
+
+| 类别 | 键 | 作用 |
+| --- | --- | --- |
+| 缩放 | 双击拖拽 | 横向框选放大（`Alt` 纵向 · `Ctrl` 框选） |
+| | 双击 | 以点击处为中心放大 2× |
+| | 滚轮 | 以指针处为中心缩放 |
+| | <kbd>↑</kbd> <kbd>↓</kbd> / <kbd>Alt</kbd>+上下 | 横向 / 纵向缩放 |
+| | <kbd>F2</kbd> / <kbd>W</kbd> / <kbd>Z</kbd> | 全出 / 默认一圈 / 缩到两光标之间 |
+| | <kbd>Esc</kbd> | 取消正在框选 |
+| 平移 | 拖拽图内或坐标轴 · 双击滚动条 | 平移 / 全出 |
+| | <kbd>Shift</kbd>+左右 · <kbd>F</kbd> <kbd>B</kbd> · <kbd>H</kbd> | 平移 · 前/后翻页 · 以光标居中 |
+| 光标 | 鼠标移动 · <kbd>←</kbd> <kbd>→</kbd> · <kbd>Ctrl</kbd>+左右 | 移动 / 步进 0.01 s / 步进 1 s |
+| | <kbd>D</kbd> · <kbd>空格</kbd> · <kbd>X</kbd> | 基准光标开关 · 放置 · 与主光标交换 |
+| 显示 | <kbd>S</kbd> | 线样式 ⇄ 点样式 |
+| | <kbd>G</kbd> | 分栏 ⇄ 重叠 |
+| | <kbd>M</kbd> | 可见区间 min/max/avg |
+| | <kbd>L</kbd> / <kbd>V</kbd> / <kbd>E</kbd> | 图例 / 数值面板 / 状态故障带 |
+| 圈 | <kbd>N</kbd> <kbd>P</kbd> · <kbd>Ctrl</kbd>+<kbd>F</kbd> · <kbd>Q</kbd> | 上/下一圈 · 最快圈 · 交换主/对比圈 |
+
+在浏览器控制台里可以用 `i3pro.state` / `i3pro.zoomTo(...)` 直接调试视图。
 
 ---
 
@@ -108,9 +138,9 @@ src/i3pro/
 ## 开发
 
 ```powershell
-python -m unittest discover -s tests -v      # 21 项，无数据文件时自动 skip
+python -m unittest discover -s tests -v      # 25 项，无数据文件时自动 skip
 python tools\verify_ld_vs_csv.py             # 与 i2 Pro CSV 逐通道对照
-node tools\smoke_viewer.js out\demo.html     # 无头跑前端脚本
+node tools\smoke_viewer.js out\demo.html     # 无头驱动前端：缩放/光标/分组等 15 项交互断言
 ```
 
 算法层（`derive` / `laps` / `render`）是不依赖框架的纯函数，改动请优先补单测——

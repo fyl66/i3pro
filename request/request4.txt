@@ -1,0 +1,139 @@
+已排除 AI 相关模块（`src/engines/ai/`、`AiInsightsPanel`），以下是对项目其余部分的详细梳理。
+
+# 一、项目定位
+
+**浏览器端的赛车遥测（Telemetry）数据分析工作台**，目标是替代/对标桌面专业软件 **MoTeC i2 Pro** 与 **Marple**（`ai/project-brain.md:7`）。
+
+一句话：把"导入赛道数据 → 看圈速 → 对比两圈 → 定位时间损失 → 分析原因 → 导出"这套车队工程流程搬到 Web，免安装、数据不出本机。
+
+**目标用户**：车队工程师、车手、赛车专业学生、赛道日爱好者。
+**典型场景**：赛后复盘、圈速优化、车辆调校数据核对。
+
+# 二、用户工作流（需求主线）
+
+```
+上传文件 → 解析(元数据+通道+圈速) → 多通道时序图/赛道地图
+   → 选基准圈+对比圈 → Time Delta 找损失点 → 公式/滤波/单位分析
+   → 导出选中圈/通道数据
+```
+
+整个应用围绕这条主线组织：`App.tsx` 用状态决定显示"上传页 / 加载页 / 错误页 / 工作台"，进入工作台后是 `RacingDockLayout` 的 17 个可停靠面板。
+
+# 三、功能需求 → 实现对照
+
+## 1. 数据导入
+- 拖拽/点击上传，限制 `.csv/.sv/.json`（`FileUpload.tsx:118`）
+- 前端走 Web Worker 解析，失败降级到主线程（`FileUpload.tsx:64-96`）
+- 后端模式：Fastify 接收，**2GB 上限**（`server/src/index.ts:34`）
+- 解析超时保护 5 分钟、可取消（`App.tsx:31`）
+
+**需求缺口**：README 说"大文件用后端"，但 `FileUpload` 实际只调 Worker，没有根据文件大小自动切换到后端 `useBackendParser`（该 hook 存在但未被 UI 使用）。
+
+## 2. 数据解析（核心）
+支持 MoTeC CSV 结构：**元数据行 → 通道名行 → 单位行 → 数据行**。
+- 元数据：Venue/Driver/Vehicle/Device/Log Date/Sample Rate/Duration（`moTecParser.ts:68`）
+- 通道识别：25 条正则模式表，自动映射 Speed/RPM/Throttle/Brake/SteerAngle/LatG/LongG/GPS/Gyro 等并带单位（`moTecParser.ts:10-37`）
+- 通道别名归一化：覆盖 MoTeC / AiM / RaceCapture 命名（`channelAlias.ts:9-48`，如 `Corr Speed`/`VelForward`/`GPS Speed` → `Speed`）
+- 三套解析实现：前端 `moTecParser.ts`、前端流式 `streamingCSVParser.ts`、后端 `server/.../motecParser.ts`（+ Python `tools/motec_parser.py`）
+
+**需求缺口**：`ParsedFile.format` 声明了 `motec-ld`/`motec-ldx`/`aim`，但**没有任何 .ld/.ldx/AiM 解析器**——类型是空承诺。
+
+## 3. 圈速识别
+4 套算法 + 自动选择（`lapDetector.ts:430`）：
+| 算法 | 原理 | 适用 |
+|---|---|---|
+| Winding Number | GPS 轨迹绕质心缠绕圈数 | 闭合赛道，最鲁棒 |
+| Beacon/Crossing | 起终点线穿越半径 | 有信标点 |
+| Speed/Pit | 低速驻留区切分 | 无 GPS，有进站 |
+| GPS Proximity | 回到起点附近 | 兜底 |
+另含 running-lap 速度谷值检测（`lapDetector.ts:316`）。
+
+## 4. 赛道识别与地图
+- 内置赛道库（珠海/上赛/成都/北京/宁波/澳门/铃鹿/蒙扎/斯帕/纽北/雪邦…），含中文名、长度、弯角、sector（`trackRecognition.ts:21`）
+- 匹配打分：起终点距离 40% + 包围盒 IoU 30% + 总里程 20% + 闭合性 10%（`trackRecognition.ts:295`）
+- Canvas 手绘赛道图（`TrackMap.tsx`）：彩虹热力图（速度/油门/刹车/任意通道）、刹车点标记、弯角标记、多圈叠加、起终点、光标联动、缩放、色标图例
+
+**需求缺口**：赛道库坐标明显是近似/编造值（同城赛道点位规律重复），实际匹配精度存疑。
+
+## 5. 多通道时序可视化
+- ECharts 折线图，多图共享光标与缩放（`TelemetryChart.tsx` / `SyncedChartContainer.tsx`）
+- **LTTB 降采样**按视口宽度自适应点数（`downsampling.ts`）
+- 支持 **时间轴 / 距离轴**切换，距离轴由 GPS 累积距离算出（`TelemetryChart.tsx:271`）
+- 每通道可套用数学操作链后再渲染（`channelMath.ts:42`）
+- 其它图表：直方图、XY 散点、频谱、仪表盘、概览缩略图（`DataSummary.tsx`：速度/油门/刹车迷你图 + 可视区间框 + 圈分隔线，点击跳转）
+
+## 6. 圈速对比
+- `LapList.tsx`：列圈速、相对最快圈 delta、选"基准圈/对比圈"，最快圈高亮
+- `TimeDeltaChart.tsx`：两圈按归一化进度累计时间差曲线（绿/红填充）
+
+**需求缺口**：对比是按**归一化位置**近似积分，不是严格的距离对齐（真正的 telemetry 对比应基于 distance），精度有限。
+
+## 7. 数学与信号处理引擎（纯函数，有单测）
+- **公式解析器**：Shunting-yard，无 `eval`，安全；支持 `+ - * / ^` 与 `sin/cos/tan/abs/sqrt/log/log10/exp/min/max/avg`（`formulaParser.ts`）
+- **通道操作**：scale / offset / zero / lowpass / movingAverage，可链式（`channelMath.ts`）
+- **信号处理**：中心差分求导、梯形积分、二阶 Butterworth 低通、滑动平均、RMS、统计（`signalProcessing.ts`）
+- **频谱**：radix-2 FFT、功率谱、主频、STFT 频谱图（`frequencyAnalysis.ts`）
+- **赛车公式**：纵向 G、刹车距离、最优弯速、横向 G、滑移角、功率/扭矩、传动比、理论最优圈（`racingFormulas.ts`）
+- **单位系统**：14 类单位检测+换算+别名+首选单位（`unitConversion.ts`）
+
+## 8. 导出
+- `ExportDialog.tsx`：按"全部/单圈 + 勾选通道"导出 CSV（`exportUtils.ts`）
+- PNG 导出函数存在（`exportUtils.ts:52`）但**未接入 UI**
+
+## 9. 工作区与交互
+- `dockview-react` 17 面板：Channels/Charts/Track Map/Laps/Formulas/Math/Filters/Histogram/Scatter/Spectrum/Gauges/Time Delta/Overview/Upload/Recent Files/Status
+- 重面板 `React.lazy` 懒加载；`ErrorBoundary` 兜底
+- 键盘快捷键（缩放/平移/轴切换/导出/帮助）；`ShortcutHelp`
+- 偏好持久化：最近文件、通道颜色、轴模式、显示模式（`sessionStore.ts` 用 `persist`）
+- 深色赛车主题，`displayMode` 支持 separate/overlaid
+
+**需求缺口**：`l`(圈列表) / `m`(赛道图) 快捷键仍是 `console.log('not yet implemented')`（`RacingDockLayout.tsx:297,302`）。
+
+## 10. 后端服务
+`Fastify + Zod + Pino`，两个接口：`POST /api/parse-csv`（流式 readline 解析）、`POST /api/detect-structure`（只探结构），10MB body / 2GB 文件，CORS 开放。
+
+# 四、非功能需求
+
+| 需求 | 目标 | 现状 |
+|---|---|---|
+| 隐私/免安装 | 数据本地处理 | 前端模式满足；后端模式上传服务器（矛盾） |
+| 大文件/百万点 | 流式+降采样+Worker | LTTB/Worker 有；但 `parseFull()` 把 chunk 又拼回数组、Worker 用 `Array.from` 序列化，**大文件会爆内存** |
+| 格式兼容 | MoTeC/AiM/通用 | 仅 MoTeC CSV 真正可用 |
+| 可维护性 | 引擎纯函数+测试 | 引擎层做得对；但解析逻辑 4 处重复 |
+| 质量保障 | lint/tsc/test/CI | Vitest + Playwright(5 组) + GitHub Actions + Docker 齐全 |
+| 文档 | 同步 | `.ai/` 严重滞后，`ai/` 是 AI 生成的蓝图，README 是 Vite 模板 |
+
+# 五、模块地图（架构视角，去掉 AI）
+
+```
+src/
+├─ components/
+│  ├─ file-upload/     导入
+│  ├─ charts/          时序图/直方图/散点/频谱/仪表/时间差/通道选择
+│  ├─ track-map/       GPS 赛道图
+│  ├─ laps/            圈列表
+│  ├─ math/            数学操作编辑器/滤波面板
+│  ├─ export/          导出对话框
+│  ├─ panels/          概览/最近文件/状态/快捷键
+│  └─ layout/          dockview 工作区
+├─ engines/
+│  ├─ parser/          moTecParser / streamingCSVParser / lapDetector / trackRecognition
+│  └─ math/            channelAlias / formulaParser / racingFormulas / signalProcessing
+│                      / frequencyAnalysis / downsampling / unitConversion / channelMath
+├─ workers/            parserWorker
+├─ store/              telemetryStore(数据) + sessionStore(偏好,持久化)
+├─ hooks/              useParserWorker / useBackendParser / useKeyboardShortcuts
+├─ types/ utils/       telemetry 类型 / exportUtils / gpsUtils
+server/                Fastify 解析服务(独立重复实现)
+tools/                 Python MoTeC 解析脚本
+```
+
+# 六、结论
+
+**需求本质**：一个"Web 版 MoTeC i2 Pro 常用分析子集"，核心价值是免安装 + 本地隐私 + 现代 UI + 圈速对比闭环。
+
+**需求覆盖度**：约 6–7 成。
+- **完成度较高**：MoTeC CSV 解析、圈速识别、多通道联动图、赛道热力图、公式/滤波/频谱/单位、导出、工作区交互、工程化配套。
+- **明显欠账**：`.ld/.ldx/AiM` 只有类型没有实现；大文件"流式"名不副实（内存瓶颈）；双圈对比未按距离严格对齐；导出只有 CSV；前后端解析逻辑重复；快捷键与文档未收尾。
+
+**一句话评价**：功能面铺得很广、引擎分层干净，但"专业级"承诺（原生格式、GB 级流式、精确对比）大多停在接口和声明层面，属于**功能原型偏成熟、生产化未完成**的状态。

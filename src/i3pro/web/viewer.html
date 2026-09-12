@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>i3pro workbench</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e232c; --line:#2b313c;
+    --fg:#e6e9ef; --muted:#8b94a7; --accent:#4cc2ff; --good:#35d07f; --bad:#ff5d6c;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:13px/1.45 "Segoe UI","Microsoft YaHei",system-ui,sans-serif; }
+  header { display:flex; gap:16px; align-items:center; flex-wrap:wrap;
+           padding:9px 16px; background:var(--panel); border-bottom:1px solid var(--line); }
+  header h1 { font-size:15px; margin:0; font-weight:600; letter-spacing:.01em; }
+  header .meta { color:var(--muted); }
+  header .meta b { color:var(--fg); font-weight:600; }
+  header .spacer { margin-left:auto; }
+  main { display:grid; grid-template-columns:310px 1fr; height:calc(100vh - 47px); }
+  aside { background:var(--panel); border-right:1px solid var(--line); overflow:auto; padding:10px 12px 28px; }
+  section#charts { overflow:auto; padding:10px 12px 60px; }
+  .group { margin-bottom:16px; }
+  .group h2 { font-size:11px; text-transform:uppercase; letter-spacing:.09em;
+              color:var(--muted); margin:0 0 7px; font-weight:600; }
+  input[type=search], input[type=text] {
+    width:100%; background:var(--panel2); color:var(--fg); border:1px solid var(--line);
+    border-radius:6px; padding:5px 8px; font-size:12px; }
+  input[type=search]:focus, input[type=text]:focus { outline:none; border-color:var(--accent); }
+  .ch { display:flex; align-items:center; gap:7px; padding:2px 5px; border-radius:5px; cursor:pointer; }
+  .ch:hover { background:var(--panel2); }
+  .ch input { accent-color:var(--accent); flex:0 0 auto; }
+  .ch .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .ch .unit { color:var(--muted); margin-left:auto; font-size:11px; flex:0 0 auto; }
+  .swatch { width:9px; height:9px; border-radius:2px; flex:0 0 auto; }
+  #channelList { max-height:44vh; overflow:auto; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th, td { text-align:right; padding:3px 5px; border-bottom:1px solid var(--line); }
+  th:first-child, td:first-child { text-align:left; }
+  th { color:var(--muted); font-weight:600; }
+  tr[data-lap] { cursor:pointer; }
+  tr[data-lap]:hover td { background:#1d2430; }
+  tr.ref td { background:#1d3b52; }
+  tr.cmp td { background:#4a3a1d; }
+  tr.incomplete td { color:var(--muted); }
+  tr.best td:nth-child(2) { color:var(--good); }
+  button { background:var(--panel2); color:var(--fg); border:1px solid var(--line);
+           border-radius:6px; padding:5px 10px; cursor:pointer; font-size:12px; }
+  button:hover { border-color:var(--accent); }
+  button.on { background:#1d3b52; border-color:var(--accent); }
+  button:disabled { opacity:.45; cursor:default; }
+  .row { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:7px; }
+  .chart { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+           margin-bottom:7px; position:relative; }
+  .chart .label { position:absolute; left:60px; top:6px; font-size:12px; pointer-events:none; }
+  .chart .readout { position:absolute; right:10px; top:6px; font-size:11px;
+                    color:var(--muted); pointer-events:none; }
+  canvas { display:block; width:100%; }
+  .split { display:grid; grid-template-columns:minmax(240px,340px) 1fr; gap:8px; }
+  .hint { color:var(--muted); font-size:11px; margin-top:6px; line-height:1.6; }
+  .pill { display:inline-block; padding:1px 6px; border-radius:9px; font-size:11px;
+          background:var(--panel2); border:1px solid var(--line); color:var(--muted); }
+  .warn { color:#ffb454; }
+  #toast { position:fixed; right:16px; bottom:16px; background:#1d3b52; color:var(--fg);
+           border:1px solid var(--accent); border-radius:7px; padding:8px 13px; font-size:12px;
+           opacity:0; transition:opacity .25s; pointer-events:none; }
+  #toast.show { opacity:1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>i3pro</h1>
+  <span class="meta" id="fileInfo"></span>
+  <span class="spacer"></span>
+  <button id="modeTime" class="on">时间轴</button>
+  <button id="modeDistance">距离轴</button>
+  <button id="modeOverlay">双圈对比</button>
+  <button id="resetView">重置缩放</button>
+  <button id="shareBtn">复制分享链接</button>
+  <button id="pngBtn">导出 PNG</button>
+</header>
+<main>
+  <aside>
+    <div class="group" id="lapGroup">
+      <h2>圈速 (GPS 切圈)</h2>
+      <table id="lapTable"></table>
+      <div class="hint">点击圈次选择：第一次点=基准圈(蓝)，第二次点=对比圈(橙)</div>
+    </div>
+    <div class="group">
+      <h2>通道 <span class="pill" id="chCount"></span></h2>
+      <input type="search" id="chSearch" placeholder="搜索通道 (如 speed / temp / AMK)">
+      <div class="row" style="margin-top:6px">
+        <button id="chClear">清空</button>
+        <button id="chDefault">默认</button>
+      </div>
+      <div id="channelList"></div>
+    </div>
+  </aside>
+  <section id="charts">
+    <div class="split">
+      <div class="chart" id="trackWrap">
+        <div class="label">赛道轨迹</div>
+        <canvas id="track" height="300"></canvas>
+      </div>
+      <div class="chart" id="deltaWrap">
+        <div class="label">时间差 Δ (对比圈 - 基准圈)</div>
+        <div class="readout" id="deltaReadout"></div>
+        <canvas id="delta" height="180"></canvas>
+      </div>
+    </div>
+    <div id="chartHost"></div>
+    <div class="hint" id="statusLine"></div>
+  </section>
+</main>
+<div id="toast"></div>
+<script>
+const DATA = /*__I3PRO_DATA__*/null;
+const PALETTE = ["#4cc2ff","#ffb454","#35d07f","#ff5d6c","#b48cff","#4ce0d2",
+                 "#ff8ad1","#c9d24b","#7aa7ff","#ff9e6b","#6bdcff","#a0e57c"];
+const AXIS_COLOR = "#232833";
+
+const $ = (id) => document.getElementById(id);
+
+const state = {
+  mode: "time",              // time | distance | overlay
+  selected: [],
+  selection: "auto",         // which set `selected` came from
+  traces: {},                // name -> {time, value, distance, unit}
+  overlay: DATA.overlay || null,
+  ref: DATA.ref || null,
+  cmp: DATA.cmp || null,
+  view: null,                // [x0, x1] in current axis units
+  cursor: null,
+  track: DATA.track || null,
+  pending: 0,
+};
+
+const CHANNELS = new Map((DATA.channels || []).map((c) => [c.name, c]));
+const embedded = new Set(Object.keys(DATA.traces || {}));
+
+function toast(text) {
+  const el = $("toast");
+  el.textContent = text;
+  el.classList.add("show");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => el.classList.remove("show"), 1900);
+}
+
+function fmt(v, digits = 2) {
+  if (v === null || v === undefined || !Number.isFinite(v)) return "--";
+  const a = Math.abs(v);
+  if (a >= 1000) return v.toFixed(0);
+  if (a >= 100) return v.toFixed(1);
+  return v.toFixed(digits);
+}
+
+function axisUnit() { return state.mode === "time" ? "s" : "m"; }
+
+function setupCanvas(canvas, height) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || canvas.parentElement.clientWidth || 600;
+  const h = height || Number(canvas.getAttribute("height")) || 150;
+  canvas.width = Math.max(1, Math.round(w * dpr));
+  canvas.height = Math.max(1, Math.round(h * dpr));
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, w, h };
+}
+
+function niceBounds(values) {
+  let lo = Infinity, hi = -Infinity;
+  for (const v of values) {
+    if (!Number.isFinite(v)) continue;
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  if (!Number.isFinite(lo)) { lo = 0; hi = 1; }
+  if (hi - lo < 1e-9) { hi = lo + Math.max(1e-6, Math.abs(lo) * 0.01); }
+  const pad = (hi - lo) * 0.08;
+  return [lo - pad, hi + pad];
+}
+
+/* --------------------------------------------------------------- data load */
+function traceOf(name) {
+  if (state.traces[name]) return state.traces[name];
+  if (embedded.has(name)) return DATA.traces[name];
+  return null;
+}
+
+async function ensureTraces(names) {
+  const missing = names.filter((n) => !traceOf(n));
+  if (!DATA.api || !missing.length) return;
+  state.pending += 1;
+  setStatus();
+  try {
+    const url = `${DATA.api}/session/${encodeURIComponent(DATA.session)}/trace`
+      + `?channels=${encodeURIComponent(missing.join(","))}&buckets=${DATA.buckets}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    Object.assign(state.traces, await res.json());
+  } catch (err) {
+    toast(`通道加载失败: ${err.message}`);
+  } finally {
+    state.pending -= 1;
+    renderAll();
+  }
+}
+
+async function ensureOverlay(ref, cmp) {
+  if (ref === null || cmp === null) return;
+  if (!DATA.api) {
+    if (DATA.overlay && String(DATA.overlay.laps[0].lap) === String(ref)
+        && String(DATA.overlay.laps[1].lap) === String(cmp)) {
+      state.overlay = DATA.overlay;
+      return;
+    }
+    toast("快照模式只内嵌了一组对比圈；用 serve 模式或重新生成以对比其它圈");
+    return;
+  }
+  try {
+    const channels = (state.overlay && state.overlay.channels) || [];
+    const url = `${DATA.api}/session/${encodeURIComponent(DATA.session)}/overlay`
+      + `?ref=${encodeURIComponent(ref)}&cmp=${encodeURIComponent(cmp)}`
+      + `&channels=${encodeURIComponent(channels.join(","))}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    state.overlay = await res.json();
+  } catch (err) {
+    toast(`对比圈加载失败: ${err.message}`);
+  }
+}
+
+function setStatus() {
+  const bits = [];
+  bits.push(state.mode === "time" ? "横轴: 时间" : "横轴: 赛道距离");
+  bits.push(`可见通道 ${state.selected.length}`);
+  if (state.pending) bits.push(`<span class="warn">加载中…</span>`);
+  if (!DATA.api && DATA.meta && !DATA.meta.has_distance) {
+    bits.push('<span class="warn">该记录没有可用速度通道，无法生成距离轴</span>');
+  }
+  bits.push("滚轮缩放 · 拖动平移 · 移动鼠标显示同步光标");
+  $("statusLine").innerHTML = bits.join(" · ");
+}
+
+/* ------------------------------------------------------------------ charts */
+function drawGrid(ctx, padL, padT, plotW, plotH, y0, y1, x0, x1, xLabel) {
+  ctx.strokeStyle = AXIS_COLOR;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i <= 4; i++) {
+    const gy = padT + (plotH * i) / 4;
+    ctx.moveTo(padL, gy);
+    ctx.lineTo(padL + plotW, gy);
+  }
+  ctx.stroke();
+
+  ctx.fillStyle = "#8b94a7";
+  ctx.font = "11px Segoe UI";
+  ctx.textAlign = "right";
+  for (let i = 0; i <= 4; i++) {
+    ctx.fillText(fmt(y1 - ((y1 - y0) * i) / 4), padL - 6, padT + (plotH * i) / 4 + 4);
+  }
+  ctx.textAlign = "center";
+  for (let i = 0; i <= 4; i++) {
+    const gx = padL + (plotW * i) / 4;
+    ctx.fillText(fmt(x0 + ((x1 - x0) * i) / 4, 1), gx, padT + plotH + 13);
+  }
+  ctx.textAlign = "left";
+  ctx.fillText(xLabel, padL + plotW + 4, padT + plotH + 13);
+}
+
+function drawCursorLine(ctx, padL, plotW, padT, padB, h, cursor, x0, x1) {
+  if (cursor === null || cursor < x0 || cursor > x1) return;
+  const px = padL + ((cursor - x0) / (x1 - x0 || 1)) * plotW;
+  ctx.strokeStyle = "#ffffff55";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(px, padT);
+  ctx.lineTo(px, h - padB);
+  ctx.stroke();
+}
+
+function traceX(trace) {
+  if (state.mode === "time") return trace.time;
+  return trace.distance || trace.time;
+}
+
+function fullRange() {
+  if (state.mode === "overlay" && state.overlay) {
+    const d = state.overlay.distance;
+    return [0, d[d.length - 1] || 1];
+  }
+  let lo = Infinity, hi = -Infinity;
+  for (const name of state.selected) {
+    const trace = traceOf(name);
+    if (!trace) continue;
+    const xs = traceX(trace);
+    if (!xs || !xs.length) continue;
+    lo = Math.min(lo, xs[0]);
+    hi = Math.max(hi, xs[xs.length - 1]);
+  }
+  if (!Number.isFinite(lo)) return [0, 1];
+  return [lo, hi === lo ? lo + 1 : hi];
+}
+
+function range() { return state.view || fullRange(); }
+
+function drawTimeSeries(canvas, name, specs, xRange) {
+  const { ctx, w, h } = setupCanvas(canvas);
+  ctx.clearRect(0, 0, w, h);
+  const padL = 60, padR = 16, padT = 22, padB = 20;
+  const plotW = Math.max(10, w - padL - padR);
+  const plotH = Math.max(10, h - padT - padB);
+  const [x0, x1] = xRange;
+
+  const all = [];
+  for (const spec of specs) if (spec.values) all.push(...spec.values);
+  const [y0, y1] = niceBounds(all);
+
+  const sx = (v) => padL + ((v - x0) / (x1 - x0 || 1)) * plotW;
+  const sy = (v) => padT + plotH - ((v - y0) / (y1 - y0 || 1)) * plotH;
+  drawGrid(ctx, padL, padT, plotW, plotH, y0, y1, x0, x1, axisUnit());
+
+  for (const spec of specs) {
+    ctx.strokeStyle = spec.color;
+    ctx.lineWidth = spec.width || 1.3;
+    ctx.beginPath();
+    let started = false;
+    const xs = spec.x, vs = spec.values;
+    for (let i = 0; i < xs.length; i++) {
+      const xv = xs[i];
+      if (!Number.isFinite(xv)) continue;
+      if (xv < x0) continue;
+      if (xv > x1) break;
+      const px = sx(xv), py = sy(vs[i]);
+      if (!started) { ctx.moveTo(px, py); started = true; } else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+  }
+  drawCursorLine(ctx, padL, plotW, padT, padB, h, state.cursor, x0, x1);
+}
+
+function renderTimeCharts() {
+  const host = $("chartHost");
+  host.innerHTML = "";
+  const names = state.selected.filter((n) => traceOf(n));
+  if (!names.length) {
+    host.innerHTML = "<p class='hint'>在左侧勾选通道以显示波形。</p>";
+    return;
+  }
+  const xRange = range();
+  names.forEach((name, idx) => {
+    const trace = traceOf(name);
+    const info = CHANNELS.get(name) || {};
+    const color = PALETTE[idx % PALETTE.length];
+    const wrap = document.createElement("div");
+    wrap.className = "chart";
+    wrap.innerHTML = `<div class="label">${name}${info.unit ? " [" + info.unit + "]" : ""}</div>`
+      + `<div class="readout"></div><canvas height="140"></canvas>`;
+    host.appendChild(wrap);
+    const spec = { x: traceX(trace), values: trace.value, color };
+    drawTimeSeries(wrap.querySelector("canvas"), name, [spec], xRange);
+    const readout = wrap.querySelector(".readout");
+    if (state.cursor !== null) {
+      const xs = spec.x;
+      let k = 0, best = Infinity;
+      for (let i = 0; i < xs.length; i++) {
+        const d = Math.abs(xs[i] - state.cursor);
+        if (d < best) { best = d; k = i; }
+      }
+      readout.textContent = `${fmt(state.cursor, 1)} ${axisUnit()} → ${fmt(spec.values[k], 3)} ${info.unit || ""}`;
+    } else {
+      readout.textContent = `${info.rate ? info.rate + " Hz" : ""}`;
+    }
+  });
+}
+
+function renderOverlayCharts() {
+  const host = $("chartHost");
+  host.innerHTML = "";
+  const overlay = state.overlay;
+  if (!overlay) {
+    host.innerHTML = "<p class='hint'>该记录没有可用圈次，无法做双圈对比。</p>";
+    return;
+  }
+  const dist = overlay.distance;
+  const xRange = state.view || [0, dist[dist.length - 1] || 1];
+  for (const name of overlay.channels) {
+    const info = CHANNELS.get(name) || {};
+    const wrap = document.createElement("div");
+    wrap.className = "chart";
+    wrap.innerHTML = `<div class="label">${name}${info.unit ? " [" + info.unit + "]" : ""}</div>`
+      + `<div class="readout"></div><canvas height="140"></canvas>`;
+    host.appendChild(wrap);
+    const specs = overlay.laps.map((lap, k) => ({
+      x: dist,
+      values: lap[name] || [],
+      color: k === 0 ? PALETTE[0] : PALETTE[1],
+      width: 1.5,
+    }));
+    drawTimeSeries(wrap.querySelector("canvas"), name, specs, xRange);
+    wrap.querySelector(".readout").textContent =
+      `蓝 = 圈 ${overlay.laps[0].lap} · 橙 = 圈 ${overlay.laps[1].lap}`;
+  }
+}
+
+function renderDelta() {
+  const wrap = $("deltaWrap");
+  const overlay = state.overlay;
+  if (!overlay || state.mode !== "overlay") {
+    wrap.style.display = "none";
+    return;
+  }
+  wrap.style.display = "";
+  const canvas = $("delta");
+  const { ctx, w, h } = setupCanvas(canvas);
+  ctx.clearRect(0, 0, w, h);
+  const padL = 60, padR = 16, padT = 22, padB = 20;
+  const plotW = w - padL - padR, plotH = h - padT - padB;
+  const dist = overlay.distance, delta = overlay.delta;
+  const [x0, x1] = state.view || [0, dist[dist.length - 1] || 1];
+  const [y0, y1] = niceBounds(delta);
+  const sx = (v) => padL + ((v - x0) / (x1 - x0 || 1)) * plotW;
+  const sy = (v) => padT + plotH - ((v - y0) / (y1 - y0 || 1)) * plotH;
+  drawGrid(ctx, padL, padT, plotW, plotH, y0, y1, x0, x1, "m");
+
+  const zero = sy(0);
+  for (let i = 1; i < dist.length; i++) {
+    if (dist[i] < x0 || dist[i - 1] > x1) continue;
+    ctx.fillStyle = delta[i] >= 0 ? "#ff5d6c55" : "#35d07f55";
+    ctx.beginPath();
+    ctx.rect(
+      sx(dist[i - 1]), Math.min(zero, sy(delta[i])),
+      Math.max(1, sx(dist[i]) - sx(dist[i - 1])), Math.abs(sy(delta[i]) - zero)
+    );
+    ctx.fill();
+  }
+  ctx.strokeStyle = "#e6e9ef";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(padL, zero);
+  ctx.lineTo(padL + plotW, zero);
+  ctx.stroke();
+  drawCursorLine(ctx, padL, plotW, padT, padB, h, state.cursor, x0, x1);
+
+  let worst = 0, at = 0;
+  for (let i = 0; i < delta.length; i++) {
+    if (Number.isFinite(delta[i]) && Math.abs(delta[i]) > Math.abs(worst)) { worst = delta[i]; at = dist[i]; }
+  }
+  $("deltaReadout").textContent =
+    `圈 ${overlay.laps[0].lap} (${fmt(overlay.laps[0].lap_time, 3)}s) vs `
+    + `圈 ${overlay.laps[1].lap} (${fmt(overlay.laps[1].lap_time, 3)}s) · `
+    + `最大差 ${worst >= 0 ? "+" : ""}${fmt(worst, 3)}s @ ${fmt(at, 0)}m`;
+}
+
+function renderTrack() {
+  const wrap = $("trackWrap");
+  const track = state.track;
+  if (!track) { wrap.style.display = "none"; return; }
+  wrap.style.display = "";
+  const canvas = $("track");
+  const { ctx, w, h } = setupCanvas(canvas, 300);
+  ctx.clearRect(0, 0, w, h);
+  const xs = track.x, ys = track.y;
+  if (!xs.length) return;
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const pad = 18;
+  const scale = Math.min((w - 2 * pad) / (x1 - x0 || 1), (h - 2 * pad) / (y1 - y0 || 1));
+  const ox = pad + (w - 2 * pad - (x1 - x0) * scale) / 2;
+  const oy = pad + (h - 2 * pad - (y1 - y0) * scale) / 2;
+  const px = (x) => ox + (x - x0) * scale;
+  const py = (y) => h - oy - (y - y0) * scale;
+  const speeds = track.speed;
+  const vmin = Math.min(...speeds), vmax = Math.max(...speeds);
+  ctx.lineWidth = 2.2;
+  for (let i = 1; i < xs.length; i++) {
+    const f = (speeds[i] - vmin) / (vmax - vmin || 1);
+    ctx.strokeStyle = `hsl(${210 - 210 * f}, 90%, ${34 + 26 * f}%)`;
+    ctx.beginPath();
+    ctx.moveTo(px(xs[i - 1]), py(ys[i - 1]));
+    ctx.lineTo(px(xs[i]), py(ys[i]));
+    ctx.stroke();
+  }
+  ctx.fillStyle = "#8b94a7";
+  ctx.textAlign = "left";
+  ctx.font = "11px Segoe UI";
+  ctx.fillText(`${vmin.toFixed(0)}–${vmax.toFixed(0)} km/h (${track.speed_channel || "-"}) · ${(x1 - x0).toFixed(0)}×${(y1 - y0).toFixed(0)} m`, 12, h - 10);
+
+  if (state.cursor !== null && track.time.length) {
+    let best = 0, bestD = Infinity;
+    for (let i = 0; i < track.time.length; i++) {
+      const d = Math.abs(track.time[i] - state.cursor);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    if (state.mode !== "overlay") {
+      ctx.fillStyle = "#fff";
+      ctx.beginPath();
+      ctx.arc(px(xs[best]), py(ys[best]), 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  if (state.cursor !== null && state.mode === "overlay" && state.overlay) {
+    const lap = state.overlay.laps[0];
+    const k = Math.max(0, Math.min(lap.time.length - 1, Math.round(state.cursor / (state.overlay.step || 1))));
+    const t = lap.time[k];
+    let best = 0, bestD = Infinity;
+    for (let i = 0; i < track.time.length; i++) {
+      const d = Math.abs(track.time[i] - t);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    ctx.fillStyle = "#4cc2ff";
+    ctx.beginPath();
+    ctx.arc(px(xs[best]), py(ys[best]), 4.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function renderAll() {
+  $("modeTime").classList.toggle("on", state.mode === "time");
+  $("modeDistance").classList.toggle("on", state.mode === "distance");
+  $("modeOverlay").classList.toggle("on", state.mode === "overlay");
+  $("modeOverlay").disabled = !state.overlay;
+  $("modeDistance").disabled = !DATA.meta || !DATA.meta.has_distance;
+  if (state.mode === "overlay") renderOverlayCharts();
+  else renderTimeCharts();
+  renderDelta();
+  renderTrack();
+  markLapRows();
+  setStatus();
+}
+
+/* ------------------------------------------------------------------ input */
+function maxX() { return range()[1]; }
+
+function valueAt(event, canvas) {
+  const rect = canvas.getBoundingClientRect();
+  const padL = 60, padR = 16;
+  const plotW = Math.max(1, rect.width - padL - padR);
+  const frac = Math.min(1, Math.max(0, (event.clientX - rect.left - padL) / plotW));
+  const [x0, x1] = range();
+  return x0 + frac * (x1 - x0);
+}
+
+function attachInteractions() {
+  const host = $("charts");
+  host.addEventListener("mousemove", (event) => {
+    const canvas = event.target.closest("canvas");
+    if (!canvas || dragState) return;
+    state.cursor = valueAt(event, canvas);
+    renderAll();
+  });
+  host.addEventListener("mouseleave", () => { state.cursor = null; renderAll(); });
+  host.addEventListener("wheel", (event) => {
+    const canvas = event.target.closest("canvas");
+    if (!canvas) return;
+    event.preventDefault();
+    const at = valueAt(event, canvas);
+    const [x0, x1] = range();
+    const factor = event.deltaY > 0 ? 1.25 : 1 / 1.25;
+    let next = [at - (at - x0) * factor, at + (x1 - at) * factor];
+    if (next[1] - next[0] < 1e-4) next = [at - 1e-4, at + 1e-4];
+    state.view = next;
+    renderAll();
+  }, { passive: false });
+
+  let drag = null;
+  host.addEventListener("mousedown", (event) => {
+    const canvas = event.target.closest("canvas");
+    if (!canvas) return;
+    drag = { x: event.clientX, span: range(), width: canvas.getBoundingClientRect().width };
+  });
+  window.addEventListener("mousemove", (event) => {
+    if (!drag) return;
+    const span = drag.span[1] - drag.span[0];
+    const shift = (-(event.clientX - drag.x) / Math.max(1, drag.width)) * span;
+    state.view = [drag.span[0] + shift, drag.span[1] + shift];
+    renderAll();
+  });
+  window.addEventListener("mouseup", () => { drag = null; });
+}
+
+/* ---------------------------------------------------------------- sidebar */
+function renderChannelList() {
+  const term = $("chSearch").value.trim().toLowerCase();
+  const list = $("channelList");
+  list.innerHTML = "";
+  const all = DATA.channels || [];
+  const shown = term
+    ? all.filter((c) => c.name.toLowerCase().includes(term) || (c.unit || "").toLowerCase().includes(term))
+    : all;
+  if (!shown.length) {
+    list.innerHTML = "<p class='hint'>没有匹配的通道</p>";
+    return;
+  }
+  const picked = new Set(state.selected);
+  // selected channels stay pinned to the top so they are always reachable
+  const ordered = [...shown].sort((a, b) => (picked.has(b.name) ? 1 : 0) - (picked.has(a.name) ? 1 : 0));
+  const frag = document.createDocumentFragment();
+  // MoTeC logs top out around 450 channels; render them all so scrolling alone
+  // is enough even without typing in the search box.
+  for (const ch of ordered.slice(0, 1000)) {
+    const on = picked.has(ch.name);
+    const color = PALETTE[state.selected.indexOf(ch.name) % PALETTE.length];
+    const row = document.createElement("label");
+    row.className = "ch";
+    row.title = `${ch.name} · ${ch.unit || "无单位"} · ${ch.rate} Hz · ${ch.samples} 点`;
+    row.innerHTML =
+      `<input type="checkbox" ${on ? "checked" : ""}>`
+      + `<span class="swatch" style="background:${on ? color : "#3a4150"}"></span>`
+      + `<span class="nm">${ch.name}</span>`
+      + `<span class="unit">${ch.unit || ""}</span>`;
+    row.querySelector("input").addEventListener("change", (event) => {
+      toggleChannel(ch.name, event.target.checked);
+    });
+    frag.appendChild(row);
+  }
+  list.appendChild(frag);
+  $("chCount").textContent = `${state.selected.length} / ${all.length}`;
+}
+
+function toggleChannel(name, on) {
+  const set = new Set(state.selected);
+  if (on) set.add(name); else set.delete(name);
+  state.selected = [...set];
+  state.selection = "manual";
+  renderChannelList();
+  ensureTraces(state.selected).then(renderAll);
+  renderAll();
+}
+
+function renderLapTable() {
+  const table = $("lapTable");
+  const laps = DATA.laps || [];
+  if (!laps.length) {
+    $("lapGroup").style.display = "none";
+    return;
+  }
+  $("lapGroup").style.display = "";
+  const best = laps.filter((l) => l.complete).reduce(
+    (a, b) => (a === null || b.lap_time < a.lap_time ? b : a), null
+  );
+  table.innerHTML = "<tr><th>圈</th><th>圈速</th><th>Δ最快</th><th>里程</th></tr>"
+    + laps.map((l) => {
+      const cls = l.complete ? "" : "incomplete";
+      const delta = l.delta_to_best === null ? "--"
+        : (l.delta_to_best > 0 ? "+" : "") + l.delta_to_best.toFixed(3);
+      return `<tr data-lap="${l.lap}" class="${cls}${best && l.lap === best.lap ? " best" : ""}">`
+        + `<td>${l.lap}</td><td>${l.lap_time.toFixed(3)}</td><td>${delta}</td>`
+        + `<td>${Math.round(l.distance)} m</td></tr>`;
+    }).join("");
+  table.querySelectorAll("tr[data-lap]").forEach((tr) => {
+    tr.addEventListener("click", () => onLapClick(tr.dataset.lap));
+  });
+  markLapRows();
+}
+
+function markLapRows() {
+  const table = $("lapTable");
+  if (!table) return;
+  table.querySelectorAll("tr[data-lap]").forEach((tr) => {
+    tr.classList.toggle("ref", state.ref !== null && tr.dataset.lap === String(state.ref));
+    tr.classList.toggle("cmp", state.cmp !== null && tr.dataset.lap === String(state.cmp));
+  });
+}
+
+async function onLapClick(label) {
+  if (state.ref === null || (state.cmp !== null && String(state.ref) !== String(label))) {
+    state.ref = label;
+    state.cmp = null;
+  } else {
+    state.cmp = label;
+  }
+  markLapRows();
+  await ensureOverlay(state.ref, state.cmp);
+  if (state.cmp !== null) state.mode = "overlay";
+  state.view = null;
+  renderAll();
+}
+
+/* ----------------------------------------------------------------- export */
+function exportPNG() {
+  const panels = [...document.querySelectorAll("#chartHost .chart, #trackWrap, #deltaWrap")]
+    .filter((el) => el.style.display !== "none" && el.querySelector("canvas"));
+  if (!panels.length) { toast("没有可导出的图表"); return; }
+  const dpr = 2;
+  const width = Math.max(...panels.map((p) => p.querySelector("canvas").clientWidth));
+  const gap = 8;
+  const heights = panels.map((p) => (p.querySelector("canvas").getAttribute("height") | 0));
+  const total = heights.reduce((a, b) => a + b + gap, 0) + 60;
+
+  const out = document.createElement("canvas");
+  out.width = width * dpr;
+  out.height = total * dpr;
+  const ctx = out.getContext("2d");
+  ctx.scale(dpr, dpr);
+  ctx.fillStyle = "#0f1115";
+  ctx.fillRect(0, 0, width, total);
+
+  ctx.fillStyle = "#e6e9ef";
+  ctx.font = "600 14px Segoe UI";
+  ctx.textAlign = "left";
+  ctx.fillText(`${DATA.meta.file}  ·  ${DATA.meta.device} ${DATA.meta.log_date} ${DATA.meta.log_time}`, 12, 24);
+  ctx.fillStyle = "#8b94a7";
+  ctx.font = "12px Segoe UI";
+  ctx.fillText(
+    `${DATA.meta.duration.toFixed(1)} s @ ${DATA.meta.sample_rate} Hz · ${DATA.meta.channels} 通道 · `
+    + `${state.mode === "time" ? "时间轴" : "距离轴"} · 速度源 ${DATA.meta.speed_channel || "-"}`,
+    12, 42
+  );
+
+  let y = 60;
+  panels.forEach((panel, i) => {
+    const src = panel.querySelector("canvas");
+    const panelHeight = heights[i];
+    ctx.fillStyle = "#171a21";
+    ctx.fillRect(0, y, width, panelHeight);
+    ctx.drawImage(src, 0, y, width, panelHeight);
+    y += panelHeight + gap;
+  });
+  const link = document.createElement("a");
+  const stem = String(DATA.meta.file || "i3pro").replace(/\.ld$/i, "");
+  link.download = `${stem}-${state.mode}.png`;
+  link.href = out.toDataURL("image/png");
+  link.click();
+  toast("已导出 PNG");
+}
+
+function shareURL() {
+  const params = new URLSearchParams();
+  params.set("channels", state.selected.join(","));
+  if (state.ref !== null) params.set("ref", state.ref);
+  if (state.cmp !== null) params.set("cmp", state.cmp);
+  if (state.mode === "overlay") params.set("mode", "overlay");
+  let url = DATA.api
+    ? `${location.origin}${location.pathname}?${params.toString()}`
+    : `${location.origin}${location.pathname}#${params.toString()}`;
+  navigator.clipboard?.writeText(url).then(
+    () => toast("分享链接已复制到剪贴板"),
+    () => toast("复制失败，链接已写入地址栏")
+  );
+  if (!DATA.api) location.hash = params.toString();
+}
+
+function readHashState() {
+  if (DATA.api || !location.hash) return;
+  const params = new URLSearchParams(location.hash.slice(1));
+  const channels = params.get("channels");
+  if (channels) {
+    const wanted = channels.split(",").filter((c) => CHANNELS.has(c));
+    if (wanted.length) { state.selected = wanted; state.selection = "manual"; }
+  }
+  if (params.get("mode") === "overlay" && state.overlay) state.mode = "overlay";
+}
+
+/* ------------------------------------------------------------------- init */
+function initHeader() {
+  const m = DATA.meta;
+  $("fileInfo").innerHTML =
+    `<b>${m.file}</b> · ${m.device} ${m.log_date} ${m.log_time} · ${m.event || "-"} · `
+    + `${m.duration.toFixed(1)} s @ ${m.sample_rate} Hz · ${m.channels} 通道 · `
+    + `速度源 ${m.speed_channel || "-"}`;
+  document.title = `i3pro · ${m.file}`;
+}
+
+function init() {
+  if (!DATA || !DATA.meta) {
+    document.body.innerHTML = "<p style='padding:24px'>缺少内嵌数据</p>";
+    return;
+  }
+  state.selected = (DATA.selected || []).slice();
+  readHashState();
+  initHeader();
+  renderLapTable();
+  renderChannelList();
+  attachInteractions();
+  ensureTraces(state.selected).then(() => renderAll());
+
+  $("chSearch").addEventListener("input", renderChannelList);
+  $("chClear").addEventListener("click", () => {
+    state.selected = [];
+    renderChannelList();
+    renderAll();
+  });
+  $("chDefault").addEventListener("click", () => {
+    state.selected = (DATA.selected || []).slice();
+    state.selection = "auto";
+    renderChannelList();
+    ensureTraces(state.selected).then(renderAll);
+    renderAll();
+  });
+  $("modeTime").addEventListener("click", () => { state.mode = "time"; state.view = null; renderAll(); });
+  $("modeDistance").addEventListener("click", () => { state.mode = "distance"; state.view = null; renderAll(); });
+  $("modeOverlay").addEventListener("click", () => {
+    if (!state.overlay) return;
+    state.mode = "overlay";
+    state.view = null;
+    renderAll();
+  });
+  $("resetView").addEventListener("click", () => { state.view = null; state.cursor = null; renderAll(); });
+  $("pngBtn").addEventListener("click", exportPNG);
+  $("shareBtn").addEventListener("click", shareURL);
+  window.addEventListener("resize", renderAll);
+  renderAll();
+}
+init();
+</script>
+</body>
+</html>

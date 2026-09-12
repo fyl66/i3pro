@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+out/
+.pytest_cache/
+*.parquet
+*.delta.json
+.tmp_deps/
+.venv/
+venv/
+node_modules/
+
+# 试车数据与 MoTeC 官方文档不进仓库：
+# 前者是 760 MB 的车队数据，后者是 MoTeC 的版权材料。
+i2pro_data/
+i2pro-help/
+*.ld
+*.ldx

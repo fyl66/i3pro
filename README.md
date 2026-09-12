@@ -1,0 +1,125 @@
+# i3pro
+
+**保留 MoTeC C125 硬件，用开源工具链补上 i2 Pro 缺的那一半：**
+原生 `.ld` 解析 → Parquet 列式存储 → GPS 自动切圈 / 距离轴双圈对比 → 免安装浏览器工作台。
+
+不依赖任何商业软件、不需要联网、不需要 npm、不需要 Rust。
+只用 Python 标准库 + numpy/pandas/pyarrow，`git clone` 下来就能跑。
+
+```
+i2pro_data/*.ld ──► 原生解析(mmap) ──► Parquet + 元数据 ──► SQL / 单通道秒级裁剪
+                        │
+                        └──► GPS 切圈 · 距离轴重叠 · Δ时间 ──► 自包含 HTML 工作台
+                                                            └──► 本地服务（局域网 + 可分享链接）
+```
+
+---
+
+## 快速开始
+
+```powershell
+cd E:\桌面\i3pro
+
+.\i3pro.cmd info i2pro_data\*.ld                  # 看一眼有哪些场次
+.\i3pro.cmd laps "i2pro_data\20260908-cjh 高避5圈.ld"   # 圈速表
+.\i3pro.cmd render "i2pro_data\20260908-cjh 高避5圈.ld" # 生成 out\<场次>.html，双击即开
+.\i3pro.cmd serve --data i2pro_data --open        # 或起本地服务，链接直接发群里
+```
+
+`i3pro.cmd` / `i3pro.ps1` 只是把 `src/` 加进 `PYTHONPATH` 再调 `python -m i3pro`，
+不需要 `pip install`。
+
+---
+
+## 已验证的能力（有数据支撑，不是接口声明）
+
+全部结论来自 `i2pro_data/` 里 **8 个真实 C125 日志**（36.6–118.8 MB）和
+MoTeC 自己导出的两个 CSV（182 MB / 425 MB）。
+
+| 能力 | 证据 |
+| --- | --- |
+| **原生解析 `.ld`**（不需要 i2 Pro，也不需要任何转换工具） | 8 个日志全部解析成功，342–437 通道，int16/int32 与 100/50/25/20/10/5/2/1 Hz 混采 |
+| **数值正确性** | 与 MoTeC 导出的 CSV 逐样本比对：两个场次各 **213/213 个可比通道全部落在显示精度内**，最大偏差 0.005 G / 0.4 deg/s（都是半个显示位）。见 `tools/verify_ld_vs_csv.py` |
+| **独立实现交叉验证** | 与另一套独立逆向的解析器 `gotzl/ldparser` 对比：通道数、通道名、单位、采样点数完全一致，抽样通道数值 `rtol=1e-9` |
+| **`.ld` → Parquet** | `耐久正赛` 118.8 MB → 19.0 MB（压掉 84%），**1.3 s**；`高避5圈` 36.6 MB → 5.3 MB，0.4 s |
+| **单通道秒级抽取** | 19.4 万点抽稀成一个通道 → **7 ms**；整套元数据+切圈+对比+轨迹 payload → 0.04 s |
+| **GPS 自动切圈** | C125 的 beacon 没接线、`.ldx` 里 `Total Laps = 1`，i2 Pro 切不出圈。i3pro 用起终点门 + 航向判据切：`高避5圈` → **5 个完整圈**（40.4–51.2 s，806–816 m），`耐久正赛` → **23 个完整圈**（最快 54.900 s） |
+| **距离轴双圈对比** | 两圈按 1 m 步长插值到同一距离轴，输出 Δ 曲线、最大损失点；Δ 终点与圈速差一致（< 0.6 s） |
+| **浏览器工作台** | 单文件 HTML（约 0.7 MB，数据全内嵌），多通道同步光标 + 缩放平移 + 时间轴/距离轴/双圈三模式 + 赛道速度着色 + 全通道搜索 + PNG 导出 + 分享链接。无服务器、无 CDN、双击即开 |
+| **工程化** | 21 项单测全绿（真实数据回归 + HTTP 端到端 + 无头 JS 冒烟），零第三方运行期依赖 |
+
+完整验收清单与复现命令见 **[`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md)**；
+规划、里程碑与风险见 **[`docs/PLAN.md`](docs/PLAN.md)**。
+
+---
+
+## 命令
+
+| 命令 | 作用 |
+| --- | --- |
+| `info <files...>` | 场次概览：设备、日期、时长、采样率、通道数 |
+| `channels <file> [--filter <子串>]` | 列出通道（名称/单位/采样率/缩放/小数位） |
+| `laps <file> [--json <path>]` | 圈速表（含相对最快圈的 Δ 与异常段标记） |
+| `track <file>` | 圈速柱状速览（终端里快速判断切圈对不对） |
+| `delta <file> [--ref 2] [--cmp 5]` | 距离轴双圈对比，输出 Δ 曲线 JSON 与最大损失点 |
+| `convert <files...> --out out` | `.ld` → Parquet + `meta.json` |
+| `series <parquet> --channels a,b --from 400 --to 405` | 按列 + 按时间窗裁剪（Parquet 列式存储的真正用处） |
+| `query "<SQL>" --parquet <files...>` | 对已转换数据集跑 SQL |
+| `export <file> --out x.csv` | 导出选中通道为 CSV |
+| `render <file> [--channels a,b] [--ref 2] [--cmp 5]` | 生成自包含 HTML 工作台 |
+| `serve [--data dir] [--host 0.0.0.0] [--port 8731] [--open]` | 本地/局域网 Web 工作台 |
+
+---
+
+## 目录结构
+
+```
+src/i3pro/
+├─ ld.py            .ld 原生解析（mmap，不复制数据）
+├─ motec_csv.py     i2 Pro CSV 导出读取（用于对照与兜底）
+├─ derive.py        速度源选择 / 距离轴积分 / GPS 局部投影
+├─ laps.py          GPS 切圈 / 距离轴重叠 / Δ时间
+├─ store.py         Parquet + 元数据落盘、列式裁剪、SQL
+├─ render.py        工作台 payload 构建 / Min-Max 降采样 / 自包含 HTML
+├─ server.py        标准库 HTTP 服务（场次列表 + JSON API + 工作台页）
+├─ cli.py           命令行入口
+└─ web/viewer.html  前端（手写 Canvas，无框架、无构建）
+```
+
+---
+
+## 数据里必须知道的坑
+
+以下都是在这批真实日志上量出来的，不是猜测：
+
+1. **MoTeC 的 `Distance` 通道恒为 0**，C125 的 beacon 输入没有接线，
+   `.ldx` 里 `Total Laps` 永远是 1。**距离轴和圈次都得自己算**——
+   这正是 i3pro 存在的理由。
+2. **默认速度源是 `Vx KF`**（记录仪自己的卡尔曼滤波纵向速度，100 Hz）。
+   轮速通道 `SpeedFR/FL/...` 在部分场次不存在，`GPS Speed` 在部分场次恒为 0。
+3. **`decimals` 是有符号 16 位**，`0xffff` 表示 −1（即 ×10）。
+   按无符号读会让 `Timestamp MTI` 之类通道整整差 100 倍。
+4. **CSV 导出会把慢通道重采样到 100 Hz 并去掉 `(LoRes)` 后缀**，
+   所以拿 CSV 校验时只能比对与导出采样率相同的通道。
+5. 格式细节与未解析部分见 [`docs/ld-format.md`](docs/ld-format.md)。
+
+---
+
+## 开发
+
+```powershell
+python -m unittest discover -s tests -v      # 21 项，无数据文件时自动 skip
+python tools\verify_ld_vs_csv.py             # 与 i2 Pro CSV 逐通道对照
+node tools\smoke_viewer.js out\demo.html     # 无头跑前端脚本
+```
+
+算法层（`derive` / `laps` / `render`）是不依赖框架的纯函数，改动请优先补单测——
+这支车队最现实的风险是「写代码的人毕业了」。
+
+---
+
+## 许可证
+
+GPL-3.0。格式逆向的原始工作来自 [gotzl/ldparser](https://github.com/gotzl/ldparser)，
+本项目保留其源码在 `vendor/ldparser/`（含 GPL-3.0 全文）用于**测试交叉验证**，
+运行期不依赖它。若希望以 MIT 发布，需要移除 `vendor/` 与相关引用。

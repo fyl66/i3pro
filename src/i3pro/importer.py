@@ -94,6 +94,7 @@ def _bring(path: Path, directory: Path, move: bool) -> dict:
         "file": target.name,
         "stem": target.stem,
         "bytes": target.stat().st_size,
+        "path": str(target),
     }
 
 

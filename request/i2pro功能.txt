@@ -1,0 +1,648 @@
+
+
+# MoTeC i2 Pro 完整功能清单
+
+> 来源：i2pro-help目录下7个PDF官方帮助文档 + motec.com.au官网 + 项目文档
+
+---
+
+
+
+## 二、分析组件（Components）
+
+### 2.1 时间/距离图表（Time/Distance Graph）
+- **时间轴 / 距离轴**切换（F9）
+- **追踪样式**：点样式（Points）/ 线样式（Line），按 S 切换
+- **通道分组**：按同单位自动分组，共享纵轴
+- **分栏/重叠模式**：按 G 切换（Tiled / Overlapped）
+- **缩放线（Scale Lines）**：显示 min/max/zero 参考线
+- **Variance 曲线**（F3）：显示 overlay 相对于 main 的累计时间差
+- **Status and Errors 面板**（E）：状态/故障通道的彩色条带
+- **Measurements**（M）：当前可见区间的 min/max/avg 自动测量
+- **Active Channel**：多通道时一个通道被标记为"活动通道"
+- **Data Offset**（O）：手动对齐 overlay 的时间/距离偏移
+
+### 2.2 Outing Graph（全程概览图）
+- 显示主文件的全部数据缩略
+- 矩形表示当前缩放区间，可拖拽调整
+- 双击全出
+
+### 2.3 直方图（Histogram）
+- 显示通道值出现频率的分布
+- 样式：柱状（Bar）、线状（Line）、文字（Text）
+- **Data Gating**：通过数学通道排除特定区间数据
+- **Color Channel**：按第三通道着色
+- 多通道叠加/分栏
+- 跟随缩放级别变化
+
+### 2.4 悬架速度直方图（Suspension Velocity Histogram）— Pro独有
+- 专为阻尼器分析优化
+- 计算：Rebound Avg/Hi%/Lo%、Bump Avg/Hi%/Lo%
+- Hi Speed / Lo Speed 边界可配置
+- 自动从悬架位移通道计算速度
+- 滤波参数可调
+
+### 2.5 散点图（Scatter Plot）— Pro独有
+- X × Y 两通道对照显示
+- **第三通道着色**（Color Channel）
+- **趋势线**：线性（Linear）/ 多项式（Polynomial）
+- **Data Gating**
+- **光标联动**：跟随时间图光标高亮对应点
+- 多通道叠加/分栏/平均模式
+- 缩放跟随
+
+### 2.6 Mixture Map（混合气图）— Pro独有
+- Lambda/AFR vs RPM，按负载分带
+- **Lambda Sensor Delay** 补偿
+- **Gear Change Filter**：排除换挡期间数据
+- 每个负载带可显示趋势线
+- 换挡过滤器（基于RPM变化率）
+
+### 2.7 FFT（快速傅里叶变换）— Pro独有
+- 频域分析，常用于悬架数据分析
+- **Windowing 函数**选择（减少频谱泄漏）
+- **FFT Points**：可配置点数（影响频率分辨率）
+- **Smoothing**：频域平滑
+- 多通道叠加/分栏
+- 与 MATLAB Welch 方法结果一致
+
+### 2.8 赛道报告（Track Report）
+- 在赛道地图上显示通道统计值（数值框）
+- 统计公式：Avg/Min/Max/Abs Max/Start Val/End Val/Val Change/Std Dev
+- **赛道颜色通道**：按通道值渲染彩虹热力图
+- **Overlay 比较**：双赛道并排显示，独立光标
+- 按区段类型过滤（弯道/直道）
+- 用户自定义赛道区段
+
+### 2.9 彩虹赛道图（Rainbow Track Map）— Pro独有
+- 通道值以颜色渐变渲染在赛道上
+- Overlay 时双赛道并排
+
+### 2.10 赛道位置（Track Position）
+- 显示赛道上的光标位置
+- 可选显示当前缩放级别
+
+### 2.11 GPS 赛道图（GPS Track）
+- 用经纬度绘制车辆路径
+- 缩放、拖拽、色标图例
+- 可显示赛道地图背景
+- 支持风向显示
+
+### 2.12 通道报告（Channel Report）— Pro独有
+- 表格化统计摘要
+- 支持按 Event/Sessions/Outings/Laps/Corners 分组
+- **Delta 列**：overlay 与 main 的差值
+- Min/Max 高亮
+- 双击 min/max 单元格跳转到对应位置
+- 导出为 CSV
+
+### 2.13 时间报告（Time Report）— Pro独有
+- 分段计时表
+- **Eclectic 最快理论圈**：所有分段最快时间之和
+- **Rolling Minimum**：连续最快圈
+- **Color Bands**：按百分比高亮接近最快的时间段
+- 导出为 CSV
+
+### 2.14 加速报告（Acceleration Report）
+- 加速度统计分析
+
+### 2.15 通道位（Channel Bits）
+- 显示ECU错误/状态位的逐位信息
+
+### 2.16 视频组件（Video Component）— Pro独有
+- 多摄像头同步显示
+- **自动同步**：MoTeC VSM（Video Sync Module）自动对齐
+- **手动同步**：解锁→拖拽对齐→锁定
+- Overlay 时多角度并排比较
+- 支持音效播放
+- 可与 TrackVision 集成生成仪表叠加视频
+
+### 2.17 仪表盘（Gauges）
+- **数值列表**（Numeric List）
+- **数值仪表**（Numeric Gauge）
+- **条形仪表**（Bar）：如刹车踏板位置
+- **表盘仪表**（Dial）：如车速表
+- **方向盘仪表**（Steering Wheel）
+- **状态灯**（Status Light）
+- **指南针仪表**（Compass）：方向/航向显示
+- **时钟仪表**（Clock）：UTC时间显示
+- 色带标记（高/低限）
+- **动画播放**（A）：实时/变速回放
+
+### 2.18 注释（Annotations）
+- 在数据任意位置放置标注
+- 显示为虚线+矩形标记
+- 右键编辑/删除
+
+### 2.19 笔记组件（Notes）
+- 自由文本记录
+
+---
+
+## 三、光标与测量系统
+
+### 3.1 主光标
+- 鼠标移动同步所有组件
+- 键盘步进：←/→ 0.01s，Ctrl+←/→ 1s
+
+### 3.2 基准光标（Datum Cursor）
+- **D**：开关
+- **空格**：在当前位置放置
+- **X**：交换主/基准光标
+- 自动计算两光标处的 **Δ 值**（时间差、距离差、通道值差）
+
+### 3.3 Values 窗口（V）
+- 显示光标处所有通道的实时数值
+- 可内联单位列节省空间
+
+---
+
+## 四、缩放与平移
+
+| 操作 | 功能 |
+|---|---|
+| 双击 | 以点击处为中心放大 2× |
+| 双击拖拽 | 框选放大 |
+| 滚轮 | 以指针处为中心缩放 |
+| ↑ / ↓ | 横向放大/缩小 |
+| Alt+↑ / Alt+↓ | 纵向放大/缩小 |
+| F2 | 横向全出 |
+| W | 默认缩放（一圈） |
+| Z | 缩放到两光标之间 |
+| H | 以光标为中心居中 |
+| F / B | 向前/向后翻页 |
+| Shift+← / Shift+→ | 横向平移 |
+| Shift+↑ / Shift+↓ | 纵向平移 |
+| 拖拽坐标轴 | 平移 |
+| 双击滚动条 | 全出 |
+| O | 偏移轴开关（数据对齐） |
+
+---
+
+## 五、圈叠加与对比
+
+- **多圈叠加**：无限制 overlay
+- **图形化对齐**：拖拽对齐 overlay 圈
+- **Variance 曲线**（F3）：累计时间差
+- **距离轴对齐**：Corrected Distance / Corrected Speed 计算
+- **Beacon 管理**：编辑/偏移 beacon 点
+- **Lap Stretch**：圈拉伸计算
+
+---
+
+## 六、数学系统（Maths）— Pro独有
+
+### 6.1 数学表达式编辑器
+- 纯文本公式输入
+- 支持算术运算符：`+ - * / ^`
+- 关系运算符：`< <= > >= == !=`
+- 逻辑运算符：`! && ||`
+- 位运算符：`~ & |`
+
+### 6.2 内置函数（完整列表）
+
+| 类别 | 函数 |
+|---|---|
+| **三角函数** | `sin cos tan acos asin atan sinh cosh tanh acosh asinh atanh` |
+| **对数/指数** | `ln log exp exp10` |
+| **幂/根** | `sqr sqrt power` |
+| **取整** | `int round round_down round_up frac remainder sgn` |
+| **统计** | `min max abs` |
+| **统计函数** | `stat_min stat_max stat_mean stat_start stat_end stat_std_dev`（支持 condition + reset） |
+| **滤波** | `smooth(x, points)` / `smooth(x, time_sec)` |
+| **滤波器** | `filter_lp filter_hp filter_cheby_lp filter_cheby_hp filter_cheby_bp filter_cheby_bs` |
+| **微分/积分** | `derivative(x)` / `integrate(x)` |
+| **逻辑** | `choose(condition, true, false)` / `invalid()` / `flip_flop(set, reset)` |
+| **时间** | `time_shift(x, offset)` / `time_valid(x, duration)` |
+| **范围** | `range_is(range)` / `range_change(range)` |
+| **位运算** | `bit_and bit_or bit_xor bit_not` |
+| **边缘** | `edge_delay(x, time, edge_type)` |
+| **随机** | `rand_chan() / rand_val()` |
+| **几何** | `hypot(x, y)` |
+
+### 6.3 数学常量
+- 可定义带单位的常量（如 360 degrees）
+- 在表达式中用引号引用
+
+### 6.4 2D/3D 查找表
+- 基于通道值的查表计算
+- 可用 Setup Sheet 值选择不同表
+
+### 6.5 Setup Sheets（设置表）
+- Excel 电子表格存储车辆设置参数
+- 按日期/时间匹配日志文件
+- 支持密码保护
+- 支持值比较（两个日期的设置差异）
+
+### 6.6 外部数学插件
+- **Math Plugins**：VB.NET/C++ 编写，处理多通道
+- **Math Functions**：嵌入表达式的自定义函数
+- 安装后可在表达式编辑器中使用
+
+### 6.7 全局数学 vs 本地数学
+- **Global Maths**：应用于所有日志文件，存储在项目中
+- **Local Maths**：每个日志文件独立，存储在 .ldx 文件中
+- 多个数学文件可按功能分组（引擎/底盘/空气动力学等）
+
+---
+
+## 七、告警系统（Alarms）— Pro独有
+
+### 7.1 告警类型
+- **Alert**：触发时闪烁显示在状态栏
+- **Warning**：触发时闪烁显示在状态栏
+- **Information**：仅在告警窗口显示
+
+### 7.2 告警模式
+- **Momentary**：条件为真时持续激活
+- **Set/Reset**：Set条件触发，Reset条件复位
+
+### 7.3 告警状态
+- Inactive → Active → Acknowledged → Latched
+- 支持延迟确认（re-arm time）
+- 支持 `for` 时间条件（如 "for 2 seconds"）
+
+### 7.4 告警窗口
+- Real Time 标签：当前激活的告警
+- Status 标签：所有告警状态
+- Log 标签：历史记录，可跳转到事件位置
+
+---
+
+## 八、数据管理
+
+### 8.1 项目（Projects）
+- 存储程序设置、工作表布局、数学公式等
+- 支持多车辆/多赛事类别
+- Profile 设置切换菜单术语（Circuit/Drag/Rally）
+
+### 8.2 工作簿/工作表（Workbooks/Worksheets）
+- 工作簿按类型分组（引擎/底盘/悬架/车手等）
+- 工作表可自由组合任意组件
+- **Worksheet Splitters**：Ctrl+拖拽分割工作表
+- **用户自定义快捷键**
+
+### 8.3 通道管理
+- **全局通道属性**：颜色、单位、min/max 全局统一
+- **通道别名（Aliases）**：当通道不存在时使用备选名称
+- **通道搜索**：模糊名称匹配
+- **拖拽添加通道**
+- **自动单位转换**
+
+### 8.4 数据窗口（Data Window）
+- F8 打开
+- 显示所有通道的当前值
+- 支持 Overlay 值对比
+- 支持按圈次过滤
+
+---
+
+## 九、赛道管理
+
+### 9.1 自动赛道生成
+- 从 GPS 数据自动生成赛道
+- 支持平滑处理
+
+### 9.2 赛道编辑器（Track Editor）
+- 自定义赛道区段（Corners/Straights等）
+- "Generate Default Sections" 可配置最短直道/弯道长度
+- **用户自定义区段**：任意数量
+
+### 9.3 赛道属性
+- 赛道宽度
+- 内线/外线/行驶线
+
+---
+
+## 十、数据导出
+
+| 格式 | 说明 |
+|---|---|
+| **MoTeC .ld** | 导出部分通道，可含/不含设备配置 |
+| **CSV** | 通用格式，可在 Excel 中打开 |
+| **MATLAB .mat** | 支持自定义采样率（Default/Fastest/Custom） |
+| **Google Earth** | 导出赛道轨迹到卫星地图 |
+| **CSV（组件级）** | 从图表/直方图/散点图/报告单独导出 |
+| **剪贴板** | 复制到 Windows 剪贴板 |
+
+---
+
+## 十一、实时遥测（T2 Telemetry）— Pro独有（后续可能添加）
+
+- **T2 Server** 接收实时数据
+- 窗口模式：Sliding / Anchored / Anchored Lap
+- 实时图表、仪表、赛道位置
+- 实时告警
+- 多车对比
+- 数据缓存与回放
+
+---
+
+
+## 十三、GPS 校正
+
+- **去重复样本**：低频GPS插值到高频
+- **时间偏移**：补偿GPS延迟
+- **无效数据处理**：经纬度为零时标记无效
+
+---
+
+## 十四、外观与配置
+
+### 14.1 配色方案（Colour Schemes）
+- 全局自定义所有组件颜色
+- 预设：白色背景/黑色背景等
+- 可跨电脑传输
+
+### 14.2 字体
+- 可自定义组件字体
+- 支持配色方案存储
+
+### 14.3 选项（Options）
+- 自动缩放选项
+- 时间格式
+- 遥测设置
+
+
+## 十五、i2 API — Pro独有
+
+- COM 接口，支持 Excel/MATLAB/VB/C#
+- 功能：加载 .ld 文件、读取通道/圈/lap/beacon/详情、创建新文件和通道、导出
+- Python 示例可用
+
+---
+
+## 十六、Feature Licences（功能许可证）
+
+| 许可证 | 说明 |
+|---|---|
+| Open MoTeC Standard Log Files | 在 i2 Pro 中打开 Standard 格式日志 |
+| Import Pi ASCII Dataset | 导入 Pi Toolbox ASCII 数据 |
+| Import EFI ASCII Dataset | 导入 EFI ASCII 数据 |
+| Import RacePak ASCII Dataset | 导入 RacePak ASCII 数据 |
+| i2 API | 应用程序编程接口 |
+
+---
+
+
+
+> 基于 i2pro-help 目录下 7 个 PDF 官方帮助文档的逐页深度分析
+
+---
+
+## 一、软件架构概述
+
+i2 Pro 采用 **Project → Workbook → Worksheet → Component** 四级结构：
+
+```
+Project（项目）
+  ├─ Profile（Circuit/Drag/Rally/Engine，切换菜单术语）
+  ├─ Workbooks（工作簿，按功能分组：引擎/底盘/车手等）
+  │   └─ Worksheets（工作表，自由组合组件）
+  │       └─ Components（组件：图表/直方图/仪表等）
+  ├─ Global Maths（全局数学，跨所有日志文件生效）
+  ├─ Channel Aliases（通道别名）
+  └─ Colour Schemes（配色方案）
+```
+
+**核心交互原则**：所有组件共享光标位置、缩放级别和 Overlay 选择。按 `TAB` 切换组件焦点，`F5` 打开属性。
+
+---
+
+## 二、时间/距离图表（核心组件）
+
+### 2.1 通道分组机制
+
+通道按 **同单位** 自动分组，每组共享 Y 轴刻度。双击组标题编辑：
+- **Manual Scale**：手动设置 min/max，仅当前图生效
+- **Channel/Auto Scale**：继承通道属性中的刻度设置，所有使用此模式的组件自动继承
+- 组内多通道时：min = 所有通道 min 的最小值，max = 所有通道 max 的最大值
+
+### 2.2 时间/距离轴切换（F9）
+
+- 按 `F9` 即时切换，模式记忆到 Worksheet 级别
+- 距离模式使用 **Corrected Distance** 通道（依赖 Corrected Speed 正常计算）
+- 距离单位通过 Channel Editor 修改 Corr Dist 通道单位来改变
+
+### 2.3 Variance 曲线（F3）
+
+- 必须先选中至少一个 Overlay
+- 显示 Overlay 相对于 Main 的**累计时间差**曲线
+- 量化两条数据之间的累积差异
+
+### 2.4 Data Offset 对齐（O键）
+
+操作流程：
+1. 按 `O` 开启偏移轴 → Main 和 Overlay 各出现一个偏移轴
+2. 拖拽或用键盘微调：
+   - `CTRL+SHIFT+方向键`：移动 Main 数据
+   - `ALT+SHIFT+方向键`：移动 Overlay 数据
+3. 再按 `O` 关闭（同时归零偏移）
+
+**对齐技巧**：使用纵向 G 力或悬架位置通道的路面颠簸特征来对齐
+
+### 2.5 Measurements（M键）
+
+自动显示当前缩放范围内每通道的 min/max/avg：
+- 鼠标悬停 min/max 值 → 图上显示对应位置垂直线
+- **双击** min/max 值 → 光标跳转到该位置
+
+### 2.6 Status and Errors 面板（E键）
+
+每个 Status/Error 通道一行水平线，无错误时空白，有错误时显示彩色条。鼠标悬停可查看通道名。
+
+---
+
+## 三、直方图
+
+**Gating Channel 机制**：通道值 ≤ 0 的数据被排除。典型用法：`abs('G Force Lat') > 0.5` → 弯道=1（保留），直道=0（排除）
+
+**样式**：Bar（柱状）/ Line（折线）/ Text（文字），按 `S` 切换
+
+**缩放影响**：显示的数据完全取决于当前缩放级别，与图表共享缩放键（↑/↓、F2、W）
+
+---
+
+## 四、悬架速度直方图（Pro独有）
+
+**速度计算**：内置从悬架位移通道自动计算速度。Velocity Calculation Tab 可配置滤波参数：
+- 滤波不足 → 直方图"有锯齿"
+- 滤波过多 → 高频信号衰减
+
+**Hi/Lo Speed 边界**：匹配减震器的 Hi/Lo 速转换点，用于统计计算和颜色带显示
+
+**统计值**：
+
+| 统计量 | 含义 |
+|--------|------|
+| Rebound Avg/Hi%/Lo% | 回弹速度的平均值/高速区占比/低速区占比 |
+| Bump Avg/Hi%/Lo% | 压缩速度的平均值/高速区占比/低速区占比 |
+
+---
+
+## 五、散点图（Pro独有）
+
+**三通道机制**：X 轴 + Y 轴 + Color（第三通道着色）
+
+**三种布局模式**（G 键切换）：
+- Overlapped：所有 Y 通道重叠
+- Tiled：分栏
+- **Average**：每个时间点将各通道值取平均后绘制
+
+**趋势线**（S 键切换）：纯点 → 点+趋势线 → 纯趋势线。支持线性/多项式。
+
+**光标联动**：点击散点图 → 光标移到 Main 数据最近点；按 `A` → 动画模式
+
+---
+
+## 六、Mixture Map（Pro独有）
+
+**核心映射**：X = Engine RPM，Y = Load Channel（Throttle/Manifold Pressure），值 = Lambda
+
+**Lambda Sensor Delay 补偿**：补偿排气到达传感器的时间 + 传感器固有延迟
+
+**Gear Change Filter**：基于 RPM 变化率排除换挡期间数据。需创建数学通道 `derivative(Engine RPM, RPM Filter Time)`
+
+**Load Band 开关**：`ALT+1`、`ALT+2`... 逐个切换各负载带和趋势线
+
+---
+
+## 七、FFT（Pro独有）
+
+**Windowing 函数**：将数据在起始/结束处衰减到零，减少频谱泄漏
+
+**FFT Points**：设置计算点数。缩放数据点数 > FFT Points 时执行多次 FFT 并平均。**频率箱数 = FFT Points / 2**
+
+**最大分析频率** = 通道采样率 / 2（奈奎斯特频率）
+
+**MATLAB 等效**：`pwelch(x, 1024, 0, 1024, r)`（Welch 方法）
+
+---
+
+## 八、赛道报告（参考）
+
+**Report Formulas**：Avg / Min / Max / Abs Max / Start Val / End Val / Val Change / Std Dev / On Channel Value Change
+
+**Track Colour Channels**：多通道层叠渲染，上层通道需有间隙让下层可见。例：制动状态通道仅在制动时显示颜色
+
+**Overlay 双赛道对比**：并排显示两条赛道，各自独立光标。**要求 Time 模式**（F9）
+
+---
+
+## 九、时间报告（Pro独有）
+
+- **Eclectic**：每个 Section 的最短时间之和 = 理论最佳圈（仅供参考，实际不可能同时全部最快）
+- **Rolling Minimum**：形成整体最短时间的连续圈组合
+- **Colour Bands**：按百分比高亮接近最快的时间段
+
+---
+
+## 十、数学系统（Pro独有）（参考）
+
+### 10.1 架构
+
+- **Global Maths**：存储在项目 math files 中，跨所有日志文件生效
+- **Local Maths**：存储在 .ldx 文件中，仅单个日志文件生效
+- **On Demand Processing**：只在显示工作表时才计算所需的数学通道
+
+### 10.2 表达式语法
+
+```
+通道名用单引号：'Engine RPM'
+单位用方括号：'Wheel Speed'[km/h]
+文本用双引号：'Driver' == "Joe"
+```
+
+**Result Units ≠ Display Units**：Result Units 定义计算结果的物理单位，Display Units 定义显示单位，两者之间自动转换。这意味着用公制编写的数学在英制环境下也能正确工作。
+
+### 10.3 核心函数
+
+| 函数 | 用途 | 关键特性 |
+|------|------|----------|
+| `choose(cond, true, false)` | 条件选择，支持嵌套 | 多档位比率选择 |
+| `invalid()` | 标记数据无效 | 从图表/报告中排除数据 |
+| `derivative(x, points/time)` | 求导 | 奇数点避免相位延迟 |
+| `integrate(x, cond, reset)` | 积分 | 支持条件积分和区间重置 |
+| `smooth(x, points/time)` | 平滑 | 奇数点避免相位延迟 |
+| `filter_cheby_bp/bs/hp/lp(...)` | 切比雪夫滤波 | 负 order 消除相位延迟 |
+| `stat_min/max/mean/start/end/std_dev` | 统计函数 | 支持 condition + reset |
+| `flip_flop(set, reset)` | 设置-复位触发器 | 带滞回的开关逻辑 |
+| `edge_delay(x, time, edge_type)` | 边沿延迟 | 过滤瞬态信号 |
+| `time_shift(x, offset)` | 时间偏移 | 对齐不同传感器 |
+| `time_valid(x, duration)` | 持续时间检测 | 过滤瞬态 |
+| `range_is(range)` | 判断是否在范围内 | 用于 gating |
+| `range_change(range)` | 范围边界递增 | 用作 reset 参数 |
+
+### 10.4 计算顺序（四种情况）
+
+1. **Local 优先于 Global**：同一通道在 Local 和 Global 各处理一次 → Local 先执行
+2. **同一文件第二个方程被忽略**
+3. **不同文件按列表顺序执行**
+4. **自身数学优先于被引用数学**
+
+---
+
+
+### 11.2 三种严重级别
+
+- **Alert/Warning**：触发时在 Alarms 窗口 + 状态栏闪烁
+- **Information**：仅在 Alarms 窗口显示
+
+### 11.3 两种模式
+
+- **Momentary**：条件真=激活，条件假=消失
+- **Set/Reset**：Set 条件触发，Reset 条件复位，两个条件可完全不同
+
+### 11.4 `for` 时间条件
+
+```
+(CoolantTemp > 80) for 2 [s]   // 持续超过2秒才触发
+```
+
+### 11.5 告警窗口三标签
+
+- **Real Time**：当前激活告警，支持 Acknowledge/Ignore
+- **Status**：所有告警状态，Invalid 和 Ignored 告警在此显示
+- **Log**：历史记录，支持 Jump to Event（跳转到 Time Graph 对应位置）
+
+---
+
+
+
+## 十三、选项配置
+
+### Telemetry 三种窗口模式
+- **Sliding**：光标在右边缘，窗口持续右滑
+- **Anchored**：窗口静态，分历史+实时两部分，光标到右边缘时窗口跳到左侧
+- **Anchored Lap**：仅距离模式，圈距离作为窗口持续时间
+
+### GPS 校正
+- **去重复样本**：低频 GPS 插值到高频，消除可变延迟
+- **时间偏移**：补偿 GPS→记录器的固定延迟，可按更新率百分比输入
+
+### Google Earth 导出
+File → Google Earth Export → 双击导出文件即可在 Google Earth 中查看赛道轨迹
+
+---
+
+## 十四、完整快捷键速查表
+
+| 键 | 功能 | 键 | 功能 |
+|---|---|---|---|
+| `A` | 动画 | `N` | 下一圈 |
+| `B` | 向后平移 | `O` | 偏移轴 |
+| `C` | 通道窗口 | `P` | 上一圈 |
+| `D` | 基准光标 | `Q` | 交换 Main/Overlay |
+| `E` | 错误面板 | `S` | 样式切换 |
+| `F` | 向前平移 | `V` | 数值窗口 |
+| `G` | 分组/布局 | `W` | 默认缩放 |
+| `H` | 居中光标 | `X` | 交换光标 |
+| `J` | 单色显示 | `Y` | 光标样式 |
+| `K` | 彩色图例 | `Z` | 缩放到光标 |
+| `L` | 图例 | `M` | 测量值 |
+| `F2` | 全出 | `F3` | Variance |
+| `F5` | 属性 | `F8` | 数据窗口 |
+| `F9` | 时间/距离 | `F4` | Overlay 开关 |
+| `↑/↓` | 水平缩放 | `Alt+↑/↓` | 垂直缩放 |
+| `Shift+←/→` | 水平平移 | `Ctrl+M` | 数学编辑器 |
+| `Ctrl+Shift+←/→` | Main 偏移 | `Alt+Shift+←/→` | Overlay 偏移 |

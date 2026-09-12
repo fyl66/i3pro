@@ -114,6 +114,7 @@ class Element {
   closest(selector) {
     if (selector === "canvas") return this.tagName === "CANVAS" ? this : null;
     if (selector === ".chart") return this._chart;
+    if (selector === ".comp") return this._comp;
     return null;
   }
 
@@ -190,6 +191,16 @@ function run(hash) {
   const sandbox = {
     document, window, location, navigator, console,
     setTimeout, clearTimeout, URLSearchParams,
+    // browser globals the workbench relies on
+    btoa: (s) => Buffer.from(s, "binary").toString("base64"),
+    atob: (s) => Buffer.from(s, "base64").toString("binary"),
+    escape: global.escape, unescape: global.unescape,
+    localStorage: {
+      _v: {},
+      getItem(k) { return Object.prototype.hasOwnProperty.call(this._v, k) ? this._v[k] : null; },
+      setItem(k, v) { this._v[k] = String(v); },
+      removeItem(k) { delete this._v[k]; },
+    },
     fetch: () => Promise.reject(new Error("fetch unavailable headless")),
   };
   vm.runInNewContext(script, sandbox);
@@ -236,14 +247,20 @@ check(!!api, "window.i3pro debug handle was not exported");
 if (api) {
   const state = api.state;
   const host = registry.get("chartHost");
-  let chartCanvas = null;
-  for (const child of host._children) {
-    if (child._q && child._q.canvas) {
-      chartCanvas = child._q.canvas;
-      chartCanvas._chart = child;
-      break;
+  const worksheet = registry.get("worksheet");
+  const canvases = [];
+  (function walk(node, owner) {
+    if (!node || !node._children) return;
+    for (const child of node._children) {
+      const nextOwner = child.dataset && child.dataset.type ? child : owner;
+      if (child.tagName === "CANVAS") {
+        child._comp = nextOwner;
+        canvases.push(child);
+      }
+      walk(child, nextOwner);
     }
-  }
+  })(worksheet, null);
+  let chartCanvas = canvases[0] || null;
   const charts = registry.get("charts");
   const debug = process.env.I3PRO_DEBUG ? console.error : () => {};
   debug("charts handlers: " + Object.keys(charts._handlers).join(","));
@@ -289,9 +306,9 @@ if (api) {
   const s0 = state.style;
   key("s");
   check(state.style !== s0, "S did not toggle the trace style");
-  const g0 = state.layout;
+  const g0 = state.groupMode;
   key("g");
-  check(state.layout !== g0, "G did not toggle the group layout");
+  check(state.groupMode !== g0, "G did not toggle the group layout");
   const m0 = state.show.measure;
   key("m");
   check(state.show.measure !== m0, "M did not toggle measurements");
@@ -343,13 +360,14 @@ if (api) {
   key("b");
   key("h");
 
-  // 10. status band toggle must not flood the selection
-  const selectedBefore = state.selected.length;
+  // 10. E adds / removes a status component instead of flooding the selection
+  const compsBeforeE = state.components.length;
+  const hadStatus = state.components.some((c) => c.type === "status");
   key("e");
-  check(state.show.status === true, "E did not switch on the status band");
-  check(state.selected.length === selectedBefore,
-    "E silently added channels to the selection");
+  check(state.components.some((c) => c.type === "status") !== hadStatus,
+    "E did not toggle the status component");
   key("e");
+  check(state.components.length === compsBeforeE, "E left the worksheet changed");
 
   // 11. sidebar buttons and the scatter selectors must not throw
   ["chClear", "chDefault", "chVisible"].forEach((id) => {
@@ -371,6 +389,64 @@ if (api) {
   // 13. share link
   const share = registry.get("shareBtn");
   if (share) share.dispatch("click", { target: share });
+
+  // 14. worksheet: the component model itself
+  const before = state.components.length;
+  check(before > 0, "the default worksheet has no components");
+  check(state.preset === "分析", "expected the 分析 preset to start with, got " + state.preset);
+  api.addComponentOfType("graph");
+  check(state.components.length === before + 1, "adding a component did not change the worksheet");
+  const added = state.components[state.components.length - 1];
+  api.componentAction(added, "up");
+  check(state.components.indexOf(added) === before - 1, "moving a component up did nothing");
+  api.componentAction(added, "close");
+  check(state.components.length === before, "removing a component did not shrink the worksheet");
+  api.applyPreset("动力");
+  check(state.preset === "动力", "switching preset did not take effect");
+  const graphChans = api.groupsFor(state.components.find((c) => c.type === "graph"))
+    .reduce((a, g) => a.concat(g.channels), []);
+  check(graphChans.length > 0, "the 动力 preset produced a graph with no channels");
+  api.applyPreset("分析");
+
+  // 15. the graph header carries the cursor value next to min / max / avg
+  if (worksheet) {
+    const headers = [];
+    const rows = [];
+    (function walk(node) {
+      if (!node || !node._children) return;
+      for (const child of node._children) {
+        const cls = String(child.className || "");
+        if (cls.indexOf("graphhead") >= 0) headers.push(child);
+        if (cls.indexOf("lrow") >= 0) rows.push(child);
+        walk(child);
+      }
+    })(worksheet);
+    check(headers.length > 0, "no graph header element was created");
+    const mid = (api.lane()[0] + api.lane()[1]) / 2;
+    state.cursor = mid;
+    api.renderAll();
+    check(rows.length > 0, "the graph header has no per-channel rows");
+    const withValue = rows.filter((row) => {
+      const cells = row._children || [];
+      return cells.length >= 3 && /^[-+]?\d/.test(String(cells[2].textContent || ""));
+    });
+    check(withValue.length > 0,
+      "the graph header does not show the value at the cursor (i2 Pro shows name | cursor | min | max | avg)");
+    const withMeasure = rows.filter((row) => {
+      const cells = row._children || [];
+      return cells.length >= 6 && /^[-+]?\d/.test(String(cells[5].textContent || ""));
+    });
+    check(withMeasure.length > 0, "the graph header does not show min / max / avg");
+  }
+
+  // 16. the worksheet must survive a round trip through a share link
+  const encoded = api.encodeLayout(state.components);
+  check(!!encoded, "the worksheet could not be encoded for a share link");
+  const decoded = api.decodeLayout(encoded);
+  check(!!decoded && decoded.length === state.components.length,
+    "the worksheet did not survive a link round trip");
+  check(decoded && decoded.map((c) => c.type).join(",") === state.components.map((c) => c.type).join(","),
+    "the worksheet link round trip lost or reordered components");
 }
 
 /* --------------------------------------------------------------- DOM checks */

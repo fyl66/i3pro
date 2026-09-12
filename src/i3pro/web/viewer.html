@@ -79,6 +79,36 @@
   .scattercfg { display:flex; gap:5px; align-items:center; flex-wrap:wrap; font-size:11px;
                 padding:2px 9px 0; color:var(--muted); }
   .scattercfg select { font-size:11px; padding:2px 5px; max-width:150px; }
+
+  /* worksheet: an ordered list of components, i2 Pro style */
+  #worksheet { display:block; }
+  .wrow { display:flex; gap:6px; align-items:stretch; }
+  .wrow > .comp { flex:1 1 0; min-width:0; margin-bottom:6px; }
+  .comp { background:var(--panel); border:1px solid var(--line); border-radius:7px;
+          position:relative; display:flex; flex-direction:column; overflow:hidden; }
+  .comp.focus { border-color:var(--accent); }
+  .compbar { display:flex; align-items:center; gap:8px; padding:2px 8px 2px 10px;
+             border-bottom:1px solid var(--line); font-size:11px; color:var(--muted); }
+  .compbar .ctitle { font-weight:600; }
+  .compbar .ctools { margin-left:auto; display:flex; gap:3px; opacity:.3; }
+  .comp:hover .compbar .ctools { opacity:1; }
+  .compbar .ctools button { padding:0 5px; font-size:11px; line-height:16px; border-radius:4px; }
+  .compbody { position:relative; flex:1 1 auto; min-height:0; }
+  .compbody canvas { display:block; width:100%; }
+  .graphhead { position:absolute; left:0; top:0; right:0; pointer-events:none; }
+  .graphhead.caption { position:static; padding:2px 8px 5px; font-size:11px;
+                       color:var(--muted); pointer-events:auto; }
+  .glegend { position:absolute; left:70px; display:flex; flex-direction:column; }
+  .lrow { display:flex; align-items:baseline; gap:7px; font-size:11px; line-height:15px;
+          background:rgba(15,17,21,.58); padding:0 4px; border-radius:3px; }
+  .lrow .lname { color:var(--fg); min-width:118px; }
+  .lrow .lcur { color:#fff; font-weight:600; min-width:58px; text-align:right;
+                font-variant-numeric:tabular-nums; }
+  .lrow .lmm { color:var(--muted); min-width:52px; text-align:right;
+               font-variant-numeric:tabular-nums; }
+  .lrow .lunit { color:var(--muted); }
+  .resize { height:6px; cursor:ns-resize; flex:0 0 auto; }
+  .comp:hover .resize { background:#232833; }
 </style>
 </head>
 <body>
@@ -95,6 +125,14 @@
 </header>
 <main>
   <aside>
+    <div class="group" id="sheetGroup">
+      <h2>工作表 <span class="count" id="sheetName"></span></h2>
+      <div class="row" id="presetRow"></div>
+      <div class="row">
+        <select id="addType" title="选择要添加的组件"></select>
+        <button id="addBtn">＋ 添加组件</button>
+      </div>
+    </div>
     <div class="group" id="lapGroup">
       <h2>圈速 <span class="count" id="lapCount"></span></h2>
       <table id="lapTable"></table>
@@ -117,30 +155,7 @@
     </div>
   </aside>
   <section id="charts">
-    <div class="split">
-      <div class="chart" id="trackWrap">
-        <div class="legend"><span>赛道轨迹 <b id="trackLegend"></b></span></div>
-        <canvas id="track" height="288"></canvas>
-      </div>
-      <div class="chart" id="scatterWrap">
-        <div class="legend"><span>散点 <b id="scatterLegend"></b></span></div>
-        <div class="scattercfg">
-          <span>X</span><select id="scatterX"></select>
-          <span>Y</span><select id="scatterY"></select>
-          <span>色</span><select id="scatterC"></select>
-        </div>
-        <canvas id="scatter" height="256"></canvas>
-      </div>
-      <div class="chart" id="deltaWrap">
-        <div class="legend"><span>时间差 Δ <b id="deltaLegend"></b></span></div>
-        <canvas id="delta" height="288"></canvas>
-      </div>
-    </div>
-    <div id="chartHost"></div>
-    <div class="chart" id="statusWrap" style="display:none">
-      <div class="legend"><span>状态与故障 <b id="statusLegend"></b></span></div>
-      <canvas id="statusBand" height="60"></canvas>
-    </div>
+    <div id="worksheet"></div>
     <div id="scrollHost"></div>
     <div id="overviewHost"></div>
     <div class="hint" id="statusLine"></div>
@@ -178,28 +193,190 @@ const GROUPS = ((DATA && DATA.groups) || []).concat(
     : []
 );
 
+/* ------------------------------------------------------- worksheet model */
+// A worksheet is an ordered list of components, like i2 Pro's
+// Worksheet -> Component model. Each component owns its own configuration.
+// span 1 = half width (two neighbours sit side by side), span 2 = full width.
+const COMPONENT_TYPES = {
+  graph:   { label: "时间/距离图", span: 2, height: 168 },
+  scatter: { label: "散点图",      span: 1, height: 300 },
+  track:   { label: "赛道轨迹",    span: 1, height: 300 },
+  delta:   { label: "时间差 Δ",    span: 2, height: 186 },
+  status:  { label: "状态与故障",  span: 2, height: 60 },
+};
+
+// Channel hints for the built-in worksheets, matched as substrings.
+const PRESET_PICKS = {
+  分析: ["Vx KF", "GPS Speed", "Brake Signal", "TH", "G Force Lat", "G Force Long",
+         "G Force Vert", "SW Angle", "AMKFR ActualTorqueValue", "Battery Power",
+         "MCU1 FR TempMotor", "GPS Heading"],
+  对比: ["Vx KF", "Brake Signal", "TH", "G Force Long", "SpeedFR", "SW Angle"],
+  动力: ["AMKFR ActualTorqueValue", "Battery Power", "MCU1 FR TempMotor",
+         "AMKFR DCBusVolt", "Pack Inst Voltage", "power real", "Total Motor Power",
+         "MCU1 FR TempIGBT"],
+  底盘: ["SpeedFR", "SpeedFL", "SpeedRR", "SpeedRL", "SW Angle", "G Force Lat",
+         "G Force Long", "Susp Pos FR", "Susp Pos RL", "Brake Signal"],
+  车手: ["Vx KF", "Brake Signal", "TH", "SW Angle", "G Force Long", "GPS Heading",
+         "G Force Lat", "Vx trqlimit"],
+};
+
+let compSeq = 0;
+
+function channelsMatching(patterns, limit) {
+  const found = [];
+  const all = (DATA && DATA.channels) || [];
+  for (const pattern of patterns) {
+    const needle = pattern.toLowerCase();
+    for (const ch of all) {
+      if (found.length >= limit) return found;
+      if (found.indexOf(ch.name) >= 0) continue;
+      if (ch.name.toLowerCase().indexOf(needle) >= 0) found.push(ch.name);
+    }
+  }
+  return found;
+}
+
+function makeComponent(type, overrides) {
+  const spec = COMPONENT_TYPES[type];
+  const comp = {
+    id: type + "-" + (++compSeq),
+    type: type,
+    span: spec.span,
+    height: spec.height,
+    config: {},
+  };
+  if (type === "graph") comp.config.channels = [];
+  if (type === "scatter") {
+    comp.config.x = null;
+    comp.config.y = [];
+    comp.config.colour = null;
+    comp.config.style = "points";
+  }
+  if (type === "track") comp.config.channel = null;
+  const merged = Object.assign(comp, overrides || {});
+  merged.config = Object.assign({}, comp.config, (overrides || {}).config || {});
+  return merged;
+}
+
+function presetDefinitions() {
+  const pick = (key, limit) => channelsMatching(PRESET_PICKS[key], limit);
+  return {
+    分析: [
+      makeComponent("track"), makeComponent("scatter"),
+      makeComponent("delta"),
+      makeComponent("graph", { config: { channels: pick("分析", 12) } }),
+    ],
+    对比: [
+      makeComponent("delta", { height: 210 }),
+      makeComponent("graph", { height: 230, config: { channels: pick("对比", 6) } }),
+      makeComponent("track"), makeComponent("scatter"),
+    ],
+    动力: [
+      makeComponent("graph", { height: 260, config: { channels: pick("动力", 10) } }),
+      makeComponent("status", { height: 96 }),
+    ],
+    底盘: [
+      makeComponent("graph", { height: 260, config: { channels: pick("底盘", 10) } }),
+      makeComponent("scatter"), makeComponent("track"),
+    ],
+    车手: [
+      makeComponent("graph", { height: 260, config: { channels: pick("车手", 8) } }),
+      makeComponent("track"), makeComponent("scatter"),
+    ],
+  };
+}
+
+function copyComponents(list) {
+  return JSON.parse(JSON.stringify(list));
+}
+
+function defaultComponents() {
+  return copyComponents(presetDefinitions()["分析"]);
+}
+
+// Compact wire form so a worksheet can travel in a URL.
+function encodeLayout(components) {
+  const compact = components.map((c) => [
+    c.type, c.span, c.height,
+    c.type === "graph" ? c.config.channels.join("|")
+      : c.type === "scatter" ? [c.config.x, (c.config.y || [])[0], c.config.colour, c.config.style].join("|")
+      : c.type === "track" ? (c.config.channel || "")
+      : "",
+  ]);
+  try {
+    return btoa(unescape(encodeURIComponent(JSON.stringify(compact))));
+  } catch (err) {
+    return "";
+  }
+}
+
+function decodeLayout(text) {
+  try {
+    const compact = JSON.parse(decodeURIComponent(escape(atob(text))));
+    if (!Array.isArray(compact)) return null;
+    return compact.map((row) => {
+      const type = row[0];
+      if (!COMPONENT_TYPES[type]) return null;
+      const comp = makeComponent(type, { span: row[1], height: row[2] });
+      const payload = String(row[3] || "");
+      if (type === "graph") comp.config.channels = payload ? payload.split("|") : [];
+      else if (type === "scatter") {
+        const parts = payload.split("|");
+        comp.config.x = parts[0] || null;
+        comp.config.y = parts[1] ? [parts[1]] : [];
+        comp.config.colour = parts[2] || null;
+        comp.config.style = parts[3] === "trend" ? "trend" : "points";
+      } else if (type === "track") comp.config.channel = payload || null;
+      return comp;
+    }).filter(Boolean);
+  } catch (err) {
+    return null;
+  }
+}
+
+const LAYOUT_STORE = "i3pro.components.v1";
+
+function saveLayout() {
+  try {
+    localStorage.setItem(LAYOUT_STORE, JSON.stringify({ preset: state.preset, components: state.components }));
+  } catch (err) { /* private mode: the worksheet simply will not persist */ }
+}
+
+function loadSavedLayout() {
+  try {
+    const raw = localStorage.getItem(LAYOUT_STORE);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.components) || !parsed.components.length) return null;
+    return parsed;
+  } catch (err) {
+    return null;
+  }
+}
+
 const state = {
   mode: "time",
-  selected: [],
+  components: [],
+  preset: "分析",
+  focusId: null,
   traces: Object.assign({}, (DATA && DATA.traces) || {}),
   overview: (DATA && DATA.overview) || null,
   view: null,
   cursor: null,
   datum: null,
   datumOn: false,
-  focus: 0,
   panelZoom: {},
   style: "line",
-  layout: "tiled",
-  show: { measure: true, status: false, values: true },
+  groupMode: "tiled",
+  show: { measure: true, legend: true, values: false },
   ref: (DATA && DATA.ref) || null,
   cmp: (DATA && DATA.cmp) || null,
   overlay: (DATA && DATA.overlay) || null,
   track: (DATA && DATA.track) || null,
-  scatter: { x: null, y: [], colour: null, style: "points" },
   points: null,
   pending: 0,
   windowKey: "",
+  dataVersion: 0,
 };
 
 let band = null;
@@ -251,8 +428,43 @@ function niceBounds(values) {
   return [lo - pad, hi + pad];
 }
 
-function channelColor(name) {
-  const idx = state.selected.indexOf(name);
+function componentById(id) { return state.components.find((c) => c.id === id) || null; }
+
+function graphComponents() { return state.components.filter((c) => c.type === "graph"); }
+
+/** The component the sidebar edits: whatever was clicked last, else a graph. */
+function focusedComponent() {
+  return componentById(state.focusId)
+      || state.components.find((c) => c.type === "graph")
+      || state.components[0]
+      || null;
+}
+
+/** Channels of the focused graph component - this is what the channel list edits. */
+function selectedChannels() {
+  const comp = focusedComponent();
+  return comp && comp.type === "graph" ? comp.config.channels : [];
+}
+
+function setSelectedChannels(names) {
+  const comp = focusedComponent();
+  if (comp && comp.type === "graph") {
+    comp.config.channels = names;
+    state.dataVersion += 1;
+  }
+}
+
+function allGraphChannels() {
+  const out = [];
+  for (const comp of graphComponents()) {
+    for (const name of comp.config.channels) if (out.indexOf(name) < 0) out.push(name);
+  }
+  return out;
+}
+
+function channelColor(name, comp) {
+  const list = comp && comp.type === "graph" ? comp.config.channels : allGraphChannels();
+  const idx = list.indexOf(name);
   return PALETTE[(idx < 0 ? 0 : idx) % PALETTE.length];
 }
 
@@ -263,16 +475,34 @@ function traceX(trace) {
   return state.mode === "time" ? trace.time : (trace.distance || trace.time);
 }
 
-function selectedGroups() {
+/** Same-unit groups for one graph component (i2 Pro's channel groups). */
+function groupsFor(comp) {
+  const names = comp.config.channels.filter((n) => !STATUS.has(n));
   return GROUPS
     .map((g) => ({ key: g.key, label: g.label, unit: g.unit,
-                   channels: g.channels.filter((c) => state.selected.includes(c) && !STATUS.has(c)) }))
+                   channels: g.channels.filter((c) => names.indexOf(c) >= 0) }))
     .filter((g) => g.channels.length);
+}
+
+/** Every channel any component needs, so one fetch serves the whole worksheet. */
+function neededChannels() {
+  const out = allGraphChannels();
+  const add = (name) => { if (name && out.indexOf(name) < 0) out.push(name); };
+  for (const comp of state.components) {
+    if (comp.type === "scatter") {
+      add(comp.config.x);
+      (comp.config.y || []).forEach(add);
+      add(comp.config.colour);
+    } else if (comp.type === "status") {
+      (DATA.status || []).forEach(add);
+    }
+  }
+  return out;
 }
 
 /* --------------------------------------------------------------- fetching */
 function plotWidth() {
-  const host = $("chartHost");
+  const host = $("worksheet");
   return Math.max(240, (host.clientWidth || 900) - 82);
 }
 
@@ -292,7 +522,7 @@ async function refreshWindowTraces(force) {
   const key = windowKey();
   if (!force && key === state.windowKey) return;
   state.windowKey = key;
-  const names = state.selected;
+  const names = neededChannels();
   if (!names.length) return;
   state.pending += 1;
   setStatus();
@@ -304,6 +534,7 @@ async function refreshWindowTraces(force) {
     const res = await fetch(url);
     if (!res.ok) throw new Error("HTTP " + res.status);
     Object.assign(state.traces, await res.json());
+    state.dataVersion += 1;
   } catch (err) {
     toast("通道加载失败: " + err.message);
   } finally {
@@ -312,8 +543,8 @@ async function refreshWindowTraces(force) {
   }
 }
 
-async function refreshPoints() {
-  const cfg = state.scatter;
+async function refreshPointsFor(comp) {
+  const cfg = comp.config;
   if (!cfg.x || !cfg.y.length || !DATA.api) { state.points = null; return; }
   const w = windowRange();
   const names = [cfg.x].concat(cfg.y).concat(cfg.colour ? [cfg.colour] : []);
@@ -324,9 +555,17 @@ async function refreshPoints() {
     const res = await fetch(url);
     if (!res.ok) throw new Error("HTTP " + res.status);
     state.points = await res.json();
+    state.dataVersion += 1;
   } catch {
     state.points = null;
   }
+}
+
+/** Refresh the scatter points for the first scatter component on the sheet. */
+function refreshPoints() {
+  const comp = state.components.find((c) => c.type === "scatter");
+  if (!comp) { state.points = null; return Promise.resolve(); }
+  return refreshPointsFor(comp);
 }
 
 /* -------------------------------------------------------------- view/mode */
@@ -336,7 +575,8 @@ function fullRange() {
     return [0, d[d.length - 1] || 1];
   }
   let lo = Infinity, hi = -Infinity;
-  const names = state.selected.length ? state.selected : Object.keys(state.traces);
+  let names = allGraphChannels();
+  if (!names.length) names = Object.keys(state.traces);
   for (const name of names) {
     const trace = traceOf(name);
     if (!trace) continue;
@@ -531,10 +771,12 @@ function visibleStats(trace, x0, x1) {
   return { min: lo, max: hi, avg: sum / n, n: n };
 }
 
-function groupScale(group) {
+function panelKey(comp, group) { return (comp ? comp.id + "|" : "") + group.key; }
+
+function groupScaleFor(group, comp) {
   const r = lane();
   const x0 = r[0], x1 = r[1];
-  const manual = state.panelZoom[group.key];
+  const manual = state.panelZoom[panelKey(comp, group)];
   if (manual) return manual;
   const values = [];
   for (const name of group.channels) {
@@ -556,82 +798,290 @@ function groupScale(group) {
   return niceBounds(values);
 }
 
-function renderMeasureLegend(node, group) {
+function groupScale(group) { return groupScaleFor(group, null); }
+
+/* ------------------------------------------------------ worksheet plumbing */
+const SHEET = new Map();          // component id -> element bundle
+
+function makeEl(tag, cls, parent) {
+  const el = document.createElement(tag);
+  if (cls) el.className = cls;
+  if (parent) parent.appendChild(el);
+  return el;
+}
+
+function sizeCanvas(canvas, w, h) {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.max(1, Math.round(w * dpr));
+  canvas.height = Math.max(1, Math.round(h * dpr));
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, w: w, h: h };
+}
+
+/** Everything that invalidates a component's cached trace layer. */
+function componentKey(comp, b, w, h) {
   const r = lane();
-  node.innerHTML = "";
-  for (const name of group.channels) {
-    const trace = traceOf(name);
-    const unit = (CHANNELS.get(name) || {}).unit || "";
-    const span = document.createElement("span");
-    let html = '<i class="swatch" style="background:' + channelColor(name)
-      + ';display:inline-block"></i><b>' + name + "</b>";
-    if (trace && state.show.measure) {
-      const st = visibleStats(trace, r[0], r[1]);
-      if (st) {
-        html += '<span class="m">min ' + fmt(st.min) + " · max " + fmt(st.max)
-          + " · avg " + fmt(st.avg) + " " + unit + "</span>";
-      }
+  return [r[0].toFixed(3), r[1].toFixed(3), state.mode, state.style, state.groupMode,
+          state.show.measure ? 1 : 0, Math.round(w), Math.round(h),
+          state.dataVersion, JSON.stringify(comp.config)].join("|");
+}
+
+function buildWorksheet() {
+  const host = $("worksheet");
+  host.innerHTML = "";
+  SHEET.clear();
+  let openRow = null;
+  for (const comp of state.components) {
+    const el = makeEl("div", "comp" + (comp.id === state.focusId ? " focus" : ""), null);
+    el.dataset.id = comp.id;
+    el.dataset.type = comp.type;
+    const bar = makeEl("div", "compbar", el);
+    makeEl("span", "ctitle", bar).textContent = componentTitle(comp);
+    const tools = makeEl("span", "ctools", bar);
+    const btn = (act, label, title) => {
+      const b = makeEl("button", "", tools);
+      b.textContent = label;
+      b.title = title;
+      b.addEventListener("click", (event) => {
+        event.stopPropagation();
+        componentAction(comp, act);
+      });
+      return b;
+    };
+    btn("up", "↑", "上移");
+    btn("down", "↓", "下移");
+    btn("close", "✕", "移除这个组件");
+    const body = makeEl("div", "compbody", el);
+    const bundle = { comp: comp, el: el, body: body, canvas: null, head: null,
+                     off: null, cacheKey: "", legendKey: "", valueNodes: [] };
+    if (comp.type === "scatter") {
+      const cfgBar = makeEl("div", "scattercfg", body);
+      makeEl("span", "", cfgBar).textContent = "X";
+      const sx = makeEl("select", "", cfgBar);
+      makeEl("span", "", cfgBar).textContent = "Y";
+      const sy = makeEl("select", "", cfgBar);
+      makeEl("span", "", cfgBar).textContent = "色";
+      const sc = makeEl("select", "", cfgBar);
+      bundle.selX = sx; bundle.selY = sy; bundle.selC = sc;
+      const on = () => {
+        comp.config.x = sx.value || null;
+        comp.config.y = sy.value ? [sy.value] : [];
+        comp.config.colour = sc.value || null;
+        state.dataVersion += 1;
+        refreshPointsFor(comp).then(renderAll);
+        renderAll();
+      };
+      [sx, sy, sc].forEach((s) => s.addEventListener("change", on));
     }
-    span.innerHTML = html;
-    node.appendChild(span);
+    bundle.canvas = makeEl("canvas", "", body);
+    if (comp.type === "scatter") {
+      bundle.canvas.addEventListener("dblclick", () => {
+        comp.config.style = comp.config.style === "points" ? "trend" : "points";
+        bundle.cacheKey = "";
+        renderAll();
+      });
+    }
+    const head = makeEl("div", "graphhead", body);
+    if (comp.type !== "graph") head.className = "graphhead caption";
+    bundle.head = head;
+    const rz = makeEl("div", "resize", el);
+    rz.title = "拖拽改高度";
+    rz.addEventListener("mousedown", (event) => beginResize(event, comp));
+    el.addEventListener("mousedown", () => {
+      state.focusId = comp.id;
+      markFocused();
+    });
+    SHEET.set(comp.id, bundle);
+
+    if (comp.span === 1 && openRow) {
+      openRow.appendChild(el);
+      openRow = null;
+    } else {
+      openRow = makeEl("div", "wrow", host);
+      openRow.appendChild(el);
+      if (comp.span === 2) openRow = null;
+    }
+  }
+  if (!state.components.length) {
+    host.innerHTML = "<p class='hint'>工作表是空的。用左上的「＋ 添加组件」放一个时间/距离图进来。</p>";
   }
 }
 
-function renderGroupPanels() {
-  const host = $("chartHost");
-  host.innerHTML = "";
-  const groups = selectedGroups();
+function componentTitle(comp) {
+  const spec = COMPONENT_TYPES[comp.type];
+  if (comp.type === "graph") {
+    const n = comp.config.channels.length;
+    return spec.label + (n ? " · " + n + " 通道" : "");
+  }
+  return spec.label;
+}
+
+function componentAction(comp, act) {
+  const idx = state.components.indexOf(comp);
+  if (act === "close") {
+    state.components.splice(idx, 1);
+    if (state.focusId === comp.id) state.focusId = null;
+  } else if (act === "up" && idx > 0) {
+    state.components.splice(idx, 1);
+    state.components.splice(idx - 1, 0, comp);
+  } else if (act === "down" && idx >= 0 && idx < state.components.length - 1) {
+    state.components.splice(idx, 1);
+    state.components.splice(idx + 1, 0, comp);
+  }
+  saveLayout();
+  buildWorksheet();
+  renderAll();
+}
+
+function markFocused() {
+  for (const bundle of SHEET.values()) {
+    bundle.el.classList.toggle("focus", bundle.comp.id === state.focusId);
+  }
+  renderChannelList();
+}
+
+function beginResize(event, comp) {
+  const startY = event.clientY;
+  const startH = comp.height;
+  const move = (moveEvent) => {
+    comp.height = Math.round(clamp(startH + (moveEvent.clientY - startY), 60, 900));
+    SHEET.get(comp.id).cacheKey = "";
+    renderAll();
+  };
+  const up = () => {
+    window.removeEventListener("mousemove", move);
+    window.removeEventListener("mouseup", up);
+    saveLayout();
+  };
+  window.addEventListener("mousemove", move);
+  window.addEventListener("mouseup", up);
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function renderComponents() {
+  for (const comp of state.components) {
+    const bundle = SHEET.get(comp.id);
+    if (!bundle || !bundle.canvas) continue;
+    if (comp.type === "graph") renderGraphComponent(comp, bundle);
+    else if (comp.type === "scatter") renderScatterComponent(comp, bundle);
+    else if (comp.type === "delta") renderDeltaComponent(comp, bundle);
+    else if (comp.type === "status") renderStatusComponent(comp, bundle);
+    else if (comp.type === "track") renderTrackComponent(comp, bundle);
+  }
+}
+
+function renderGraphComponent(comp, b) {
+  const groups = groupsFor(comp);
+  const canvas = b.canvas;
+  const width = canvas.clientWidth || $("worksheet").clientWidth || 900;
+  const panelH = Math.max(92, Math.round(comp.height / Math.max(1, groups.length)));
+  const height = groups.length ? panelH * groups.length : 92;
+  canvas.setAttribute("height", height);
   if (!groups.length) {
-    host.innerHTML = "<p class='hint'>左侧勾选通道以显示波形。</p>";
+    const c = sizeCanvas(canvas, width, height);
+    c.ctx.clearRect(0, 0, c.w, c.h);
+    c.ctx.fillStyle = "#8b94a7";
+    c.ctx.font = "12px Segoe UI";
+    c.ctx.textAlign = "left";
+    c.ctx.fillText("这个图还没有通道 —— 点一下它，然后在左侧勾选通道", 12, 24);
+    b.head.style.display = "none";
     return;
   }
-  const r = lane();
-  const x0 = r[0], x1 = r[1];
-  const ticks = (DATA.laps || []).map((l) => l.start_time);
-  const pad = axisPad();
-
-  if (state.layout === "overlapped") {
-    const wrap = document.createElement("div");
-    wrap.className = "chart focus";
-    wrap.dataset.group = "*";
-    wrap.innerHTML = '<div class="legend"></div><canvas height="'
-      + Math.max(220, groups.length * 52) + '"></canvas>';
-    host.appendChild(wrap);
-    renderMeasureLegend(wrap.querySelector(".legend"),
-      { key: "*", channels: groups.reduce((a, g) => a.concat(g.channels), []) });
-    const canvas = wrap.querySelector("canvas");
-    const c = setupCanvas(canvas);
-    c.ctx.clearRect(0, 0, c.w, c.h);
-    const plotW = c.w - pad.l - pad.r, plotH = c.h - pad.t - pad.b;
-    drawGrid(c.ctx, pad, plotW, plotH, 0, 1, x0, x1, axisUnit(), ticks);
-    for (const group of groups) {
-      const s = groupScale(group);
-      drawTraces(c.ctx, pad, plotW, plotH, x0, x1, s[0], s[1], group.channels.map((name) => ({
-        x: traceX(traceOf(name)), values: (traceOf(name) || {}).value, color: channelColor(name),
+  b.head.style.display = "";
+  const c = sizeCanvas(canvas, width, height);
+  const ctx = c.ctx;
+  // In Tiled mode every unit group gets its own panel; in Overlapped mode they
+  // share one panel and each keeps its own y-scale (i2 Pro's "Overlapped groups").
+  const overlapped = state.groupMode === "overlapped" && groups.length > 1;
+  const panels = groups.map((group, gi) => overlapped
+    ? { group: group, top: 0, panelH: height }
+    : { group: group, top: gi * panelH, panelH: panelH });
+  const key = componentKey(comp, b, c.w, height);
+  if (b.cacheKey !== key) {
+    if (!b.off) b.off = document.createElement("canvas");
+    const off = sizeCanvas(b.off, c.w, height);
+    const octx = off.ctx;
+    octx.clearRect(0, 0, off.w, off.h);
+    const r = lane();
+    const ticks = (DATA.laps || []).map((l) => l.start_time);
+    const padBase = axisPad();
+    panels.forEach((panel, gi) => {
+      const group = panel.group;
+      const pad = { l: padBase.l, r: padBase.r, t: panel.top + padBase.t, b: padBase.b };
+      const plotH = panel.panelH - padBase.t - padBase.b;
+      const plotW = off.w - pad.l - pad.r;
+      const scale = groupScaleFor(group, comp);
+      drawGrid(octx, pad, plotW, plotH,
+               scale[0], scale[1], r[0], r[1], gi === groups.length - 1 ? axisUnit() : "", ticks);
+      drawTraces(octx, pad, plotW, plotH,
+                 r[0], r[1], scale[0], scale[1], group.channels.map((name) => ({
+        x: traceX(traceOf(name)), values: (traceOf(name) || {}).value,
+        color: channelColor(name, comp),
       })));
-    }
-    drawCursorLines(c.ctx, pad, plotW, plotH, x0, x1);
-    return;
+    });
+    b.cacheKey = key;
   }
-
-  groups.forEach((group, gi) => {
-    const wrap = document.createElement("div");
-    wrap.className = "chart" + (gi === state.focus ? " focus" : "");
-    wrap.dataset.group = group.key;
-    wrap.innerHTML = '<div class="legend"></div><canvas height="128"></canvas>';
-    host.appendChild(wrap);
-    renderMeasureLegend(wrap.querySelector(".legend"), group);
-    const canvas = wrap.querySelector("canvas");
-    const c = setupCanvas(canvas);
-    c.ctx.clearRect(0, 0, c.w, c.h);
-    const plotW = c.w - pad.l - pad.r, plotH = c.h - pad.t - pad.b;
-    const s = groupScale(group);
-    drawGrid(c.ctx, pad, plotW, plotH, s[0], s[1], x0, x1, axisUnit(), ticks);
-    drawTraces(c.ctx, pad, plotW, plotH, x0, x1, s[0], s[1], group.channels.map((name) => ({
-      x: traceX(traceOf(name)), values: (traceOf(name) || {}).value, color: channelColor(name),
-    })));
-    drawCursorLines(c.ctx, pad, plotW, plotH, x0, x1);
+  ctx.clearRect(0, 0, c.w, height);
+  ctx.drawImage(b.off, 0, 0, c.w, height);
+  const r = lane();
+  const padBase = axisPad();
+  panels.forEach((panel) => {
+    drawCursorLines(ctx, { l: padBase.l, r: padBase.r, t: panel.top + padBase.t, b: padBase.b },
+                    c.w - padBase.l - padBase.r, panel.panelH - padBase.t - padBase.b, r[0], r[1]);
   });
+  renderGraphHead(comp, b, groups, panels, overlapped);
+}
+
+/**
+ * The i2 Pro graph header: one row per channel showing the value at the cursor
+ * alongside the min / max / average of the visible range.
+ */
+function renderGraphHead(comp, b, groups, panels, overlapped) {
+  const r = lane();
+  const signature = groups.map((g) => g.key + ":" + g.channels.join(",")).join(";")
+    + "|" + (state.show.measure ? 1 : 0) + "|" + (state.show.legend ? 1 : 0)
+    + "|" + state.groupMode;
+  b.head.style.display = state.show.legend ? "" : "none";
+  if (b.legendKey !== signature) {
+    b.head.innerHTML = "";
+    b.valueNodes = [];
+    b.head.style.paddingLeft = "70px";
+    let stacked = 0;
+    groups.forEach((group, gi) => {
+      const block = makeEl("div", "glegend", b.head);
+      block.style.top = (overlapped ? stacked + 4 : panels[gi].top + 4) + "px";
+      for (const name of group.channels) {
+        const row = makeEl("div", "lrow", block);
+        const sw = makeEl("i", "swatch", row);
+        sw.style.background = channelColor(name, comp);
+        makeEl("span", "lname", row).textContent = name;
+        const cur = makeEl("span", "lcur", row);
+        const mn = makeEl("span", "lmm", row);
+        const mx = makeEl("span", "lmm", row);
+        const av = makeEl("span", "lmm", row);
+        makeEl("span", "lunit", row).textContent = (CHANNELS.get(name) || {}).unit || "";
+        b.valueNodes.push({ name: name, cur: cur, min: mn, max: mx, avg: av });
+      }
+      stacked += group.channels.length * 15 + 6;
+    });
+    b.legendKey = signature;
+  }
+  for (const node of b.valueNodes) {
+    const trace = traceOf(node.name);
+    const at = state.cursor === null ? null : valueAt(trace, state.cursor);
+    node.cur.textContent = fmt(at, 3);
+    if (state.show.measure && trace) {
+      const st = visibleStats(trace, r[0], r[1]);
+      node.min.textContent = st ? fmt(st.min) : "--";
+      node.max.textContent = st ? fmt(st.max) : "--";
+      node.avg.textContent = st ? fmt(st.avg) : "--";
+      node.min.style.display = node.max.style.display = node.avg.style.display = "";
+    } else {
+      node.min.style.display = node.max.style.display = node.avg.style.display = "none";
+    }
+  }
 }
 
 function renderOverview() {
@@ -789,27 +1239,15 @@ function renderScrollbar() {
   ctx.strokeStyle = "#4cc2ff";
   ctx.strokeRect(x0 + .5, 2.5, Math.max(4, x1 - x0) - 1, c.h - 5);
 }
-function renderScatter() {
-  const wrap = $("scatterWrap");
-  const cfg = state.scatter;
-  const canvas = $("scatter");
-  const c = setupCanvas(canvas, 256);
-  const ctx = c.ctx;
-  ctx.clearRect(0, 0, c.w, c.h);
-  if (!cfg.x || !cfg.y.length) { wrap.style.display = "none"; return; }
-  wrap.style.display = "";
+/** Static layer of a scatter component; returns the mapping for the cursor. */
+function paintScatter(cfg, ctx, cw, ch) {
+  const c = { ctx: ctx, w: cw, h: ch };
+  if (!cfg.x || !cfg.y.length) return null;
   const pad = { l: 58, r: 16, t: 8, b: 20 };
   const plotW = c.w - pad.l - pad.r, plotH = c.h - pad.t - pad.b;
   const src = state.points && state.points.values ? state.points.values : null;
   const xSeries = src ? src[cfg.x] : null;
-  if (!xSeries || !xSeries.length) {
-    ctx.fillStyle = "#8b94a7";
-    ctx.font = "12px Segoe UI";
-    ctx.textAlign = "center";
-    ctx.fillText(DATA.api ? "载入散点…" : "散点需要 serve 模式（快照只内嵌折线）", c.w / 2, c.h / 2);
-    $("scatterLegend").textContent = "";
-    return;
-  }
+  if (!xSeries || !xSeries.length) return null;
   const ys = cfg.y.filter((n) => src[n]);
   let xlo = Infinity, xhi = -Infinity, ylo = Infinity, yhi = -Infinity;
   for (const v of xSeries) if (Number.isFinite(v)) { if (v < xlo) xlo = v; if (v > xhi) xhi = v; }
@@ -875,6 +1313,45 @@ function renderScatter() {
       }
     }
   }
+  const xUnit = (CHANNELS.get(cfg.x) || {}).unit || "";
+  ctx.fillStyle = "#8b94a7";
+  ctx.textAlign = "left";
+  ctx.font = "10px Segoe UI";
+  ctx.fillText(cfg.x + " [" + xUnit + "]", pad.l, 9);
+  return { px: px, py: py, xSeries: xSeries, ys: ys, src: src };
+}
+
+function renderScatterComponent(comp, b) {
+  const cfg = comp.config;
+  const c = sizeCanvas(b.canvas, b.canvas.clientWidth || 420, Math.max(150, comp.height - 26));
+  const ctx = c.ctx;
+  ctx.clearRect(0, 0, c.w, c.h);
+  if (!cfg.x || !cfg.y.length) {
+    ctx.fillStyle = "#8b94a7";
+    ctx.font = "12px Segoe UI";
+    ctx.textAlign = "left";
+    ctx.fillText("选 X / Y 通道", 12, 24);
+    b.head.textContent = "";
+    return;
+  }
+  const key = componentKey(comp, b, c.w, c.h);
+  if (b.cacheKey !== key) {
+    if (!b.off) b.off = document.createElement("canvas");
+    const off = sizeCanvas(b.off, c.w, c.h);
+    off.ctx.clearRect(0, 0, off.w, off.h);
+    b.mapping = paintScatter(cfg, off.ctx, c.w, c.h);
+    b.cacheKey = b.mapping ? key : "";
+  }
+  if (!b.mapping) {
+    ctx.fillStyle = "#8b94a7";
+    ctx.font = "12px Segoe UI";
+    ctx.textAlign = "left";
+    ctx.fillText(DATA.api ? "载入散点…" : "散点需要 serve 模式（快照只内嵌折线）", 12, 24);
+    b.head.textContent = "";
+    return;
+  }
+  ctx.drawImage(b.off, 0, 0, c.w, c.h);
+  const m = b.mapping;
   if (state.cursor !== null && state.points && state.points.time) {
     let best = -1, bestD = Infinity;
     for (let i = 0; i < state.points.time.length; i++) {
@@ -883,33 +1360,32 @@ function renderScatter() {
     }
     if (best >= 0) {
       ctx.fillStyle = "#fff";
-      for (const name of ys) {
-        const v = src[name][best];
+      for (const name of m.ys) {
+        const v = m.src[name][best];
         if (!Number.isFinite(v)) continue;
         ctx.beginPath();
-        ctx.arc(px(xSeries[best]), py(v), 3.4, 0, Math.PI * 2);
+        ctx.arc(m.px(m.xSeries[best]), m.py(v), 3.4, 0, Math.PI * 2);
         ctx.fill();
       }
     }
   }
-  const xUnit = (CHANNELS.get(cfg.x) || {}).unit || "";
-  ctx.fillStyle = "#8b94a7";
-  ctx.textAlign = "left";
-  ctx.font = "10px Segoe UI";
-  ctx.fillText(cfg.x + " [" + xUnit + "]", pad.l, 9);
-  $("scatterLegend").textContent = state.points.time.length + " 点 · "
+  b.head.textContent = (state.points.time.length || 0) + " 点 · "
     + (cfg.style === "points" ? "散点" : "散点+趋势线") + " · 只显示当前缩放区间";
 }
 
-function renderDelta() {
-  const wrap = $("deltaWrap");
+function renderDeltaComponent(comp, b) {
   const overlay = state.overlay;
-  if (!overlay || state.mode !== "overlay") { wrap.style.display = "none"; return; }
-  wrap.style.display = "";
-  const canvas = $("delta");
-  const c = setupCanvas(canvas, 288);
+  const c = sizeCanvas(b.canvas, b.canvas.clientWidth || 600, Math.max(110, comp.height - 24));
   const ctx = c.ctx;
   ctx.clearRect(0, 0, c.w, c.h);
+  if (!overlay || state.mode !== "overlay") {
+    ctx.fillStyle = "#8b94a7";
+    ctx.font = "12px Segoe UI";
+    ctx.textAlign = "left";
+    ctx.fillText("在左侧圈速表里点两行（基准圈 + 对比圈），再切到「双圈对比」", 12, 26);
+    b.head.textContent = "";
+    return;
+  }
   const pad = axisPad();
   const plotW = c.w - pad.l - pad.r, plotH = c.h - pad.t - pad.b;
   const dist = overlay.distance, delta = overlay.delta;
@@ -940,29 +1416,38 @@ function renderDelta() {
   for (let i = 0; i < delta.length; i++) {
     if (Number.isFinite(delta[i]) && Math.abs(delta[i]) > Math.abs(worst)) { worst = delta[i]; at = dist[i]; }
   }
-  $("deltaLegend").textContent = "圈 " + overlay.laps[0].lap + " (" + fmt(overlay.laps[0].lap_time, 3)
+  b.head.textContent = "圈 " + overlay.laps[0].lap + " (" + fmt(overlay.laps[0].lap_time, 3)
     + "s) vs 圈 " + overlay.laps[1].lap + " (" + fmt(overlay.laps[1].lap_time, 3)
     + "s) · 最大差 " + (worst >= 0 ? "+" : "") + fmt(worst, 3) + "s @ " + fmt(at, 0) + "m";
 }
 
-function renderStatusBand() {
-  const wrap = $("statusWrap");
-  const names = (DATA.status || []).filter((n) => state.selected.includes(n));
-  if (!state.show.status || !names.length) { wrap.style.display = "none"; return; }
-  wrap.style.display = "";
-  const canvas = $("statusBand");
+function renderStatusComponent(comp, b) {
+  const all = DATA.status || [];
+  const names = (comp.config.channels && comp.config.channels.length)
+    ? comp.config.channels.filter((n) => all.indexOf(n) >= 0)
+    : all;
   const rowH = 13;
-  const height = Math.max(40, names.length * rowH + 20);
-  canvas.setAttribute("height", height);
-  const c = setupCanvas(canvas, height);
+  const rows = Math.max(1, Math.floor((comp.height - 22) / rowH));
+  const shown = names.slice(0, rows);
+  const height = Math.max(44, shown.length * rowH + 20);
+  b.canvas.setAttribute("height", height);
+  const c = sizeCanvas(b.canvas, b.canvas.clientWidth || 600, height);
   const ctx = c.ctx;
   ctx.clearRect(0, 0, c.w, c.h);
+  if (!shown.length) {
+    ctx.fillStyle = "#8b94a7";
+    ctx.font = "12px Segoe UI";
+    ctx.textAlign = "left";
+    ctx.fillText("这场记录里没有状态通道", 12, 26);
+    b.head.textContent = "";
+    return;
+  }
   const pad = axisPad();
   const plotW = c.w - pad.l - pad.r;
   const r = lane();
   const x0 = r[0], x1 = r[1];
   ctx.font = "10px Segoe UI";
-  names.forEach((name, row) => {
+  shown.forEach((name, row) => {
     const trace = traceOf(name);
     const y = pad.t + row * rowH;
     ctx.fillStyle = "#8b94a7";
@@ -977,19 +1462,24 @@ function renderStatusBand() {
       ctx.fillRect(pad.l + ((xs[i] - x0) / (x1 - x0 || 1)) * plotW, y + 1, 2, rowH - 3);
     }
   });
-  $("statusLegend").textContent = names.length + " 个状态通道 · 有颜色=激活";
+  b.head.textContent = shown.length + (names.length > shown.length ? "/" + names.length : "")
+    + " 个状态通道 · 有颜色=激活（拖高这个组件能多显示几行）";
   drawCursorLines(ctx, pad, plotW, c.h - pad.t - pad.b, x0, x1);
 }
 
-function renderTrack() {
-  const wrap = $("trackWrap");
+function renderTrackComponent(comp, b) {
   const track = state.track;
-  if (!track) { wrap.style.display = "none"; return; }
-  wrap.style.display = "";
-  const canvas = $("track");
-  const c = setupCanvas(canvas, 288);
+  const c = sizeCanvas(b.canvas, b.canvas.clientWidth || 320, Math.max(150, comp.height - 24));
   const ctx = c.ctx;
   ctx.clearRect(0, 0, c.w, c.h);
+  if (!track) {
+    ctx.fillStyle = "#8b94a7";
+    ctx.font = "12px Segoe UI";
+    ctx.textAlign = "left";
+    ctx.fillText("这场记录没有可用的 GPS 轨迹", 12, 26);
+    b.head.textContent = "";
+    return;
+  }
   const xs = track.x, ys = track.y;
   if (!xs.length) return;
   const x0 = Math.min.apply(null, xs), x1 = Math.max.apply(null, xs);
@@ -1025,7 +1515,7 @@ function renderTrack() {
   };
   if (state.datumOn && state.datum !== null) mark(state.datum, "#ffb454", 3.6);
   if (state.cursor !== null) mark(state.cursor, "#fff", 4.2);
-  $("trackLegend").textContent = vmin.toFixed(0) + "–" + vmax.toFixed(0) + " km/h ("
+  b.head.textContent = vmin.toFixed(0) + "–" + vmax.toFixed(0) + " km/h ("
     + (track.speed_channel || "-") + ") · " + (x1 - x0).toFixed(0) + "×" + (y1 - y0).toFixed(0) + " m";
 }
 
@@ -1037,7 +1527,7 @@ function renderValues() {
   $("cursorInfo").textContent = state.cursor === null ? "移动鼠标" : fmt(state.cursor, 2) + " " + axisUnit();
   if (state.cursor === null) { panel.innerHTML = "<div class='hint'>把鼠标移到图上</div>"; return; }
   const rows = [];
-  for (const name of state.selected) {
+  for (const name of allGraphChannels()) {
     const trace = traceOf(name);
     if (!trace) continue;
     const v = valueAt(trace, state.cursor);
@@ -1140,6 +1630,8 @@ function renderChannelList() {
   const list = $("channelList");
   list.innerHTML = "";
   const frag = document.createDocumentFragment();
+  const chosen = selectedChannels();
+  const comp = focusedComponent();
   let shown = 0;
   const match = (name) => {
     if (!term) return true;
@@ -1155,8 +1647,8 @@ function renderChannelList() {
     head.innerHTML = "<span>" + group.label + '</span><span class="addall">全选</span>';
     head.querySelector(".addall").addEventListener("click", () => {
       const merged = {};
-      state.selected.concat(names).forEach((n) => { merged[n] = 1; });
-      state.selected = Object.keys(merged);
+      chosen.concat(names).forEach((n) => { merged[n] = 1; });
+      setSelectedChannels(Object.keys(merged));
       renderChannelList();
       refreshWindowTraces(true).then(renderAll);
       renderAll();
@@ -1164,12 +1656,12 @@ function renderChannelList() {
     frag.appendChild(head);
     for (const name of names) {
       const ch = CHANNELS.get(name) || {};
-      const on = state.selected.indexOf(name) >= 0;
+      const on = chosen.indexOf(name) >= 0;
       const row = document.createElement("label");
       row.className = "ch";
       row.title = name + " · " + (ch.unit || "无单位") + " · " + ch.rate + " Hz · " + ch.samples + " 点";
       row.innerHTML = '<input type="checkbox" ' + (on ? "checked" : "") + ">"
-        + '<span class="swatch" style="background:' + (on ? channelColor(name) : "#3a4150") + '"></span>'
+        + '<span class="swatch" style="background:' + (on ? channelColor(name, comp) : "#3a4150") + '"></span>'
         + '<span class="nm">' + name + '</span><span class="unit">' + (ch.unit || "") + "</span>";
       row.querySelector("input").addEventListener("change", (event) => {
         toggleChannel(name, event.target.checked);
@@ -1180,40 +1672,53 @@ function renderChannelList() {
   }
   if (!shown) list.innerHTML = "<p class='hint'>没有匹配的通道</p>";
   else list.appendChild(frag);
-  $("chCount").textContent = state.selected.length + " / " + DATA.channels.length;
+  $("chCount").textContent = chosen.length + " / " + DATA.channels.length
+    + (comp && comp.type === "graph" ? "" : "（未选中图）");
 }
 
 function toggleChannel(name, on) {
-  const set = new Set(state.selected);
+  const set = new Set(selectedChannels());
   if (on) set.add(name); else set.delete(name);
-  state.selected = Array.from(set);
+  setSelectedChannels(Array.from(set));
   state.windowKey = "";
+  buildWorksheet();
   renderChannelList();
-  refreshWindowTraces(true).then(() => { renderScatterOptions(); renderAll(); });
+  refreshWindowTraces(true).then(() => { syncScatterSelectors(); renderAll(); });
   renderAll();
 }
 
-function renderScatterOptions() {
-  const names = state.selected.length ? state.selected : Object.keys(state.traces);
-  if (!names.length) return;
-  const fill = (select, value, allowNone) => {
-    select.innerHTML = (allowNone ? '<option value="">无</option>' : "")
-      + names.map((n) => '<option value="' + n + '">' + n + "</option>").join("");
-    select.value = names.indexOf(value) >= 0 ? value : names[0];
-  };
-  if (!state.scatter.x || names.indexOf(state.scatter.x) < 0) {
-    state.scatter.x = names.find((n) => /G Force Lat/i.test(n))
-      || names.find((n) => /km\/h/.test((CHANNELS.get(n) || {}).unit || ""))
-      || names[0];
+/** Fill each scatter component's X / Y / colour pickers from the sheet's channels. */
+function syncScatterSelectors() {
+  const names = allGraphChannels();
+  for (const comp of state.components) {
+    if (comp.type !== "scatter") continue;
+    const b = SHEET.get(comp.id);
+    if (!b || !b.selX) continue;
+    if (!names.length) continue;
+    fillSelect(b.selX, names, comp.config.x, false);
+    fillSelect(b.selY, names, (comp.config.y || [])[0], false);
+    fillSelect(b.selC, names, comp.config.colour, true);
+    if (!comp.config.x || names.indexOf(comp.config.x) < 0) {
+      comp.config.x = names.find((n) => /G Force Lat/i.test(n))
+        || names.find((n) => /km\/h/.test((CHANNELS.get(n) || {}).unit || ""))
+        || names[0];
+    }
+    if (!comp.config.y.length || names.indexOf(comp.config.y[0]) < 0) {
+      comp.config.y = [names.find((n) => /G Force Long/i.test(n)) || names[1] || names[0]];
+    }
+    if (comp.config.colour && names.indexOf(comp.config.colour) < 0) comp.config.colour = null;
+    b.selX.value = comp.config.x;
+    b.selY.value = comp.config.y[0] || "";
+    b.selC.value = comp.config.colour || "";
   }
-  if (!state.scatter.y.length || names.indexOf(state.scatter.y[0]) < 0) {
-    state.scatter.y = [names.find((n) => /G Force Long/i.test(n)) || names[1] || names[0]];
-  }
-  if (state.scatter.colour && names.indexOf(state.scatter.colour) < 0) state.scatter.colour = null;
-  fill($("scatterX"), state.scatter.x, false);
-  fill($("scatterY"), state.scatter.y[0], false);
-  fill($("scatterC"), state.scatter.colour, true);
 }
+
+function fillSelect(select, names, value, allowNone) {
+  select.innerHTML = (allowNone ? '<option value="">无</option>' : "")
+    + names.map((n) => '<option value="' + n + '">' + n + "</option>").join("");
+  select.value = names.indexOf(value) >= 0 ? value : (names[0] || "");
+}
+
 /* ----------------------------------------------------------- interactions */
 function xAt(event, canvas) {
   const rect = canvas.getBoundingClientRect();
@@ -1233,9 +1738,23 @@ function yAt(event, canvas, y0, y1) {
 }
 
 function groupOfCanvas(canvas) {
-  const wrap = canvas.closest ? canvas.closest(".chart") : null;
-  if (!wrap || !wrap.dataset || !wrap.dataset.group) return null;
-  return GROUPS.find((g) => g.key === wrap.dataset.group) || null;
+  const wrap = canvas.closest ? canvas.closest(".comp") : null;
+  if (!wrap || !wrap.dataset) return null;
+  const comp = componentById(wrap.dataset.id);
+  if (!comp || comp.type !== "graph") return null;
+  const groups = groupsFor(comp);
+  if (!groups.length) return null;
+  return { comp: comp, groups: groups };
+}
+
+/** Which panel of a graph component the pointer is over. */
+function panelAt(comp, canvas, clientY) {
+  const groups = groupsFor(comp);
+  if (!groups.length) return null;
+  const rect = canvas.getBoundingClientRect();
+  const panelH = Math.max(92, comp.height / groups.length);
+  const idx = clamp(Math.floor((clientY - rect.top) / panelH), 0, groups.length - 1);
+  return groups[idx];
 }
 
 function bandOverlay() {
@@ -1272,7 +1791,7 @@ function beginBand(event, canvas) {
     rect: canvas.getBoundingClientRect(),
     x0: event.clientX, y0: event.clientY,
     x1: event.clientX, y1: event.clientY,
-    group: groupOfCanvas(canvas),
+    target: groupOfCanvas(canvas),
   };
   drawBand();
 }
@@ -1291,12 +1810,13 @@ function finishBand(event) {
   const a = xAt({ clientX: info.x0, clientY: info.y0 }, info.canvas);
   const b = xAt({ clientX: info.x1, clientY: info.y0 }, info.canvas);
   if (info.kind === "y" || info.kind === "xy") {
-    const group = info.group;
-    if (group) {
-      const s = groupScale(group);
+    const target = info.target;
+    if (target) {
+      const group = panelAt(target.comp, info.canvas, info.y0) || target.groups[0];
+      const s = groupScaleFor(group, target.comp);
       const c = yAt({ clientY: info.y0, clientX: info.x0 }, info.canvas, s[0], s[1]);
       const d = yAt({ clientY: info.y1, clientX: info.x0 }, info.canvas, s[0], s[1]);
-      state.panelZoom[group.key] = [Math.min(c, d), Math.max(c, d)];
+      state.panelZoom[panelKey(target.comp, group)] = [Math.min(c, d), Math.max(c, d)];
     }
   }
   if (info.kind === "x" || info.kind === "xy") zoomTo(a, b);
@@ -1356,12 +1876,13 @@ function attachInteractions() {
     if (canvas.id === "track" || canvas.id === "overview" || canvas.id === "scrollCanvas") return;
     event.preventDefault();
     if (event.altKey) {
-      const group = groupOfCanvas(canvas);
-      if (group) {
-        const s = groupScale(group);
+      const target = groupOfCanvas(canvas);
+      if (target) {
+        const group = panelAt(target.comp, canvas, event.clientY) || target.groups[0];
+        const s = groupScaleFor(group, target.comp);
         const mid = (s[0] + s[1]) / 2;
         const half = ((s[1] - s[0]) / 2) * (event.deltaY > 0 ? 1.2 : 1 / 1.2);
-        state.panelZoom[group.key] = [mid - half, mid + half];
+        state.panelZoom[panelKey(target.comp, group)] = [mid - half, mid + half];
         renderAll();
       }
       return;
@@ -1382,13 +1903,15 @@ function moveCursor(delta, fast) {
 }
 
 function zoomVertical(factor) {
-  const groups = selectedGroups();
+  const comp = focusedComponent();
+  if (!comp || comp.type !== "graph") return;
+  const groups = groupsFor(comp);
   if (!groups.length) return;
-  const group = groups[clamp(state.focus, 0, groups.length - 1)];
-  const s = groupScale(group);
+  const group = groups[0];
+  const s = groupScaleFor(group, comp);
   const mid = (s[0] + s[1]) / 2;
   const half = ((s[1] - s[0]) / 2) * factor;
-  state.panelZoom[group.key] = [mid - half, mid + half];
+  state.panelZoom[panelKey(comp, group)] = [mid - half, mid + half];
   renderAll();
 }
 
@@ -1458,14 +1981,23 @@ function onKeyDown(event) {
     case "f": case "F": panBy(0.5); stop(); return;
     case "b": case "B": panBy(-0.5); stop(); return;
     case "s": case "S": state.style = state.style === "line" ? "points" : "line"; renderAll(); stop(); return;
-    case "g": case "G": state.layout = state.layout === "tiled" ? "overlapped" : "tiled"; renderAll(); stop(); return;
-    case "m": case "M": state.show.measure = !state.show.measure; renderAll(); stop(); return;
-    case "e": case "E":
-      state.show.status = !state.show.status;
-      if (state.show.status && !state.selected.some((n) => STATUS.has(n))) {
-        toast("在左下角「状态与故障」分组里勾选要看的状态通道");
-      }
+    case "g": case "G":
+      state.groupMode = state.groupMode === "tiled" ? "overlapped" : "tiled";
       renderAll(); stop(); return;
+    case "m": case "M": state.show.measure = !state.show.measure; renderAll(); stop(); return;
+    case "l": case "L": state.show.legend = !state.show.legend; renderAll(); stop(); return;
+    case "e": case "E": {
+      const existing = state.components.find((c) => c.type === "status");
+      if (existing) componentAction(existing, "close");
+      else {
+        state.components.push(makeComponent("status"));
+        saveLayout();
+        buildWorksheet();
+        syncScatterSelectors();
+        renderAll();
+      }
+      stop(); return;
+    }
     case "d": case "D":
       state.datumOn = !state.datumOn;
       if (state.datumOn && state.datum === null) state.datum = state.cursor === null ? lane()[0] : state.cursor;
@@ -1498,21 +2030,29 @@ function onKeyDown(event) {
 }
 
 /* ----------------------------------------------------------------- export */
+function canvasCssSize(canvas) {
+  const dpr = window.devicePixelRatio || 1;
+  return {
+    w: canvas.clientWidth || Math.round((canvas.width || 900) / dpr),
+    h: Number(canvas.getAttribute("height")) || Math.round((canvas.height || 150) / dpr),
+  };
+}
+
 function exportPNG() {
-  const nodes = document.querySelectorAll("#chartHost .chart, #trackWrap, #scatterWrap, #deltaWrap, #overviewChart");
   const panels = [];
-  for (const el of nodes) {
-    if (el.style.display === "none") continue;
-    const cv = el.querySelector("canvas");
-    if (cv) panels.push(el);
+  for (const comp of state.components) {
+    const b = SHEET.get(comp.id);
+    if (b && b.canvas) panels.push(b.canvas);
   }
+  const overviewCanvas = $("overview");
+  if (overviewCanvas) panels.push(overviewCanvas);
   if (!panels.length) { toast("没有可导出的图表"); return; }
   const dpr = 2;
   let width = 0;
-  panels.forEach((p) => { width = Math.max(width, p.querySelector("canvas").clientWidth); });
+  panels.forEach((p) => { width = Math.max(width, canvasCssSize(p).w); });
   const gap = 6;
   let total = 62;
-  panels.forEach((p) => { total += (p.querySelector("canvas").getAttribute("height") | 0) + gap; });
+  panels.forEach((p) => { total += canvasCssSize(p).h + gap; });
   const out = document.createElement("canvas");
   out.width = Math.max(1, width * dpr);
   out.height = Math.max(1, total * dpr);
@@ -1530,11 +2070,12 @@ function exportPNG() {
   const r = lane();
   ctx.fillText((state.mode === "time" ? "时间轴" : "距离轴") + " " + r[0].toFixed(2) + "–"
     + r[1].toFixed(2) + " " + axisUnit() + " · " + DATA.meta.duration.toFixed(1) + " s @ "
-    + DATA.meta.sample_rate + " Hz · " + DATA.meta.channels + " 通道", 12, 42);
+    + DATA.meta.sample_rate + " Hz · " + DATA.meta.channels + " 通道 · 工作表 " + state.preset,
+    12, 42);
   let y = 58;
-  panels.forEach((panel) => {
-    const src = panel.querySelector("canvas");
-    const h = src.getAttribute("height") | 0;
+  panels.forEach((src) => {
+    const size = canvasCssSize(src);
+    const h = size.h;
     ctx.fillStyle = "#171a21";
     ctx.fillRect(0, y, width, h);
     ctx.drawImage(src, 0, y, width, h);
@@ -1550,10 +2091,12 @@ function exportPNG() {
 
 function shareURL() {
   const params = new URLSearchParams();
-  params.set("channels", state.selected.join(","));
+  params.set("channels", selectedChannels().join(","));
   if (state.ref !== null) params.set("ref", state.ref);
   if (state.cmp !== null) params.set("cmp", state.cmp);
   if (state.mode === "overlay") params.set("mode", "overlay");
+  const layout = encodeLayout(state.components);
+  if (layout) params.set("layout", layout);
   const url = DATA.api
     ? location.origin + location.pathname + "?" + params.toString()
     : location.origin + location.pathname + "#" + params.toString();
@@ -1566,15 +2109,98 @@ function shareURL() {
   if (!DATA.api) location.hash = params.toString();
 }
 
+function urlParams() {
+  if (DATA.api) return new URLSearchParams(location.search || "");
+  const hash = (location.hash || "").replace(/^#/, "");
+  return new URLSearchParams(hash);
+}
+
+/** URL layout > saved layout > built-in preset. */
+function restoreWorksheet() {
+  const fromURL = urlParams().get("layout");
+  if (fromURL) {
+    const decoded = decodeLayout(fromURL);
+    if (decoded && decoded.length) {
+      state.components = decoded;
+      state.preset = "自定义";
+      return;
+    }
+  }
+  const saved = loadSavedLayout();
+  if (saved) {
+    state.components = saved.components;
+    state.preset = saved.preset || "分析";
+    return;
+  }
+  state.components = defaultComponents();
+  state.preset = "分析";
+}
+
 function readHashState() {
-  if (DATA.api || !location.hash) return;
-  const params = new URLSearchParams(location.hash.slice(1));
+  const params = urlParams();
   const channels = params.get("channels");
   if (channels) {
     const wanted = channels.split(",").filter((c) => CHANNELS.has(c));
-    if (wanted.length) state.selected = wanted;
+    const comp = graphComponents()[0];
+    if (wanted.length && comp) comp.config.channels = wanted;
   }
   if (params.get("mode") === "overlay" && state.overlay) state.mode = "overlay";
+}
+
+function renderPresetButtons() {
+  const row = $("presetRow");
+  if (!row) return;
+  row.innerHTML = "";
+  const presets = presetDefinitions();
+  for (const name of Object.keys(presets)) {
+    const btn = document.createElement("button");
+    btn.textContent = name;
+    if (state.preset === name) btn.className = "on";
+    btn.addEventListener("click", () => applyPreset(name));
+    row.appendChild(btn);
+  }
+  $("sheetName").textContent = state.preset;
+}
+
+function applyPreset(name) {
+  const presets = presetDefinitions();
+  if (!presets[name]) return;
+  state.components = copyComponents(presets[name]);
+  state.preset = name;
+  state.focusId = null;
+  state.view = null;
+  state.panelZoom = {};
+  state.windowKey = "";
+  saveLayout();
+  buildWorksheet();
+  renderPresetButtons();
+  renderChannelList();
+  syncScatterSelectors();
+  refreshWindowTraces(true).then(() => { refreshPoints().then(renderAll); });
+  renderAll();
+}
+
+function renderAddTypeOptions() {
+  const sel = $("addType");
+  if (!sel) return;
+  sel.innerHTML = Object.keys(COMPONENT_TYPES)
+    .map((t) => '<option value="' + t + '">' + COMPONENT_TYPES[t].label + "</option>").join("");
+}
+
+function addComponentOfType(type) {
+  const comp = makeComponent(type);
+  if (type === "graph") comp.config.channels = (DATA.selected || []).slice();
+  state.components.push(comp);
+  state.focusId = comp.id;
+  state.preset = "自定义";
+  state.windowKey = "";
+  saveLayout();
+  buildWorksheet();
+  renderPresetButtons();
+  renderChannelList();
+  syncScatterSelectors();
+  refreshWindowTraces(true).then(() => { refreshPoints().then(renderAll); });
+  renderAll();
 }
 
 function setStatus() {
@@ -1582,8 +2208,9 @@ function setStatus() {
   bits.push(state.mode === "time" ? "横轴 时间[s]" : "横轴 距离[m]");
   const r = lane();
   bits.push("窗口 " + fmt(r[0], 2) + "–" + fmt(r[1], 2) + " " + axisUnit());
-  bits.push("通道 " + state.selected.length);
-  bits.push(state.layout === "tiled" ? "分栏" : "重叠");
+  bits.push("组件 " + state.components.length);
+  bits.push("通道 " + allGraphChannels().length);
+  bits.push(state.groupMode === "tiled" ? "分栏" : "重叠");
   bits.push(state.style === "line" ? "线" : "点");
   if (state.datumOn && state.datum !== null) bits.push("基准光标 " + fmt(state.datum, 2));
   if (state.pending) bits.push('<span class="warn">加载中…</span>');
@@ -1598,11 +2225,7 @@ function renderAll() {
   $("modeOverlay").classList.toggle("on", state.mode === "overlay");
   $("modeOverlay").disabled = !state.overlay;
   $("modeDistance").disabled = !DATA.meta.has_distance;
-  renderGroupPanels();
-  renderStatusBand();
-  renderScatter();
-  renderDelta();
-  renderTrack();
+  renderComponents();
   renderValues();
   renderScrollbar();
   renderOverview();
@@ -1657,38 +2280,47 @@ function init() {
     showTemplateNotice();
     return;
   }
-  if (!DATA || !DATA.meta) {
-    showTemplateNotice();
-    return;
-  }
-  state.selected = (DATA.selected || []).slice();
-  readHashState();
   initHeader();
+  restoreWorksheet();
+  readHashState();
+  buildWorksheet();
   renderLapTable();
   renderChannelList();
-  renderScatterOptions();
+  syncScatterSelectors();
+  renderPresetButtons();
+  renderAddTypeOptions();
   attachInteractions();
 
   $("chSearch").addEventListener("input", renderChannelList);
-  $("chClear").addEventListener("click", () => { state.selected = []; renderChannelList(); renderAll(); });
-  $("chDefault").addEventListener("click", () => {
-    state.selected = (DATA.selected || []).slice();
+  $("chClear").addEventListener("click", () => {
+    setSelectedChannels([]);
+    buildWorksheet();
     renderChannelList();
-    refreshWindowTraces(true).then(() => { renderScatterOptions(); renderAll(); });
+    renderAll();
+  });
+  $("chDefault").addEventListener("click", () => {
+    setSelectedChannels((DATA.selected || []).slice());
+    buildWorksheet();
+    renderChannelList();
+    syncScatterSelectors();
+    state.windowKey = "";
+    refreshWindowTraces(true).then(renderAll);
     renderAll();
   });
   $("chVisible").addEventListener("click", () => {
     const r = lane();
-    state.selected = state.selected.filter((name) => {
+    setSelectedChannels(selectedChannels().filter((name) => {
       const trace = traceOf(name);
       if (!trace) return false;
       const st = visibleStats(trace, r[0], r[1]);
       return !!st && st.max - st.min > 1e-9;
-    });
+    }));
+    buildWorksheet();
     renderChannelList();
     refreshWindowTraces(true).then(renderAll);
     renderAll();
   });
+  $("addBtn").addEventListener("click", () => addComponentOfType($("addType").value));
   $("modeTime").addEventListener("click", () => {
     state.mode = "time"; state.view = null; state.panelZoom = {}; scheduleRefresh(); renderAll();
   });
@@ -1705,36 +2337,20 @@ function init() {
   $("pngBtn").addEventListener("click", exportPNG);
   $("shareBtn").addEventListener("click", shareURL);
 
-  const onScatterChange = () => {
-    state.scatter.x = $("scatterX").value;
-    state.scatter.y = [$("scatterY").value].filter(Boolean);
-    state.scatter.colour = $("scatterC").value || null;
-    refreshPoints().then(renderAll);
-    renderAll();
-  };
-  ["scatterX", "scatterY", "scatterC"].forEach((id) => $(id).addEventListener("change", onScatterChange));
-  $("scatter").addEventListener("dblclick", () => {
-    state.scatter.style = state.scatter.style === "points" ? "trend" : "points";
-    renderAll();
-  });
-  $("chartHost").addEventListener("mousedown", (event) => {
-    const wrap = event.target.closest ? event.target.closest(".chart") : null;
-    if (!wrap) return;
-    const groups = selectedGroups();
-    const idx = groups.findIndex((g) => g.key === wrap.dataset.group);
-    if (idx >= 0) { state.focus = idx; renderAll(); }
-  });
-
   renderAll();
   refreshWindowTraces(true).then(() => { refreshPoints().then(renderAll); });
 }
 init();
 // Debugging handle: poke at the workbench from the browser console, e.g.
 //   i3pro.state.view = [600, 620]; i3pro.renderAll();
+//   i3pro.addComponentOfType("graph");
 window.i3pro = {
   state: state, data: DATA, renderAll: renderAll, lane: lane,
   fullRange: fullRange, zoomTo: zoomTo, zoomFactor: zoomFactor,
-  selectedGroups: selectedGroups, refreshWindowTraces: refreshWindowTraces,
+  groupsFor: groupsFor, selectedChannels: selectedChannels,
+  addComponentOfType: addComponentOfType, applyPreset: applyPreset,
+  componentAction: componentAction, refreshWindowTraces: refreshWindowTraces,
+  encodeLayout: encodeLayout, decodeLayout: decodeLayout, saveLayout: saveLayout,
 };
 </script>
 </body>

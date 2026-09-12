@@ -116,6 +116,23 @@ node tools\smoke_viewer.js out\demo.html     # 无头跑前端脚本
 算法层（`derive` / `laps` / `render`）是不依赖框架的纯函数，改动请优先补单测——
 这支车队最现实的风险是「写代码的人毕业了」。
 
+### 常见问题
+
+**`git push` 连不上 github.com（超时 / connection reset）**
+浏览器能开 GitHub、git 却不行，通常是系统走本地代理而 git 没走。查一下
+`HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings` 里的 `ProxyServer`
+（本机是 `127.0.0.1:7890`），然后让 git 也用它：
+
+```powershell
+git config --global http.proxy http://127.0.0.1:7890
+git config --global https.proxy http://127.0.0.1:7890
+```
+
+**某个场次切不出圈**：看 `laps` 的 `complete` 列。直线/单圈测试本来就只有 1 段，
+首尾的进出场段会被标记成「进出场/泊车/异常段」，不计入最快圈统计。
+
+**通道值看起来差 100 倍**：检查是不是把 `decimals` 当无符号读了（见上文第 3 条）。
+
 ---
 
 ## 许可证

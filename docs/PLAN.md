@@ -150,8 +150,11 @@ i2pro_data/*.ld ──► i3pro.ld (mmap 原生解析) ──┬──► i3pro.
 
 ## 8. 待确认事项
 
-1. **仓库托管**：本机 `gh` 登录的账号是 `fyl66`，但 token 已失效，无法自动建远端仓库。
-   需要你执行 `gh auth login` 后告诉我要建的仓库名，或直接在 GitHub 上手动建空仓库再 `git push`。
+1. **仓库托管**：代码已推到 **https://github.com/fyl66/i3pro**（private）。
+   仓库名如果不对（比如你想放进队里的组织仓库），改动很便宜：
+   `git remote set-url origin <新地址> && git push -u origin main`。
+   ⚠️ 本机 git 直连 github.com 会超时，必须走本机代理：
+   `git config --global http.proxy http://127.0.0.1:7890`（Clash 默认端口，按你自己的改）。
 2. **许可证**：`vendor/ldparser` 是 GPL-3.0（格式逆向的来源，仅用于测试交叉验证）。
    当前仓库按 GPL-3.0 处理。若希望改成 MIT 发布，需要移除 `vendor/` 并重写 `docs/ld-format.md`
    中引用该实现的部分。

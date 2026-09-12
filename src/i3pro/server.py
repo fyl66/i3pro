@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import math
+import socket
 import threading
 import webbrowser
 from collections import OrderedDict
@@ -25,10 +26,14 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import numpy as np
 
-from . import derive, laps as lapsmod, render, store
+from . import derive, importer, laps as lapsmod, render, store
 from . import ld as ldmod
 
 __all__ = ["SessionLibrary", "serve", "make_handler"]
+
+#: Refuse anything larger than this in one upload (the biggest log here is
+#: 119 MB, so 2 GB leaves room without letting a stray file fill the disk).
+MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 
 
 def _json_safe(value):
@@ -123,6 +128,12 @@ class SessionLibrary:
                 log.close()
             self._cache.clear()
 
+    def upload_dir(self) -> Path:
+        """Where an uploaded log goes: the first configured data root."""
+        root = self.roots[0] if self.roots else Path("i2pro_data")
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
 
 def _csv_arg(query: dict, key: str) -> list[str]:
     raw = (query.get(key) or [""])[0]
@@ -173,11 +184,23 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
 
         # --------------------------------------------------------------- GET
         def do_GET(self):  # noqa: N802 - http.server API
+            self.dispatch("GET")
+
+        def do_HEAD(self):  # noqa: N802 - http.server API
+            self.dispatch("HEAD")
+
+        def do_POST(self):  # noqa: N802 - http.server API
+            self.dispatch("POST")
+
+        def do_PUT(self):  # noqa: N802 - http.server API
+            self.dispatch("PUT")
+
+        def dispatch(self, method: str):
             parsed = urlparse(self.path)
             query = parse_qs(parsed.query)
             parts = [unquote(p) for p in parsed.path.split("/") if p]
             try:
-                self.route(parts, query)
+                self.route(parts, query, method)
             except KeyError as exc:
                 self._error(404, f"未知场次: {exc.args[0]}")
             except FileNotFoundError as exc:
@@ -187,15 +210,12 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
             except Exception as exc:  # pragma: no cover - defensive
                 self._error(500, f"{type(exc).__name__}: {exc}")
 
-        def do_HEAD(self):  # noqa: N802 - http.server API
-            self.do_GET()
-
         # ------------------------------------------------------------- routes
-        def route(self, parts: list[str], query: dict) -> None:
+        def route(self, parts: list[str], query: dict, method: str = "GET") -> None:
             if not parts:
                 return self._html(index_page(library))
             if parts[0] == "api":
-                return self.api(parts[1:], query)
+                return self.api(parts[1:], query, method)
             if parts[0] == "session" and len(parts) >= 2:
                 return self.session_page(parts[1], query)
             if parts[0] == "favicon.ico":
@@ -216,11 +236,13 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
             payload["session"] = name
             self._html(render.render_page(payload))
 
-        def api(self, parts: list[str], query: dict) -> None:
+        def api(self, parts: list[str], query: dict, method: str = "GET") -> None:
             if not parts:
                 return self._error(404, "no such api path")
             if parts[0] == "sessions":
                 return self._json(library.listing())
+            if parts[0] == "upload":
+                return self.upload(query, method)
             if parts[0] != "session" or len(parts) < 3:
                 return self._error(404, "no such api path")
             name, action = parts[1], parts[2]
@@ -312,7 +334,163 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
 
             self._error(404, "no such api action")
 
+        # ------------------------------------------------------------ upload
+        def upload(self, query: dict, method: str) -> None:
+            """PUT /api/upload?name=<file.ld> with the raw bytes as the body.
+
+            Raw body instead of multipart keeps this dependency-free (no
+            ``cgi``/``email`` parsing to get wrong) and lets the browser stream
+            a 100 MB log straight from the file picker.
+            """
+            if method not in ("PUT", "POST"):
+                self.close_connection = True
+                return self._error(405, "上传请用 PUT")
+            name = (query.get("name") or [""])[0]
+            try:
+                clean = importer.safe_name(name)
+            except ValueError as exc:
+                self.close_connection = True
+                return self._error(400, str(exc))
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
+            if length <= 0:
+                self.close_connection = True
+                return self._error(400, "请求体为空")
+            if length > MAX_UPLOAD_BYTES:
+                self.close_connection = True
+                return self._error(
+                    413, f"文件太大: {length / 1e6:.0f} MB > {MAX_UPLOAD_BYTES / 1e6:.0f} MB"
+                )
+            try:
+                info = importer.store_stream(library.upload_dir(), clean, self.rfile, length)
+            except ValueError as exc:
+                self.close_connection = True
+                return self._error(400, str(exc))
+            except OSError as exc:
+                self.close_connection = True
+                return self._error(500, f"写盘失败: {exc}")
+
+            summary: dict = {"ok": True, **info}
+            target = Path(info["path"])
+            if clean.lower().endswith(".ld"):
+                try:
+                    with ldmod.LogFile.read(target) as log:
+                        meta = log.metadata()
+                        tokens = render.detect(log)
+                    summary.update(
+                        device=meta["device"],
+                        duration=round(meta["duration"], 1),
+                        channels=meta["channels"],
+                        complete_laps=len([l for l in tokens if l.complete]),
+                        url=f"/session/{quote(info['stem'])}",
+                    )
+                except Exception as exc:  # stored, but not readable
+                    summary["warning"] = f"文件已保存，但解析失败: {exc}"
+            print(
+                f"  ↑ 导入 {info['file']} ({info['bytes'] / 1e6:.1f} MB)"
+                + (f" · {summary.get('channels')} 通道" if summary.get("channels") else "")
+                + (f" · {summary['warning']}" if summary.get("warning") else "")
+            )
+            self._json(summary)
+
     return Handler
+
+
+def _lan_addresses() -> list[str]:
+    """Best-effort list of this machine's non-loopback IPv4 addresses.
+
+    The first entry is the address of the interface that would carry the default
+    route (found via ``connect`` on a UDP socket - no packets are sent), which is
+    the one a team mate can actually reach. The rest are other adapters, kept
+    only as a hint because laptops often have WSL / Docker / VirtualBox
+    interfaces that look like LANs but are not.
+    """
+    primary = None
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("10.255.255.255", 1))
+        primary = probe.getsockname()[0]
+    except OSError:
+        primary = None
+    finally:
+        probe.close()
+
+    others: list[str] = []
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            address = info[4][0]
+            if address.startswith("127.") or address.startswith("169.254."):
+                continue
+            if address == primary or address in others:
+                continue
+            others.append(address)
+    except OSError:
+        pass
+
+    if primary and not primary.startswith("127."):
+        return [primary] + others[:3]
+    return others[:4]
+
+
+_IMPORT_BLOCK = """
+<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;
+            background:#171a21;border:1px solid #2b313c;border-radius:8px;
+            padding:10px 12px;margin:0 0 14px">
+  <input id="files" type="file" multiple accept=".ld,.ldx" style="display:none">
+  <button id="pickBtn" style="background:#1d3b52;border:1px solid #4cc2ff;color:#e6e9ef;
+          border-radius:6px;padding:6px 12px;cursor:pointer;font-size:13px">
+    选择 .ld 文件导入
+  </button>
+  <span style="color:#8b94a7;font-size:12px">
+    或者把文件直接拖进这个窗口 · 也可以把 .ld 拖到 <code>导入数据.bat</code> 上
+  </span>
+  <span id="importMsg" style="color:#4cc2ff;font-size:12px;margin-left:auto"></span>
+</div>
+<script>
+(function () {
+  var input = document.getElementById("files");
+  var msg = document.getElementById("importMsg");
+  var busy = false;
+
+  document.getElementById("pickBtn").addEventListener("click", function () {
+    if (!busy) input.click();
+  });
+
+  async function upload(list) {
+    var files = Array.prototype.slice.call(list);
+    if (!files.length || busy) return;
+    busy = true;
+    for (var i = 0; i < files.length; i++) {
+      var file = files[i];
+      msg.textContent = "上传 " + (i + 1) + "/" + files.length + ": " + file.name
+        + " (" + (file.size / 1e6).toFixed(1) + " MB) …";
+      try {
+        var res = await fetch("/api/upload?name=" + encodeURIComponent(file.name),
+                              { method: "PUT", body: file });
+        var body = await res.json().catch(function () { return {}; });
+        if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+      } catch (err) {
+        msg.style.color = "#ff5d6c";
+        msg.textContent = "导入失败: " + file.name + " — " + err.message;
+        busy = false;
+        return;
+      }
+    }
+    msg.textContent = "导入完成，正在刷新…";
+    location.reload();
+  }
+
+  input.addEventListener("change", function () { upload(input.files); });
+  document.addEventListener("dragover", function (e) { e.preventDefault(); });
+  document.addEventListener("drop", function (e) {
+    e.preventDefault();
+    if (e.dataTransfer && e.dataTransfer.files) upload(e.dataTransfer.files);
+  });
+})();
+</script>
+"""
 
 
 def index_page(library: SessionLibrary, error: str | None = None) -> str:
@@ -365,12 +543,32 @@ def index_page(library: SessionLibrary, error: str | None = None) -> str:
   <p>选择一个试车场次开始分析；所有数据都在本机解析，不上传。</p>
 </header>
 <main>
+{_IMPORT_BLOCK}
 <table>
  <tr><th>场次</th><th>设备</th><th>日期</th><th>时长</th><th>通道</th><th>完整圈</th><th>最快圈</th></tr>
  {''.join(rows) or '<tr><td colspan="7">没有找到 .ld 文件</td></tr>'}
 </table>
 </main>
 """
+
+
+def bind(host: str, port: int, handler, attempts: int = 10) -> ThreadingHTTPServer:
+    """Bind the first free port in ``[port, port + attempts)``.
+
+    The launcher always asks for 8731; if a previous workbench is still running
+    (or something else grabbed the port) we quietly move to the next one instead
+    of dying with a bind error the user has to decode.
+    """
+    last: OSError | None = None
+    for candidate in range(port, port + max(1, attempts)):
+        try:
+            return ThreadingHTTPServer((host, candidate), handler)
+        except OSError as exc:
+            last = exc
+    raise OSError(
+        f"端口 {port}-{port + attempts - 1} 都被占用，用 --port {port + attempts} 换一个"
+        f"（最后一次错误: {last}）"
+    )
 
 
 def serve(
@@ -381,17 +579,37 @@ def serve(
     cache_size: int = 3,
     open_browser: bool = False,
     ready: threading.Event | None = None,
+    port_attempts: int = 10,
 ) -> None:
     """Run the workbench server until Ctrl-C."""
     library = SessionLibrary(roots, cache_size=cache_size)
-    httpd = ThreadingHTTPServer((host, port), make_handler(library, buckets))
+    handler = make_handler(library, buckets)
+    try:
+        httpd = bind(host, port, handler, port_attempts)
+    except OSError:
+        library.close()
+        raise
     actual_port = httpd.server_address[1]
-    url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '::') else host}:{actual_port}/"
-    print(f"i3pro 本地服务已启动: {url}")
-    print(f"  {len(library.names())} 个场次, 数据目录: {', '.join(str(r) for r in roots)}")
+    local = f"http://127.0.0.1:{actual_port}/"
+    print(f"i3pro 本地服务已启动: {local}")
+    if host in ("0.0.0.0", "::"):
+        addresses = _lan_addresses()
+        if addresses:
+            print(f"  发给队友(局域网): http://{addresses[0]}:{actual_port}/")
+            for address in addresses[1:]:
+                print(f"  其他网卡(多半是虚拟网卡): http://{address}:{actual_port}/")
+        else:
+            print("  局域网: 没找到网卡地址，用 ipconfig 查一下本机 IP")
+        print("  ⚠ 第一次运行 Windows 防火墙可能弹窗，选“允许访问”。")
+    else:
+        print("  只监听本机；要发给队友用 --host 0.0.0.0")
+    names = library.names()
+    print(f"  {len(names)} 个场次, 数据目录: {', '.join(str(r) for r in roots)}")
+    if not names:
+        print("  ⚠ 这些目录里没有 .ld 文件，用 --data <目录> 指定试车数据所在位置")
     print("  Ctrl-C 停止")
     if open_browser:
-        threading.Timer(0.4, lambda: webbrowser.open(url)).start()
+        threading.Timer(0.4, lambda: webbrowser.open(local)).start()
     if ready is not None:
         ready.set()
     try:

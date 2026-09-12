@@ -274,6 +274,153 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_snapshot(args: argparse.Namespace) -> int:
+    """Render every session in --data to a self-contained HTML, plus an index."""
+    data = Path(args.data)
+    out = Path(args.out)
+    if not data.is_dir():
+        print(f"# 数据目录不存在: {data}")
+        return 1
+    files = sorted(data.glob("*.ld"))
+    if not files:
+        print(f"# {data} 里没有 .ld 文件")
+        return 1
+    out.mkdir(parents=True, exist_ok=True)
+    rows: list[dict] = []
+    for path in files:
+        target = out / f"{path.stem}.html"
+        print(f"  {path.name} ...", end="", flush=True)
+        try:
+            with ldmod.LogFile.read(path) as log:
+                laps: list = []
+                try:
+                    laps = lapsmod.detect_laps(log)
+                except ValueError:
+                    pass
+                rendermod.render_html(log, target, channels=None, buckets=args.buckets)
+                meta = log.metadata()
+            complete = [l for l in laps if l.complete]
+            best = min((l.lap_time for l in complete), default=None)
+            rows.append(
+                {
+                    "file": path.name,
+                    "target": target.name,
+                    "device": meta["device"],
+                    "date": meta["log_date"],
+                    "duration": meta["duration"],
+                    "channels": meta["channels"],
+                    "complete_laps": len(complete),
+                    "best_lap": best,
+                    "size_mb": target.stat().st_size / 1e6,
+                    "error": None,
+                }
+            )
+            print(f" {target.stat().st_size / 1e6:.2f} MB"
+                  + (f", {len(complete)} 完整圈, 最快 {best:.3f}s" if best else ""))
+        except Exception as exc:  # one broken log must not stop the batch
+            rows.append({"file": path.name, "error": f"{type(exc).__name__}: {exc}"})
+            print(f" 失败: {exc}")
+
+    index = out / "index.html"
+    index.write_text(_snapshot_index(rows, data), encoding="utf-8")
+    ok = sum(1 for r in rows if not r["error"])
+    print(f"\n生成 {ok}/{len(rows)} 个快照 -> {out}")
+    print(f"双击这个文件开始看: {index}")
+    for row in rows:
+        if row["error"]:
+            print(f"  ! {row['file']}: {row['error']}")
+    if args.open:
+        import webbrowser
+
+        webbrowser.open(index.resolve().as_uri())
+    return 0 if ok else 1
+
+
+def cmd_import(args: argparse.Namespace) -> int:
+    """Copy or move .ld/.ldx files into the data folder so they show up."""
+    from . import importer
+
+    destination = Path(args.data)
+    results = importer.import_paths(args.paths, destination, move=args.move)
+    imported = [r for r in results if "error" not in r]
+    failed = [r for r in results if "error" in r]
+
+    for row in imported:
+        note = ""
+        if row["file"].lower().endswith(".ld"):
+            try:
+                with ldmod.LogFile.read(row["path"]) as log:
+                    meta = log.metadata()
+                    note = f"{meta['channels']} 通道 · {meta['duration']:.0f} s · {meta['device']}"
+            except Exception as exc:  # imported but unreadable -> say so now
+                note = f"⚠ 无法解析: {type(exc).__name__}: {exc}"
+        print(f"  + {row['file']}  ({row['bytes'] / 1e6:.1f} MB)  {note}")
+    for row in failed:
+        print(f"  ! {row['source']}: {row['error']}")
+
+    verb = "移动" if args.move else "复制"
+    print(f"\n{verb} {len(imported)} 个文件到 {destination.resolve()}")
+    if failed:
+        print(f"{len(failed)} 个文件跳过")
+    if imported:
+        print("下一步: 双击 启动.bat 打开工作台，场次列表里就能看到它们。")
+    return 0 if imported else 1
+
+
+def _snapshot_index(rows: list[dict], data_dir: Path) -> str:
+    """A plain index page so the snapshot folder is self-explanatory."""
+    body = []
+    for row in rows:
+        if row["error"]:
+            body.append(
+                f"<tr><td>{row['file']}</td><td colspan='5' style='color:#ff5d6c'>"
+                f"{row['error']}</td></tr>"
+            )
+            continue
+        best = "--" if row["best_lap"] is None else f"{row['best_lap']:.3f} s"
+        body.append(
+            "<tr>"
+            f"<td><a href=\"{row['target']}\">{row['file']}</a></td>"
+            f"<td>{row['device']}</td><td>{row['date']}</td>"
+            f"<td>{row['duration']:.0f} s</td><td>{row['channels']}</td>"
+            f"<td>{row['complete_laps']}</td><td>{best}</td>"
+            "</tr>"
+        )
+    return f"""<!doctype html>
+<meta charset="utf-8">
+<title>i3pro 快照</title>
+<style>
+ body {{ margin:0; background:#0f1115; color:#e6e9ef;
+        font:14px/1.6 "Segoe UI","Microsoft YaHei",system-ui,sans-serif; }}
+ header {{ padding:20px 26px; border-bottom:1px solid #2b313c; }}
+ h1 {{ margin:0 0 4px; font-size:18px; }}
+ p {{ margin:0; color:#8b94a7; }}
+ main {{ padding:16px 26px 40px; }}
+ table {{ border-collapse:collapse; width:100%; }}
+ th, td {{ text-align:left; padding:6px 10px; border-bottom:1px solid #2b313c; }}
+ th {{ color:#8b94a7; font-weight:600; }}
+ a {{ color:#4cc2ff; text-decoration:none; }}
+ a:hover {{ text-decoration:underline; }}
+ code {{ background:#1e232c; padding:1px 6px; border-radius:4px; }}
+</style>
+<header>
+  <h1>i3pro 快照</h1>
+  <p>双击任意一行离线查看。数据已经嵌进每个 HTML 里，不需要服务器、不需要联网。</p>
+</header>
+<main>
+<table>
+ <tr><th>场次</th><th>设备</th><th>日期</th><th>时长</th><th>通道</th><th>完整圈</th><th>最快圈</th></tr>
+ {''.join(body) or "<tr><td colspan='7'>没有可用的场次</td></tr>"}
+</table>
+<p style="margin-top:18px">
+  快照的波形是提前抽稀好的：放大到很细的时间段会看到折线。要看全分辨率细节，回到项目根目录
+  双击 <code>启动.bat</code>，用交互模式。
+</p>
+<p style="margin-top:6px;color:#8b94a7">数据目录: {data_dir}</p>
+</main>
+"""
+
+
 def cmd_track(args: argparse.Namespace) -> int:
     """Print a coarse ASCII trace of the detected lap times (quick sanity check)."""
     with ldmod.LogFile.read(args.file) as log:
@@ -364,6 +511,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cache", type=int, default=3, help="内存中保留的已解析场次数量")
     p.add_argument("--open", action="store_true", help="启动后自动打开浏览器")
     p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("snapshot", help="把每个场次导出成离线 HTML 快照")
+    p.add_argument("--data", default="i2pro_data", help=".ld 所在目录")
+    p.add_argument("--out", default="out", help="输出目录")
+    p.add_argument("--buckets", type=int, default=rendermod.DEFAULT_BUCKETS,
+                   help="每通道下采样像素列数 (越大越清晰、文件越大)")
+    p.add_argument("--open", action="store_true", help="生成后打开索引页")
+    p.set_defaults(func=cmd_snapshot)
+
+    p = sub.add_parser("import", help="把 .ld/.ldx 导入数据目录（可拖拽到 导入数据.bat 上）")
+    p.add_argument("paths", nargs="+", help="文件或目录，可多个")
+    p.add_argument("--data", default="i2pro_data", help="目标数据目录")
+    p.add_argument("--move", action="store_true", help="移动而不是复制")
+    p.set_defaults(func=cmd_import)
 
     p = sub.add_parser("track", help="圈速柱状速览")
     p.add_argument("file")

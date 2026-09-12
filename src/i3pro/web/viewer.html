@@ -164,13 +164,16 @@ const GRID = "#232833";
 const $ = (id) => document.getElementById(id);
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
-const CHANNELS = new Map((DATA.channels || []).map((c) => [c.name, c]));
+// This file is the *template*. The data payload is injected by
+// `i3pro render` / `i3pro serve`; opening it straight from disk has no data, so
+// everything below stays null-safe and init() shows instructions instead.
+const CHANNELS = new Map(((DATA && DATA.channels) || []).map((c) => [c.name, c]));
 // Status/error channels are drawn in the band under the graphs (i2 Pro's
 // "Status and Errors" panel), not as traces, so they get their own group at the
 // bottom of the channel list and are filtered out of the chart panels.
-const STATUS = new Set(DATA.status || []);
-const GROUPS = (DATA.groups || []).concat(
-  (DATA.status || []).length
+const STATUS = new Set((DATA && DATA.status) || []);
+const GROUPS = ((DATA && DATA.groups) || []).concat(
+  (DATA && DATA.status || []).length
     ? [{ key: "__status__", label: "状态与故障", unit: "", channels: DATA.status.slice() }]
     : []
 );
@@ -178,8 +181,8 @@ const GROUPS = (DATA.groups || []).concat(
 const state = {
   mode: "time",
   selected: [],
-  traces: Object.assign({}, DATA.traces || {}),
-  overview: DATA.overview || null,
+  traces: Object.assign({}, (DATA && DATA.traces) || {}),
+  overview: (DATA && DATA.overview) || null,
   view: null,
   cursor: null,
   datum: null,
@@ -189,10 +192,10 @@ const state = {
   style: "line",
   layout: "tiled",
   show: { measure: true, status: false, values: true },
-  ref: DATA.ref || null,
-  cmp: DATA.cmp || null,
-  overlay: DATA.overlay || null,
-  track: DATA.track || null,
+  ref: (DATA && DATA.ref) || null,
+  cmp: (DATA && DATA.cmp) || null,
+  overlay: (DATA && DATA.overlay) || null,
+  track: (DATA && DATA.track) || null,
   scatter: { x: null, y: [], colour: null, style: "points" },
   points: null,
   pending: 0,
@@ -1616,9 +1619,46 @@ function initHeader() {
   document.title = "i3pro · " + m.file;
 }
 
+function showTemplateNotice() {
+  document.title = "i3pro · 模板文件（不含数据）";
+  const isFile = location.protocol === "file:";
+  document.body.innerHTML = `
+    <div style="max-width:760px;margin:8vh auto;padding:0 24px;
+                font:14px/1.75 'Segoe UI','Microsoft YaHei',system-ui,sans-serif;color:#e6e9ef">
+      <h1 style="font-size:20px;margin:0 0 6px">这是模板文件，本身不含数据</h1>
+      <p style="color:#8b94a7;margin:0 0 22px">
+        <code style="background:#1e232c;padding:1px 6px;border-radius:4px">src/i3pro/web/viewer.html</code>
+        是工作台的空壳：数据由 <code style="background:#1e232c;padding:1px 6px;border-radius:4px">i3pro</code>
+        在生成页面时注入。<br>
+        ${isFile ? "你现在是用 <b>file://</b> 直接打开的，所以看到的是空页面。" : ""}
+      </p>
+      <h2 style="font-size:14px;margin:0 0 8px">正确用法（回到项目根目录 <code>E:\\桌面\\i3pro</code>）</h2>
+      <ol style="color:#8b94a7;margin:0 0 22px;padding-left:22px">
+        <li><b style="color:#e6e9ef">双击 <code style="background:#1e232c;padding:1px 6px;border-radius:4px">启动.bat</code></b>
+            —— 起本地服务并自动打开浏览器，可任意缩放、链接发给队友。</li>
+        <li>或者双击 <code style="background:#1e232c;padding:1px 6px;border-radius:4px">导出快照.bat</code>
+            —— 在 <code>out\\</code> 目录生成每个场次的 HTML，双击其中任意一个即可离线查看。</li>
+      </ol>
+      <h2 style="font-size:14px;margin:0 0 8px">命令行等价写法</h2>
+      <pre style="background:#171a21;border:1px solid #2b313c;border-radius:8px;padding:12px 14px;
+                  overflow:auto;color:#cfe3ff;margin:0">cd /d "E:\\桌面\\i3pro"
+i3pro.cmd serve --data i2pro_data --open
+i3pro.cmd snapshot --data i2pro_data --out out</pre>
+      <p style="color:#8b94a7;margin:22px 0 0">
+        如果你确实想直接看某个文件：用
+        <code style="background:#1e232c;padding:1px 6px;border-radius:4px">out\\&lt;场次名&gt;.html</code>，
+        那个文件的数据是嵌进去的，双击就能用。
+      </p>
+    </div>`;
+}
+
 function init() {
   if (!DATA || !DATA.meta) {
-    document.body.innerHTML = "<p style='padding:24px'>缺少内嵌数据</p>";
+    showTemplateNotice();
+    return;
+  }
+  if (!DATA || !DATA.meta) {
+    showTemplateNotice();
     return;
   }
   state.selected = (DATA.selected || []).slice();

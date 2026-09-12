@@ -11,6 +11,8 @@
  * before you can see anything" without a browser.
  *
  * Set I3PRO_HASH=... to start from a URL hash (e.g. "mode=overlay").
+ * Pass --expect-template when the file is the raw src template: it must not
+ * throw, and it must show the "this is not a data file" instructions.
  */
 const fs = require("fs");
 const vm = require("vm");
@@ -197,6 +199,7 @@ function run(hash) {
 /* ------------------------------------------------------------------- drive */
 const problems = [];
 const check = (ok, message) => { if (!ok) problems.push(message); };
+const expectTemplate = process.argv.indexOf("--expect-template") >= 0;
 
 let ctx;
 try {
@@ -210,6 +213,22 @@ try {
 const window = ctx.window;
 const registry = ctx.registry;
 const api = ctx.api;
+
+if (expectTemplate) {
+  const body = ctx.document.body.innerHTML;
+  check(String(ctx.document.title).indexOf("模板") >= 0,
+    "template notice did not set the page title");
+  check(body.indexOf("启动.bat") >= 0 && body.indexOf("导出快照.bat") >= 0,
+    "template notice does not tell the user which launcher to double-click");
+  check(body.indexOf("viewer.html") >= 0,
+    "template notice does not name the file that was opened");
+  if (problems.length) {
+    console.error("FAIL:\n  - " + problems.join("\n  - "));
+    process.exit(1);
+  }
+  console.log("PASS - template without data shows instructions instead of throwing");
+  process.exit(0);
+}
 const key = (k, extra) => window.dispatch("keydown",
   Object.assign({ key: k, target: { tagName: "BODY" }, preventDefault() {} }, extra || {}));
 
@@ -358,7 +377,10 @@ if (api) {
 const header = registry.get("fileInfo");
 check(header && header.innerHTML.indexOf(".ld") >= 0, "header was not populated");
 const lapTable = registry.get("lapTable");
-check(lapTable && lapTable._html.indexOf("<tr") >= 0, "lap table is empty");
+const expectsLaps = !!(api && api.data && (api.data.laps || []).length);
+if (expectsLaps) {
+  check(lapTable && lapTable._html.indexOf("<tr") >= 0, "lap table is empty");
+}
 const channelList = registry.get("channelList");
 check(channelList && channelList._children.length > 5, "channel list is empty");
 const count = registry.get("chCount");

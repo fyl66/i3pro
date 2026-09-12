@@ -1,0 +1,6 @@
+# Keep source files LF, but make Windows scripts CRLF: cmd.exe is fussy about
+# LF-only .bat files with parenthesised blocks.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

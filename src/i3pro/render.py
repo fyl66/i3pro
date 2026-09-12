@@ -39,7 +39,9 @@ __all__ = [
 
 TEMPLATE = Path(__file__).with_name("web") / "viewer.html"
 
-DEFAULT_BUCKETS = 1200
+#: Pixel columns per channel in a static snapshot. Higher = smoother when you
+#: zoom in, at the cost of file size (2000 ≈ 1.2 MB for a 12 channel payload).
+DEFAULT_BUCKETS = 2000
 
 #: Channels a driver/vehicle-dynamics engineer opens first, best first.
 DEFAULT_CHANNEL_PRIORITY = (

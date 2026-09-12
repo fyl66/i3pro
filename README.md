@@ -15,23 +15,39 @@ i2pro_data/*.ld ──► 原生解析(mmap) ──► Parquet + 元数据 ─�
 
 ---
 
-## 快速开始
+## 一键启动
+
+**双击 `启动.bat`** 就行——它会起本地服务并自动打开浏览器。（第一次运行 Windows 防火墙可能弹窗，选“允许访问”。）
+
+| 双击这个 | 干什么 | 什么时候用 |
+| --- | --- | --- |
+| **`启动.bat`** | 起服务 + 开浏览器，可任意缩放，控制台会打印一个局域网地址 | 日常分析、在 P 房几个人一起看 |
+| **`导出快照.bat`** | 把每个场次导出成 `out\<场次>.html`，再打开索引页 | 要把某一场发给没装 Python 的队友 |
+
+命令行等价写法：
 
 ```powershell
 cd E:\桌面\i3pro
-
-.\i3pro.cmd info i2pro_data\*.ld                  # 看一眼有哪些场次
-.\i3pro.cmd laps "i2pro_data\20260908-cjh 高避5圈.ld"   # 圈速表
-.\i3pro.cmd serve --data i2pro_data --open        # 推荐：本地服务，可任意缩放、链接发群里
-.\i3pro.cmd render "i2pro_data\20260908-cjh 高避5圈.ld" # 或导出单个 HTML 快照，双击即开
+.\i3pro.cmd serve --data i2pro_data --open         # 等价于 启动.bat
+.\i3pro.cmd snapshot --data i2pro_data --out out   # 等价于 导出快照.bat
+.\i3pro.cmd info i2pro_data\*.ld                   # 场次概览
 ```
 
-`serve` 和 `render` 的区别只有一条：**缩放时会不会补细节**。
-快照里的波形是提前抽稀好的一次性数据，放大看到的是折线；`serve` 每次缩放都按可见区间
-重新取全分辨率数据（1 秒窗口 = 100 个原始样本，单次请求 3 ms）。
+`i3pro.cmd` 会自动探测可用的 Python（`python` / `py -3` / `python3`，以及
+`%LOCALAPPDATA%\Programs\Python\Python3*`），把 `src/` 加进 `PYTHONPATH` 再调
+`python -m i3pro`——**不需要 `pip install`，不需要联网**。
 
-`i3pro.cmd` / `i3pro.ps1` 只是把 `src/` 加进 `PYTHONPATH` 再调 `python -m i3pro`，
-不需要 `pip install`。
+### ⚠️ 不要双击 `src\i3pro\web\viewer.html`
+
+那是**模板**，本身不含数据——数据由 i3pro 在生成页面时注入。直接打开它只会看到一段说明
+（以前是空白页 + 一个控制台报错，现在会明确告诉你去点哪个 bat）。
+
+### 两种模式的区别只有一条：缩放时会不会补细节
+
+* **`启动.bat`（serve）**：每次缩放按可见区间重新取全分辨率数据 —— 1 秒窗口 = 100 个原始样本，
+  单次请求 3 ms。想看细节用这个。
+* **`导出快照.bat`（snapshot）**：波形是提前抽稀好的，放大到很细的时间段会看到折线，
+  但 HTML 自包含，发给谁都能双击打开。
 
 ---
 
@@ -74,6 +90,7 @@ MoTeC 自己导出的两个 CSV（182 MB / 425 MB）。
 | `export <file> --out x.csv` | 导出选中通道为 CSV |
 | `render <file> [--channels a,b] [--ref 2] [--cmp 5]` | 生成自包含 HTML 工作台 |
 | `serve [--data dir] [--host 0.0.0.0] [--port 8731] [--open]` | 本地/局域网 Web 工作台 |
+| `snapshot [--data dir] [--out out] [--open]` | 批量导出每个场次的离线 HTML + 索引页 |
 
 ---
 
@@ -104,13 +121,22 @@ MoTeC 自己导出的两个 CSV（182 MB / 425 MB）。
 ## 目录结构
 
 ```
+启动.bat            一键起服务 + 开浏览器（给队友用这个）
+导出快照.bat        一键导出所有离线 HTML 快照
+i3pro.cmd           命令行入口（自动探测 Python），两个 bat 都调它
+docs/               PLAN.md 规划 · ACCEPTANCE.md 验收清单 · ld-format.md 格式逆向记录
+tools/              verify_ld_vs_csv.py 解析对照 · smoke_viewer.js 无头驱动前端
+tests/              29 项单测
+out/                生成物（快照 HTML / Parquet），已在 .gitignore 里
+i2pro_data/         试车数据（.ld/.ldx/.csv），不进仓库
+
 src/i3pro/
 ├─ ld.py            .ld 原生解析（mmap，不复制数据）
 ├─ motec_csv.py     i2 Pro CSV 导出读取（用于对照与兜底）
 ├─ derive.py        速度源选择 / 距离轴积分 / GPS 局部投影
 ├─ laps.py          GPS 切圈 / 距离轴重叠 / Δ时间
 ├─ store.py         Parquet + 元数据落盘、列式裁剪、SQL
-├─ render.py        工作台 payload 构建 / Min-Max 降采样 / 自包含 HTML
+├─ render.py        工作台 payload 构建 / 通道分组 / Min-Max 降采样 / 自包含 HTML
 ├─ server.py        标准库 HTTP 服务（场次列表 + JSON API + 工作台页）
 ├─ cli.py           命令行入口
 └─ web/viewer.html  前端（手写 Canvas，无框架、无构建）
@@ -147,6 +173,17 @@ node tools\smoke_viewer.js out\demo.html     # 无头驱动前端：缩放/光�
 这支车队最现实的风险是「写代码的人毕业了」。
 
 ### 常见问题
+
+**双击 `src\i3pro\web\viewer.html` 一片空白 / 没有数据**
+那是模板文件，不含数据。双击 `启动.bat`，或者双击 `out\<场次名>.html`。
+
+**双击 `启动.bat` 提示 "Could not find a working Python 3"**
+装一个 Python 3.10+（[python.org](https://www.python.org/downloads/)），安装时勾上
+`Add python.exe to PATH`。注意本机如果装过 `py` 启动器但没有注册解释器，脚本会自动跳过它。
+
+**端口 8731 被占用**
+启动脚本会自动往后找 10 个端口，控制台会打印实际用的那个。也可以手动指定
+`--port 9000`。
 
 **`git push` 连不上 github.com（超时 / connection reset）**
 浏览器能开 GitHub、git 却不行，通常是系统走本地代理而 git 没走。查一下

@@ -469,6 +469,71 @@ class TestIndependentParsers(unittest.TestCase):
             self.assertGreater(compared, 200)
 
 
+class TestLaunchers(unittest.TestCase):
+    """The one-click path: 启动.bat -> serve, 导出快照.bat -> snapshot."""
+
+    @_needs(HILL)
+    def test_snapshot_writes_html_and_index(self):
+        import contextlib
+        import io
+        import tempfile
+
+        from i3pro import cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "data"
+            target = Path(tmp) / "out"
+            source.mkdir()
+            shutil.copy2(HILL, source / HILL.name)
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = cli.main(["snapshot", "--data", str(source), "--out", str(target)])
+            self.assertEqual(code, 0)
+            produced = target / f"{HILL.stem}.html"
+            self.assertTrue(produced.exists())
+            self.assertGreater(produced.stat().st_size, 200_000)
+            page = produced.read_text(encoding="utf-8")
+            self.assertIn('"channels"', page)
+            index = (target / "index.html").read_text(encoding="utf-8")
+            self.assertIn(HILL.name, index)
+            self.assertIn("启动.bat", index)   # tells the reader how to get full detail
+
+    def test_snapshot_reports_missing_data_dir(self):
+        import contextlib
+        import io
+        import tempfile
+
+        from i3pro import cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = cli.main(
+                    ["snapshot", "--data", str(Path(tmp) / "nope"),
+                     "--out", str(Path(tmp) / "out")]
+                )
+        self.assertEqual(code, 1)
+
+    def test_bind_moves_to_the_next_free_port(self):
+        """Starting twice must not die with a bind error."""
+        import socket
+
+        from i3pro import server
+
+        holder = socket.socket()
+        holder.bind(("127.0.0.1", 0))
+        holder.listen(1)
+        busy = holder.getsockname()[1]
+        library = server.SessionLibrary([])
+        try:
+            httpd = server.bind("127.0.0.1", busy, server.make_handler(library), attempts=5)
+            try:
+                self.assertNotEqual(httpd.server_address[1], busy)
+            finally:
+                httpd.server_close()
+        finally:
+            holder.close()
+            library.close()
+
+
 class TestViewerScript(unittest.TestCase):
     """The generated workbench must execute without throwing (needs node)."""
 
@@ -497,6 +562,19 @@ class TestViewerScript(unittest.TestCase):
     @_needs(HILL)
     def test_runs_headless_in_overlay_mode(self):
         self._smoke("mode=overlay")
+
+    def test_template_without_data_shows_instructions(self):
+        """Opening src/.../viewer.html directly must explain itself, not throw."""
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed")
+        finished = subprocess.run(
+            [node, str(ROOT / "tools" / "smoke_viewer.js"),
+             str(ROOT / "src" / "i3pro" / "web" / "viewer.html"), "--expect-template"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=90,
+        )
+        self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+        self.assertIn("instructions", finished.stdout)
 
 
 if __name__ == "__main__":

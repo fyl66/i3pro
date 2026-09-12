@@ -159,6 +159,60 @@ $env:I3PRO_HASH="mode=overlay"; node tools\smoke_viewer.js out\demo.html; Remove
 
 ---
 
+## A15 · 一键启动（双击就能用）
+
+**通过判据**：在项目根目录**双击 `启动.bat`**，出现控制台窗口，内容依次是
+
+```
+ i3pro  -  MoTeC .ld data workbench
+   data folder : E:\桌面\i3pro\i2pro_data
+i3pro 本地服务已启动: http://127.0.0.1:8731/
+  发给队友(局域网): http://10.161.26.88:8731/
+  ⚠ 第一次运行 Windows 防火墙可能弹窗，选“允许访问”。
+  8 个场次, 数据目录: E:\桌面\i3pro\i2pro_data
+```
+
+并且浏览器自动打开场次列表。要求：
+
+1. **不需要装任何依赖、不需要联网**；Python 会自动探测（`python` / `py -3` / `python3` /
+   `%LOCALAPPDATA%\Programs\Python\Python3*`），本机 `py` 启动器存在但没注册解释器时能正确跳过。
+2. 端口被占用时**自动换端口**，不报绑定错误（`TestLaunchers.test_bind_moves_to_the_next_free_port`）。
+3. 出错时窗口不关闭（`pause`），并列出最可能的原因。
+
+### 不要双击模板文件
+
+```powershell
+node tools\smoke_viewer.js src\i3pro\web\viewer.html --expect-template
+```
+
+**通过判据**：`PASS - template without data shows instructions instead of throwing`。
+即：直接打开模板**不报错**，而是显示一段中文说明，告诉用户去点 `启动.bat` 或 `导出快照.bat`。
+
+---
+
+## A16 · 离线快照
+
+**通过判据**：双击 `导出快照.bat`（或 `i3pro.cmd snapshot --data i2pro_data --out out`），
+控制台逐个打印进度，最后给出：
+
+```
+生成 8/8 个快照 -> out
+双击这个文件开始看: out\index.html
+```
+
+* `out\` 下每个场次一个自包含 HTML（0.5–2 MB），**不需要 Python、不需要服务器、不需要联网**。
+* `out\index.html` 列出所有场次与关键数据（设备/日期/时长/通道数/完整圈/最快圈）。
+* 每个快照都要能通过无头驱动：
+
+```powershell
+Get-ChildItem out -Filter *.html | Where-Object { $_.Name -ne 'index.html' } |
+  ForEach-Object { node tools\smoke_viewer.js $_.FullName }
+```
+
+**通过判据**：每一个都 `PASS`（含 0 圈次的场次：那时圈速面板会隐藏，不算失败）。
+
+---
+
 ## A9 · 缩放模型（对齐 i2 Pro）
 
 i2 Pro 的缩放不是"滚轮放大"这么简单，它是一整套鼠标 + 键盘分工。照搬后必须逐条成立：
@@ -284,7 +338,7 @@ python -m unittest tests.test_i3pro.TestChannelGroups -v
 python -m unittest discover -s tests -v
 ```
 
-**通过判据**：`Ran 25 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）。
+**通过判据**：`Ran 29 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）。
 
 测试覆盖：
 
@@ -302,3 +356,4 @@ python -m unittest discover -s tests -v
 | `TestServer` | HTTP 端到端：场次列表、工作台页、通道、时间窗、散点、概览、对比圈、赛道、404 |
 | `TestIndependentParsers` | 第二套实现交叉验证、213 通道 CSV 全量对照 |
 | `TestViewerScript` | 无头驱动前端：15 项交互断言 + 时间轴 / 双圈两条渲染路径 |
+| `TestLaunchers` | 一键启动：快照批量导出 + 索引页、缺数据目录的报错、端口占用自动换端口 |

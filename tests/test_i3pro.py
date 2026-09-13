@@ -18,6 +18,7 @@ import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -26,7 +27,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from i3pro import (  # noqa: E402
-    csvlog, derive, laps as lapsmod, ld, maths as mathsmod, motec_csv, render, server, store,
+    csvlog, derive, laps as lapsmod, ld, maths as mathsmod, motec_csv, render, sections
+    as sectionsmod, server, store,
 )
 
 DATA = ROOT / "i2pro_data"
@@ -1121,7 +1123,7 @@ class TestDistanceAxisLookup(unittest.TestCase):
         """
         with ld.LogFile.read(ENDURANCE) as log:
             distance = np.maximum.accumulate(
-                np.asarray(lapsmod._distance_series(log), dtype=float)
+                np.asarray(lapsmod.distance_on_master(log), dtype=float)
             )
             time = np.asarray(lapsmod._master_time(log), dtype=float)
             rate = log.sample_rate
@@ -1146,7 +1148,7 @@ class TestDistanceAxisLookup(unittest.TestCase):
         """The plotted overview has ~2 s buckets; this walks the distance series."""
         with ld.LogFile.read(ENDURANCE) as log:
             distance = np.maximum.accumulate(
-                np.asarray(lapsmod._distance_series(log), dtype=float)
+                np.asarray(lapsmod.distance_on_master(log), dtype=float)
             )
             time = np.asarray(lapsmod._master_time(log), dtype=float)
             rate = log.sample_rate
@@ -1171,7 +1173,7 @@ class TestDistanceAxisLookup(unittest.TestCase):
     def test_a_distance_the_car_never_drove_is_refused(self):
         with ld.LogFile.read(HILL) as log:
             distance = np.maximum.accumulate(
-                np.asarray(lapsmod._distance_series(log), dtype=float)
+                np.asarray(lapsmod.distance_on_master(log), dtype=float)
             )
             far = float(distance[-1]) + 500.0
             grid = [float(value) for value in np.linspace(distance[0], distance[-1], 50)]
@@ -2127,6 +2129,377 @@ class TestMaths(unittest.TestCase):
             session, [mathsmod.Definition("甲", "车速 * 4"),
                       mathsmod.Definition("乙", "甲 + 1")], cache=cache)
         self.assertIs(again["乙"], second["乙"])
+
+
+class TestSections(unittest.TestCase):
+    """#7 赛道区段：切分本身是不依赖框架的纯函数，先用合成数据钉死它。"""
+
+    def _lap(self, length=400.0, corners=((100.0, 160.0), (260.0, 330.0)), step=1.0):
+        """一条假圈：指定距离区间里给一个"弯"的测度，其余是直道。"""
+        count = int(length / step) + 1
+        distance = np.arange(count, dtype=float) * step
+        measure = np.full(count, 0.1)
+        for start, end in corners:
+            measure[(distance >= start) & (distance <= end)] = 1.6
+        return distance, measure
+
+    def test_auto_split_tiles_the_lap_without_gaps_or_overlaps(self):
+        distance, measure = self._lap()
+        config = sectionsmod.auto_config(distance, measure, "lateral_g", 1.0, 20.0)
+        self.assertGreaterEqual(len(config.boundaries), 3)
+        self.assertEqual(config.boundaries[0], 0.0)
+        self.assertEqual(config.boundaries[-1], 400.0)
+        self.assertEqual(len(config.kinds), len(config.boundaries) - 1)
+        self.assertEqual(len(config.names), len(config.kinds))
+        self.assertGreater(config.boundaries[0], -1.0)
+        for left, right in zip(config.boundaries, config.boundaries[1:]):
+            self.assertGreater(right, left, "边界必须严格递增（否则就是重叠）")
+        rows = config.spans
+        self.assertAlmostEqual(sum(row["length_m"] for row in rows), 400.0, places=1)
+        # 每两条相邻区段的种类必须不同（"弯/直"交替，否则说明合并没做完）
+        for before, after in zip(config.kinds, config.kinds[1:]):
+            self.assertNotEqual(before, after)
+        self.assertFalse(config.edited, "自动切出来的不是'手工改过'")
+        self.assertEqual(config.reference_label, "")
+
+    def test_the_two_corners_land_where_they_were_put(self):
+        distance, measure = self._lap()
+        config = sectionsmod.auto_config(distance, measure, "lateral_g", 1.0, 20.0)
+        corners = [row for row in config.spans if row["kind"] == "corner"]
+        self.assertEqual(len(corners), 2, corners)
+        for row, expected in zip(corners, ((100.0, 160.0), (260.0, 330.0))):
+            self.assertLess(abs(row["start_distance"] - expected[0]), 8.0)
+            self.assertLess(abs(row["end_distance"] - expected[1]), 8.0)
+
+    def test_sensitivity_only_moves_the_corner_mileage_up(self):
+        distance, measure = self._lap(corners=((60.0, 140.0), (250.0, 300.0)))
+        mileage = []
+        for sensitivity in (0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 3.0):
+            config = sectionsmod.auto_config(distance, measure, "lateral_g", sensitivity, 20.0)
+            mileage.append(
+                sum(row["length_m"] for row in config.spans if row["kind"] == "corner")
+            )
+        for before, after in zip(mileage, mileage[1:]):
+            self.assertGreaterEqual(after, before, f"灵敏度调大反而少判了弯：{mileage}")
+        self.assertGreater(mileage[-1], mileage[0], f"灵敏度完全不起作用：{mileage}")
+
+    def test_a_flat_measure_means_one_straight_not_invented_corners(self):
+        """测度整场一个值（坏通道就长这样）时不许硬切出一堆假弯。"""
+        distance = np.arange(0, 500, 1.0)
+        measure = np.full(distance.size, 0.42)
+        config = sectionsmod.auto_config(distance, measure, "lateral_g", 1.0, 25.0)
+        self.assertEqual(len(config.spans), 1)
+        self.assertEqual(config.kinds, ("straight",))
+        self.assertEqual(config.names, ("直 1",))
+        self.assertEqual(config.boundaries, (0.0, 499.0))
+
+    def test_min_length_decides_whether_a_spike_is_a_corner(self):
+        # 阈值是分位数算的：60 m 的弯（占一圈 15%）稳在 90 分位之上，
+        # 4 m 的尖峰连 90 分位都够不到——那种"弯"本来就该被平滑掉。
+        distance, measure = self._lap(corners=((200.0, 260.0),))
+        loose = sectionsmod.auto_config(distance, measure, "lateral_g", 1.0, 80.0)
+        tight = sectionsmod.auto_config(distance, measure, "lateral_g", 1.0, 2.0)
+        self.assertEqual([row["kind"] for row in loose.spans], ["straight"])
+        self.assertIn("corner", [row["kind"] for row in tight.spans])
+
+    def test_absurd_parameters_say_what_to_change(self):
+        distance, measure = self._lap(length=200.0)
+        with self.assertRaises(ValueError) as caught:
+            sectionsmod.auto_config(distance, measure, "lateral_g", 1.0, 150.0)
+        self.assertIn("最短段长", str(caught.exception))
+        with self.assertRaises(ValueError) as caught:
+            sectionsmod.auto_config(distance, measure, "lateral_g", 0.0, 20.0)
+        self.assertIn("灵敏度", str(caught.exception))
+        with self.assertRaises(ValueError) as caught:
+            sectionsmod.auto_config(distance, measure, "nosuch", 1.0, 20.0)
+        self.assertIn("判据", str(caught.exception))
+
+    def test_manual_edits_get_sorted_clamped_and_still_cover_the_lap(self):
+        distance, measure = self._lap()
+        config = sectionsmod.auto_config(distance, measure, "lateral_g", 1.0, 20.0)
+        messy = replace(
+            config,
+            boundaries=(80.0, -30.0, 500.0, 80.4, 200.0),
+            kinds=("corner",),
+            names=("T1",),
+        )
+        fixed, notice = sectionsmod.normalize(messy, 400.0)
+        self.assertEqual(fixed.boundaries[0], 0.0)
+        self.assertEqual(fixed.boundaries[-1], 400.0)
+        self.assertEqual(list(fixed.boundaries), sorted(fixed.boundaries))
+        self.assertEqual(len(fixed.kinds), len(fixed.boundaries) - 1)
+        self.assertEqual(len(fixed.names), len(fixed.kinds))
+        self.assertTrue(fixed.edited, "手工整理过的必须立起 edited，否则重切会覆盖")
+        self.assertEqual(fixed.names[0], "T1")
+        self.assertTrue(all(name for name in fixed.names), "名字不许留空")
+        self.assertIsNotNone(notice)
+
+    def test_a_partial_boundary_list_is_completed_not_left_with_holes(self):
+        """手工编辑只给一条边界时，把它补成"覆盖整圈"，而不是留一段没人管的赛道。"""
+        distance, measure = self._lap()
+        config = sectionsmod.auto_config(distance, measure, "lateral_g", 1.0, 20.0)
+        fixed, notice = sectionsmod.normalize(replace(config, boundaries=(120.0,)), 400.0)
+        self.assertEqual(fixed.boundaries[0], 0.0)
+        self.assertEqual(fixed.boundaries[-1], 400.0)
+        self.assertEqual(len(fixed.kinds), len(fixed.boundaries) - 1)
+        self.assertIn("整理", notice or "")
+
+    def test_same_layout_tells_a_real_edit_from_a_no_op(self):
+        distance, measure = self._lap()
+        config = sectionsmod.auto_config(distance, measure, "lateral_g", 1.0, 20.0)
+        self.assertTrue(sectionsmod.same_layout(config, replace(config, edited=True)))
+        moved = replace(config, boundaries=(0.0, *config.boundaries[1:-1], config.boundaries[-1]))
+        self.assertTrue(sectionsmod.same_layout(config, moved))
+        renamed = replace(config, names=("别的名字", *config.names[1:]))
+        self.assertFalse(sectionsmod.same_layout(config, renamed))
+
+    def test_duplicate_names_are_shifted_apart(self):
+        distance, measure = self._lap()
+        config = sectionsmod.auto_config(distance, measure, "lateral_g", 1.0, 20.0)
+        same = replace(config, names=tuple(["弯"] * len(config.kinds)))
+        fixed = sectionsmod.dedupe_names(same)
+        self.assertEqual(len(set(fixed.names)), len(fixed.names))
+        self.assertEqual(fixed.names[0], "弯")
+        self.assertIn("弯 2", fixed.names)
+
+    def test_the_sidecar_round_trips_and_refuses_nonsense(self):
+        import tempfile
+
+        distance, measure = self._lap()
+        config = sectionsmod.auto_config(distance, measure, "curvature", 1.4, 30.0)
+        config = replace(config, reference_label="3", length_m=400.0, edited=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "场次.ld"
+            path = sectionsmod.save_config(session, config)
+            self.assertEqual(path.name, "场次.sections.json")
+            back = sectionsmod.load_config(session)
+            self.assertEqual(back, config)
+            self.assertTrue(back.edited)
+            path.write_text(json.dumps({"basis": "猜的", "boundaries": [0, 1]}), "utf-8")
+            with self.assertRaises(ValueError) as caught:
+                sectionsmod.load_config(session)
+            message = str(caught.exception)
+            self.assertIn("basis", message)
+            self.assertIn("删掉这个文件", message)
+
+    # ------------------------------------------------------------ 真数据
+    @_needs(HILL)
+    def test_the_golden_hill_lap_splits_into_corners_and_straights(self):
+        with ld.LogFile.read(HILL) as log:
+            laps = render.detect(log)
+            lap = sectionsmod.reference_lap(laps)
+            self.assertEqual(lap.label, "5", "参考圈应该是最快的完整圈")
+            config = sectionsmod.auto_for_log(log, lap, "curvature", 1.0)
+            summary = sectionsmod.summarize(log, lap, config)
+            self.assertEqual((summary["corners"], summary["straights"]), (3, 4))
+            self.assertAlmostEqual(summary["corner_m"], 408.0, delta=1.0)
+            self.assertAlmostEqual(summary["straight_m"], 404.0, delta=1.0)
+            self.assertAlmostEqual(
+                summary["corner_m"] + summary["straight_m"], summary["lap_length_m"], delta=0.5
+            )
+            # 灵敏度越大，判成弯的里程越多（实测 8 条曲线全单调不降）
+            mileage = [
+                sectionsmod.summarize(
+                    log, lap, sectionsmod.auto_for_log(log, lap, "curvature", value)
+                )["corner_m"]
+                for value in (0.5, 1.0, 1.5, 2.0, 3.0)
+            ]
+            self.assertEqual(mileage, sorted(mileage), f"灵敏度不单调：{mileage}")
+
+    @_needs(ENDURANCE)
+    def test_the_golden_endurance_lap_and_its_per_lap_marks(self):
+        with ld.LogFile.read(ENDURANCE) as log:
+            laps = render.detect(log)
+            lap = sectionsmod.reference_lap(laps)
+            config = sectionsmod.auto_for_log(log, lap, "curvature", 1.0)
+            summary = sectionsmod.summarize(log, lap, config)
+            self.assertEqual((summary["corners"], summary["straights"]), (6, 7))
+            self.assertAlmostEqual(summary["corner_m"], 376.0, delta=2.0)
+            marks = sectionsmod.lap_marks(log, laps, config)
+            self.assertEqual(len(marks), len(laps))
+            for row, source in zip(marks, laps):
+                self.assertLess(abs(row["times"][0] - source.start_time), 0.05)
+                self.assertLess(abs(row["times"][-1] - source.end_time), 0.05)
+                self.assertEqual(list(row["times"]), sorted(row["times"]))
+            # 每条圈的速度不一样：边界的**绝对时刻**不能拿参考圈平移出来
+            first, last = marks[0]["times"], marks[-1]["times"]
+            start0, start1 = laps[0].start_time, laps[-1].start_time
+            self.assertNotAlmostEqual(first[1] - start0, last[1] - start1, places=2)
+            self.assertNotEqual(laps[0].lap_time, laps[-1].lap_time)
+
+    @_needs(HILL)
+    def test_bands_land_inside_the_lap_they_are_asked_about(self):
+        with ld.LogFile.read(HILL) as log:
+            laps = render.detect(log)
+            lap = laps[1]
+            config = sectionsmod.auto_for_log(log, sectionsmod.reference_lap(laps), "lateral_g", 1.0)
+            rows = sectionsmod.bands(log, lap, config)
+            self.assertTrue(rows)
+            self.assertAlmostEqual(rows[0]["start_time"], lap.start_time, delta=0.05)
+            self.assertAlmostEqual(rows[-1]["end_time"], lap.end_time, delta=0.05)
+            for before, after in zip(rows, rows[1:]):
+                self.assertAlmostEqual(before["end_time"], after["start_time"], delta=0.05)
+                self.assertAlmostEqual(before["end_distance"], after["start_distance"], delta=0.05)
+
+    @_needs(HILL)
+    def test_a_stored_split_on_another_lap_says_so(self):
+        """换参考圈之后边界不在原来的距离上了：要说出来，不许悄悄按新圈用。"""
+        import shutil
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / HILL.name
+            shutil.copyfile(HILL, session)
+            with ld.LogFile.read(session) as log:
+                laps = render.detect(log)
+                lap = sectionsmod.reference_lap(laps)
+                config = sectionsmod.auto_for_log(log, lap, "curvature", 1.0)
+                sectionsmod.save_config(session, replace(config, reference_label="1",
+                                                         edited=True))
+                stored, notice = sectionsmod.effective_config(log, laps)
+            self.assertTrue(stored.edited)
+            self.assertIn("第 1 圈", notice or "")
+            self.assertIn("第 5 圈", notice or "")
+            self.assertIn("重切", notice or "")
+
+    @_needs(HILL)
+    def test_the_curvature_basis_is_not_the_dead_Curvature_channel(self):
+        """场次里那条叫 `Curvature` 的通道整场是 0，不能被当成判据。"""
+        with ld.LogFile.read(HILL) as log:
+            raw = np.asarray(derive.hold_to_master(log, "Curvature"), dtype=float)
+            self.assertEqual(float(np.nanmax(np.abs(raw))), 0.0)
+            measure = sectionsmod.measure_series(log, "curvature")
+            self.assertGreater(float(np.nanpercentile(measure, 90)), 0.01)
+            self.assertEqual(sectionsmod.measure_unit("curvature"), "1/m")
+
+
+class TestSectionsOverHttp(unittest.TestCase):
+    """#7 走到界面之前的那一段：GET/PUT + 侧车 + "不许悄悄覆盖手工改动"。"""
+
+    @_needs(HILL)
+    def test_sections_are_served_saved_and_protected(self):
+        import tempfile
+        from http.server import ThreadingHTTPServer
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            copy = root / HILL.name
+            copy.write_bytes(HILL.read_bytes())
+            before = copy.read_bytes()
+            library = server.SessionLibrary([root], cache_size=1, maths_root=root)
+            httpd = ThreadingHTTPServer(
+                ("127.0.0.1", 0), server.make_handler(library, buckets=200)
+            )
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            base = f"http://127.0.0.1:{httpd.server_address[1]}"
+            quoted = urllib.parse.quote(copy.stem)
+
+            def request(path, method="GET", payload=None):
+                body = None if payload is None else json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(base + path, data=body, method=method)
+                if body is not None:
+                    req.add_header("Content-Type", "application/json")
+                try:
+                    with urllib.request.urlopen(req, timeout=120) as response:
+                        return response.status, json.loads(response.read().decode("utf-8"))
+                except urllib.error.HTTPError as exc:
+                    return exc.code, json.loads(exc.read().decode("utf-8"))
+
+            try:
+                # 没存过侧车：GET 也要给出"按缺省参数切好的一份"（不落盘）
+                status, state = request(f"/api/session/{quoted}/sections")
+                self.assertEqual(status, 200, state)
+                self.assertEqual(state["lap"], "5")
+                self.assertTrue(state["bands"])
+                self.assertTrue(state["laps"])
+                self.assertEqual(state["available"], ["curvature", "lateral_g"])
+                self.assertFalse((root / f"{copy.stem}.sections.json").exists(),
+                                 "看一眼区段不该写盘")
+                first_boundaries = state["config"]["boundaries"]
+
+                # 重切：按横向加速度、灵敏度 1.5
+                status, state = request(
+                    f"/api/session/{quoted}/sections", "PUT",
+                    {"auto": True, "basis": "lateral_g", "sensitivity": 1.5},
+                )
+                self.assertEqual(status, 200, state)
+                self.assertEqual(state["saved"], f"{copy.stem}.sections.json")
+                self.assertEqual(state["config"]["basis"], "lateral_g")
+                self.assertAlmostEqual(state["config"]["sensitivity"], 1.5, places=6)
+                self.assertFalse(state["config"]["edited"])
+                sidecar = json.loads((root / f"{copy.stem}.sections.json").read_text("utf-8"))
+                self.assertEqual(sidecar["basis"], "lateral_g")
+                self.assertEqual(copy.read_bytes(), before, ".ld 被写过了")
+                self.assertNotEqual(sidecar["boundaries"], first_boundaries)
+
+                # 手工改名字 + 挪一条边界：进侧车，edited 立起来
+                names = list(state["config"]["names"])
+                names[1] = "T1 入弯"
+                boundaries = list(state["config"]["boundaries"])
+                boundaries[1] = boundaries[1] + 7.0
+                status, state = request(
+                    f"/api/session/{quoted}/sections", "PUT",
+                    {"boundaries": boundaries, "names": names,
+                     "kinds": state["config"]["kinds"]},
+                )
+                self.assertEqual(status, 200, state)
+                self.assertTrue(state["config"]["edited"])
+                self.assertEqual(state["config"]["names"][1], "T1 入弯")
+                self.assertAlmostEqual(state["config"]["boundaries"][1], boundaries[1], places=1)
+                self.assertEqual(state["bands"][1]["name"], "T1 入弯")
+                self.assertIn("整理", state["notice"] or "")
+
+                # 自动重切不许悄悄覆盖：先 400（带 needs_force），再来一次带 force 才动
+                status, body = request(
+                    f"/api/session/{quoted}/sections", "PUT",
+                    {"auto": True, "basis": "curvature", "sensitivity": 1.0},
+                )
+                self.assertEqual(status, 400, body)
+                self.assertTrue(body["needs_force"])
+                self.assertIn("手工改过", body["error"])
+                kept = json.loads((root / f"{copy.stem}.sections.json").read_text("utf-8"))
+                self.assertEqual(kept["names"][1], "T1 入弯", "被挡住的重切还是动了侧车")
+                status, state = request(
+                    f"/api/session/{quoted}/sections", "PUT",
+                    {"auto": True, "basis": "curvature", "sensitivity": 1.0, "force": True},
+                )
+                self.assertEqual(status, 200, state)
+                self.assertFalse(state["config"]["edited"])
+                self.assertEqual(state["config"]["basis"], "curvature")
+                self.assertNotIn("T1 入弯", state["config"]["names"])
+                self.assertIn("覆盖", state["notice"] or "")
+
+                # 存过之后重新打开：读到的还是存下来的那一份
+                status, again = request(f"/api/session/{quoted}/sections")
+                self.assertEqual(status, 200)
+                self.assertEqual(again["config"], state["config"])
+
+                # 坏请求要有下一步：一条边界、不认识的判据、没圈可切
+                status, body = request(
+                    f"/api/session/{quoted}/sections", "PUT", {"names": ["只有名字"]}
+                )
+                self.assertEqual(status, 400, body)
+                self.assertIn("boundaries", body["error"])
+                status, body = request(
+                    f"/api/session/{quoted}/sections", "PUT",
+                    {"auto": True, "basis": "凭感觉"},
+                )
+                self.assertEqual(status, 400)
+                self.assertIn("判据", body["error"])
+                # 只给一条边界：补成覆盖整圈的区段，并说清整理了什么
+                status, state = request(
+                    f"/api/session/{quoted}/sections", "PUT", {"boundaries": [120.0]}
+                )
+                self.assertEqual(status, 200, state)
+                self.assertEqual(state["config"]["boundaries"][0], 0.0)
+                self.assertEqual(state["config"]["boundaries"][-1], round(
+                    float(sectionsmod.lap_distance(
+                        library.get(copy.stem), sectionsmod.reference_lap(render.detect(
+                            library.get(copy.stem))))[-1]), 1))
+                self.assertIn("整理", state["notice"] or "")
+            finally:
+                httpd.shutdown()
+                library.close()
 
 
 class TestMathsOverHttp(unittest.TestCase):

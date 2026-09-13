@@ -160,6 +160,13 @@
   .mfuncs { max-height:190px; overflow:auto; margin-top:4px; font-size:11px; }
   .mfuncs .mfunc { padding:2px 4px; border-bottom:1px solid #1d222b; }
   .mfuncs .mfunc b { color:var(--accent); }
+  .srow { display:flex; align-items:center; gap:4px; font-size:11px; padding:2px 0; }
+  .srow .skind { cursor:pointer; border:1px solid #46505f; border-radius:3px; padding:0 4px; }
+  .srow .skind.corner { color:var(--warn); border-color:var(--warn); }
+  .srow .sname { flex:1; min-width:0; }
+  .srow .sedge { width:62px; }
+  .srow .slen { color:var(--muted); white-space:nowrap; }
+  .srow.dim { opacity:.55; }
 </style>
 </head>
 <body>
@@ -170,6 +177,7 @@
   <button id="modeTime" class="on">时间轴</button>
   <button id="modeDistance">距离轴</button>
   <button id="modeOverlay">双圈对比</button>
+  <button id="toggleSections" class="on" title="在时间轴上显示赛道区段带子">区段</button>
   <button id="resetView">重置</button>
   <button id="shareBtn">分享链接</button>
   <button id="pngBtn">导出 PNG</button>
@@ -196,6 +204,19 @@
       <div class="beacons" id="beaconList"></div>
       <table id="lapTable"></table>
       <div class="hint">点=基准圈(蓝)并跳到该圈 · <kbd>Ctrl</kbd>+点=对比圈(橙) · <kbd>Shift</kbd>+点=只跳转</div>
+    </div>
+    <div class="group" id="sectionsGroup">
+      <h2>赛道区段 <span class="count" id="sectionsCount"></span></h2>
+      <div class="row">
+        <select id="sectionsBasis" title="按什么切"></select>
+        <input type="number" id="sectionsSensitivity" step="0.1" min="0.2" max="5" value="1"
+               title="灵敏度：越大越容易判成弯（判成弯的里程不会减少）">
+        <button id="sectionsAuto" title="按上面的判据与灵敏度重新切分">重切</button>
+      </div>
+      <div class="hint" id="sectionsNote"></div>
+      <div class="slist" id="sectionsList"></div>
+      <div class="hint">点「弯 / 直」切换种类 · 改名字或起点距离就存下来（<kbd>回车</kbd> 保存）·
+        <kbd>G</kbd> 旁边的「区段」按钮可把带子从图上收起来</div>
     </div>
     <div class="group" id="valuesGroup">
       <h2>光标值 <span class="count" id="cursorInfo"></span></h2>
@@ -520,6 +541,12 @@ const state = {
   track: (DATA && DATA.track) || null,
   points: null,
   lapsConfig: { mode: "auto", beacons: [], trusted: {} },
+  //: 赛道区段：GET/PUT 的最近一次载荷；快照模式下来自注入的 DATA.sections。
+  sections: (DATA && DATA.sections) || null,
+  //: 图上要不要画区段带子（时间轴模式，默认开）。
+  showSections: true,
+  //: 上一次重切被"手工改过"挡住了？再点一次就带 force 覆盖。
+  sectionsForce: false,
   //: 服务内存里还留着一版可以撤销的配置？由服务的响应说了算，界面不猜。
   canUndo: false,
   placeBeacon: false,
@@ -918,6 +945,41 @@ function drawGrid(ctx, pad, plotW, plotH, y0, y1, x0, x1, xLabel, ticks) {
     }
     ctx.stroke();
   }
+}
+
+/**
+ * 赛道区段的带子：弯道暖色、直道冷色，边界画一根淡竖线。
+ *
+ * 只在**时间轴**上画。区段是按距离定义的，每条圈的速度不一样，所以跨圈的带子
+ * 得用服务端算好的"每条圈自己的边界时刻"（`sections.laps[].times`）——拿参考圈
+ * 的秒数平移会画到隔壁圈去。距离轴模式下每条圈的走线长度不同，宁可不画。
+ */
+function drawSectionBands(ctx, pad, plotW, plotH, x0, x1) {
+  const info = sectionsState();
+  if (!info || !state.showSections || state.mode !== "time" || !info.laps) return 0;
+  const kinds = (info.config || {}).kinds || [];
+  const sx = (v) => pad.l + ((v - x0) / (x1 - x0 || 1)) * plotW;
+  let drawn = 0;
+  for (const lap of info.laps) {
+    const times = lap.times || [];
+    for (let i = 0; i + 1 < times.length; i++) {
+      const start = times[i], end = times[i + 1];
+      if (!(end > x0) || !(start < x1)) continue;
+      const left = sx(Math.max(start, x0));
+      const right = sx(Math.min(end, x1));
+      if (right - left < 0.5) continue;
+      ctx.fillStyle = kinds[i] === "corner" ? "rgba(255,158,64,.10)" : "rgba(96,164,255,.055)";
+      ctx.fillRect(left, pad.t, right - left, plotH);
+      ctx.strokeStyle = "rgba(160,175,200,.16)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(Math.round(left) + .5, pad.t);
+      ctx.lineTo(Math.round(left) + .5, pad.t + plotH);
+      ctx.stroke();
+      drawn += 1;
+    }
+  }
+  return drawn;
 }
 
 function drawTraces(ctx, pad, plotW, plotH, x0, x1, y0, y1, specs) {
@@ -1433,6 +1495,7 @@ function renderGraphComponent(comp, b) {
       const plotH = panel.panelH - padBase.t - padBase.b;
       const plotW = off.w - pad.l - pad.r;
       const scale = groupScaleFor(group, comp);
+      drawSectionBands(octx, pad, plotW, plotH, r[0], r[1]);
       drawGrid(octx, pad, plotW, plotH,
                scale[0], scale[1], r[0], r[1], gi === groups.length - 1 ? axisUnit() : "", ticks);
       drawTraces(octx, pad, plotW, plotH,
@@ -2794,6 +2857,164 @@ function mathsDelete(index) {
   });
 }
 
+/* -------------------------------------------------------------- 赛道区段 */
+
+/** 区段的当前载荷：改过就用服务端刚回来的那份，否则用注入的（快照）。 */
+function sectionsState() { return state.sections || (DATA && DATA.sections) || null; }
+
+/**
+ * 左侧的区段表：每行 = 一条区段（种类 / 名字 / 起点距离 / 长度）。
+ *
+ * 起点距离是**沿参考圈量的米**，不是时刻；第 1 行的起点永远锁在 0，最后一行的
+ * 终点永远锁在本圈长度上（服务端会这么整理，界面上直接说明白，省得用户改完了
+ * 发现被"改回去"）。点种类那一格切换弯/直，改名字/距离回车即存。
+ */
+function renderSections() {
+  const list = $("sectionsList");
+  if (!list) return;
+  const info = sectionsState() || {};
+  const labels = info.basis_labels || { curvature: "曲率", lateral_g: "横向加速度" };
+  const available = info.available || Object.keys(labels);
+  const pick = $("sectionsBasis");
+  if (pick) {
+    pick.innerHTML = available
+      .map((key) => '<option value="' + esc(key) + '">按' + esc(labels[key] || key) + "</option>")
+      .join("");
+    const wanted = (info.config || {}).basis || available[0] || "";
+    if (available.indexOf(wanted) >= 0) pick.value = wanted;
+  }
+  const sens = $("sectionsSensitivity");
+  if (sens && info.config && typeof document.activeElement !== "undefined"
+      && document.activeElement !== sens) {
+    sens.value = String(info.config.sensitivity);
+  }
+  const rows = info.bands || [];
+  list.innerHTML = rows.map((row) => {
+    const first = row.index === 0;
+    return '<div class="srow" data-section-row="' + row.index + '">'
+      + '<span class="skind' + (row.kind === "corner" ? " corner" : "")
+      + '" data-section-kind="' + row.index + '" title="点一下切换弯 / 直">'
+      + esc(row.kind_label) + "</span>"
+      + '<input class="sname" data-section-name="' + row.index + '" value="' + esc(row.name)
+      + '" title="区段名字（报表与图例用它）">'
+      + '<input class="sedge" type="number" step="1" data-section-edge="' + row.index
+      + '" value="' + row.start_distance + '"' + (first ? " disabled" : "")
+      + ' title="' + (first ? "第 1 段的起点永远是 0 米" : "这一段的起点距离（米，沿参考圈量）")
+      + '">'
+      + '<span class="slen">' + fmt(row.length_m, 1) + " m</span></div>";
+  }).join("");
+  const count = $("sectionsCount");
+  if (count) count.textContent = rows.length ? String(rows.length) : "";
+  const note = $("sectionsNote");
+  if (note) {
+    const parts = [];
+    if (info.error) parts.push("切不了区段：" + info.error);
+    else if (info.lap) {
+      const summary = info.summary || {};
+      parts.push("参考圈 第 " + info.lap + " 圈（" + fmt(info.length_m, 0) + " m）");
+      if (summary.corners !== undefined) {
+        parts.push("弯 " + summary.corners + " 条 " + fmt(summary.corner_m, 0) + " m · 直 "
+          + summary.straights + " 条 " + fmt(summary.straight_m, 0) + " m");
+      }
+      parts.push("按" + (labels[(info.config || {}).basis] || "—"));
+      if ((info.config || {}).edited) parts.push("边界被手工改过");
+    }
+    if (info.notice) parts.push(info.notice);
+    if (!DATA || !DATA.api) parts.push("快照模式：区段能看，改不了（这是快照，改了也带不走）");
+    note.textContent = parts.join(" · ");
+  }
+}
+
+/** 手工改一条区段时发给服务端的完整定义（服务端只认整份，不做增量合并）。 */
+function sectionsManualPayload(changes) {
+  const config = (sectionsState() || {}).config || {};
+  const out = {
+    boundaries: (config.boundaries || []).slice(),
+    kinds: (config.kinds || []).slice(),
+    names: (config.names || []).slice(),
+    basis: config.basis || "lateral_g",
+    sensitivity: config.sensitivity || 1,
+    min_length_m: config.min_length_m || 25,
+  };
+  Object.keys(changes || {}).forEach((key) => { out[key] = changes[key]; });
+  return out;
+}
+
+async function saveSections(payload, okMessage) {
+  if (!DATA || !DATA.api) { toast("快照模式不能改区段，用 serve 模式"); return null; }
+  try {
+    const res = await fetch(DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/sections", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      if (data && data.needs_force) {
+        // 手工改过再重切要按两次：第一次拦住并说清后果，第二次才真的覆盖
+        state.sectionsForce = true;
+        toast(data.error);
+      } else {
+        toast("区段没保存：" + ((data && data.error) || ("HTTP " + res.status)));
+      }
+      return null;
+    }
+    applySectionsResponse(data);
+    if (okMessage) toast(okMessage);
+    return data;
+  } catch (err) {
+    toast("区段没保存：" + err.message);
+    return null;
+  }
+}
+
+function applySectionsResponse(data) {
+  state.sections = data;
+  state.sectionsForce = false;
+  renderSections();
+  renderAll();
+}
+
+async function loadSections() {
+  if (!DATA || !DATA.api) { renderSections(); return null; }
+  try {
+    const res = await fetch(DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/sections");
+    if (!res.ok) return null;
+    state.sections = await res.json();
+    renderSections();
+    return state.sections;
+  } catch (err) {
+    return null;
+  }
+}
+
+function sectionsAuto() {
+  const basis = $("sectionsBasis") ? $("sectionsBasis").value : "lateral_g";
+  const raw = $("sectionsSensitivity") ? Number($("sectionsSensitivity").value) : 1;
+  const sensitivity = Number.isFinite(raw) && raw > 0 ? raw : 1;
+  const payload = { auto: true, basis: basis, sensitivity: sensitivity };
+  if (state.sectionsForce) payload.force = true;
+  return saveSections(payload, "已按" + basis + "、灵敏度 " + sensitivity + " 重新切分");
+}
+
+function setSectionName(index, value) {
+  const names = (((sectionsState() || {}).config || {}).names || []).slice();
+  names[index] = String(value || "");
+  return saveSections(sectionsManualPayload({ names: names }), "区段名字已存进侧车");
+}
+
+function setSectionEdge(index, metres) {
+  const boundaries = (((sectionsState() || {}).config || {}).boundaries || []).slice();
+  boundaries[index] = Number(metres);
+  return saveSections(sectionsManualPayload({ boundaries: boundaries }), "区段边界已存进侧车");
+}
+
+function toggleSectionKind(index) {
+  const kinds = (((sectionsState() || {}).config || {}).kinds || []).slice();
+  kinds[index] = kinds[index] === "corner" ? "straight" : "corner";
+  return saveSections(sectionsManualPayload({ kinds: kinds }), "区段种类已存进侧车");
+}
+
 async function loadMaths() {
   if (DATA && DATA.api) {
     try {
@@ -3588,6 +3809,31 @@ function init() {
     box.hidden = !box.hidden;
   });
   loadMaths();
+  const sectionsList = $("sectionsList");
+  if (sectionsList) {
+    sectionsList.addEventListener("change", (event) => {
+      const target = event && event.target ? event.target : {};
+      const nameIndex = target.dataset ? target.dataset.sectionName : undefined;
+      const edgeIndex = target.dataset ? target.dataset.sectionEdge : undefined;
+      if (nameIndex !== undefined) setSectionName(Number(nameIndex), target.value);
+      else if (edgeIndex !== undefined) setSectionEdge(Number(edgeIndex), target.value);
+    });
+    sectionsList.addEventListener("click", (event) => {
+      const target = event && event.target ? event.target : {};
+      const kindIndex = target.dataset ? target.dataset.sectionKind : undefined;
+      if (kindIndex !== undefined) toggleSectionKind(Number(kindIndex));
+    });
+  }
+  if ($("sectionsAuto")) $("sectionsAuto").addEventListener("click", sectionsAuto);
+  if ($("toggleSections")) {
+    $("toggleSections").addEventListener("click", () => {
+      state.showSections = !state.showSections;
+      $("toggleSections").classList.toggle("on", state.showSections);
+      renderAll();
+    });
+  }
+  renderSections();
+  loadSections();
   $("chClear").addEventListener("click", () => {
     setSelectedChannels([]);
     buildWorksheet();
@@ -3661,6 +3907,12 @@ window.i3pro = {
   reindexChannels: reindexChannels, selectChannel: selectChannel,
   mathsState: mathsState, escapeText: escapeText,
   insertMathsChannel: insertMathsChannel, renderMathsChannelPicker: renderMathsChannelPicker,
+  sectionsState: sectionsState, renderSections: renderSections,
+  sectionsManualPayload: sectionsManualPayload, saveSections: saveSections,
+  applySectionsResponse: applySectionsResponse, loadSections: loadSections,
+  sectionsAuto: sectionsAuto, setSectionName: setSectionName,
+  setSectionEdge: setSectionEdge, toggleSectionKind: toggleSectionKind,
+  drawSectionBands: drawSectionBands,
 };
 </script>
 </body>

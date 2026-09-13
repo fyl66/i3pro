@@ -20,13 +20,14 @@ import socket
 import threading
 import webbrowser
 from collections import OrderedDict
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import numpy as np
 
-from . import csvlog, derive, importer, laps as lapsmod, maths, render, store
+from . import csvlog, derive, importer, laps as lapsmod, maths, render, sections, store
 from . import ld as ldmod
 
 __all__ = ["SessionLibrary", "serve", "make_handler"]
@@ -449,6 +450,13 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                     }
                 )
 
+            if action == "sections":
+                # 赛道区段（i2 Pro 的 Track Sections）：GET 看当前生效的，
+                # PUT 重切（auto）或手工改边界/名字。
+                if method == "PUT":
+                    return self.save_sections(log)
+                return self._json(render.sections_payload(log, render.detect(log)))
+
             if action == "maths":
                 # 数学通道：GET 看当前生效的定义，PUT 存，POST 试算一条式子
                 if method == "PUT":
@@ -556,6 +564,98 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
             return lapsmod.undo_config(current, library.laps_undo_slot(log.path)) is not None
 
         # ------------------------------------------------------------ upload
+        def save_sections(self, log) -> None:
+            """PUT /api/session/<name>/sections：重切（``auto``）或手工改边界 / 名字。
+
+            两条路落在同一个侧车里，区别只有一个：**手工改过之后 ``edited`` 就立
+            起来**，再点"重切"会先被挡住——ticket #7 要的就是"自动切分不会悄悄
+            覆盖手工改动"。确认要覆盖时带上 ``force``（对应 i2 Pro Track Editor
+            里的"重新生成"）。
+            """
+            try:
+                data = self._read_json()
+            except (ValueError, UnicodeDecodeError) as exc:
+                return self._error(400, str(exc))
+            if not isinstance(data, dict):
+                return self._error(400, "需要一个 JSON 对象")
+            recognized = render.detect(log)
+            lap = sections.reference_lap(recognized)
+            if lap is None:
+                return self._error(400, "本场还没有圈，先切圈（放一个信标）再来分区段")
+            try:
+                stored = sections.load_config(log.path)
+                length = float(sections.lap_distance(log, lap)[-1])
+            except ValueError as exc:
+                return self._error(400, str(exc))
+            notice = None
+
+            if data.get("auto"):
+                if stored is not None and stored.edited and not data.get("force"):
+                    return self._json(
+                        {
+                            "error": "这一场的区段被手工改过，重切会覆盖你的边界与名字；"
+                                     "确认要覆盖就再点一次「重切」",
+                            "needs_force": True,
+                        },
+                        400,
+                    )
+                basis = str(data.get("basis") or (stored.basis if stored else "lateral_g"))
+                try:
+                    sensitivity = data.get("sensitivity")
+                    sensitivity = (
+                        float(sensitivity) if sensitivity is not None
+                        else (stored.sensitivity if stored and stored.basis == basis
+                              else sections.DEFAULT_SENSITIVITY)
+                    )
+                    raw_min = data.get("min_length_m")
+                    min_length = (
+                        float(raw_min) if raw_min is not None
+                        else (stored.min_length_m if stored else sections.DEFAULT_MIN_SECTION_M)
+                    )
+                    config = sections.auto_for_log(log, lap, basis, sensitivity, min_length)
+                except (TypeError, ValueError) as exc:
+                    return self._error(400, str(exc))
+                if stored is not None and stored.edited:
+                    notice = "已按新参数重新切分，手工改过的边界与名字被覆盖了"
+            else:
+                try:
+                    # 手工编辑必须带边界：只发一段名字的话，"改第 2 段"到底指哪一段
+                    # 全靠猜。界面本来就整份发，这条规矩是给别的调用方看的。
+                    if not data.get("boundaries"):
+                        return self._error(
+                            400,
+                            "手工改区段要给出 boundaries（至少两条：0 与本圈长度）；"
+                            "要按曲率／横向加速度自动切一次就带上 auto",
+                        )
+                    merged = {**(stored.as_dict() if stored else {}), **data}
+                    # 只发了一半的 kinds / names 时，后半段沿用侧车里那一份：
+                    # 否则"改第一条的名字"会把后面几条顺手打回默认编号。
+                    if stored is not None:
+                        for key in ("kinds", "names"):
+                            if key in data:
+                                incoming_list = list(data.get(key) or [])
+                                kept = list(getattr(stored, key))
+                                if len(incoming_list) < len(kept):
+                                    merged[key] = incoming_list + kept[len(incoming_list):]
+                    incoming = sections.SectionConfig.from_dict(merged)
+                    config, notice = sections.normalize(
+                        sections.dedupe_names(incoming), length
+                    )
+                except (TypeError, ValueError) as exc:
+                    return self._error(400, str(exc))
+                # 手工改的边界是按**当前这条参考圈**量的，记下来，换参考圈时能提醒
+                unchanged = stored is not None and sections.same_layout(stored, config)
+                config = replace(
+                    config,
+                    reference_label=lap.label,
+                    edited=stored.edited if unchanged else True,
+                )
+
+            path = sections.save_config(log.path, config)
+            payload = render.sections_payload(log, recognized, config, notice=notice)
+            payload["saved"] = path.name
+            self._json(payload)
+
         # ------------------------------------------------------ maths editing
         def _read_json(self):
             length = int(self.headers.get("Content-Length") or 0)

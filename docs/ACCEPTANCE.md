@@ -779,7 +779,7 @@ i2 Pro 的 **Missed Beacons**：车确实穿过了起终点，但没被检出，
 | 一次**什么都没改**的保存不吃掉上一步（"顺手保存一下"不能让用户撤不回来） | 同上 |
 | 没有可撤销的一步时，接口 400 并说下一步做什么（"改一次信标再来撤销"），且不动边车 | 同上 |
 | 刷新页面后按钮仍然说得准：页面注入的 `laps_can_undo` 由服务给出，`false` → `true` → `false` 三态都对 | 同上（`page_payload()`） |
-| UI：没有可撤销的一步时按钮是 **disabled**（不是静默失败） | `tools/smoke_viewer.js` 第 23 组 |
+| UI：没有可撤销的一步时按钮是 **disabled**（不是静默失败） | `tools/smoke_viewer.js` 第 24 组（第 23 组是赛道区段） |
 | UI：**灰按钮不会被点**——浏览器不会把 click / 焦点送给 disabled 控件，所以"点了为什么没反应"的解释要有别的出口：代码里另留一道守卫（脚本直接调 `undoBeaconEdit()` 时说明原因），按钮 `title` 也写着当前状态 | 同上（注意：无头 harness 的假元素**不做**这条浏览器规则的模拟，它的"点了有提示"不能当成真实浏览器行为） |
 | UI：撤销发的是 `{"undo":true}`，**不是**把整份配置重发一遍 | 同上 |
 | UI：按服务返回的 `can_undo` 决定按钮亮灰，并弹出"已撤销上一步信标编辑" | 同上 |
@@ -795,6 +795,77 @@ i2 Pro 的 **Missed Beacons**：车确实穿过了起终点，但没被检出，
    越界穿越之后就再也撤不回来了。
 3. **撤销路径也不跑 `reconcile_edits`。** 槽里存的本来就是上一次规范化之后的配置，"原样交回去"
    才是这个功能的本义；再规范化一遍只会给"撤销"加入它不该有的判断。
+
+---
+
+## A30 · 赛道区段：自动切分与手动编辑（ticket #7）
+
+**语义**（`CONTEXT.md` 里也钉了一条）：赛道区段 = 沿**距离**量出来的一段（弯道或直道），
+边界以米记在一条**参考圈**上，套在每一条圈上使用。它不是圈（计时的单位，见 A8），
+也不是环（几何回环）。自动切分给出第一版，人改过之后由人说了算。
+
+```powershell
+python -m unittest tests.test_i3pro.TestSections tests.test_i3pro.TestSectionsOverHttp -v
+.\i3pro.cmd snapshot --data i2pro_data --out out
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"     # 第 23 组断言
+```
+
+**这次实测出来的三件事，决定了实现的样子**：
+
+1. **场次里那条叫 `Curvature` 的通道整场都是 0**（两份金标准场次都是），`Radius` 在耐久正赛里
+   也整场是 0（高避5圈里中位 18 m，不像真实半径）。拿它们当判据会"切出一整条直道"却看着像
+   成功了。所以两个判据都是现算的：
+
+   | 判据 | 是什么 | 单位 | 特点 |
+   | --- | --- | --- | --- |
+   | 曲率（`curvature`） | GPS 轨迹的 `\|d(航向)/d(距离)\|` | 1/m | 与速度无关；位移 < 5 cm 的相邻点记为直行（车几乎不动时方位角抖动除以小位移会炸出天文数字） |
+   | 横向加速度（`lateral_g`） | `\|G Force Lat\|` | G | 与速度有关：慢的发夹弯在这里显得弱 |
+
+2. **阈值用分位数算**：`10 分位 + (90 分位 − 10 分位) × 0.35 ÷ 灵敏度`。不同车、不同赛道的
+   曲率量级差几倍，绝对值阈值在这条赛道上能用、换条就废。灵敏度是唯一旋钮，实测**单调**：
+   高避5圈按曲率把灵敏度从 0.3 调到 3.0，判成弯的里程是 0 / 136 / 218 / 408 / 461 / 547 / 595 m
+   （每一步都不减；条数不一定增——两条弯之间的短直道短于最短段长时会被并成一条大弯）。
+3. **边界定在 1 m 的均匀距离网格上**：按时间采样的样本在慢弯里挤成一团，直接对样本做阈值
+   会让边界全挤在同一个地方。
+
+**实测数字**（临时探针 `out\probe_sections.py` / `out\probe_sections2.py`；单测里钉了同样的值）：
+
+| 场次 | 参考圈（最快完整圈） | 判据 @ 灵敏度 1.0 | 结果 |
+| --- | --- | --- | --- |
+| 20260908-cjh 高避5圈 | 第 5 圈，40.440 s / 812.1 m | 曲率 | 弯 3 条 408.0 m + 直 4 条 404.0 m = 812.0 m（圈长 812.1） |
+| 20260908-cjh 高避5圈 | 同上 | 横向加速度 | 弯 4 条 634.0 m + 直 4 条 178.0 m |
+| 20260524-耐久正赛 | 第 10 圈，54.900 s / 813.8 m | 曲率 | 弯 6 条 376.0 m + 直 7 条 438.0 m |
+| 20260524-耐久正赛 | 同上 | 横向加速度 | 弯 2 条 674.9 m + 直 3 条 139.0 m |
+| 20260912-TV0 | 第 8 圈，10.980 s / 113.4 m | 曲率 | 中位半径 **6.2 m** → 整圈都在转弯（"整圈一条弯"是实话，不是噪声） |
+| 合肥八字陈君灏 | 第 2 圈，14.300 s / 148.1 m | 曲率 | 中位半径 **8.4 m** → 同上，八字本来就是一直在转 |
+
+**通过判据**：
+
+| 验收条目（ticket #7 原话） | 断言 / 位置 |
+| --- | --- |
+| 自动切分给出弯道与直道两类区段，**覆盖整圈、不重叠、不留缝** | 合成数据：边界首 0 尾 L、严格递增、相邻种类必不同、各段长度和 == 圈长（±0.5 m）——`TestSections::test_auto_split_tiles_the_lap_without_gaps_or_overlaps`；真数据：`TestSections::test_the_golden_hill_lap_splits_into_corners_and_straights` |
+| 自动切分放在该在的地方（不是"切了就算"） | 两个已知位置的弯，切出来的起止距离与放进去的相差 < 8 m：`TestSections::test_the_two_corners_land_where_they_were_put` |
+| **灵敏度可调** | 0.3→3.0 七档：判成弯的里程单调不降、且首尾必须不同（合成数据与两份金标准都测）：`test_sensitivity_only_moves_the_corner_mileage_up`、`test_the_golden_hill_lap_splits_into_corners_and_straights` |
+| **看得出按什么切** | 载荷里带 `basis` + `basis_labels`，界面下拉与提示行直接写"按曲率 / 按横向加速度"；判据没得选（没有 GPS 轨迹 / 没有 `G Force Lat`）时 400 并说清缺什么——`sections.available_bases`、`TestSectionsOverHttp` |
+| 判据不是那条坏通道 | 金标准里 `Curvature` 整场为 0，而 GPS 曲率的 90 分位 > 0.01：`test_the_curvature_basis_is_not_the_dead_Curvature_channel` |
+| 坏参数要说下一步 | 最短段长 > 半圈、灵敏度 ≤ 0、不认识的判据，三种都给出可操作的报错：`test_absurd_parameters_say_what_to_change` |
+| **边界与名字可手动编辑** | `PUT /api/session/<n>/sections`（带 `boundaries`/`kinds`/`names`）→ 归一化（排序、去重、夹在 [0, 圈长]、补齐首尾）、名字不许重复、名字空着给默认：`test_manual_edits_get_sorted_clamped_and_still_cover_the_lap`、`test_duplicate_names_are_shifted_apart` |
+| 只给一条边界也不许留洞 | 补成覆盖整圈并给出 `notice`：`test_a_partial_boundary_list_is_completed_not_left_with_holes` |
+| **手动改过之后自动切分不会悄悄覆盖** | 侧车里 `edited` 立起来；再点重切得到 **400 + `needs_force`**，侧车一个字节不动；带 `force` 才覆盖并说明"覆盖了手工改动"：`TestSectionsOverHttp::test_sections_are_served_saved_and_protected` |
+| "同一份再存一次"不算手工改过 | `edited` 只在内容真的变了（`sections.same_layout`）时才立起来：`test_same_layout_tells_a_real_edit_from_a_no_op` |
+| **区段随场次持久化** | `<场次>.sections.json` 侧车（`.ld` 只读、字节不变）；存过之后重新 GET 拿到的就是存下来的那一份：`test_the_sidecar_round_trips_and_refuses_nonsense`、同上 HTTP 用例 |
+| 侧车坏了要说下一步 | 不认识的 `basis` / 种类会报出文件名与"改掉它或删掉这个文件"：`test_the_sidecar_round_trips_and_refuses_nonsense` |
+| **时间轴上能把当前区段可视化出来** | 载荷带每条圈自己的边界时刻（`lap_marks`）→ 前端在时间轴面板画弯/直带子 + 边界线；`tools/smoke_viewer.js` 第 23 组断言：时间轴模式画出 ≥2 条带子、关掉开关后一条不画、**距离轴模式一条不画** |
+| 每条圈的带子按**那条圈自己的速度**定位 | 边界时刻在圈内递增、首尾正好是该圈起止时刻；两条圈的"边界相对时刻"必须不同（同一条参考圈秒数平移是错的）：`test_the_golden_endurance_lap_and_its_per_lap_marks`、`test_bands_land_inside_the_lap_they_are_asked_about` |
+| 换了参考圈要提醒 | 侧车里记着"切在哪条圈上"，与当前参考圈不同时给出"这份区段是按第 1 圈切的，当前参考圈是第 5 圈（圈长差 …）"：`test_a_stored_split_on_another_lap_says_so` |
+| UI：左侧区段表（种类 / 名字 / 起点距离 / 长度），改名字、挪边界、点种类各发一次 PUT 且带完整定义；重切第一次不带 `force`、被拦之后第二次带 `force` | `tools/smoke_viewer.js` 第 23 组 |
+
+**边界（明确不做 / 说清代价）**：
+
+* 带子**只画在时间轴**上。距离轴模式下每条圈的走线长度不同（参考圈 812.1 m，别的圈 810～815 m），
+  服务端不替用户猜该按哪条圈画，宁可不画。
+* 参考圈换了（信标挪了、切分方式变了）不会自动把边界"搬"到新圈上：只提醒，重切由用户点。
+* 不做 i2 Pro 那种带计时意义的 S1/S2/S3 计时段——那是另一个概念（`CONTEXT.md` 里也标了）。
 
 ---
 
@@ -923,7 +994,7 @@ python -m unittest tests.test_i3pro.TestChannelGroups -v
 python -m unittest discover -s tests -v
 ```
 
-**通过判据**：`Ran 100 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）。
+**通过判据**：`Ran 129 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）。
 
 测试覆盖：
 
@@ -941,12 +1012,14 @@ python -m unittest discover -s tests -v
 | `TestCsvReader` | i2 Pro CSV 导出结构解析 |
 | `TestChannelGroups` | 通道按单位分组：不重不漏、单位一致、状态通道识别 |
 | `TestPoints` | 散点原始样本、时间窗裁剪、超窗口自动 stride |
-| `TestMaths` | 数学通道引擎（31 项）：白名单与 AST 断言、函数集、区间统计的条件与复位、微分积分、平滑与低通、成环与前向引用、一条坏了不拖累其它、本地覆盖全局、缓存命中与失效、派生列在下游等价于原生通道 |
+| `TestMaths` | 数学通道引擎（42 项）：白名单与 AST 断言、函数集、区间统计的条件与复位、微分积分、平滑与低通、成环与前向引用、一条坏了不拖累其它、本地覆盖全局、缓存命中与失效、派生列在下游等价于原生通道、通道名的识别（少空格/换分隔符/大小写/歧义不猜） |
+| `TestSections` | 赛道区段（16 项）：切分覆盖整圈不重不漏、弯切在该在的位置、灵敏度单调、测度整条平线时不造弯、最短段长决定"尖峰算不算弯"、手工编辑的排序/夹紧/补齐、名字去重、同一份不算改过、侧车往返与坏文件、真数据的份数与里程、每条圈的边界时刻（含"换了参考圈要提醒"） |
+| `TestSectionsOverHttp` | 赛道区段走到 HTTP：GET 不落盘、重切落盘、手工改名字与边界、`edited` 立起来、被挡住的重切 400 + `needs_force` 且侧车不动、带 `force` 才覆盖、坏请求的下一步、`.ld` 字节不变 |
 | `TestMathsOverHttp` | 数学通道走到 HTTP：存本地 / 全局、侧车落盘、坏表达式 400 且不动已存侧车、同名拦截、`shadowed`、试算接口、函数表 |
 | `TestRender` | 静态/服务两种 payload、自包含性 |
 | `TestServer` | HTTP 端到端：场次列表、工作台页、通道、时间窗、散点、概览、对比圈、赛道、404 |
 | `TestIndependentParsers` | 第二套实现交叉验证、213 通道 CSV 全量对照 |
 | `TestBeaconUndo` | 撤销的纯函数层：什么是"同一版"、什么时候没有可撤销的一步、交回去的是上一版本身 |
 | `TestBeaconUndoOverHttp` | 撤销走真实 `PUT`：改名 / 插入 / 删除各自一步回到原样、`trusted` 迁移、落盘、一次无改动的保存不吃掉上一步、没有可撤销的一步时 400 并说明下一步、页面注入的 `laps_can_undo` 三态 |
-| `TestViewerScript` | 无头驱动前端：脚本里 **151 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
+| `TestViewerScript` | 无头驱动前端：脚本里 **181 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
 | `TestLaunchers` | 一键启动：快照批量导出 + 索引页、缺数据目录的报错、端口占用自动换端口 |

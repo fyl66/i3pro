@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import derive, laps as lapsmod
+from . import derive, laps as lapsmod, sections as sectionsmod
 from . import ld as ldmod
 
 __all__ = [
@@ -35,6 +35,7 @@ __all__ = [
     "groups",
     "pick_channels",
     "track_payload",
+    "sections_payload",
 ]
 
 TEMPLATE = Path(__file__).with_name("web") / "viewer.html"
@@ -410,6 +411,60 @@ def track_payload(
     }
 
 
+def sections_payload(
+    log: ldmod.LogFile,
+    laps=None,
+    config=None,
+    notice: str | None = None,
+) -> dict:
+    """赛道区段的载荷：区段表 + 参考圈上的分段 + 每条圈上的边界时刻。
+
+    快照与本地服务走同一个函数——快照里也必须能看见区段带子，否则"图上有没有"
+    就变成两种事实了。
+
+    ``config`` 为空表示"看当前生效的"：侧车里存过就用它，没存过就按缺省参数自动
+    切一份（**不落盘**），和 i2 Pro 第一次生成赛道图时的行为一致。
+    """
+    recognized = list(laps) if laps is not None else list(detect(log))
+    lap = sectionsmod.reference_lap(recognized)
+    out: dict = {
+        "available": sectionsmod.available_bases(log),
+        "basis_labels": dict(sectionsmod.BASIS_LABELS),
+        "kind_labels": dict(sectionsmod.KIND_LABELS),
+        "config": None,
+        "lap": None if lap is None else lap.label,
+        "length_m": 0.0,
+        "bands": [],
+        "laps": [],
+        "summary": None,
+        "notice": notice,
+        "error": None,
+    }
+    if lap is None:
+        out["notice"] = notice or "本场还没有圈，先放一个信标再来分区段"
+        return out
+    if config is None:
+        try:
+            config, auto_notice = sectionsmod.effective_config(log, recognized)
+        except ValueError as exc:
+            out["error"] = str(exc)
+            out["notice"] = notice or str(exc)
+            return out
+        if auto_notice and not notice:
+            notice = auto_notice
+    out["config"] = config.as_dict()
+    out["length_m"] = round(float(config.length_m), 1)
+    out["notice"] = notice
+    try:
+        out["bands"] = sectionsmod.bands(log, lap, config)
+        out["laps"] = sectionsmod.lap_marks(log, recognized, config)
+        out["summary"] = sectionsmod.summarize(log, lap, config)
+    except ValueError as exc:      # 参考圈的距离轴坏了：给原因，不给假的带子
+        out["error"] = str(exc)
+        out["notice"] = notice or str(exc)
+    return out
+
+
 def build_payload(
     log: ldmod.LogFile,
     channels: list[str] | None = None,
@@ -474,6 +529,7 @@ def build_payload(
         "cmp": None if chosen_cmp is None else chosen_cmp.label,
         "track": track_payload(log) if with_track else None,
         "laps_config": lapsmod.load_config(log.path).as_dict(),
+        "sections": sections_payload(log, recognized),
         "api": api_base,
         "buckets": buckets,
         "session": log.path.stem,

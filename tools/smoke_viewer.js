@@ -991,7 +991,122 @@ if (api) {
     api.data.api = apiBase;
   }
 
-  // 23. undo: one step back, and a button that is grey rather than silent
+  // 23. track sections: the list, the edits that reach the sidecar, and the
+  // bands on the time axis.
+  {
+    // 快照里就带着区段：面板要有内容，而不是等 GET 回来才画
+    const info = api.sectionsState();
+    check(!!info && !!info.config, "the snapshot carries no track sections");
+    const rows = (info && info.bands) || [];
+    check(rows.length >= 2, "the section list is empty: " + rows.length);
+    check(rows.every((row) => row.name && row.kind_label),
+      "a section row is missing its name or kind label: " + JSON.stringify(rows[0]));
+    const lengths = rows.reduce((sum, row) => sum + row.length_m, 0);
+    check(Math.abs(lengths - info.length_m) < 0.5,
+      "the sections do not tile the lap: " + lengths + " vs " + info.length_m);
+    check(((info.config.kinds || []).length === info.config.boundaries.length - 1),
+      "kinds and boundaries disagree on how many spans there are");
+    const hostHtml = String(registry.get("sectionsList")._html);
+    check(hostHtml.indexOf("data-section-name=\"0\"") >= 0
+          && hostHtml.indexOf("skind") >= 0,
+      "the section panel did not render its rows: " + hostHtml.slice(0, 120));
+    check(hostHtml.indexOf("disabled") >= 0,
+      "the first section's start distance must be locked at 0");
+    check(String(registry.get("sectionsNote").textContent).indexOf("参考圈") >= 0,
+      "the section note does not say which lap it was cut on");
+
+    // 改名字 / 改边界 / 换种类：每条都只发一次 PUT，且带走完整定义
+    const apiBase = api.data.api;
+    api.data.api = apiBase || "http://serve";   // 假装在 serve 模式下（快照不许改区段）
+    const beforeEdit = httpCalls.length;
+    api.setSectionName(1, "T1 出弯");
+    const edits = httpCalls.slice(beforeEdit)
+      .filter((call) => call.method === "PUT" && call.url.indexOf("/sections") >= 0);
+    check(edits.length === 1, "renaming a section must send one PUT, got " + edits.length);
+    if (edits.length === 1) {
+      const sent = JSON.parse(edits[0].body);
+      check(sent.names && sent.names[1] === "T1 出弯",
+        "the rename did not reach the request body: " + edits[0].body);
+      check(sent.boundaries && sent.boundaries.length === info.config.boundaries.length,
+        "a manual edit must carry the whole boundary list: " + edits[0].body);
+      check(!sent.auto, "a manual edit must not ask for a re-split: " + edits[0].body);
+    }
+    const beforeEdge = httpCalls.length;
+    api.setSectionEdge(1, 140);
+    const edgePuts = httpCalls.slice(beforeEdge)
+      .filter((call) => call.method === "PUT" && call.url.indexOf("/sections") >= 0);
+    check(edgePuts.length === 1
+          && JSON.parse(edgePuts[0].body).boundaries[1] === 140,
+      "moving a boundary did not reach the request body: "
+      + (edgePuts[0] ? edgePuts[0].body : "(no request)"));
+    const beforeKind = httpCalls.length;
+    api.toggleSectionKind(2);
+    const kindPuts = httpCalls.slice(beforeKind)
+      .filter((call) => call.method === "PUT" && call.url.indexOf("/sections") >= 0);
+    check(kindPuts.length === 1
+          && JSON.parse(kindPuts[0].body).kinds[2] !== info.config.kinds[2],
+      "flipping a section kind did not reach the request body: "
+      + (kindPuts[0] ? kindPuts[0].body : "(no request)"));
+
+    // 重切：第一次按判据+灵敏度，被"手工改过"挡住之后再点一次才带 force
+    api.state.sectionsForce = false;
+    const beforeAuto = httpCalls.length;
+    api.sectionsAuto();
+    const autos = httpCalls.slice(beforeAuto)
+      .filter((call) => call.method === "PUT" && call.url.indexOf("/sections") >= 0);
+    check(autos.length === 1, "re-splitting must send one PUT, got " + autos.length);
+    if (autos.length === 1) {
+      const sent = JSON.parse(autos[0].body);
+      check(sent.auto === true && sent.force !== true,
+        "the first re-split must not overwrite manual edits: " + autos[0].body);
+      check(typeof sent.sensitivity === "number" && !!sent.basis,
+        "the re-split request is missing the basis / sensitivity: " + autos[0].body);
+    }
+    api.state.sectionsForce = true;      // 服务端已经用 needs_force 拦过一次
+    const beforeForced = httpCalls.length;
+    api.sectionsAuto();
+    const forced = httpCalls.slice(beforeForced)
+      .filter((call) => call.method === "PUT" && call.url.indexOf("/sections") >= 0);
+    check(forced.length === 1 && JSON.parse(forced[0].body).force === true,
+      "the second re-split must carry force: "
+      + (forced[0] ? forced[0].body : "(no request)"));
+    api.state.sectionsForce = false;
+
+    // 带子只画在时间轴上，且跟着开关走
+    const recorder = { fills: 0, strokes: 0, fillRect() { this.fills += 1; },
+                       beginPath() {}, moveTo() {}, lineTo() {}, stroke() { this.strokes += 1; } };
+    const pad = { l: 0, r: 0, t: 0, b: 0 };
+    const mode = api.state.mode;
+    api.state.mode = "time";
+    api.state.showSections = true;
+    const drawn = api.drawSectionBands(recorder, pad, 400, 100, info.laps[0].times[0],
+                                       info.laps[0].times[info.laps[0].times.length - 1]);
+    check(drawn >= 2, "no section band was drawn in time mode: " + drawn);
+    check(recorder.fills === drawn && recorder.strokes === drawn,
+      "a band was counted but not filled/stroked: " + JSON.stringify(recorder));
+    api.state.showSections = false;
+    check(api.drawSectionBands(recorder, pad, 400, 100, 0, 1e9) === 0,
+      "hiding the sections still drew bands");
+    api.state.showSections = true;
+    api.state.mode = "distance";
+    check(api.drawSectionBands(recorder, pad, 400, 100, 0, 1e9) === 0,
+      "section bands were drawn on the distance axis (each lap has its own track length)");
+    api.state.mode = mode;
+
+    const toggle = registry.get("toggleSections");
+    check(!!toggle, "there is no button to hide the section bands");
+    if (toggle) {
+      check(api.state.showSections === true, "the section bands should start visible");
+      toggle.dispatch("click", { target: toggle });
+      check(!api.state.showSections && !toggle.classList.contains("on"),
+        "clicking the section toggle did not hide the bands");
+      toggle.dispatch("click", { target: toggle });
+      check(api.state.showSections, "clicking the section toggle again did not bring them back");
+    }
+    api.data.api = apiBase;
+  }
+
+  // 24. undo: one step back, and a button that is grey rather than silent
   const undoBtn = registry.get("undoLaps");
   check(!!undoBtn, "the undo button is missing");
   if (undoBtn) {

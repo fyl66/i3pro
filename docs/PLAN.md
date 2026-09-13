@@ -163,7 +163,7 @@ i2 Pro 的结构是 `Project → Workbook → Worksheet → Component`。我们�
 
 ### M3 — 工程化（已完成）
 
-单测（真实数据回归 + HTTP 端到端 + 无头 JS 冒烟）从当时的 21 项起一路加上来，现在 **112 项**
+单测（真实数据回归 + HTTP 端到端 + 无头 JS 冒烟）从当时的 21 项起一路加上来，现在 **129 项**
 （`python -m unittest discover -s tests`）、零第三方运行期依赖、git 仓库。
 
 ---
@@ -195,7 +195,7 @@ i2 Pro 的结构是 `Project → Workbook → Worksheet → Component`。我们�
 | beacon 未接线导致切圈失败 | 高/中 | GPS 起终点门 + 航向判据 + 异常段标记 + 速度兜底 | 已闭环（A5） |
 | 部分场次 GPS 完全失效 | 中/中 | 距离积分回落 `Vx KF`；无速度通道时明确报错而不是给出错数据 | 已覆盖 |
 | 直道/单圈数据切不出圈 | 高/低 | UI 接受 0 圈（显示提示），不崩 | 已覆盖（3 个直线场次 0 圈） |
-| 人员流动导致烂尾 | 高/高 | 纯函数算法层 + 112 项单测 + 中文文档 + 零依赖 | 已闭环 |
+| 人员流动导致烂尾 | 高/高 | 纯函数算法层 + 129 项单测 + 中文文档 + 零依赖 | 已闭环 |
 | 赛场没网 | 中/中 | 运行期零安装、单文件 HTML | 已闭环 |
 
 ---
@@ -211,8 +211,11 @@ i2 Pro 的结构是 `Project → Workbook → Worksheet → Component`。我们�
    本地 + 全局两种作用域、派生列按需算并缓存。它是 gating 通道、派生量、报表统计、
    告警条件的地基，接下来做直方图/散点 gating 与告警条件时**直接复用它的表达式能力，
    不再自造第二套条件语法**。
-3. **Track Editor / 区段定义** —— 有了区段才能做「双击区段名放大到该弯/直道」（i2 Pro 的
-   `To Zoom to a Range: double-click on the range band`）、区段报表、Eclectic 理论最快圈
+3. ~~**Track Editor / 区段定义**~~ —— **完成**（ticket #7，验收 A30）：按曲率（GPS 轨迹，
+  与速度无关）或横向加速度自动切弯道/直道，灵敏度单调可调，边界与名字可手改，**改过之后
+  自动重切不会悄悄覆盖**；时间轴上画弯/直带子。它同时给后面的「双击区段名放大到该弯/直道」
+  （i2 Pro 的 `To Zoom to a Range: double-click on the range band`）、区段报表与 Eclectic
+  理论最快圈留好了接口——区段是按距离定义的，报表按段统计直接用它。
 4. Histogram / Suspension Histogram / FFT（按 M6 的组件系统直接加类型即可）
 5. Channel Report / Time Report（表格化统计 + Eclectic）
 6. Gauges 动画播放（表盘已做完）+ Alarms 告警（对三电安全预警有用）

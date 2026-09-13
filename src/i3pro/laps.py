@@ -36,6 +36,9 @@ __all__ = [
     "check_new_crossings",
     "insertion_notice",
     "time_at_distance",
+    "distance_on_master",
+    "clean_name",
+    "unique_name",
     "detect_laps",
     "detect_from_config",
     "load_config",
@@ -766,8 +769,8 @@ def reconcile_edits(old: LapConfig, new: LapConfig) -> LapConfig:
         if before is not None and before.name == beacon.name:
             continue
         fallback = before.name if before is not None else DEFAULT_BEACON_NAME
-        name = _unique_name(
-            _clean_name(beacon.name, fallback),
+        name = unique_name(
+            clean_name(beacon.name, fallback),
             [b.name for other, b in enumerate(beacons) if other != index],
         )
         beacons[index] = replace(beacon, name=name)
@@ -930,7 +933,7 @@ def time_at_distance(log: ldmod.LogFile, distance: float) -> float | None:
     outside the range the car actually drove.
     """
     try:
-        series = np.asarray(_distance_series(log), dtype=np.float64)
+        series = np.asarray(distance_on_master(log), dtype=np.float64)
     except ValueError:
         return None
     time = np.asarray(_master_time(log), dtype=np.float64)
@@ -947,12 +950,12 @@ def time_at_distance(log: ldmod.LogFile, distance: float) -> float | None:
     return float(time[min(index, count - 1)])
 
 
-def _clean_name(name: object, fallback: str) -> str:
+def clean_name(name: object, fallback: str) -> str:
     """Trim the name; empty means "keep whatever it was called before"."""
     return str(name or "").strip() or fallback
 
 
-def _unique_name(stem: str, taken: Iterable[str], limit: int = MAX_BEACON_NAME) -> str:
+def unique_name(stem: str, taken: Iterable[str], limit: int = MAX_BEACON_NAME) -> str:
     """Truncate to ``limit`` characters and add " 2", " 3"… until it is free."""
     used = set(taken)
     name = stem[:limit]
@@ -1031,7 +1034,7 @@ def _laps_for_beacons(log: ldmod.LogFile, config: LapConfig) -> list[Lap]:
     series it is closest to in time, or - when no placed beacon produced a series
     - into the boundaries the session already has.
     """
-    distance = _distance_series(log)
+    distance = distance_on_master(log)
     placed = [b for b in config.beacons if b.has_position]
     timed = sorted(b.time for b in config.beacons if not b.has_position and b.time is not None)
 
@@ -1101,7 +1104,7 @@ def _laps_with_inserted_crossings(
     return _flag_implausible(_lap_from_bounds(log, distance, bounds))
 
 
-def _distance_series(log: ldmod.LogFile) -> np.ndarray:
+def distance_on_master(log: ldmod.LogFile) -> np.ndarray:
     """Cumulative distance on the master time base, with the GPS fallback."""
     try:
         return derive.distance_series(log)

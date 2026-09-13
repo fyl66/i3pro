@@ -247,6 +247,9 @@
         <select id="mathsPickChannel" title="把通道名插到表达式的光标处（含空格 / 括号 / 短横线的名字会自动加单引号）">
           <option value="">插入通道…</option>
         </select>
+        <select id="mathsPickFunc" title="把函数模板插到表达式的光标处，光标停在括号里">
+          <option value="">插入函数…</option>
+        </select>
         <input type="text" id="mathsUnit" placeholder="单位（可留空）">
         <select id="mathsScope">
           <option value="local">本地 —— 只在本场次生效</option>
@@ -2657,34 +2660,78 @@ function renderMathsList() {
  */
 function renderMathsChannelPicker() {
   const pick = $("mathsPickChannel");
-  if (!pick) return;
-  const keep = pick.value;
   const names = CHANNELS ? Array.from(CHANNELS.keys()) : [];
-  pick.innerHTML = '<option value="">插入通道…</option>'
-    + names.map((n) => '<option value="' + esc(n) + '">' + esc(n) + "</option>").join("");
-  pick.value = names.indexOf(keep) >= 0 ? keep : "";
+  if (pick) {
+    const keep = pick.value;
+    // 按单位分组：这个车队一场 400 多条通道，平铺一列没法找
+    const byUnit = new Map();
+    for (const name of names) {
+      const unit = String(((CHANNELS.get(name) || {}).unit) || "");
+      if (!byUnit.has(unit)) byUnit.set(unit, []);
+      byUnit.get(unit).push(name);
+    }
+    let html = '<option value="">插入通道…</option>';
+    for (const unit of Array.from(byUnit.keys()).sort()) {
+      html += '<optgroup label="' + esc(unit || "无单位") + '">'
+        + byUnit.get(unit).slice().sort().map((name) => '<option value="' + esc(name) + '">'
+            + esc(name) + (unit ? " · " + esc(unit) : "") + "</option>").join("")
+        + "</optgroup>";
+    }
+    pick.innerHTML = html;
+    pick.value = names.indexOf(keep) >= 0 ? keep : "";
+  }
+  const funcs = $("mathsPickFunc");
+  if (funcs) {
+    const keep = funcs.value;
+    const catalogue = mathsState().functions || [];
+    funcs.innerHTML = '<option value="">插入函数…</option>'
+      + catalogue.map((f) => '<option value="' + esc(f.name) + '">' + esc(f.name)
+          + "(" + esc(mathsArity(f)) + ") · " + esc(f.doc || "") + "</option>").join("");
+    funcs.value = catalogue.some((f) => f.name === keep) ? keep : "";
+  }
+}
+
+/** `smooth(1~3)` 这种参数个数提示，写在函数下拉里。 */
+function mathsArity(f) {
+  const low = f.min_args === undefined ? 1 : Number(f.min_args);
+  const high = f.max_args === undefined || f.max_args === null ? Infinity : Number(f.max_args);
+  if (high === low) return String(low);
+  return high === Infinity ? low + "+" : low + "~" + high;
 }
 
 function insertMathsChannel(name) {
+  if (!name) return;
+  insertMathsText("'" + String(name).replace(/'/g, "") + "'");
+  mathsPickReset("mathsPickChannel");
+}
+
+/** 函数模板：插 `名字(` 并把光标留在括号里，参数接着从通道下拉里挑。 */
+function insertMathsFunction(name) {
+  if (!name) return;
+  insertMathsText(String(name) + "(");
+  mathsPickReset("mathsPickFunc");
+}
+
+/** 往表达式光标处插一段文本；前面该有空格就补一个，插完光标停在文本后面。 */
+function insertMathsText(text) {
   const expr = $("mathsExpr");
-  if (!expr || !name) return;
-  const quoted = "'" + String(name).replace(/'/g, "") + "'";
+  if (!expr || !text) return;
   const start = typeof expr.selectionStart === "number" ? expr.selectionStart : expr.value.length;
   const end = typeof expr.selectionEnd === "number" ? expr.selectionEnd : expr.value.length;
   const before = expr.value.slice(0, start);
   const after = expr.value.slice(end);
-  const lead = before && !/\s$/.test(before) && !/[(+\-*/,]$/.test(before) ? " " : "";
-  expr.value = before + lead + quoted + after;
+  const needsSpace = before && !/\s$/.test(before) && !/[(+\-*/,]$/.test(before);
+  const lead = needsSpace ? " " : "";
+  expr.value = before + lead + text + after;
   if (typeof expr.setSelectionRange === "function") {
-    const caret = (before + lead + quoted).length;
+    const caret = (before + lead + text).length;
     expr.setSelectionRange(caret, caret);
   }
-  pick_value_reset();
   if (typeof expr.focus === "function") expr.focus();
 }
 
-function pick_value_reset() {
-  const pick = $("mathsPickChannel");
+function mathsPickReset(id) {
+  const pick = $(id);
   if (pick) pick.value = "";
 }
 
@@ -3804,6 +3851,9 @@ function init() {
   $("mathsPickChannel").addEventListener("change", (event) => {
     insertMathsChannel(event.target.value);
   });
+  $("mathsPickFunc").addEventListener("change", (event) => {
+    insertMathsFunction(event.target.value);
+  });
   $("mathsFuncs").addEventListener("click", () => {
     const box = $("mathsFuncList");
     box.hidden = !box.hidden;
@@ -3907,6 +3957,7 @@ window.i3pro = {
   reindexChannels: reindexChannels, selectChannel: selectChannel,
   mathsState: mathsState, escapeText: escapeText,
   insertMathsChannel: insertMathsChannel, renderMathsChannelPicker: renderMathsChannelPicker,
+  insertMathsFunction: insertMathsFunction,
   sectionsState: sectionsState, renderSections: renderSections,
   sectionsManualPayload: sectionsManualPayload, saveSections: saveSections,
   applySectionsResponse: applySectionsResponse, loadSections: loadSections,

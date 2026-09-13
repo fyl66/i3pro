@@ -985,6 +985,39 @@ if (api) {
         check(registry.get("mathsExpr").value === "1 + '" + wanted + "'",
           "inserting into a non-empty expression lost what was already typed (got "
           + registry.get("mathsExpr").value + ")");
+
+        // 通道下拉按单位分组：一场 400+ 条通道，平铺一列没法找
+        check(String(pick._html).indexOf("<optgroup") >= 0,
+          "the channel picker does not group channels by unit");
+
+        // 函数也不该手打：插的是"函数("，光标留在括号里，参数接着从通道下拉挑
+        const funcs = registry.get("mathsPickFunc");
+        check(!!funcs, "the maths editor has no insert-function picker");
+        if (funcs) {
+          // 快照的载荷里没有函数表（编辑本来就被禁用），所以这里先喂一份目录，
+          // 验的是"目录 → 下拉 → 插入"这条接线。
+          api.applyMathsResponse({
+            definitions: [], shadowed: [], errors: [],
+            functions: [{ name: "smooth", min_args: 1, max_args: 3, doc: "平滑滤波" }],
+          });
+          check(String(funcs._html).indexOf("smooth") >= 0,
+            "the function picker does not list the catalogue");
+          check(String(funcs._html).indexOf("1~3") >= 0,
+            "the function picker does not show how many arguments the function takes");
+          registry.get("mathsExpr").value = "";
+          funcs.value = "smooth";
+          funcs.dispatch("change", { target: funcs });
+          check(registry.get("mathsExpr").value === "smooth(",
+            "picking a function did not insert its template (got "
+            + registry.get("mathsExpr").value + ")");
+          check(funcs.value === "",
+            "the function picker should fall back to its placeholder after inserting");
+          pick.value = wanted;
+          pick.dispatch("change", { target: pick });
+          check(registry.get("mathsExpr").value === "smooth('" + wanted + "'",
+            "a channel cannot be picked into a function call (got "
+            + registry.get("mathsExpr").value + ")");
+        }
         api.closeMathsEditor();
       }
     }

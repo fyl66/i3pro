@@ -324,9 +324,28 @@ if (api) {
   const s0 = state.style;
   key("s");
   check(state.style !== s0, "S did not toggle the trace style");
-  const g0 = state.groupMode;
+  let graphComp = state.components.find((c) => c.type === "graph");
+  const g0 = graphComp ? graphComp.config.mode : null;
   key("g");
-  check(state.groupMode !== g0, "G did not toggle the group layout");
+  check(graphComp && graphComp.config.mode !== g0,
+    "G did not toggle the focused graph's tiled/overlapped layout");
+  // two graphs on one sheet must be switchable independently
+  api.addComponentOfType("graph");
+  const graphs = state.components.filter((c) => c.type === "graph");
+  if (graphs.length >= 2) {
+    const first = graphs[0], second = graphs[1];
+    first.config.mode = "tiled";
+    second.config.mode = "tiled";
+    state.focusId = second.id;
+    key("g");
+    check(second.config.mode === "overlapped" && first.config.mode === "tiled",
+      "G changed a graph that was not the focused one");
+    state.focusId = first.id;
+    key("g");
+    check(first.config.mode === "overlapped" && second.config.mode === "overlapped",
+      "G did not toggle the second graph");
+  }
+  api.applyPreset("分析");                      // back to a known worksheet
   const m0 = state.show.measure;
   key("m");
   check(state.show.measure !== m0, "M did not toggle measurements");
@@ -484,18 +503,26 @@ if (api) {
     check(state.view && Math.abs(state.view[0] - completeLap.start_time) < 0.01
       && Math.abs(state.view[1] - completeLap.end_time) < 0.01,
       "clicking a lap zoomed to the wrong time range");
-    check(String(state.ref) === String(completeLap.lap),
-      "clicking a lap did not make it the reference (Main) lap");
-    check(state.cmp === null, "a plain lap click should clear the comparison lap");
 
-    // Ctrl+click on a *different* lap must arm the comparison and switch to overlay
+    // the 基 button makes it the Main lap
+    const refBefore = state.ref;
+    api.selectLap(completeLap.lap, false);
+    check(String(state.ref) === String(completeLap.lap),
+      "「基」did not make the lap the reference");
+    check(state.cmp === null, "「基」should clear the comparison lap");
+
+    // the 比 button arms the comparison and switches to overlay
     const other = (api.data.laps || []).find((l) => l.complete && l.lap !== completeLap.lap);
-    const otherRow = other && lapRows.find((r) => r.dataset.lap === String(other.lap));
-    if (otherRow) {
-      otherRow.dispatch("click", { target: otherRow, shiftKey: false, ctrlKey: true });
-      check(String(state.cmp) === String(other.lap), "ctrl+click did not set the comparison lap");
-      check(state.mode === "overlay", "ctrl+click did not switch to the overlay comparison");
-      key("F4");   // no-op safety: unknown keys must not throw
+    if (other) {
+      api.selectLap(other.lap, true);
+      check(String(state.cmp) === String(other.lap), "「比」did not set the comparison lap");
+      check(state.mode === "overlay", "「比」did not switch to the overlay comparison");
+      // the lap table must expose both buttons on every row
+      check(lapTableEl._html.indexOf('data-role="ref"') >= 0
+        && lapTableEl._html.indexOf('data-role="cmp"') >= 0,
+        "the lap table is missing the 基 / 比 buttons");
+      api.selectLap(other.lap, true);           // toggling it off again
+      check(state.cmp === null, "clicking 「比」twice should clear the comparison");
     }
   }
 
@@ -555,13 +582,27 @@ if (api) {
 
     const beforeW = target.w, beforeH = target.h;
     const handle = element._children[element._children.length - 1];
+    check(String(handle.className || "").indexOf("rz") >= 0,
+      "the resize handles are missing from the component");
     handle.dispatch("mousedown", { clientX: 100, clientY: 100, preventDefault() {}, stopPropagation() {} });
     window.dispatch("mousemove", { clientX: 200, clientY: 200 });
     window.dispatch("mouseup", {});
     check(target.w !== beforeW || target.h !== beforeH, "dragging the corner did not resize it");
     check(target.x % 0.25 === 0 && target.y % 0.5 === 0 &&
-          target.w % 0.25 === 0 && target.h % 0.5 === 0,
+          target.w % 0.25 === 0 && target.h % 0.25 === 0,
           "component geometry is not on the grid (snapping broken)");
+
+    // the right-edge handle must change width only, the bottom-edge height only
+    const handles = element._children.filter((c) => String(c.className || "").indexOf("rz") >= 0);
+    check(handles.length === 3, "expected three resize handles, got " + handles.length);
+    const rightHandle = handles.find((c) => String(c.className).indexOf("rzright") >= 0);
+    const w0 = target.w, h0 = target.h;
+    if (rightHandle) {
+      rightHandle.dispatch("mousedown", { clientX: 100, clientY: 100, preventDefault() {}, stopPropagation() {} });
+      window.dispatch("mousemove", { clientX: 160, clientY: 400 });
+      window.dispatch("mouseup", {});
+      check(target.w !== w0 && target.h === h0, "the right-edge handle must change width only");
+    }
   }
 }
 

@@ -50,6 +50,8 @@
   tr.cmp td { background:#4a3a1d; }
   tr.incomplete td { color:var(--muted); }
   tr.best td:nth-child(2) { color:var(--good); }
+  .lapsel { white-space:nowrap; }
+  .lapsel button { padding:0 4px; font-size:10px; line-height:15px; border-radius:3px; }
   button { background:var(--panel2); color:var(--fg); border:1px solid var(--line);
            border-radius:5px; padding:4px 9px; cursor:pointer; font-size:12px; }
   button:hover { border-color:var(--accent); }
@@ -111,10 +113,18 @@
   .lrow .lmm { color:var(--muted); min-width:52px; text-align:right;
                font-variant-numeric:tabular-nums; }
   .lrow .lunit { color:var(--muted); }
-  .resize { height:6px; cursor:nwse-resize; flex:0 0 auto;
-            background:linear-gradient(135deg, transparent 45%, #3a4150 45%, #3a4150 55%, transparent 55%);
-            background-position:right bottom; background-repeat:no-repeat; }
-  .comp:hover .resize { background:#232833; }
+  /* Three resize affordances: drag the right edge, the bottom edge, or the
+     corner (both). The old single 6 px strip at the very bottom was almost
+     impossible to hit because the canvas usually does not fill the body. */
+  .rz { position:absolute; z-index:15; }
+  .rzright { top:0; right:0; bottom:10px; width:7px; cursor:ew-resize; }
+  .rzbottom { left:0; right:10px; bottom:0; height:7px; cursor:ns-resize; }
+  .rzcorner { right:0; bottom:0; width:16px; height:16px; cursor:nwse-resize;
+              background:linear-gradient(135deg, transparent 46%, #46505f 46%, #46505f 54%, transparent 54%); }
+  .comp:hover .rzright, .comp:hover .rzbottom { background:rgba(76,194,255,.16); }
+  .comp:hover .rzcorner {
+      background:linear-gradient(135deg, transparent 46%, var(--accent) 46%, var(--accent) 54%, transparent 54%); }
+  .compbar .csize { color:#5d6575; font-variant-numeric:tabular-nums; }
   .guide { position:absolute; background:#4cc2ff; pointer-events:none; z-index:20; display:none; }
   .guide { top:0; bottom:0; width:1px; }
   .guide.h { left:0; right:0; top:auto; height:1px; width:auto; }
@@ -271,7 +281,10 @@ function makeComponent(type, overrides) {
     h: o.h === undefined ? spec.rows : o.h,
     config: {},
   };
-  if (type === "graph") comp.config.channels = [];
+  if (type === "graph") {
+    comp.config.channels = [];
+    comp.config.mode = "tiled";        // G toggles this per component, like i2 Pro
+  }
   if (type === "scatter") {
     comp.config.x = null;
     comp.config.y = [];
@@ -351,7 +364,7 @@ function defaultComponents() {
 function encodeLayout(components) {
   const compact = components.map((c) => [
     c.type, c.x, c.y, c.w, c.h,
-    c.type === "graph" ? c.config.channels.join("|")
+    c.type === "graph" ? c.config.channels.join("|") + "#" + (c.config.mode || "tiled")
       : c.type === "scatter" ? [c.config.x, (c.config.y || [])[0], c.config.colour, c.config.style].join("|")
       : c.type === "track" ? (c.config.channel || "")
       : c.type === "gauge" ? [c.config.subtype, (c.config.channels || []).join("~")].join("|")
@@ -373,7 +386,11 @@ function decodeLayout(text) {
       if (!COMPONENT_TYPES[type]) return null;
       const comp = makeComponent(type, { x: row[1], y: row[2], w: row[3], h: row[4] });
       const payload = String(row[5] || "");
-      if (type === "graph") comp.config.channels = payload ? payload.split("|") : [];
+      if (type === "graph") {
+        const parts = payload.split("#");
+        comp.config.channels = parts[0] ? parts[0].split("|") : [];
+        comp.config.mode = parts[1] === "overlapped" ? "overlapped" : "tiled";
+      }
       else if (type === "scatter") {
         const parts = payload.split("|");
         comp.config.x = parts[0] || null;
@@ -896,7 +913,9 @@ function buildWorksheet() {
     el.dataset.id = comp.id;
     el.dataset.type = comp.type;
     const bar = makeEl("div", "compbar", el);
-    makeEl("span", "ctitle", bar).textContent = componentTitle(comp);
+    const titleSpan = makeEl("span", "ctitle", bar);
+    titleSpan.textContent = componentTitle(comp);
+    const sizeSpan = makeEl("span", "csize", bar);
     const tools = makeEl("span", "ctools", bar);
     const btn = (act, label, title) => {
       const b = makeEl("button", "", tools);
@@ -913,6 +932,7 @@ function buildWorksheet() {
     btn("close", "✕", "移除这个组件");
     const body = makeEl("div", "compbody", el);
     const bundle = { comp: comp, el: el, body: body, canvas: null, head: null,
+                     sizeSpan: sizeSpan, titleSpan: titleSpan,
                      off: null, cacheKey: "", legendKey: "", valueNodes: [] };
     if (comp.type === "scatter") {
       const cfgBar = makeEl("div", "scattercfg", body);
@@ -964,9 +984,15 @@ function buildWorksheet() {
     const head = makeEl("div", "graphhead", body);
     if (comp.type !== "graph") head.className = "graphhead caption";
     bundle.head = head;
-    const rz = makeEl("div", "resize", el);
-    rz.title = "拖拽改宽高（自动吸附到相邻组件）";
-    rz.addEventListener("mousedown", (event) => beginResize(event, comp, el));
+    const handle = (cls, axis, title) => {
+      const h = makeEl("div", "rz " + cls, el);
+      h.title = title;
+      h.addEventListener("mousedown", (event) => beginResize(event, comp, el, axis));
+      return h;
+    };
+    handle("rzright", "x", "拖右边缘改宽度（吸附到相邻组件）");
+    handle("rzbottom", "y", "拖下边缘改高度（吸附）");
+    handle("rzcorner", "xy", "拖右下角同时改宽高（吸附）");
     bar.style.cursor = "move";
     bar.title = "拖拽移动（自动吸附）";
     bar.addEventListener("mousedown", (event) => beginMove(event, comp, el));
@@ -990,6 +1016,10 @@ function positionComponent(el, comp) {
   el.style.width = (comp.w / GRID_COLS * 100) + "%";
   el.style.top = (comp.y * ROW_PX) + "px";
   el.style.height = (comp.h * ROW_PX) + "px";
+  const bundle = SHEET.get(comp.id);
+  if (bundle && bundle.sizeSpan) {
+    bundle.sizeSpan.textContent = comp.w.toFixed(2) + "×" + comp.h.toFixed(2) + " 格";
+  }
 }
 
 function xTargets(comp) {
@@ -1093,22 +1123,28 @@ function beginMove(event, comp, el) {
   event.stopPropagation();
 }
 
-function beginResize(event, comp, el) {
+function beginResize(event, comp, el, axis) {
+  const axes = axis || "xy";
   const host = $("worksheet");
   const rect = host.getBoundingClientRect();
   const colPx = (rect.width || 1200) / GRID_COLS;
   const startX = event.clientX, startY = event.clientY;
   const originW = comp.w, originH = comp.h;
   const move = (e) => {
-    let w = originW + (e.clientX - startX) / colPx;
-    let h = originH + (e.clientY - startY) / ROW_PX;
+    let w = originW, h = originH;
+    if (axes.indexOf("x") >= 0) w = originW + (e.clientX - startX) / colPx;
+    if (axes.indexOf("y") >= 0) h = originH + (e.clientY - startY) / ROW_PX;
     w = Math.round(w * 4) / 4;
-    h = Math.round(h * 2) / 2;
+    h = Math.round(h * 4) / 4;
     let gx = null, gy = null;
-    const right = snapEdge(comp.x + w, xTargets(comp));
-    if (right.guide !== null) { w = right.value - comp.x; gx = right.guide; }
-    const bottom = snapEdge(comp.y + h, yTargets(comp));
-    if (bottom.guide !== null) { h = bottom.value - comp.y; gy = bottom.guide; }
+    if (axes.indexOf("x") >= 0) {
+      const right = snapEdge(comp.x + w, xTargets(comp));
+      if (right.guide !== null) { w = right.value - comp.x; gx = right.guide; }
+    }
+    if (axes.indexOf("y") >= 0) {
+      const bottom = snapEdge(comp.y + h, yTargets(comp));
+      if (bottom.guide !== null) { h = bottom.value - comp.y; gy = bottom.guide; }
+    }
     comp.w = clamp(w, 2, GRID_COLS - comp.x);
     comp.h = clamp(h, 3, 60);
     positionComponent(el, comp);
@@ -1132,12 +1168,18 @@ function componentTitle(comp) {
   const spec = COMPONENT_TYPES[comp.type];
   if (comp.type === "graph") {
     const n = comp.config.channels.length;
-    return spec.label + (n ? " · " + n + " 通道" : "");
+    const mode = comp.config.mode === "overlapped" ? "重叠" : "分栏";
+    return spec.label + (n ? " · " + n + " 通道" : "") + " · " + mode;
   }
   if (comp.type === "gauge") {
     return spec.label + " · " + (GAUGE_SUBTYPES[comp.config.subtype] || comp.config.subtype);
   }
   return spec.label;
+}
+
+function refreshComponentTitle(comp) {
+  const bundle = SHEET.get(comp.id);
+  if (bundle && bundle.titleSpan) bundle.titleSpan.textContent = componentTitle(comp);
 }
 
 function componentAction(comp, act) {
@@ -1200,7 +1242,7 @@ function renderGraphComponent(comp, b) {
   const ctx = c.ctx;
   // In Tiled mode every unit group gets its own panel; in Overlapped mode they
   // share one panel and each keeps its own y-scale (i2 Pro's "Overlapped groups").
-  const overlapped = state.groupMode === "overlapped" && groups.length > 1;
+  const overlapped = comp.config.mode === "overlapped" && groups.length > 1;
   const panels = groups.map((group, gi) => overlapped
     ? { group: group, top: 0, panelH: height }
     : { group: group, top: gi * panelH, panelH: panelH });
@@ -1248,7 +1290,7 @@ function renderGraphHead(comp, b, groups, panels, overlapped) {
   const r = lane();
   const signature = groups.map((g) => g.key + ":" + g.channels.join(",")).join(";")
     + "|" + (state.show.measure ? 1 : 0) + "|" + (state.show.legend ? 1 : 0)
-    + "|" + state.groupMode;
+    + "|" + (comp.config.mode || "tiled");
   b.head.style.display = state.show.legend ? "" : "none";
   if (b.legendKey !== signature) {
     b.head.innerHTML = "";
@@ -1980,20 +2022,28 @@ function renderLapTable() {
   const best = complete.reduce((a, b) => (a === null || b.lap_time < a.lap_time ? b : a), null);
   $("lapCount").textContent = complete.length + "/" + laps.length
     + (best ? " · 最快 " + best.lap_time.toFixed(3) + "s" : "");
-  table.innerHTML = "<tr><th>圈</th><th>圈速</th><th>Δ最快</th><th>里程</th></tr>"
+  table.innerHTML = "<tr><th>圈</th><th>圈速</th><th>Δ最快</th><th>里程</th><th></th></tr>"
     + laps.map((l) => {
       const cls = (l.complete ? "" : "incomplete") + (best && l.lap === best.lap ? " best" : "");
       const delta = (l.delta_to_best === null || l.delta_to_best === undefined) ? "--"
         : (l.delta_to_best > 0 ? "+" : "") + l.delta_to_best.toFixed(3);
       return '<tr data-lap="' + l.lap + '" class="' + cls + '"><td>' + l.lap
         + "</td><td>" + l.lap_time.toFixed(3) + "</td><td>" + delta
-        + "</td><td>" + Math.round(l.distance) + " m</td></tr>";
+        + "</td><td>" + Math.round(l.distance) + " m</td>"
+        + '<td class="lapsel">'
+        + '<button data-role="ref" title="设为基准圈 (Main)">基</button>'
+        + '<button data-role="cmp" title="设为对比圈 (Overlay)">比</button>'
+        + "</td></tr>";
     }).join("");
   table.querySelectorAll("tr[data-lap]").forEach((tr) => {
     tr.addEventListener("click", (event) => {
-      const ctrl = event.ctrlKey || event.metaKey;
-      if (event.shiftKey && !ctrl) { zoomToLap(tr.dataset.lap); return; }  // 只跳转
-      onLapClick(tr.dataset.lap, ctrl);
+      const button = event.target && event.target.closest ? event.target.closest("button") : null;
+      if (button) {
+        if (event.stopPropagation) event.stopPropagation();
+        selectLap(tr.dataset.lap, button.dataset.role === "cmp");
+        return;
+      }
+      zoomToLap(tr.dataset.lap);            // 点行本身：只跳转，不动选择
     });
   });
   markLapRows();
@@ -2008,9 +2058,11 @@ function markLapRows() {
   });
 }
 
-async function onLapClick(label, asCompare) {
-  // Plain click makes the lap the Main (基准) lap and jumps to it, exactly like
-  // i2 Pro's Data window. Ctrl+click marks it as the Overlay (对比) lap.
+/**
+ * Choose a lap explicitly: the 基 / 比 buttons in the lap table, or Ctrl+click
+ * on a row. Clicking the row itself only jumps the view.
+ */
+async function selectLap(label, asCompare) {
   if (asCompare && String(state.ref) !== String(label)) {
     state.cmp = String(state.cmp) === String(label) ? null : label;
   } else {
@@ -2434,9 +2486,20 @@ function onKeyDown(event) {
     case "f": case "F": panBy(0.5); stop(); return;
     case "b": case "B": panBy(-0.5); stop(); return;
     case "s": case "S": state.style = state.style === "line" ? "points" : "line"; renderAll(); stop(); return;
-    case "g": case "G":
-      state.groupMode = state.groupMode === "tiled" ? "overlapped" : "tiled";
-      renderAll(); stop(); return;
+    case "g": case "G": {
+      // Tiled / overlapped is a per-component setting (i2 Pro: Component menu),
+      // so two graphs on one sheet can be laid out differently.
+      const comp = focusedComponent();
+      if (comp && comp.type === "graph") {
+        comp.config.mode = (comp.config.mode || "tiled") === "tiled" ? "overlapped" : "tiled";
+        const b = SHEET.get(comp.id);
+        if (b) b.cacheKey = "";
+        refreshComponentTitle(comp);
+        saveLayout();
+        renderAll();
+      } else toast("先点一下要切换的时间/距离图");
+      stop(); return;
+    }
     case "m": case "M": state.show.measure = !state.show.measure; renderAll(); stop(); return;
     case "l": case "L": state.show.legend = !state.show.legend; renderAll(); stop(); return;
     case "e": case "E": {
@@ -2665,7 +2728,10 @@ function setStatus() {
   bits.push("窗口 " + fmt(r[0], 2) + "–" + fmt(r[1], 2) + " " + axisUnit());
   bits.push("组件 " + state.components.length);
   bits.push("通道 " + allGraphChannels().length);
-  bits.push(state.groupMode === "tiled" ? "分栏" : "重叠");
+  const focusComp = focusedComponent();
+  if (focusComp && focusComp.type === "graph") {
+    bits.push("「" + (focusComp.config.mode === "overlapped" ? "重叠" : "分栏") + "」");
+  }
   bits.push(state.style === "line" ? "线" : "点");
   if (state.datumOn && state.datum !== null) {
     bits.push("基准光标 " + fmt(state.datum, 2) + axisUnit()
@@ -2810,6 +2876,7 @@ window.i3pro = {
   componentAction: componentAction, refreshWindowTraces: refreshWindowTraces,
   encodeLayout: encodeLayout, decodeLayout: decodeLayout, saveLayout: saveLayout,
   buildWorksheet: buildWorksheet, syncScatterSelectors: syncScatterSelectors,
+  selectLap: selectLap, zoomToLap: zoomToLap,
 };
 </script>
 </body>

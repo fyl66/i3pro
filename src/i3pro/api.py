@@ -66,13 +66,25 @@ class Response:
     path: Path | None = None
 
 
-class Body:
-    """请求体：**按需读**。上传可能上百 MB，不能一进 dispatch 就读进内存。"""
+class ClientGone(Exception):
+    """客户端在导出写到一半时断开（点了「取消」）。
 
-    def __init__(self, length: int = 0, reader=None, data: bytes | None = None):
+    它**不是错误**：没人收这份文件了，越早停越好——临时目录由 ``act_export`` 清掉。
+    """
+
+
+class Body:
+    """请求体：**按需读**。上传可能上百 MB，不能一进 dispatch 就读进内存。
+
+    ``alive`` 是 HTTP 管道给的一个"客户端还在不在"的探针（可选）。导出用它早停：
+    队友点了「取消」，浏览器会把连接关掉，我们不必把剩下几百 MB 写完再删。
+    """
+
+    def __init__(self, length: int = 0, reader=None, data: bytes | None = None, alive=None):
         self.length = max(0, int(length or 0))
         self._reader = reader
         self._data = data
+        self.alive = alive
 
     @classmethod
     def of(cls, value) -> "Body":
@@ -99,6 +111,9 @@ class Api:
         call = _Call(self, Body.of(body))
         try:
             return call.api(list(parts), dict(query), method)
+        except ClientGone:
+            # 客户端已经走了（导出中途取消）：没人收这份数据，安静收场。
+            return Response(status=499, body=b"", close=True)
         except KeyError as exc:
             return call._error(404, f"未知场次: {exc.args[0]}")
         except FileNotFoundError as exc:
@@ -446,8 +461,15 @@ class _Call:
         )
         directory = Path(tempfile.mkdtemp(prefix="i3pro-export-"))
         target = directory / filename
+        alive = getattr(self.body_source, "alive", None)
+
+        def progress(done, total):
+            """写一块就问一次"人还在吗"——点了取消就别把剩下几百 MB 写完。"""
+            if alive is not None and not alive():
+                raise ClientGone()
+
         try:
-            exportmod.write(log, request, target)
+            exportmod.write(log, request, target, progress=progress)
         except Exception:
             shutil.rmtree(directory, ignore_errors=True)
             raise

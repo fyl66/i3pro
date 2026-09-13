@@ -3865,6 +3865,30 @@ class TestApiLayerWithoutASocket(unittest.TestCase):
             self.assertIsInstance(response, self.api.Response)
             self.assertGreaterEqual(response.status, 200)
 
+    def test_客户端走了就早停并清掉临时目录(self):
+        """点了「取消」之后，服务端不该把剩下几百 MB 写完再删。
+
+        浏览器的 ``fetch`` 被 abort 时会关连接，HTTP 层把这个事实做成 ``Body.alive``
+        探针；导出每写一块问一次，不在了就 ``ClientGone``。这条同时钉住"安静收场"
+        （499 而不是假装成功）与"临时目录一个都不留"。
+        """
+        if not HILL.exists():
+            self.skipTest("缺金标准数据")
+        from i3pro import api as apimod
+
+        temp = Path(tempfile.gettempdir())
+        before = set(temp.glob("i3pro-export-*"))
+        response = self.client.handle(
+            ["session", HILL.stem, "export"],
+            {"channels": ["all"], "rate": ["auto"], "format": ["csv"], "layout": ["wide"],
+             "from": ["0"], "to": ["5"]},
+            "GET",
+            apimod.Body(length=0, alive=lambda: False),
+        )
+        self.assertEqual(response.status, 499, "客户端已断开时应当安静收场，而不是回 200")
+        self.assertEqual(set(temp.glob("i3pro-export-*")), before,
+                         "取消了导出，临时目录却没清掉")
+
     def test_未知会话与未知动作各自报自己的错(self):
         if not (DATA.exists() and any(DATA.glob("*.ld"))):
             self.skipTest("缺 i2pro_data/ 数据")
@@ -3933,6 +3957,10 @@ class TestStructureOfTheSplit(unittest.TestCase):
         self.assertEqual(server.count("self.rfile.read"), 1,
                          "读 socket 的地方只该是 _read_body 这一处")
         self.assertIn("def _read_body(", server)
+        # 导出中途取消要靠这一个探针早停；它丢了，"取消"就只是客户端不看而已
+        self.assertIn("alive=self._client_alive", server,
+                      "Body 没拿到「客户端还在不在」的探针：导出取消会退化成"
+                      "「把整份写完再删」")
 
     def test_动作分派只有一张表(self):
         api = self._code("api.py")

@@ -2009,7 +2009,7 @@ python -m unittest tests.test_i3pro.TestExportRanges tests.test_i3pro.TestExport
 node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"    # -> PASS
 
 # 3. 真浏览器真鼠标：点开面板 -> 预估 -> 真下载一个文件（第 4 道回归的导出那几条）
-python tools\verify_clicks.py                                 # -> 62 项检查：62 通过，0 失败
+python tools\verify_clicks.py                                 # -> 68 项检查：68 通过，0 失败
 
 # 4. 两份金标准各真导一次（把 out 换成你自己的临时目录）
 python -m i3pro export "i2pro_data\20260908-cjh 高避5圈.ld" --rate 10 --out out\hill.csv
@@ -2069,9 +2069,17 @@ Excel 那条出口由 **openpyxl 当独立裁判**逐格验（`TestExportTimesta
   每张都带表头；列数超 Excel 上限时报错并说"改用 CSV"。
 * **快照（离线 HTML）里导出是禁用的**：没有服务端可取数，按钮灰掉并写明"用「启动.bat」
   打开 serve 模式"。
-* **取消不留垃圾**：下载走"先落临时文件、再按 `Content-Length` 流式回传"，成功 / 出错 /
-  连接中断三种情况都由 `server.send` 或 `act_export` 清理（真浏览器那几条断言跑完
-  `%TEMP%\i3pro-export-*` 为空）。
+* **取消不留垃圾（这条断言当场抓到一个真问题）**：下载走"先落临时文件、再按
+  `Content-Length` 流式回传"。真浏览器验收里现在有一条**真取消**：点「导出」（整场 +
+  原始采样 + 全通道）→ 按钮自己变成「取消」→ 再点一次 → 面板说"已取消"、没有文件落地、
+  `%TEMP%\i3pro-export-*` 清空。**起先它是红的**：服务端要等自己把整份文件写完、发不出去
+  之后才发现人走了（50 MB 的导出取消后临时目录还挂着十几秒），因为 `act_export` 是在写盘
+  **之前**就返回 `Response` 的，根本不知道客户端走了。现在 HTTP 层把"客户端还在不在"
+  （非阻塞 `select` + `recv(..., MSG_PEEK)` 看 EOF）做成 `Body.alive` 探针，导出每写一块
+  问一次，不在了就 `ClientGone` → 立刻 `rmtree` → 499 安静收场
+  （单测 `TestApiLayerWithoutASocket.test_客户端走了就早停并清掉临时目录`，
+  结构守卫另外钉住 `alive=self._client_alive` 这根线不许被拆掉）。
+  它是**尽力而为**：浏览器只是不读、并没有关连接时探针看不出来，那就退回"写完再删"。
 
 ---
 
@@ -2093,10 +2101,15 @@ Excel 那条出口由 **openpyxl 当独立裁判**逐格验（`TestExportTimesta
 
 **测试侧也收成一处**：九组 `*OverHttp` 用例 + `TestServer` + `TestSidecar` 现在共用
 `with http_session(场次) as http:` 一个夹具（`_Http` 上有 `get_json` / `put_json` /
-`get_text` / `get_bytes` / `json` / `raw` / `page_payload`）。实测
-`ThreadingHTTPServer(` 的**构造 13 处 → 1 处**（夹具里那一句）、
-`urllib.request.urlopen` **20 处 → 7 处**（5 处在 `_Http` 上，另外 2 处是 `TestServer` 故意用
-`assertRaises(HTTPError)` 判 400/404）。
+`get_text` / `get_bytes` / `json` / `raw` / `page_payload`），实测 **14 个用例**用同一个夹具；
+改之前这份文件里有 **13 处** `ThreadingHTTPServer(...)` 构造、**20 处**
+`urllib.request.urlopen`，每个用例各抄一遍"起服务 + 拼 URL + 解 JSON + 记错误形状"。
+
+```powershell
+rg -n "ThreadingHTTPServer\(" tests\test_i3pro.py       # 2 行：1 行真构造（夹具里）+ 1 行在守卫用例的文档字符串里
+rg -n "urllib\.request\.urlopen" tests\test_i3pro.py    # 9 行：7 行真调用（5 行在 _Http 上，2 行是 TestServer 故意判 400/404）+ 2 行文档字符串
+rg -c "with http_session\(" tests\test_i3pro.py         # 14
+```
 
 另外钉住的：路由表里每个动作都有实现；动作清单就是那 16 个；`Api.handle` 对
 `["sessions"]` / `["nope"]` / `["session","nope","info"]` 都**返回 `Response` 而不是 `None`**
@@ -2173,9 +2186,9 @@ node tools\smoke_viewer.js out\<场次>.html   # 3. 无头驱动前端：PASS
 python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘：全过（没有 Edge 的机器打印 SKIP，不算通过）
 ```
 
-**通过判据**：`Ran 285 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）；
+**通过判据**：`Ran 286 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）；
 `PASS - 0 channel(s) outside tolerance`；`PASS - workbench ran headless ... interactions verified`；
-`62 项检查：62 通过，0 失败`。**四条全绿才算改完**（AGENTS.md 规则 7）。
+`68 项检查：68 通过，0 失败`。**四条全绿才算改完**（AGENTS.md 规则 7）。
 
 上面各条验收里出现的"当时的结果"（`Ran 232 tests` / `51 项检查` 之类）是**那一轮**的
 实测记录，不是当前的数字；当前的数字只认这一节。每加一条验收条目就把这一节改一次。
@@ -2183,7 +2196,7 @@ python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘�
 **别并行跑两个测试进程**：`out/_test_data/` 是固定的，两边同时写同一份副本时
 `shutil.copy2` 会撞上 `WinError 1224`（目标文件正被映射着）。实测过：两条
 `python -m unittest` 同时起，第二条在导入阶段就报这个错；串行跑两次都是
-`Ran 285 tests / OK`。这不是用例的错，是"副本目录只有一份"的代价。
+`Ran 286 tests / OK`。这不是用例的错，是"副本目录只有一份"的代价。
 
 **金标准场次先复制再读**：`tests/test_i3pro.py` 在导入时把两份金标准场次复制到
 `out/_test_data/`（实测各 1 份、共 148.2 MB，复制 0.08 s；该目录每轮先清空），

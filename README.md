@@ -82,7 +82,7 @@ MoTeC 自己导出的两个 CSV（182 MB / 425 MB）。
 | **注释（i2 Pro 的 Notes）** | 在光标处放一条带文字的标记（"这里换了刹车点"）：时间轴上是琥珀色虚线 + 那行字，轨迹图上是一个点 + 那行字；点文字**就地改**（回车保存 / Esc 取消）、✕ 删除。存 `<场次>.notes.json` 侧车，**不参与切圈 / 比圈 / 报表**（实测加注释前后圈速表 9 行不变），随快照与分享链接一起走 |
 | **GPS 校正** | 把坏定位**标出来**再决定要不要修：掉星给的 `(0,0)`（`高避5圈` 638 点、`TV0` 32256 点）、卫星数不足、以及最阴的一类——**定位整体跳到几百米外并留在那**（黄金数据 `耐久正赛` 里就有一次 **214.5 m / 0.05 s**，隐含 15443 km/h；16 个场次 12 个有）。16 个场次里**一个孤立毛刺都没有**，所以不删点（删哪边都是猜），而是**断开连线 + 标红 + 计数**：轨迹图不再跨着空档画一条不存在的直线。校正本身（时间偏移按秒或按更新周期、插值到主采样率）默认关，开了之后可选择只作用于**轨迹 / 切圈 / 距离轴**；关掉时数值与旧实现**逐点 `array_equal`**。参数存 `<场次>.gps.json` |
 | **数据导出（CSV / Excel）** | 把数据带走去 Excel / Python / MATLAB 接着算：范围可选**全部日志 / 当前视图 / 选中圈 / 光标 A–B / 指定时间段**（`12.5s`，或 `2026-09-14 12:34:56.789`，也可以只写 `12:35:10.123`）/ **指定距离段**，边界**左闭右闭**；通道可全选或按侧边栏勾选（数学通道单独开关）；采样可选 **Auto**（各通道保留原始采样点，宽表以并集为索引、缺失留空）或统一采样率（1/5/10/20/50/100/200/500 与自定义，`linear` / `hold` / `nearest` / `mean`）；主索引可选 `time_s`（相对秒）、`timestamp`（绝对时间戳＝场次起点 + 相对秒）或 `distance_m`——**范围自己决定轴**（选距离段就是米、选时间段就是秒，主索引下拉跟着锁，免得把 1200–1850 当成"秒"导出去）。CSV 是 UTF-8 **带 BOM** 的宽表或长表（可选打包 `metadata.json`），Excel 是「元数据」sheet + 「数据」sheet、超 104 万行自动分 sheet——`.xlsx` 用**标准库**写（`zipfile` + 最小 OOXML），没有为它多一个运行期依赖。面板先给预计行数与体积，进度条按 `Content-Length` 走、再点一次就是取消。实测两份金标准 `--rate 10`：高避 **4,641 行 × 442 列 / 6.7 MiB**、耐久 **19,431 行 × 347 列 / 22.6 MiB**，末行时刻 `463.99` / `1942.99`。命令行同一个出口：`i3pro export <文件> --rate 10 --out x.csv` |
-| **工程化** | 285 项单测全绿（真实数据回归 + HTTP 端到端 + 无头驱动前端 442 个断言点），另有 **真浏览器真鼠标验收 62 项**（`tools\verify_clicks.py`，Edge 的 DevTools 协议发真事件，跑在两份金标准上），零第三方运行期依赖；改这个仓库的硬性规则见 [AGENTS.md](AGENTS.md) |
+| **工程化** | 286 项单测全绿（真实数据回归 + HTTP 端到端 + 无头驱动前端 442 个断言点），另有 **真浏览器真鼠标验收 68 项**（`tools\verify_clicks.py`，Edge 的 DevTools 协议发真事件，跑在两份金标准上），零第三方运行期依赖；改这个仓库的硬性规则见 [AGENTS.md](AGENTS.md) |
 
 完整验收清单与复现命令见 **[`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md)**；
 规划、里程碑与风险见 **[`docs/PLAN.md`](docs/PLAN.md)**。
@@ -145,7 +145,7 @@ MoTeC 自己导出的两个 CSV（182 MB / 425 MB）。
 i3pro.cmd           命令行入口（自动探测 Python），两个 bat 都调它
 docs/               PLAN.md 规划 · ACCEPTANCE.md 验收清单 · ld-format.md 格式逆向记录
 tools/              verify_ld_vs_csv.py 解析对照 · smoke_viewer.js 无头驱动前端
-tests/              285 项单测
+tests/              286 项单测
 maths/              全局数学通道定义（global.json，跨场次复用）
 out/                生成物（快照 HTML / Parquet），已在 .gitignore 里
 i2pro_data/         试车数据（.ld/.ldx/.csv），不进仓库
@@ -187,7 +187,7 @@ src/i3pro/
 ## 开发
 
 ```powershell
-python -m unittest discover -s tests -v      # 285 项，无数据文件时自动 skip
+python -m unittest discover -s tests -v      # 286 项，无数据文件时自动 skip
 python tools\verify_ld_vs_csv.py             # 与 i2 Pro CSV 逐通道对照
 node tools\smoke_viewer.js out\demo.html     # 无头驱动前端：缩放/光标/分组/信标编辑/数学通道/区段/报表/直方图/频谱/注释/GPS 校正/导出等 442 个断言点
 python tools\verify_clicks.py                # 真 Edge 发真鼠标/键盘：62 项交互验收（需要 Edge + 金标准数据）

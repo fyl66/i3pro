@@ -18,6 +18,7 @@ the same session twice costs nothing.
 
 from __future__ import annotations
 
+import select
 import socket
 import threading
 import webbrowser
@@ -26,7 +27,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import render
-from .api import Api, Body, Response, csv_arg, float_arg, int_arg
+from .api import Api, Body, ClientGone, Response, csv_arg, float_arg, int_arg
 from .library import SessionLibrary, dumps, json_safe
 
 __all__ = [
@@ -79,12 +80,24 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
             """只在动作真的要请求体时才被调用（上传 100 MB 也不预先读）。"""
             return self.rfile.read(length)
 
+        def _client_alive(self) -> bool:
+            """客户端还在不在？导出写到一半用它早停（尽力而为：看不出来就当还在）。"""
+            try:
+                ready, _, _ = select.select([self.connection], [], [], 0)
+                if not ready:
+                    return True
+                return self.connection.recv(1, socket.MSG_PEEK) != b""
+            except OSError as exc:           # 非阻塞套接字"现在没数据"= 还连着
+                return isinstance(exc, BlockingIOError)
+
         def dispatch(self, method: str) -> None:
             parsed = urlparse(self.path)
             query = parse_qs(parsed.query)
             parts = [unquote(p) for p in parsed.path.split("/") if p]
             try:
                 response = self.route(parts, query, method)
+            except ClientGone:
+                return  # 客户端走了：不算错误，也不用回东西
             except Exception as exc:  # 页面那两条路也可能炸；兜住，别把连接晾着
                 response = Response(
                     500,
@@ -97,7 +110,10 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                         "error": f"/{'/'.join(parts)} 没有返回响应（这是服务端的 bug）"
                     }).encode("utf-8"),
                 )
-            self.send(response)
+            try:
+                self.send(response)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # 发到一半客户端走了；临时文件在 send 的 finally 里已经删了
 
         def route(self, parts: list[str], query: dict, method: str) -> Response:
             if not parts:
@@ -105,7 +121,7 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
             if parts[0] == "api":
                 return api.handle(
                     parts[1:], query, method,
-                    Body(self._content_length(), self._read_body),
+                    Body(self._content_length(), self._read_body, alive=self._client_alive),
                 )
             if parts[0] == "session" and len(parts) >= 2:
                 return self._html(self.session_page(parts[1], query))

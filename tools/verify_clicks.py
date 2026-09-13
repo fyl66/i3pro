@@ -1375,6 +1375,51 @@ class Checker:
         self.check("导出过程没有页面级报错",
                    len(self.browser.page_errors()) == before_errors,
                    self.browser.page_errors()[:3])
+
+        # 「再点一次就是取消」（需求 §5：支持取消、取消后不许留半个文件）。
+        # 挑一个够大的导出（整场 + 原始采样 + 全通道），点下去之后立刻看到按钮变成
+        # 「取消」，再点一次，面板要自己说"已取消"，而且**没有文件落地、没有临时目录**。
+        self.js(
+            "i3pro.applyExportConfig({range:'all',from:'',to:'',channels:'all',maths:true,"
+            "rate:'auto',custom:'',resample:'linear',meta:false,axis:'time',format:'csv',"
+            "layout:'wide'}); true"
+        )
+        big = json.loads(self.js(
+            "(function(){var b=document.getElementById('exportGo');"
+            "var r=b.getBoundingClientRect();"
+            "return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2});})()"
+        ))
+        before_files = set(os.listdir(download_dir))
+        self.browser.click(big["x"], big["y"], self.session)
+        running = self.browser.wait_for(
+            "document.getElementById('exportGo').textContent.indexOf('取消') >= 0",
+            self.session, timeout=30,
+        )
+        self.check("导出中「导出」按钮自己变成「取消」", running,
+                   self.js("document.getElementById('exportGo').textContent"))
+        self.browser.click(big["x"], big["y"], self.session)      # 再点一次 = 取消
+        stopped = self.browser.wait_for(
+            "document.getElementById('exportPlan').textContent.indexOf('已取消') >= 0",
+            self.session, timeout=30,
+        )
+        self.check("再点一次就取消，面板说已取消", stopped,
+                   self.js("document.getElementById('exportPlan').textContent"))
+        time.sleep(1.0)
+        self.check("取消之后没有文件落地",
+                   set(os.listdir(download_dir)) == before_files,
+                   sorted(os.listdir(download_dir)))
+        for _ in range(40):            # 服务端清理临时目录是异步的，等它一下
+            leftovers = glob.glob(os.path.join(tempfile.gettempdir(), "i3pro-export-*"))
+            if not leftovers:
+                break
+            time.sleep(0.25)
+        self.check("取消之后服务端临时目录也不残留", not leftovers, leftovers[:3])
+        # 收尾：换回小配置，免得影响后面别的用例读面板状态
+        self.js(
+            "i3pro.applyExportConfig({range:'time',from:'10',to:'12',channels:'all',"
+            "maths:true,rate:'10',custom:'',resample:'linear',meta:false,axis:'time',"
+            "format:'csv',layout:'wide'}); true"
+        )
         # 收尾：把面板关掉，后面的用例在干净状态下跑
         self.js("i3pro.closeExportDialog(); true")
 

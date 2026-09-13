@@ -134,6 +134,24 @@
   .rzcorner { right:0; bottom:0; width:16px; height:16px; cursor:nwse-resize;
               background:linear-gradient(135deg, transparent 46%, #46505f 46%, #46505f 54%, transparent 54%); }
   .comp:hover .rzright, .comp:hover .rzbottom { background:rgba(76,194,255,.16); }
+  /* 报表组件（时间报告 / 通道报告）：表格是 DOM 不是 canvas——要能横向滚动、
+     选中、复制，用 canvas 画一张几百行的表只会让人没法复制一个数字。 */
+  .compbody.tabular { display:flex; flex-direction:column; }
+  .rwrap { flex:1 1 auto; min-height:0; overflow:auto; }
+  .rtable { width:100%; border-collapse:collapse; font-size:11px;
+            font-variant-numeric:tabular-nums; }
+  .rtable th, .rtable td { padding:2px 6px; border-bottom:1px solid var(--line);
+                           white-space:nowrap; text-align:right; }
+  .rtable th { position:sticky; top:0; z-index:2; background:var(--panel);
+               color:var(--muted); font-weight:600; }
+  .rtable th.l, .rtable td.l { text-align:left; }
+  .rtable tr:hover td { background:rgba(76,194,255,.07); }
+  .rtable td.best { color:#35d07f; font-weight:600; }
+  .rtable td.close { color:#ffb454; }
+  .rtable td.fair { color:#8b94a7; }
+  .rtable td.none { color:#4b5364; }
+  .rnote { flex:0 0 auto; padding:3px 8px 5px; font-size:11px; color:var(--muted); }
+  .rnote b { color:var(--fg); }
   .comp:hover .rzcorner {
       background:linear-gradient(135deg, transparent 46%, var(--accent) 46%, var(--accent) 54%, transparent 54%); }
   .compbar .csize { color:#5d6575; font-variant-numeric:tabular-nums; }
@@ -337,7 +355,17 @@ const COMPONENT_TYPES = {
   gauge:   { label: "仪表",        cols: 4,  rows: 13 },
   delta:   { label: "时间差 Δ",    cols: 12, rows: 8 },
   status:  { label: "状态与故障",  cols: 12, rows: 4 },
+  report:  { label: "时间报告",    cols: 12, rows: 10 },
+  chreport:{ label: "通道报告",    cols: 12, rows: 12 },
 };
+
+//: 一张表里最多报告几条通道。再多就不是表了，是一份要滚半天的清单。
+const MAX_REPORT_CHANNELS = 8;
+
+//: 区段过滤的三种取值（和时间报告的列、通道报告的分组共用一套说法）。
+const SECTION_FILTERS = [
+  ["all", "全部区段"], ["corner", "只看弯道"], ["straight", "只看直道"],
+];
 
 const GAUGE_SUBTYPES = {
   numeric: "数值仪表",
@@ -363,6 +391,19 @@ const PRESET_PICKS = {
 };
 
 let compSeq = 0;
+
+/** 报表默认报告哪几条通道：优先挑快照**真的带了**的那几条。
+ *
+ * 快照里的表是导出时按选中的通道算好的，组件却可以另外选；默认值要是挑了没带的，
+ * 一打开就是空表。serve 模式下没有这个限制。 */
+function defaultReportChannels(limit) {
+  const table = DATA && DATA.report && DATA.report.channels_lap;
+  const embedded = table ? (table.channels || []) : null;
+  const pool = (DATA && DATA.selected && DATA.selected.length)
+    ? DATA.selected.slice() : allGraphChannels();
+  const usable = embedded ? pool.filter((name) => embedded.indexOf(name) >= 0) : pool;
+  return (usable.length ? usable : pool).slice(0, limit);
+}
 
 function channelsMatching(patterns, limit) {
   const found = [];
@@ -405,6 +446,13 @@ function makeComponent(type, overrides) {
   if (type === "gauge") {
     comp.config.subtype = o.subtype || "numeric";
     comp.config.channels = [];
+  }
+  if (type === "report") comp.config.filter = "all";
+  if (type === "chreport") {
+    comp.config.channels = [];
+    comp.config.by = "lap";              // lap | section
+    comp.config.lap = null;              // 按区段分组时看哪条圈（null = 参考圈）
+    comp.config.filter = "all";
   }
   comp.config = Object.assign({}, comp.config, o.config || {});
   return comp;
@@ -459,6 +507,13 @@ function presetDefinitions() {
       placed(makeComponent("gauge", { subtype: "bar" }), 6, 13, 6, 11),
       placed(makeComponent("gauge", { subtype: "list" }), 0, 24, 12, 13),
     ],
+    报表: [
+      placed(makeComponent("graph", { config: { channels: pick("分析", 8) } }), 0, 0, 12, 9),
+      placed(makeComponent("report"), 0, 9, 12, 11),
+      placed(makeComponent("chreport", {
+        config: { channels: defaultReportChannels(3) },
+      }), 0, 20, 12, 12),
+    ],
   };
 }
 
@@ -478,6 +533,10 @@ function encodeLayout(components) {
       : c.type === "scatter" ? [c.config.x, (c.config.y || [])[0], c.config.colour, c.config.style].join("|")
       : c.type === "track" ? (c.config.channel || "")
       : c.type === "gauge" ? [c.config.subtype, (c.config.channels || []).join("~")].join("|")
+      : c.type === "report" ? (c.config.filter || "all")
+      : c.type === "chreport" ? [
+          c.config.by || "lap", c.config.lap || "", c.config.filter || "all",
+        ].join("|") + "#" + (c.config.channels || []).slice(0, MAX_REPORT_CHANNELS).join("~")
       : "",
   ]);
   try {
@@ -512,6 +571,20 @@ function decodeLayout(text) {
         const parts = payload.split("|");
         comp.config.subtype = GAUGE_SUBTYPES[parts[0]] ? parts[0] : "numeric";
         comp.config.channels = parts[1] ? parts[1].split("~").filter(Boolean) : [];
+      }
+      else if (type === "report") {
+        comp.config.filter = ["all", "corner", "straight"].indexOf(payload) >= 0
+          ? payload : "all";
+      } else if (type === "chreport") {
+        const parts = payload.split("#");
+        const head = parts[0].split("|");
+        comp.config.by = head[0] === "section" ? "section" : "lap";
+        comp.config.lap = head[1] || null;
+        comp.config.filter = ["all", "corner", "straight"].indexOf(head[2]) >= 0
+          ? head[2] : "all";
+        comp.config.channels = parts[1]
+          ? parts[1].split("~").filter((n) => CHANNELS.has(n)).slice(0, MAX_REPORT_CHANNELS)
+          : [];
       }
       return comp;
     }).filter(Boolean);
@@ -643,10 +716,17 @@ function focusedComponent() {
       || null;
 }
 
-/** Channels of the focused graph component - this is what the channel list edits. */
+/** Channels of the focused component - this is what the sidebar channel list edits.
+ *
+ * 图组件与**通道报告**都从这份清单吃东西：共用一个勾选界面，就不必再给报表
+ * 造一个通道选择器（445 条通道的场次里，那多半会做成一个更难用的下拉框）。
+ */
 function selectedChannels() {
   const comp = focusedComponent();
-  return comp && comp.type === "graph" ? comp.config.channels : [];
+  if (!comp) return [];
+  if (comp.type === "graph") return comp.config.channels;
+  if (comp.type === "chreport") return comp.config.channels || [];
+  return [];
 }
 
 function setSelectedChannels(names) {
@@ -654,6 +734,10 @@ function setSelectedChannels(names) {
   if (comp && comp.type === "graph") {
     comp.config.channels = names;
     state.dataVersion += 1;
+  } else if (comp && comp.type === "chreport") {
+    comp.config.channels = names.slice(0, MAX_REPORT_CHANNELS);
+    state.dataVersion += 1;
+    saveLayout();
   }
 }
 
@@ -1157,6 +1241,8 @@ function buildWorksheet() {
     const el = makeEl("div", "comp" + (comp.id === state.focusId ? " focus" : ""), null);
     el.dataset.id = comp.id;
     el.dataset.type = comp.type;
+    // 报表是 DOM 表格，别的组件是 canvas
+    const tabular = comp.type === "report" || comp.type === "chreport";
     const bar = makeEl("div", "compbar", el);
     const titleSpan = makeEl("span", "ctitle", bar);
     titleSpan.textContent = componentTitle(comp);
@@ -1174,8 +1260,9 @@ function buildWorksheet() {
     };
     btn("up", "↑", "上移");
     btn("down", "↓", "下移");
+    if (tabular) btn("csv", "CSV", "把这张表导出成 CSV（列序与界面上看到的一致）");
     btn("close", "✕", "移除这个组件");
-    const body = makeEl("div", "compbody", el);
+    const body = makeEl("div", "compbody" + (tabular ? " tabular" : ""), el);
     const bundle = { comp: comp, el: el, body: body, canvas: null, head: null,
                      sizeSpan: sizeSpan, titleSpan: titleSpan,
                      off: null, cacheKey: "", legendKey: "", valueNodes: [] };
@@ -1234,7 +1321,50 @@ function buildWorksheet() {
       });
       if (state.track) bundle.trackData = state.track;
     }
-    bundle.canvas = makeEl("canvas", "", body);
+    if (tabular) {
+      const cfgBar = makeEl("div", "scattercfg", body);
+      makeEl("span", "", cfgBar).textContent = "区段";
+      const selFilter = makeEl("select", "", cfgBar);
+      selFilter.innerHTML = SECTION_FILTERS.map(
+        (pair) => '<option value="' + pair[0] + '">' + pair[1] + "</option>"
+      ).join("");
+      selFilter.value = comp.config.filter || "all";
+      bundle.selFilter = selFilter;
+      selFilter.addEventListener("change", () => {
+        comp.config.filter = selFilter.value;
+        refreshComponentTitle(comp);
+        saveLayout();
+        renderAll();
+      });
+      if (comp.type === "chreport") {
+        makeEl("span", "", cfgBar).textContent = "分组";
+        const selBy = makeEl("select", "", cfgBar);
+        selBy.innerHTML = '<option value="lap">按圈</option>'
+          + '<option value="section">按区段</option>';
+        selBy.value = comp.config.by || "lap";
+        bundle.selBy = selBy;
+        const selLap = makeEl("select", "", cfgBar);
+        bundle.selLap = selLap;
+        selBy.addEventListener("change", () => {
+          comp.config.by = selBy.value;
+          saveLayout();
+          buildWorksheet();
+          renderAll();
+        });
+        selLap.addEventListener("change", () => {
+          comp.config.lap = selLap.value || null;
+          saveLayout();
+          renderAll();
+        });
+        makeEl("span", "", cfgBar).textContent = "通道在左侧勾选";
+      }
+      const tableHost = makeEl("div", "rwrap", body);
+      const noteHost = makeEl("div", "rnote", body);
+      bundle.tableHost = tableHost;
+      bundle.noteHost = noteHost;
+    } else {
+      bundle.canvas = makeEl("canvas", "", body);
+    }
     if (comp.type === "scatter") {
       bundle.canvas.addEventListener("dblclick", () => {
         comp.config.style = comp.config.style === "points" ? "trend" : "points";
@@ -1245,9 +1375,11 @@ function buildWorksheet() {
     if (comp.type === "track") {
       bundle.canvas.addEventListener("click", (event) => onTrackClick(event, comp, bundle));
     }
-    const head = makeEl("div", "graphhead", body);
-    if (comp.type !== "graph") head.className = "graphhead caption";
-    bundle.head = head;
+    if (!tabular) {
+      const head = makeEl("div", "graphhead", body);
+      if (comp.type !== "graph") head.className = "graphhead caption";
+      bundle.head = head;
+    }
     const handle = (cls, axis, title) => {
       const h = makeEl("div", "rz " + cls, el);
       h.title = title;
@@ -1265,6 +1397,8 @@ function buildWorksheet() {
       markFocused();
     });
     SHEET.set(comp.id, bundle);
+    // 报表的下拉框要等 bundle 进了 SHEET 才能填（syncReportSelectors 从那儿取元素）
+    if (tabular) syncReportSelectors(comp);
     host.appendChild(el);
     positionComponent(el, comp);
     maxRow = Math.max(maxRow, comp.y + comp.h);
@@ -1438,6 +1572,15 @@ function componentTitle(comp) {
   if (comp.type === "gauge") {
     return spec.label + " · " + (GAUGE_SUBTYPES[comp.config.subtype] || comp.config.subtype);
   }
+  if (comp.type === "report") {
+    const filter = SECTION_FILTERS.find((pair) => pair[0] === comp.config.filter);
+    return spec.label + " · " + ((filter && filter[1]) || "全部区段");
+  }
+  if (comp.type === "chreport") {
+    const n = (comp.config.channels || []).length;
+    const by = (comp.config.by || "lap") === "section" ? "按区段" : "按圈";
+    return spec.label + " · " + by + (n ? " · " + n + " 通道" : " · 还没选通道");
+  }
   return spec.label;
 }
 
@@ -1448,6 +1591,10 @@ function refreshComponentTitle(comp) {
 
 function componentAction(comp, act) {
   const idx = state.components.indexOf(comp);
+  if (act === "csv") {
+    exportReportCSV(comp);
+    return;
+  }
   if (act === "close") {
     state.components.splice(idx, 1);
     if (state.focusId === comp.id) state.focusId = null;
@@ -1473,7 +1620,18 @@ function markFocused() {
 function renderComponents() {
   for (const comp of state.components) {
     const bundle = SHEET.get(comp.id);
-    if (!bundle || !bundle.canvas) continue;
+    if (!bundle) continue;
+    if (comp.type === "report" || comp.type === "chreport") {
+      // 表还没到就先挂个占位，然后去要数据——这样任何入口（预设、分享链接、
+      // 改区段、改数学通道）加进来都不用额外接线。
+      if (!bundle.report || bundle.reportKey !== reportFetchKey(comp)) {
+        refreshReport(comp);
+      }
+      if (comp.type === "report") renderTimeReport(comp, bundle);
+      else renderChannelReport(comp, bundle);
+      continue;
+    }
+    if (!bundle.canvas) continue;
     if (comp.type === "graph") renderGraphComponent(comp, bundle);
     else if (comp.type === "scatter") renderScatterComponent(comp, bundle);
     else if (comp.type === "delta") renderDeltaComponent(comp, bundle);
@@ -2276,6 +2434,302 @@ async function refreshTrackFor(comp) {
   }
 }
 
+/* ------------------------------------------------------------ 报表组件 #11 */
+/* 时间报告与通道报告。两张表都由 Python 算好（`report.py`），界面只负责排版、
+   着色和导出——同一个数字在快照、服务、命令行里必须是同一个，所以这里不做
+   二次统计。快照模式用注入的 DATA.report，服务模式按需向 /report 取。 */
+
+function reportFetchKey(comp) {
+  const cfg = comp.config;
+  const channels = (cfg.channels || []).slice(0, MAX_REPORT_CHANNELS).join(",");
+  const shape = comp.type === "report"
+    ? "time"
+    : "channels|" + (cfg.by || "lap") + "|" + (cfg.lap || "");
+  // dataVersion 进键：改过区段 / 数学通道 / 圈之后，同一张表也得重算
+  return [shape, channels, state.dataVersion].join("|");
+}
+
+function snapshotReportTable(comp) {
+  const src = (DATA && DATA.report) || null;
+  if (!src) return null;
+  if (comp.type === "report") return src.time || null;
+  if ((comp.config.by || "lap") === "section") {
+    const reference = src.reference_lap;
+    const wanted = comp.config.lap;
+    if (wanted && reference && String(wanted) !== String(reference)) return null;
+    return src.channels_section || null;
+  }
+  return src.channels_lap || null;
+}
+
+async function refreshReport(comp) {
+  const b = SHEET.get(comp.id);
+  if (!b || b.reportPending) return;
+  const key = reportFetchKey(comp);
+  if (b.reportKey === key) return;
+  if (!DATA.api) {
+    b.report = snapshotReportTable(comp);
+    b.reportKey = key;
+    b.reportNotice = b.report ? null
+      : (DATA.report
+        ? "快照里只有参考圈那一条的区段表；换成「按圈」，或者回 serve 模式换圈"
+        : "这份快照没带报表数据：用「报表」预设重新导出一份，或者用 serve 模式");
+    renderAll();
+    return;
+  }
+  b.reportPending = true;
+  const cfg = comp.config;
+  const params = new URLSearchParams();
+  params.set("table", comp.type === "report" ? "time" : "channels");
+  if (comp.type === "chreport") {
+    params.set("by", cfg.by || "lap");
+    if ((cfg.by || "lap") === "section" && cfg.lap) params.set("lap", cfg.lap);
+    const names = (cfg.channels || []).filter((n) => CHANNELS.has(n))
+      .slice(0, MAX_REPORT_CHANNELS);
+    if (names.length) params.set("channels", names.join(","));
+  }
+  const url = DATA.api + "/session/" + encodeURIComponent(DATA.session)
+    + "/report?" + params.toString();
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    if (data.error) {
+      b.report = null;
+      b.reportNotice = data.error;
+    } else {
+      b.report = comp.type === "report" ? data.time : data.channels;
+      b.reportNotice = data.notice || null;
+    }
+  } catch (err) {
+    b.report = null;
+    b.reportNotice = "报表没算出来（" + err.message + "）；看看本地服务还在不在";
+  }
+  b.reportPending = false;
+  b.reportKey = key;
+  renderAll();
+}
+
+function reportRowsOf(comp, table) {
+  const kinds = table.row_kinds || [];
+  const filter = comp.config.filter || "all";
+  // 通道报告的行还带一条通道名：快照里只嵌了导出时选中的那几条通道，
+  // 组件自己选的可能多出来，这里按组件要的那几条筛。
+  let wanted = null;
+  let channelAt = -1;
+  if (comp.type === "chreport") {
+    wanted = new Set(comp.config.channels || []);
+    channelAt = (table.columns || []).findIndex((c) => c.key === "channel");
+  }
+  const out = [];
+  for (let i = 0; i < table.rows.length; i += 1) {
+    if (filter !== "all" && kinds[i] !== filter) continue;
+    if (wanted && (channelAt < 0 || !wanted.has(table.rows[i][channelAt]))) continue;
+    out.push(i);
+  }
+  return out;
+}
+
+function bandForRatio(ratio, bands) {
+  if (ratio === null || ratio === undefined || !Number.isFinite(ratio)) return "";
+  for (const band of bands || []) if (ratio <= band.max_ratio) return band.key;
+  return "";
+}
+
+function cellText(value, column) {
+  const isText = column && column.type === "text";
+  // 文字列空着就该是空的；"--" 留给"这条通道这段没有有效样本"那种数字缺失
+  if (value === null || value === undefined || value === "") return isText ? "" : "--";
+  if (typeof value !== "number") return esc(String(value));
+  const digits = column && column.decimals !== undefined ? column.decimals : 3;
+  return esc(fmt(value, digits));
+}
+
+function reportPlaceholder(b) {
+  return '<p class="rnote">' + esc(b.reportNotice || "正在算这张表…") + "</p>";
+}
+
+function renderTimeReport(comp, b) {
+  const table = b.report;
+  if (!table) {
+    b.tableHost.innerHTML = reportPlaceholder(b);
+    b.noteHost.innerHTML = "";
+    return;
+  }
+  const columns = table.columns;
+  const bestAt = columns.findIndex((c) => c.key === "best");
+  const picked = reportRowsOf(comp, table);
+  const head = "<tr>" + columns.map(
+    (column, j) => '<th class="' + (j < 2 ? "l" : "") + '">' + esc(column.label) + "</th>"
+  ).join("") + "</tr>";
+  const body = picked.map((i) => {
+    const row = table.rows[i];
+    const best = typeof row[bestAt] === "number" && row[bestAt] > 0 ? row[bestAt] : null;
+    const cells = row.map((value, j) => {
+      let cls = j < 2 ? "l" : "";
+      if (value === null || value === undefined) cls = "none";
+      else if (best !== null && j >= 2 && j < bestAt) {
+        cls = bandForRatio(typeof value === "number" ? value / best : null, table.bands);
+      }
+      return '<td class="' + cls + '">' + cellText(value, columns[j]) + "</td>";
+    }).join("");
+    return "<tr>" + cells + "</tr>";
+  }).join("");
+  // 显式 thead / tbody：浏览器虽然会自动补，但表头要在滚动时钉住（sticky），
+  // 而且"表头行"和"数据行"分开之后，外面数行数、读表头都不会数错。
+  b.tableHost.innerHTML = '<table class="rtable"><thead>' + head
+    + "</thead><tbody>" + body + "</tbody></table>";
+  b.noteHost.innerHTML = timeReportNote(comp, table, picked.length);
+}
+
+function timeReportNote(comp, table, shown) {
+  const s = table.summary || {};
+  const bits = [];
+  if (s.theoretical !== null && s.theoretical !== undefined) {
+    bits.push("理论最快圈 <b>" + fmt(s.theoretical, 3) + " s</b>（各段最快相加，参考下限）");
+  }
+  if (s.rolling) bits.push("连续最快圈 <b>" + fmt(s.rolling.duration, 3) + " s</b>");
+  if (s.best_lap) {
+    bits.push("最快圈 第 " + esc(String(s.best_lap.lap)) + " 圈 <b>"
+      + fmt(s.best_lap.lap_time, 3) + " s</b>");
+  }
+  bits.push("显示 " + shown + " / " + table.rows.length + " 段");
+  if (s.based_on) bits.push("按" + esc(s.based_on));
+  const notice = (SHEET.get(comp.id) || {}).reportNotice;
+  return bits.join(" · ") + (notice ? " · " + esc(notice) : "");
+}
+
+function renderChannelReport(comp, b) {
+  const table = b.report;
+  if (!table) {
+    b.tableHost.innerHTML = reportPlaceholder(b);
+    b.noteHost.innerHTML = "";
+    return;
+  }
+  const columns = table.columns;
+  const picked = reportRowsOf(comp, table);
+  const head = "<tr>" + columns.map(
+    (column, j) => '<th class="' + (j < 6 ? "l" : "") + '">' + esc(column.label) + "</th>"
+  ).join("") + "</tr>";
+  const body = picked.map((i) => {
+    const row = table.rows[i];
+    return "<tr>" + row.map(
+      (value, j) => '<td class="' + (j < 6 ? "l" : "") + (value === null ? " none" : "")
+        + '">' + cellText(value, columns[j]) + "</td>"
+    ).join("") + "</tr>";
+  }).join("");
+  b.tableHost.innerHTML = '<table class="rtable"><thead>' + head
+    + "</thead><tbody>" + body + "</tbody></table>";
+  b.noteHost.innerHTML = channelReportNote(comp, table, picked.length);
+}
+
+function channelReportNote(comp, table, shown) {
+  const parts = [];
+  parts.push("按" + ((table.by || "lap") === "section" ? "区段" : "圈") + "分组");
+  parts.push(shown + " / " + table.rows.length + " 行");
+  // 报的是**这张表实际列出**的通道数：快照里嵌了 12 条而组件只要了 3 条时，
+  // 写"12 条通道"会让人以为表里真有 12 条。
+  const listed = new Set();
+  const channelAt = table.columns.findIndex((c) => c.key === "channel");
+  for (const i of reportRowsOf(comp, table)) listed.add(table.rows[i][channelAt]);
+  parts.push(esc(listed.size + " 条通道"));
+  if ((table.channels || []).length > listed.size) {
+    parts.push("快照带了 " + (table.channels || []).length + " 条");
+  }
+  if ((table.by || "lap") === "section" && table.lap) {
+    parts.push("第 " + esc(String(table.lap)) + " 圈");
+  }
+  if ((table.missing || []).length) {
+    parts.push("本场没有：" + esc((table.missing || []).join("、")));
+  }
+  const embedded = new Set(table.channels || []);
+  const absent = (comp.config.channels || []).filter((name) => !embedded.has(name));
+  if (absent.length) {
+    parts.push("快照里没带这几条：" + esc(absent.join("、")) + "（导出快照时没选中；serve 模式可以随便选）");
+  }
+  if ((comp.config.channels || []).length > MAX_REPORT_CHANNELS) {
+    parts.push("只算前 " + MAX_REPORT_CHANNELS + " 条");
+  }
+  const notes = (table.notes || []).length ? " · " + esc((table.notes || []).join(" ")) : "";
+  const notice = (SHEET.get(comp.id) || {}).reportNotice;
+  return parts.join(" · ") + notes + (notice ? " · " + esc(notice) : "");
+}
+
+function csvCell(value, column) {
+  if (value === null || value === undefined) return "";
+  let text;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return "";
+    const digits = column && column.decimals !== undefined ? column.decimals : 3;
+    text = digits === null ? String(value) : value.toFixed(digits);
+  } else {
+    text = String(value);
+  }
+  if (/[",\n]/.test(text)) text = '"' + text.replace(/"/g, '""') + '"';
+  return text;
+}
+
+/** 和 Python 的 ``report.to_csv`` 同一套列序、同一套小数位——只是换了个语言写。 */
+function reportCSVText(comp, table) {
+  const columns = (table || (SHEET.get(comp.id) || {}).report || {}).columns || [];
+  const rows = (table || (SHEET.get(comp.id) || {}).report || {}).rows || [];
+  const picked = reportRowsOf(comp, { rows: rows, row_kinds: (table || {}).row_kinds || [] });
+  const lines = [columns.map((column) => csvCell(column.label, null)).join(",")];
+  for (const i of picked) {
+    lines.push(rows[i].map((value, j) => csvCell(value, columns[j])).join(","));
+  }
+  return lines.join("\n") + "\n";
+}
+
+function exportReportCSV(comp) {
+  const b = SHEET.get(comp.id);
+  const table = b && b.report;
+  if (!table) {
+    toast("这张表还没算出来；等它出现再点 CSV");
+    return "";
+  }
+  const text = reportCSVText(comp, table);
+  const name = String(DATA.meta.file || "i3pro").replace(/\.ld$/i, "")
+    + "-" + (comp.type === "report" ? "时间报告" : "通道报告") + ".csv";
+  try {
+    const blob = new Blob(["\ufeff" + text], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    toast("已导出 " + name);
+  } catch (err) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text);
+      toast("这个浏览器不让直接下载，CSV 已经放进剪贴板");
+    } else {
+      toast("导出失败：" + err.message);
+    }
+  }
+  return text;
+}
+
+function syncReportSelectors(comp) {
+  const b = SHEET.get(comp.id);
+  if (!b || !b.selLap) return;
+  const bySection = (comp.config.by || "lap") === "section";
+  const labels = (DATA.laps || []).map((lap) => String(lap.lap));
+  const reference = ((DATA.sections || {}).lap) || "";
+  b.selLap.innerHTML = '<option value="">参考圈'
+    + (reference ? "（第 " + esc(reference) + " 圈）" : "") + "</option>"
+    + labels.map((l) => '<option value="' + esc(l) + '">第 ' + esc(l) + " 圈</option>").join("");
+  b.selLap.value = comp.config.lap || "";
+  b.selLap.disabled = !bySection;
+  b.selLap.title = bySection ? "按区段分组时统计哪一条圈" : "切成「按区段」再选圈";
+  if (b.selFilter && !bySection && comp.type === "chreport") {
+    b.selFilter.disabled = true;
+    b.selFilter.title = "按圈分组时每一行就是一整条圈，没有区段类型可分；切成「按区段」再用过滤";
+  }
+}
+
 function renderValues() {
   const group = $("valuesGroup");
   if (!state.show.values) { group.style.display = "none"; return; }
@@ -2494,6 +2948,7 @@ function applyLapsResponse(data) {
   renderLapTable();
   if (data.notice) toast(data.notice);
   state.windowKey = "";
+  state.dataVersion += 1;          // 圈变了，报表 / 缓存都得重算
   refreshWindowTraces(true).then(renderAll);
   renderAll();
 }
@@ -2891,6 +3346,7 @@ function mathsSaveList(draft) {
 /** 服务端算完一次之后，把列表、报错、函数表一起换掉。 */
 function applyMathsResponse(data) {
   state.maths = data;
+  state.dataVersion += 1;          // 数学通道变了：报表里报的可能是它们
   closeMathsEditor();
   renderMathsList();
   renderMathsFunctions();
@@ -3231,6 +3687,7 @@ async function saveSections(payload, okMessage) {
 function applySectionsResponse(data) {
   state.sections = data;
   state.sectionsForce = false;
+  state.dataVersion += 1;          // 区段变了：报表里的分段计时与区段统计都得重算
   renderSections();
   renderAll();
 }
@@ -3939,6 +4396,9 @@ function renderAddTypeOptions() {
 function addComponentOfType(type) {
   const comp = makeComponent(type);
   if (type === "graph") comp.config.channels = (DATA.selected || []).slice();
+  if (type === "chreport" && !comp.config.channels.length) {
+    comp.config.channels = defaultReportChannels(3);
+  }
   state.components.push(comp);
   state.focusId = comp.id;
   state.preset = "自定义";
@@ -4207,6 +4667,12 @@ window.i3pro = {
   zoomToSection: zoomToSection, onSectionRowDoubleClick: onSectionRowDoubleClick,
   sectionRowIndexOf: sectionRowIndexOf,
   sectionStripAt: sectionStripAt, SECTION_STRIP_PX: SECTION_STRIP_PX,
+  refreshReport: refreshReport, reportFetchKey: reportFetchKey,
+  reportRowsOf: reportRowsOf, reportCSVText: reportCSVText,
+  exportReportCSV: exportReportCSV, syncReportSelectors: syncReportSelectors,
+  snapshotReportTable: snapshotReportTable, bandForRatio: bandForRatio,
+  MAX_REPORT_CHANNELS: MAX_REPORT_CHANNELS, SECTION_FILTERS: SECTION_FILTERS,
+  bundleOf: (comp) => SHEET.get(comp.id),
 };
 </script>
 </body>

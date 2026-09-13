@@ -27,8 +27,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from i3pro import (  # noqa: E402
-    csvlog, derive, laps as lapsmod, ld, maths as mathsmod, motec_csv, render, sections
-    as sectionsmod, server, store,
+    csvlog, derive, laps as lapsmod, ld, maths as mathsmod, motec_csv, render,
+    report as reportmod, sections as sectionsmod, server, store,
 )
 
 DATA = ROOT / "i2pro_data"
@@ -2561,6 +2561,389 @@ class TestSectionsOverHttp(unittest.TestCase):
                 httpd.shutdown()
                 library.close()
 
+
+class _TableChannel:
+    """报表测试用的最小通道：只带 ``report`` 真正会碰的那几个字段。"""
+
+    def __init__(self, name, unit, rate, values):
+        self.name = name
+        self.unit = unit
+        self.sample_rate = float(rate)
+        self._values = np.asarray(values, dtype=np.float64)
+
+    @property
+    def sample_count(self):
+        return int(self._values.size)
+
+
+class _TableLog:
+    """合成场次：通道与距离轴都摆在主时间基上，圈和区段的秒数能手算出来。
+
+    报表的算法必须能脱离 ``.ld`` 单测——金标准数据只能证明"这份数据上是对的"。
+    """
+
+    def __init__(self, seconds, rate=10.0, channels=None, distance=None):
+        self.sample_rate = float(rate)
+        self.duration = float(seconds)
+        self.path = Path("合成场次.ld")
+        count = int(round(self.duration * self.sample_rate)) + 1
+        self._channels: dict[str, _TableChannel] = {}
+        for name, spec in (channels or {}).items():
+            values, unit = spec if isinstance(spec, tuple) else (spec, "")
+            self._channels[name] = _TableChannel(
+                name, unit, self.sample_rate, self._pad(values, count)
+            )
+        if distance is not None:
+            self._channels["Distance"] = _TableChannel(
+                "Distance", "m", self.sample_rate, self._pad(distance, count)
+            )
+
+    def _pad(self, values, count):
+        values = np.asarray(values, dtype=np.float64).reshape(-1)
+        if values.size >= count:
+            return values[:count]
+        pad = values[-1] if values.size else 0.0
+        return np.concatenate([values, np.full(count - values.size, pad)])
+
+    def has(self, name):
+        return name in self._channels
+
+    def channel(self, name):
+        return self._channels[name]
+
+    def values(self, name):
+        return self._channels[name if isinstance(name, str) else name.name]._values
+
+
+class TestReport(unittest.TestCase):
+    """#11 时间报告 / 通道报告：先用合成数据把口径钉死，再拿金标准验一遍。"""
+
+    def _frame(self, seconds=30.0, rate=10.0):
+        """一条 10 m/s 的匀速距离轴：第 n 个样本在 0.1n 秒、走了 n 米。"""
+        count = int(round(seconds * rate)) + 1
+        distance = np.arange(count, dtype=float)
+        # 通道值就用采样时刻（秒），这样统计量能一眼看出窗口取对了没有
+        speed = np.arange(count, dtype=float) / rate
+        return _TableLog(
+            seconds,
+            rate=rate,
+            channels={"Speed": (speed, "km/h")},
+            distance=distance,
+        )
+
+    def _laps(self):
+        # 第 1 圈 0–20 s 跑完 200 m；第 2 圈 20–30 s 只跑了 100 m（被截断）
+        return [
+            lapsmod.Lap(0, "1", 0.0, 20.0, 0.0, 200.0, complete=True),
+            lapsmod.Lap(1, "2", 20.0, 30.0, 200.0, 300.0, complete=False),
+        ]
+
+    def _config(self):
+        return sectionsmod.SectionConfig(
+            basis="lateral_g",
+            boundaries=(0.0, 100.0, 200.0),
+            kinds=("straight", "corner"),
+            names=("直 1", "弯 1"),
+            reference_label="1",
+            length_m=200.0,
+        )
+
+    # ------------------------------------------------------------ 纯函数
+    def test_stats_use_the_first_and_last_valid_sample(self):
+        found = reportmod.stats([np.nan, 1.0, 3.0, np.nan, 7.0, np.nan])
+        self.assertAlmostEqual(found["min"], 1.0)
+        self.assertAlmostEqual(found["max"], 7.0)
+        self.assertAlmostEqual(found["abs_max"], 7.0)
+        self.assertAlmostEqual(found["mean"], 11.0 / 3.0)
+        self.assertAlmostEqual(found["start"], 1.0, msg="起值不能是开头的 NaN")
+        self.assertAlmostEqual(found["end"], 7.0, msg="终值不能是结尾的 NaN")
+        self.assertAlmostEqual(found["change"], 6.0)
+        self.assertGreater(found["std_dev"], 0.0)
+
+        empty = reportmod.stats([np.nan, np.nan])
+        for key in reportmod.STAT_KEYS:
+            self.assertIsNone(empty[key], f"{key} 在没有有效样本时必须是 None，0 会被当成真实测量")
+
+    def test_band_thresholds_match_the_documented_ratios(self):
+        self.assertEqual(reportmod.band_for(1.0), "best")
+        self.assertEqual(reportmod.band_for(1.005), "best")
+        self.assertEqual(reportmod.band_for(1.006), "close")
+        self.assertEqual(reportmod.band_for(1.03), "close")
+        self.assertEqual(reportmod.band_for(1.031), "fair")
+        self.assertEqual(reportmod.band_for(1.08), "fair")
+        self.assertEqual(reportmod.band_for(1.081), "")
+        self.assertEqual(reportmod.band_for(None), "")
+
+    # ------------------------------------------------------------ 时间报告
+    def test_matrix_lists_one_column_per_lap_and_sums_to_the_lap_time(self):
+        log, laps, config = self._frame(), self._laps(), self._config()
+        table = reportmod.time_report(log, laps, config)
+        self.assertEqual(len(table["rows"]), 2, "两条区段就该只有两行")
+        self.assertEqual(
+            [column["label"] for column in table["columns"]][:4],
+            ["区段", "类型", "圈 1", "圈 2（未完）"],
+            "表头必须点出没跑完的圈，否则一格 5 s 的'直道'会被当成神级走线",
+        )
+        straight, corner = table["rows"]
+        self.assertEqual(straight[0], "1. 直 1")
+        self.assertAlmostEqual(straight[2], 10.0)
+        self.assertAlmostEqual(straight[3], 5.0)
+        self.assertAlmostEqual(corner[2], 10.0)
+        self.assertAlmostEqual(corner[3], 5.0)
+        # 每一条圈的整行加起来必须等于那条圈的圈速（分段是无缝无叠地铺满一圈的）
+        for column, lap in ((2, laps[0]), (3, laps[1])):
+            total = sum(row[column] for row in table["rows"])
+            self.assertAlmostEqual(total, lap.lap_time, places=6)
+
+    def test_a_truncated_lap_cannot_win_a_section(self):
+        """被截断的圈（进站 / 回维修区）不能把"理论最快圈"拉到一个跑不出来的值。"""
+        log, config = self._frame(), self._config()
+        partial = reportmod.time_report(log, self._laps(), config)
+        self.assertEqual(partial["summary"]["based_on"], "完整圈")
+        self.assertAlmostEqual(partial["summary"]["theoretical"], 20.0)
+        self.assertEqual(partial["rows"][0][-2], "1", "段最快必须出自那条完整圈")
+
+        both = [lapsmod.Lap(0, "1", 0.0, 20.0, 0.0, 200.0, complete=True),
+                lapsmod.Lap(1, "2", 20.0, 30.0, 200.0, 300.0, complete=True)]
+        table = reportmod.time_report(log, both, config)
+        self.assertAlmostEqual(table["summary"]["theoretical"], 10.0,
+                               msg="两条圈都完整时，5 s 的段才算数")
+        self.assertEqual(table["rows"][0][-2], "2")
+
+    def test_kind_filter_keeps_the_index_and_narrows_the_theoretical_lap(self):
+        log, laps, config = self._frame(), self._laps(), self._config()
+        table = reportmod.time_report(log, laps, config, kind="corner")
+        self.assertEqual(table["section_count"], 1)
+        self.assertEqual(table["filter"], "corner")
+        self.assertEqual(table["rows"][0][0], "2. 弯 1", "过滤后序号仍是原序号")
+        self.assertEqual(table["row_kinds"], ["corner"])
+        self.assertAlmostEqual(table["summary"]["theoretical"], 10.0,
+                               msg="只看弯道时理论最快圈只加弯道那些段")
+
+    def test_theoretical_rolling_and_best_lap_line_up(self):
+        log, laps, config = self._frame(), self._laps(), self._config()
+        summary = reportmod.time_report(log, laps, config)["summary"]
+        self.assertAlmostEqual(summary["rolling"]["duration"], 20.0,
+                               msg="200 m 的窗口在这条合成数据上正好 20 s")
+        self.assertAlmostEqual(summary["best_lap"]["lap_time"], 20.0)
+        self.assertLessEqual(summary["theoretical"], summary["rolling"]["duration"])
+        self.assertIn("参考下限", summary["note"])
+
+    # ------------------------------------------------------------ 连续最快圈
+    def test_a_stop_inside_the_window_counts_against_the_rolling_lap(self):
+        """窗口跑的是**距离**：这段距离里停着的 90 s 就是这段距离的一部分。
+
+        合成数据：0→100 m 用 10 s，在 100 m 处停 90 s，再 100→500 m 用 40 s。
+        正确口径（首次到达）给 130 s；把停车的尾端也当起点会给出 40 s——那等于
+        声称"400 m 只用了 40 s"，而车在那段距离里明明停着。
+        """
+        rate = 10.0
+        count = 1401
+        time = np.arange(count) / rate
+        distance = np.where(
+            time <= 10.0, 10.0 * time,
+            np.where(time <= 100.0, 100.0, 100.0 + 10.0 * (time - 100.0)),
+        )
+        log = _TableLog(140.0, rate=rate, distance=distance)
+        found = reportmod.rolling_best(log, 400.0)
+        self.assertIsNotNone(found)
+        self.assertAlmostEqual(found["duration"], 130.0, places=3, msg="停车段的 90 s 被抹掉了")
+        self.assertAlmostEqual(found["start_time"], 0.0, places=3)
+        self.assertAlmostEqual(found["end_time"], 130.0, places=3)
+
+    def test_rolling_lap_needs_a_full_lap_of_track(self):
+        log = _TableLog(20.0, rate=10.0, distance=np.arange(201, dtype=float))
+        self.assertIsNone(reportmod.rolling_best(log, 400.0),
+                          "赛道长度不到一圈时要给 None，不能给一段假成绩")
+        self.assertIsNone(reportmod.rolling_best(log, 0.0))
+
+    # ------------------------------------------------------------ 通道报告
+    def test_channel_report_windows_do_not_share_the_boundary_sample(self):
+        log, laps, config = self._frame(), self._laps(), self._config()
+        table = reportmod.channel_report(log, laps, config, ["Speed"])
+        self.assertEqual(len(table["rows"]), 2, "两条圈两条通道各一行")
+        first, second = table["rows"]
+        at = {column["key"]: index for index, column in enumerate(table["columns"])}
+        self.assertEqual(first[:6], ["1", "1", "", "", "Speed", "km/h"])
+        self.assertAlmostEqual(first[at["min"]], 0.0)
+        self.assertAlmostEqual(first[at["max"]], 19.9)      # 止点那一刻算下一条圈
+        self.assertAlmostEqual(first[at["change"]], 19.9)
+        self.assertGreater(first[at["std_dev"]], 0.0)
+        self.assertAlmostEqual(second[at["min"]], 20.0)
+        self.assertAlmostEqual(second[at["start"]], 20.0)   # 起值 = 20.0 s 那个样本
+
+    def test_channel_report_by_section_uses_that_lap_own_boundaries(self):
+        log, laps, config = self._frame(), self._laps(), self._config()
+        table = reportmod.channel_report(log, laps, config, ["Speed"], by="section")
+        self.assertEqual(table["by"], "section")
+        self.assertEqual(table["lap"], "1", "按区段分组默认跑在参考圈上")
+        rows = table["rows"]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([row[2] for row in rows], ["1. 直 1", "2. 弯 1"])
+        self.assertAlmostEqual(rows[0][6], 0.0)
+        self.assertAlmostEqual(rows[1][6], 10.0, msg="弯 1 从第 100 个样本（10 s）开始")
+
+        other = reportmod.channel_report(log, laps, config, ["Speed"], by="section", lap_label="2")
+        self.assertEqual(other["lap"], "2")
+        self.assertEqual(other["rows"][0][1], "2")
+        self.assertAlmostEqual(other["rows"][0][6], 20.0, msg="第 2 圈从 20 s 起算")
+
+    def test_channel_report_refuses_an_unknown_grouping(self):
+        log, laps, config = self._frame(), self._laps(), self._config()
+        with self.assertRaises(ValueError) as caught:
+            reportmod.channel_report(log, laps, config, ["Speed"], by="lapx")
+        self.assertIn("lap / section", str(caught.exception))
+
+    def test_missing_channels_are_reported_not_silently_dropped(self):
+        log, laps, config = self._frame(), self._laps(), self._config()
+        table = reportmod.channel_report(log, laps, config, ["Speed", "不存在的通道"])
+        self.assertEqual(table["channels"], ["Speed"])
+        self.assertEqual(table["missing"], ["不存在的通道"])
+
+    # ------------------------------------------------------------ CSV
+    def test_csv_header_is_the_column_labels_and_cells_are_escaped(self):
+        columns = [
+            {"key": "a", "label": "名称", "type": "text"},
+            {"key": "b", "label": "用时", "type": "time", "decimals": 3},
+        ]
+        rows = [["T1, 入弯", 12.3456], ["带\"引号\"", 1.0]]
+        text = reportmod.to_csv(columns, rows)
+        lines = text.strip().split("\n")
+        self.assertEqual(lines[0], "名称,用时")
+        self.assertEqual(lines[1], '"T1, 入弯",12.346')
+        self.assertEqual(lines[2], '"带""引号""",1.000')
+        self.assertTrue(text.endswith("\n"))
+
+    def test_csv_of_the_time_report_has_one_line_per_section(self):
+        log, laps, config = self._frame(), self._laps(), self._config()
+        table = reportmod.time_report(log, laps, config)
+        text = reportmod.to_csv(table["columns"], table["rows"])
+        lines = text.strip().split("\n")
+        self.assertEqual(len(lines), len(table["rows"]) + 1)
+        width = len(table["columns"])
+        for line in lines:
+            self.assertEqual(len(line.split(",")), width)
+
+    # ------------------------------------------------------------ 金标准
+    @_needs(HILL)
+    def test_golden_hill_sections_sum_to_each_lap(self):
+        with ld.LogFile.read(HILL) as log:
+            laps = render.detect(log)
+            payload = render.report_payload(log)
+            table = payload["time"]
+            self.assertIsNone(payload["error"], payload.get("notice"))
+            # 2 个前缀列 + 每条圈一列 + 3 个尾列（段最快 / 出自 / 快慢差）
+            self.assertEqual(len(table["columns"]) - 5, len(table["lap_labels"]))
+            by_label = {str(lap.label): lap for lap in laps}
+            for position, label in enumerate(table["lap_labels"]):
+                total = 0.0
+                seen = False
+                for row in table["rows"]:
+                    value = row[2 + position]
+                    if value is None:
+                        continue
+                    total += value
+                    seen = True
+                if seen:
+                    self.assertAlmostEqual(
+                        total, by_label[label].lap_time, places=2,
+                        msg=f"第 {label} 圈的分段加起来不等于圈速",
+                    )
+            summary = table["summary"]
+            self.assertLessEqual(summary["theoretical"], summary["rolling"]["duration"])
+            self.assertLessEqual(summary["rolling"]["duration"], summary["best_lap"]["lap_time"])
+
+    @_needs(ENDURANCE)
+    def test_golden_endurance_report_is_consistent(self):
+        with ld.LogFile.read(ENDURANCE) as log:
+            laps = render.detect(log)
+            table = render.report_payload(log)["time"]
+            summary = table["summary"]
+            self.assertGreater(len(table["rows"]), 5)
+            self.assertGreater(summary["theoretical"], 0)
+            self.assertLess(summary["theoretical"], summary["best_lap"]["lap_time"],
+                            "理论最快圈不可能比真跑出来的最快圈还慢")
+            self.assertGreater(summary["rolling"]["lap_length_m"], 100.0)
+            # 连续最快圈的窗口是连续数据里的一段，可以跨过起点线
+            self.assertLessEqual(summary["rolling"]["duration"], summary["best_lap"]["lap_time"])
+
+    @_needs(ENDURANCE)
+    def test_golden_channel_report_covers_every_lap_and_channel(self):
+        with ld.LogFile.read(ENDURANCE) as log:
+            laps = render.detect(log)
+            channels = ["Vx KF", "G Force Long"]
+            if not all(log.has(name) for name in channels):
+                self.skipTest("金标准里没有这两条通道")
+            table = render.report_payload(log, channels=channels)["channels"]
+            self.assertEqual(len(table["rows"]), len(laps) * len(channels))
+            self.assertEqual(table["channels"], channels)
+            for row in table["rows"]:
+                self.assertIsNotNone(row[6], "每条圈每个通道都该有最小值")
+
+
+class TestReportOverHttp(unittest.TestCase):
+    """#11 走到界面之前的那一段：/report 的两种表、两种过滤、CSV 出口。"""
+
+    @_needs(HILL)
+    def test_report_endpoint_serves_both_tables_and_csv(self):
+        import tempfile
+        from http.server import ThreadingHTTPServer
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            copy = root / HILL.name
+            copy.write_bytes(HILL.read_bytes())
+            library = server.SessionLibrary([root], cache_size=1, maths_root=root)
+            httpd = ThreadingHTTPServer(
+                ("127.0.0.1", 0), server.make_handler(library, buckets=200)
+            )
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            base = f"http://127.0.0.1:{httpd.server_address[1]}"
+            quoted = urllib.parse.quote(copy.stem)
+
+            def get(path):
+                with urllib.request.urlopen(base + path, timeout=120) as response:
+                    return response.status, response.read()
+
+            try:
+                status, raw = get(f"/api/session/{quoted}/report")
+                self.assertEqual(status, 200)
+                payload = json.loads(raw.decode("utf-8"))
+                self.assertIsNone(payload["error"])
+                self.assertTrue(payload["time"]["rows"])
+                self.assertTrue(payload["channels"]["rows"])
+
+                status, raw = get(f"/api/session/{quoted}/report?table=time&filter=corner")
+                table = json.loads(raw.decode("utf-8"))["time"]
+                self.assertEqual(table["filter"], "corner")
+                self.assertTrue(all(kind == "corner" for kind in table["row_kinds"]))
+                self.assertNotIn("channels", json.loads(raw.decode("utf-8")))
+
+                status, raw = get(f"/api/session/{quoted}/report?csv=time&filter=corner")
+                text = raw.decode("utf-8-sig")
+                lines = text.strip().split("\n")
+                self.assertEqual(status, 200)
+                self.assertEqual(lines[0].split(",")[0], "区段")
+                self.assertEqual(len(lines), len(table["rows"]) + 1)
+
+                status, raw = get(f"/api/session/{quoted}/report?csv=channels&by=section&channels=Vx%20KF")
+                text = raw.decode("utf-8-sig")
+                self.assertEqual(text.split("\n")[0].split(",")[:6],
+                                 ["分组", "圈", "区段", "类型", "通道", "单位"])
+                self.assertIn("弯", text)
+
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    get(f"/api/session/{quoted}/report?filter=nosuch")
+                self.assertEqual(caught.exception.code, 400)
+                message = json.loads(caught.exception.read().decode("utf-8"))["error"]
+                self.assertIn("filter 只认", message)
+            finally:
+                httpd.shutdown()
+                library.close()
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
 
 class TestMathsOverHttp(unittest.TestCase):
     """#3 走到界面之前的那一段：PUT/GET/POST + 侧车文件 + 作用域。"""

@@ -15,6 +15,7 @@ from . import csvlog, laps as lapsmod
 from . import derive
 from . import ld as ldmod
 from . import render as rendermod
+from . import report as reportmod
 from . import store
 from . import maths as mathsmod
 
@@ -330,7 +331,7 @@ def cmd_render(args: argparse.Namespace) -> int:
             best = min((l.lap_time for l in complete), default=None)
             best_txt = "-" if best is None else f"{best:.3f}s"
             print(
-                f"{len(laps)} 段 / {len(complete)} 完整圈, 最快 {best_txt}; "
+                f"{len(laps)} 圈 / {len(complete)} 完整圈, 最快 {best_txt}; "
                 f"速度源 {derive.speed_channel(log)}"
             )
         except ValueError as exc:
@@ -527,6 +528,63 @@ def cmd_track(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_report(args: argparse.Namespace) -> int:
+    """时间报告 / 通道报告。数字和界面上是同一份（``render.report_payload``）。"""
+    with csvlog.open_session(args.file) as log:
+        laps = rendermod.detect(log)
+        channels = None
+        if args.channels:
+            channels = [c.strip() for c in args.channels.split(",") if c.strip()]
+        kind = None if args.filter in (None, "", "all") else args.filter
+        payload = rendermod.report_payload(
+            log, laps, channels=channels, kind=kind, by=args.by, lap_label=args.lap
+        )
+        if payload.get("error"):
+            print(f"# {payload['error']}")
+            return 1
+        table = payload[args.table]
+        labels = [column["label"] for column in table["columns"]]
+        rows = [
+            {label: reportmod.format_cell(row[i], table["columns"][i])
+             for i, label in enumerate(labels)}
+            for row in table["rows"]
+        ]
+        if args.limit:
+            rows = rows[: args.limit]
+
+        if args.table == "time":
+            summary = table["summary"]
+            rolling = summary.get("rolling") or {}
+            best = summary.get("best_lap") or {}
+            print(
+                f"# 时间报告：{table['section_count']} 段 "
+                f"（{summary.get('corners', 0)} 弯 / {summary.get('straights', 0)} 直）· "
+                f"理论最快圈 {summary.get('theoretical')} s（各段最快相加，参考下限）· "
+                f"连续最快圈 {rolling.get('duration', '--')} s · "
+                f"最快圈 第 {best.get('lap', '--')} 圈 {best.get('lap_time', '--')} s"
+            )
+            print(f"# 按{summary.get('based_on', '—')}统计；{summary.get('note', '')}")
+        else:
+            print(
+                f"# 通道报告：按{'区段' if table['by'] == 'section' else '圈'}分组 · "
+                f"{len(table['rows'])} 行 · 通道 {', '.join(table['channels']) or '（无）'}"
+            )
+            for note in table["notes"]:
+                print(f"# {note}")
+            if table.get("missing"):
+                print(f"# 本场没有这些通道：{', '.join(table['missing'])}")
+        _print_table(rows, labels)
+
+        if args.csv:
+            path = Path(args.csv)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            text = reportmod.to_csv(table["columns"], table["rows"])
+            # 带 BOM：Excel 直接双击打开中文表头才不会乱码
+            path.write_text(text, encoding="utf-8-sig", newline="")
+            print(f"wrote {path} ({len(table['rows'])} 行 + 表头)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="i3pro", description="MoTeC i2 Pro 数据工具链 (i3pro)")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -641,6 +699,20 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("track", help="圈速柱状速览")
     p.add_argument("file")
     p.set_defaults(func=cmd_track)
+
+    p = sub.add_parser("report", help="时间报告 / 通道报告（分段计时、理论最快圈、通道统计）")
+    p.add_argument("file")
+    p.add_argument("--table", choices=["time", "channels"], default="time",
+                   help="time=分段计时（默认），channels=通道统计")
+    p.add_argument("--filter", choices=["all", "corner", "straight"], default="all",
+                   help="只看弯道 / 只看直道")
+    p.add_argument("--by", choices=["lap", "section"], default="lap",
+                   help="通道报告的分组方式：按圈（默认）或按区段")
+    p.add_argument("--lap", help="按区段分组时看哪一条圈（默认参考圈）")
+    p.add_argument("--channels", help="通道报告的通道，逗号分隔（默认挑常用通道）")
+    p.add_argument("--csv", help="同时写一份 CSV（带 BOM，Excel 直接打开）")
+    p.add_argument("--limit", type=int, default=0, help="只打印前 N 行")
+    p.set_defaults(func=cmd_report)
     return parser
 
 

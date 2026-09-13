@@ -94,7 +94,7 @@ Measure-Command { .\i3pro.cmd convert "i2pro_data\20260524-耐久正赛.ld" --ou
 完整圈圈速全部落在 30–70 s、单圈里程 600–1000 m；首尾两个进出场段被标记为
 `(进出场/泊车/异常段)`。
 
-**当前结果**：7 段 / 5 完整圈，40.44 s – 51.18 s，806–816 m。
+**当前结果**：7 圈 / 5 完整圈，40.44 s – 51.18 s，806–816 m。
 
 ```powershell
 .\i3pro.cmd track "i2pro_data\20260524-耐久正赛.ld"
@@ -102,7 +102,7 @@ Measure-Command { .\i3pro.cmd convert "i2pro_data\20260524-耐久正赛.ld" --ou
 
 **通过判据**：≥ 20 个完整圈，最快圈在 50–70 s。
 
-**当前结果**：26 段 / 23 完整圈，最快 54.900 s，单圈约 810 m。
+**当前结果**：26 圈 / 23 完整圈，最快 54.900 s，单圈约 810 m。
 
 ---
 
@@ -961,7 +961,7 @@ i2 Pro 的 `To Zoom to a Range: double-click on the range band`：双击一条�
 
 ```powershell
 node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"   # 7 圈
-node tools\smoke_viewer.js "out\20260524-耐久正赛.html"       # 26 段 / 23 圈
+node tools\smoke_viewer.js "out\20260524-耐久正赛.html"       # 26 圈 / 23 完整圈
 ```
 
 真 Edge 渲染的观感验证（脚手架 `out/shot_sections.py`，`out/` 已 gitignore）：
@@ -977,6 +977,106 @@ node tools\smoke_viewer.js "out\20260524-耐久正赛.html"       # 26 段 / 23 
 
 **当前结果**：`TestSections` 19 项、全套 **132 项单测 OK**；`verify_ld_vs_csv` PASS；
 两份金标准快照 smoke 均 PASS。
+
+---
+
+## A32 · 时间报告与通道报告（ticket #11）
+
+i2 Pro 的两张 Pro 独有报表：**时间报告**（分段计时 + 理论最快圈 + 连续最快圈）与
+**通道报告**（按圈或按区段列统计量）。这里做成两个工作表组件：`时间报告` 与
+`通道报告`。
+
+两张表都是 **DOM 表格**而不是 canvas——报告是要拿走的（复制一格、导出 CSV），
+画在画布上就变成一张图，连一个数字都选不中。
+
+**算法在 Python 里，只算一次**：`report.py` 是不依赖框架的纯函数，快照、本地服务、
+命令行三个入口全走 `render.report_payload()`。界面上不做二次统计——"这条通道这一段
+的均值"必须能在命令行里复现，不能只在浏览器里成立。
+
+```powershell
+.\i3pro.cmd report "i2pro_data\20260908-cjh 高避5圈.ld" --limit 3
+.\i3pro.cmd report "i2pro_data\20260524-耐久正赛.ld" --table channels --by section --filter corner --limit 5
+.\i3pro.cmd report "i2pro_data\20260524-耐久正赛.ld" --csv out\时间报告.csv
+```
+
+**口径**（写进 `CONTEXT.md`，改实现就要改那里）：
+
+| 项 | 定义 |
+| --- | --- |
+| 分段用时 | 那条圈**自己的**边界时刻之差（`sections.lap_marks`），不是拿参考圈的秒数平移；所以每条圈各列加起来正好等于该圈圈速（实测两份金标准，误差 0.0000 s） |
+| 理论最快圈 | 每个区段各自的最快用时相加；只取**完整圈**的段（被截断的进出场段会把成绩拉到跑不出来的值）。界面与 CLI 都写明"这是参考下限" |
+| 连续最快圈 | 在一整段连续行驶上滑一个"一圈长度"的窗口，取用时最短的那个；窗口两端都是**首次到达**该距离的时刻，和 `laps.time_at_distance` 一个口径 |
+| 起值 / 终值 | 窗口内第一个 / 最后一个**有效**样本（NaN 不算数）；没有有效样本给 `None`——给 0 会被当成一次真实测量 |
+| 标准差 | 总体标准差（`ddof=0`） |
+| 统计窗口 | 半开区间 `[起, 止)`：止点那一刻的样本算下一条圈，否则相邻两条圈会重复计同一个样本 |
+| 「接近最快」分档 | 相对该段最快：≤ +0.5 % 最快 / ≤ +3 % 接近 / ≤ +8 % 一般（相对量，直道与发夹弯不能共用一个绝对秒数） |
+
+**通过判据**：
+
+| 断言 | 命令 / 位置 |
+| --- | --- |
+| 时间报告是"区段 × 圈"的矩阵，**每条圈的整列加起来等于该圈圈速** | `TestReport::test_matrix_lists_one_column_per_lap_and_sums_to_the_lap_time` |
+| 没跑完的圈在表头就写着`（未完）`，且**不能赢任何一段的"段最快"** | `TestReport::test_a_truncated_lap_cannot_win_a_section` |
+| 只看弯道 / 只看直道：行数跟着变，**序号仍是原序号**（和区段面板对得上），理论最快圈只剩被显示的那些段 | `TestReport::test_kind_filter_keeps_the_index_and_narrows_the_theoretical_lap` |
+| 统计量：最小 / 最大 / 绝对最大 / 均值 / 起值 / 终值 / 变化量 / 标准差；窗口全 NaN 时**每一项都是 `None` 而不是 0** | `TestReport::test_stats_use_the_first_and_last_valid_sample` |
+| 分档阈值就是文档里那三个数（1.005 / 1.03 / 1.08） | `TestReport::test_band_thresholds_match_the_documented_ratios` |
+| 通道报告按圈 / 按区段分组：行数 = 圈（或段）× 通道，窗口取**那条圈自己的**边界时刻 | `TestReport::test_channel_report_windows_do_not_share_the_boundary_sample`、`test_channel_report_by_section_uses_that_lap_own_boundaries` |
+| 停车段算进连续最快圈：合成数据里"10 s 跑 100 m → 停 90 s → 40 s 跑 400 m"给出 **130.0 s**，把停车尾端当起点会给出 40 s | `TestReport::test_a_stop_inside_the_window_counts_against_the_rolling_lap` |
+| 赛道不够一圈时连续最快圈给 `None`，不给一段假成绩 | `TestReport::test_rolling_lap_needs_a_full_lap_of_track` |
+| 缺失通道被**报出来**而不是静默丢掉 | `TestReport::test_missing_channels_are_reported_not_silently_dropped` |
+| CSV：表头 = 列标签，含逗号/引号的格子被正确转义，小数位按列走 | `TestReport::test_csv_header_is_the_column_labels_and_cells_are_escaped` |
+| HTTP：`/report` 两种表、`table=` 只算一张、`csv=` 直接吐 CSV（带 BOM）、`filter=` 写错给 400 并说清只认什么 | `TestReportOverHttp::test_report_endpoint_serves_both_tables_and_csv` |
+| 界面：表渲染成 DOM 表格、行数 = 段数；表下面那句话报出**理论最快圈 / 连续最快圈**，数字与载荷一致 | `tools/smoke_viewer.js` 第 26 组 |
+| 界面：切「只看弯道」后表格行数与 CSV 行数一起变 | 同上 |
+| 前端的 CSV 转义/小数位和 Python **逐字节一致**（`T1, 入弯` → 加引号）、数字 `12.3456` → `12.346` | 同上 |
+| 按圈分组时"区段过滤"下拉框**灰掉并说明切成「按区段」**（按圈分组时每一行就是一整条圈） | 同上 |
+| 快照离线可用：**不许**去请求 `/report`；快照里没带的通道要说明"导出快照时没选中" | 同上 |
+| 分享链接带走报表配置（区段过滤、通道清单） | 同上 |
+| 真数据钉子：金标准两条圈的**每条圈、每一段**加起来等于圈速，且 理论 ≤ 连续 ≤ 最快圈 | `TestReport::test_golden_hill_sections_sum_to_each_lap`、`test_golden_endurance_report_is_consistent` |
+| 无头断言点 **223 → 255** | `rg -o "check\(" tools/smoke_viewer.js \| Measure-Object` |
+
+```powershell
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"   # 7 圈
+node tools\smoke_viewer.js "out\20260524-耐久正赛.html"       # 26 圈 / 23 完整圈
+```
+
+**当前结果（实测）**：
+
+| 场次 | 区段 | 理论最快圈 | 连续最快圈 | 最快圈 |
+| --- | --- | --- | --- | --- |
+| 高避5圈 | 7 段（3 弯 / 4 直） | 39.470 s | 39.750 s | 第 5 圈 40.440 s |
+| 耐久正赛 | 13 段（6 弯 / 7 直） | 52.990 s | 54.450 s | 第 10 圈 54.900 s |
+
+快照体积：高避 1.27 MB、耐久 1.59 MB（报表给耐久那份加了约 0.3 MB）。
+
+**边界（说清代价）**：
+
+* 快照里的通道报告只带**导出快照时选中的那几条**通道（耐久一份要几十万行，全带上
+  就不是"双击即开"了）。界面会说明哪几条没带，要看别的通道用 `serve` 模式。
+* 快照的"按区段"分组只有**参考圈**那一份；换一条圈要联网。
+* 一张表最多报告 8 条通道（再多就不是表，是一份要滚半天的清单）。
+* 连续最快圈是**整段**连续数据的滑动窗口，所以它会跨过起点线；它和"最快圈"不是一个
+  概念，界面上两个都显示、不互相替代。
+
+**真 Edge 渲染的观感验证**（脚手架 `out/verify_report.py`，`out/` 已 gitignore）：
+真 Chromium + 真鼠标，17 项全过——**表格是真 DOM**（7 圈的矩阵 1238 px 刚好放下、
+26 圈的矩阵 1357 px 触发横向滚动而表头 `sticky`）、每一段至少有一格落在「最快」档、
+切「只看弯道」后行数从 7 变 3，以及**真点一次 CSV 按钮、文件真的落到磁盘上**：
+`20260908-cjh 高避5圈-时间报告.csv`，4 行（表头 + 3 段）、表头与表格列标签一字不差、
+前三字节是 BOM。截图：`out/shots/report-worksheet.png`、`report-corners.png`、
+`report-endurance.png`。
+
+这一步抓出三个只有真浏览器才会露头的问题，都已修：
+
+1. **组件标题不跟着走**——改成「只看弯道」之后表只剩弯道，标题还写着"全部区段"；
+2. 表下面那行说明里 `**原始采样**` 的星号**原样显示**（那是纯文本，不当 Markdown 渲染）；
+3. 空白的文字格显示成 `--`（和"这段没有有效样本"的数字缺失撞在一起），文字列空着就该是空的。
+
+另外把表改成显式 `<thead>/<tbody>`：浏览器虽然会自动补，但表头要 `sticky` 钉住，
+外边数行数、读表头也不该把表头行算进数据行。
+
+**当前结果**：`TestReport` + `TestReportOverHttp` 18 项、全套 **150 项单测 OK**；
+`verify_ld_vs_csv` PASS；两份金标准快照 smoke 均 PASS；真 Edge 验收 17/17。
 
 ---
 
@@ -1132,5 +1232,5 @@ python -m unittest discover -s tests -v
 | `TestIndependentParsers` | 第二套实现交叉验证、213 通道 CSV 全量对照 |
 | `TestBeaconUndo` | 撤销的纯函数层：什么是"同一版"、什么时候没有可撤销的一步、交回去的是上一版本身 |
 | `TestBeaconUndoOverHttp` | 撤销走真实 `PUT`：改名 / 插入 / 删除各自一步回到原样、`trusted` 迁移、落盘、一次无改动的保存不吃掉上一步、没有可撤销的一步时 400 并说明下一步、页面注入的 `laps_can_undo` 三态 |
-| `TestViewerScript` | 无头驱动前端：脚本里 **223 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
+| `TestViewerScript` | 无头驱动前端：脚本里 **255 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
 | `TestLaunchers` | 一键启动：快照批量导出 + 索引页、缺数据目录的报错、端口占用自动换端口 |

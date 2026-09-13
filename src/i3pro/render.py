@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import derive, laps as lapsmod, sections as sectionsmod
+from . import derive, laps as lapsmod, report as reportmod, sections as sectionsmod
 from . import ld as ldmod
 
 __all__ = [
@@ -36,6 +36,8 @@ __all__ = [
     "pick_channels",
     "track_payload",
     "sections_payload",
+    "report_payload",
+    "snapshot_report",
 ]
 
 TEMPLATE = Path(__file__).with_name("web") / "viewer.html"
@@ -465,6 +467,59 @@ def sections_payload(
     return out
 
 
+def report_payload(
+    log: ldmod.LogFile,
+    laps=None,
+    config=None,
+    channels: list[str] | None = None,
+    kind: str | None = None,
+    by: str = "lap",
+    lap_label: str | None = None,
+) -> dict:
+    """时间报告与通道报告：快照、服务、CLI 走的是同一个出口。
+
+    区段切不出来时（本场没有圈、或者没有可用的判据）返回一条**能照做**的提示，
+    而不是一张空表——空表看起来像"算出来就是零"，那是两种事实。
+    """
+    recognized = list(laps) if laps is not None else detect(log)
+    notice = None
+    if config is None:
+        try:
+            config, notice = sectionsmod.effective_config(log, recognized)
+        except ValueError as exc:
+            return {"error": str(exc), "notice": str(exc), "time": None, "channels": None}
+    if config is None or len(config.boundaries) < 2:
+        message = notice or "本场还没有圈，先放一个信标再来看报表"
+        return {"error": message, "notice": message, "time": None, "channels": None}
+    chosen = [c for c in (channels or pick_channels(log)) if log.has(c)]
+    out = reportmod.report_payload(
+        log, recognized, config, chosen, kind=kind, by=by, lap_label=lap_label
+    )
+    out["notice"] = notice
+    out["error"] = None
+    return out
+
+
+def snapshot_report(log: ldmod.LogFile, laps, config, channels: list[str]) -> dict:
+    """快照里带的那一份报表：时间报告 + 通道报告（按圈 / 按区段各一份）。
+
+    快照是双击就开的文件，背后没有服务可以再问一次，所以两种分组都得先算好，
+    界面上的下拉框在离线时才有东西可切。区段分组只算参考圈那一份——把每条圈
+    都算一遍会让快照里塞进几十倍的数据，而"换一条圈看区段"本来就是要联网的活。
+    """
+    reference = sectionsmod.reference_lap(laps)
+    return {
+        "time": reportmod.time_report(log, laps, config),
+        "channels_lap": reportmod.channel_report(log, laps, config, channels, by="lap"),
+        "channels_section": reportmod.channel_report(
+            log, laps, config, channels, by="section"
+        ),
+        "reference_lap": None if reference is None else str(reference.label),
+        "error": None,
+        "notice": None,
+    }
+
+
 def build_payload(
     log: ldmod.LogFile,
     channels: list[str] | None = None,
@@ -475,6 +530,7 @@ def build_payload(
     step: float = 1.0,
     with_track: bool = True,
     overview_buckets: int = 900,
+    with_report: bool = False,
 ) -> dict:
     """Everything the workbench needs. Traces are only embedded in static mode."""
     time = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
@@ -530,10 +586,29 @@ def build_payload(
         "track": track_payload(log) if with_track else None,
         "laps_config": lapsmod.load_config(log.path).as_dict(),
         "sections": sections_payload(log, recognized),
+        "report": (
+            _snapshot_report_or_error(log, recognized, selected) if with_report else None
+        ),
         "api": api_base,
         "buckets": buckets,
         "session": log.path.stem,
     }
+
+
+def _snapshot_report_or_error(
+    log: ldmod.LogFile, recognized, channels: list[str]
+) -> dict:
+    """快照要的报表；切不出区段时给一条能照做的提示，而不是一张空表。"""
+    try:
+        config, notice = sectionsmod.effective_config(log, recognized)
+    except ValueError as exc:
+        return {"error": str(exc), "notice": str(exc), "time": None}
+    if config is None or len(config.boundaries) < 2:
+        message = notice or "本场还没有圈，先放一个信标再来看报表"
+        return {"error": message, "notice": message, "time": None}
+    out = snapshot_report(log, recognized, config, channels)
+    out["notice"] = notice
+    return out
 
 
 def render_html(
@@ -544,10 +619,17 @@ def render_html(
     cmp: str | None = None,
     buckets: int = DEFAULT_BUCKETS,
     with_track: bool = True,
+    with_report: bool = True,
 ) -> Path:
     """Write a self-contained workbench snapshot and return its path."""
     payload = build_payload(
-        log, channels=channels, ref=ref, cmp=cmp, buckets=buckets, with_track=with_track
+        log,
+        channels=channels,
+        ref=ref,
+        cmp=cmp,
+        buckets=buckets,
+        with_track=with_track,
+        with_report=with_report,
     )
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)

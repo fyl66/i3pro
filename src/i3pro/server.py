@@ -27,7 +27,17 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import numpy as np
 
-from . import csvlog, derive, importer, laps as lapsmod, maths, render, sections, store
+from . import (
+    csvlog,
+    derive,
+    importer,
+    laps as lapsmod,
+    maths,
+    render,
+    report as reportmod,
+    sections,
+    store,
+)
 from . import ld as ldmod
 
 __all__ = ["SessionLibrary", "serve", "make_handler"]
@@ -251,6 +261,21 @@ def _int_arg(query: dict, key: str, default: int) -> int:
     return default if value is None else int(value)
 
 
+def _filter_arg(query: dict, key: str) -> str | None:
+    """``filter=all|corner|straight`` → ``None`` / ``corner`` / ``straight``。
+
+    写错了直接拒绝：静默当成 all 会让人以为"只看弯道"生效了，而表里其实是全部。
+    """
+    raw = (query.get(key) or [None])[0]
+    if raw in (None, "", "all"):
+        return None
+    if raw not in sections.KIND_LABELS:
+        raise ValueError(
+            f"filter 只认 all / {' / '.join(sorted(sections.KIND_LABELS))}，收到的是 {raw!r}"
+        )
+    return str(raw)
+
+
 def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS):
     class Handler(BaseHTTPRequestHandler):
         server_version = "i3pro"
@@ -457,6 +482,11 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                     return self.save_sections(log)
                 return self._json(render.sections_payload(log, render.detect(log)))
 
+            if action == "report":
+                # 时间报告 / 通道报告（ticket #11）。GET 一张或两张表；
+                # 带 csv=time|channels 时直接吐 CSV，方便命令行与队友核对。
+                return self.session_report(log, query)
+
             if action == "maths":
                 # 数学通道：GET 看当前生效的定义，PUT 存，POST 试算一条式子
                 if method == "PUT":
@@ -485,6 +515,57 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
             self._error(404, "no such api action")
 
         # --------------------------------------------------------- lap editing
+        def session_report(self, log, query: dict) -> None:
+            """GET /api/session/<name>/report[?...] —— 时间报告与通道报告。
+
+            参数：``table=time|channels``（只要一张，省一半计算）、
+            ``filter=all|corner|straight``、``by=lap|section``、``lap=<圈标签>``、
+            ``channels=A,B``、``csv=time|channels``（直接吐 CSV）。
+
+            两张表都由 :func:`i3pro.render.report_payload` 算，界面、快照、命令行
+            是同一个出口——不会出现"浏览器里是这个数、CLI 里是那个数"。
+            """
+            laps = render.detect(log)
+            wanted_table = (query.get("table") or [None])[0]
+            if wanted_table not in (None, "", "time", "channels"):
+                raise ValueError(f"table 只认 time / channels，收到的是 {wanted_table!r}")
+            wanted_csv = (query.get("csv") or [None])[0]
+            if wanted_csv in ("", None):
+                wanted_csv = None
+            if wanted_csv is not None and wanted_csv not in ("time", "channels"):
+                raise ValueError(f"csv 只认 time / channels，收到的是 {wanted_csv!r}")
+            if wanted_table and wanted_csv and wanted_table != wanted_csv:
+                raise ValueError(
+                    f"table={wanted_table} 与 csv={wanted_csv} 不是同一张表；"
+                    f"只要 CSV 的话去掉 table= 就行"
+                )
+
+            payload = render.report_payload(
+                log,
+                laps,
+                channels=_csv_arg(query, "channels") or None,
+                kind=_filter_arg(query, "filter"),
+                by=(query.get("by") or ["lap"])[0],
+                lap_label=(query.get("lap") or [None])[0],
+            )
+            if payload.get("error") is not None:
+                return self._error(400, str(payload["error"]))
+
+            only = wanted_csv or wanted_table or ""
+            if only in ("time", "channels"):
+                payload = {
+                    "notice": payload.get("notice"),
+                    "error": None,
+                    only: payload[only],
+                }
+                if wanted_csv:
+                    table = payload[only]
+                    text = reportmod.to_csv(table["columns"], table["rows"])
+                    return self._send(
+                        ("\ufeff" + text).encode("utf-8"), 200, "text/csv; charset=utf-8"
+                    )
+            return self._json(payload)
+
         def save_laps(self, log) -> None:
             """PUT /api/session/<name>/laps：整份信标 / 切分方式配置，或 ``{"undo": true}``。
 

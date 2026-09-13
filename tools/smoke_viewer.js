@@ -80,6 +80,10 @@ class Element {
   get innerHTML() { return this._html; }
   set innerHTML(value) {
     this._html = String(value);
+    // 真 DOM 赋 innerHTML 会把旧子节点全部丢掉。shim 以前只换文本、留着旧
+    // children，于是"重新 build 之后还找得到上一次那个元素"——那会掩盖
+    // 真正的 bug（改动没生效，测试却读到了旧对象）。
+    this._children = [];
     this._rows = [];
     // Beacon pills: one editable name box and one delete link per beacon. The
     // viewer wires these up with querySelectorAll, so the shim has to hand back
@@ -293,6 +297,19 @@ function SHEETEl(root, id) {
   return found;
 }
 
+/** Everything inside one component element whose class matches `needle`. */
+function insideOf(root, needle) {
+  const out = [];
+  (function walk(node) {
+    if (!node || !node._children) return;
+    for (const child of node._children) {
+      if (String(child.className || "").indexOf(needle) >= 0) out.push(child);
+      walk(child);
+    }
+  })(root);
+  return out;
+}
+
 if (expectTemplate) {
   const body = ctx.document.body.innerHTML;
   check(String(ctx.document.title).indexOf("模板") >= 0,
@@ -399,6 +416,10 @@ if (api) {
   const m0 = state.show.measure;
   key("m");
   check(state.show.measure !== m0, "M did not toggle measurements");
+  // 恢复：后面第 15 组要看图例里的 min / max / avg，measure 关着的话那边
+  // 只能靠上一次 build 留下的旧节点"看起来通过"。
+  key("m");
+  check(state.show.measure === m0, "M did not toggle measurements back");
   key("d");
   key(" ");
   check(state.datumOn && state.datum !== null, "D / space did not place the datum cursor");
@@ -1388,6 +1409,166 @@ if (api) {
     check(String(registry.get("toast").textContent).indexOf("已撤销") >= 0,
       "the user was not told that the undo happened");
     api.data.api = apiBase;
+  }
+
+  // 26. 报表：时间报告（区段 × 圈 + 理论最快圈）与通道报告
+  const embedded = api.data.report;
+  check(!!embedded && !!embedded.time,
+    "快照载荷里没有报表：导出快照时必须带上 time / channels_lap / channels_section");
+  if (embedded && embedded.time) {
+    api.applyPreset("报表");
+    const kinds = state.components.map((c) => c.type);
+    check(kinds.indexOf("report") >= 0 && kinds.indexOf("chreport") >= 0,
+      "「报表」预设没有摆出时间报告与通道报告: " + kinds.join(","));
+    api.renderAll();
+
+    const timeComp = state.components.find((c) => c.type === "report");
+    const timeEl = SHEETEl(worksheet, timeComp.id);
+    const timeWrap = insideOf(timeEl, "rwrap")[0];
+    const timeNote = insideOf(timeEl, "rnote")[0];
+    check(!!timeWrap && String(timeWrap._html).indexOf("<table class=\"rtable\">") >= 0,
+      "时间报告没有渲染出表格");
+    if (timeWrap) {
+      const rows = (String(timeWrap._html).match(/<tr>/g) || []).length;
+      check(rows === embedded.time.rows.length + 1,
+        "时间报告的行数不对：表里 " + rows + " 行，数据 " + embedded.time.rows.length + " 段");
+      check(String(timeWrap._html).indexOf("理论最快圈") < 0,
+        "理论最快圈属于表下面那句话，不该塞进表格里");
+    }
+    check(!!timeNote
+      && String(timeNote.innerHTML).indexOf("理论最快圈") >= 0
+      && String(timeNote.innerHTML).indexOf(
+        embedded.time.summary.theoretical.toFixed(3)) >= 0,
+      "表下面那句话没有报出理论最快圈: " + (timeNote ? timeNote.innerHTML : "(缺元素)"));
+    check(!!timeNote && String(timeNote.innerHTML).indexOf("连续最快圈") >= 0,
+      "表下面那句话没有报出连续最快圈");
+
+    // 只看弯道：行数必须掉到弯道的行数，且理论最快圈跟着只剩弯道
+    const cornerRows = embedded.time.row_kinds.filter((k) => k === "corner").length;
+    const straightRows = embedded.time.row_kinds.filter((k) => k === "straight").length;
+    check(cornerRows > 0 && straightRows > 0, "金标准的区段里应该有弯也有直");
+    timeComp.config.filter = "corner";
+    api.renderAll();
+    const cornerTable = insideOf(timeEl, "rwrap")[0];
+    const cornerCount = (String(cornerTable._html).match(/<tr>/g) || []).length;
+    check(cornerCount === cornerRows + 1,
+      "只看弯道之后行数没变对： " + cornerCount + " vs " + (cornerRows + 1));
+
+    // CSV：列序就是表头，行数与当前过滤后的行数一致
+    const csv = api.reportCSVText(timeComp, embedded.time);
+    const csvLines = csv.replace(/\n$/, "").split("\n");
+    check(csvLines[0] === embedded.time.columns.map((c) => c.label).join(","),
+      "CSV 表头和表格列标签不一致: " + csvLines[0]);
+    check(csvLines.length === cornerRows + 1,
+      "CSV 行数没有跟着「只看弯道」走: " + csvLines.length);
+    check(csvLines.every((line) => line.split(",").length === embedded.time.columns.length
+      || line.indexOf('"') >= 0),
+      "CSV 的列数有的地方对不上");
+
+    // 数字与引号的处理必须和 Python 的 report.to_csv 一样
+    const probe = api.reportCSVText(timeComp, {
+      columns: [{ key: "a", label: "名称", type: "text" },
+                { key: "b", label: "用时", type: "time", decimals: 3 }],
+      rows: [["T1, 入弯", 12.3456], ["带\"引号\"", 1]],
+      row_kinds: ["corner", "corner"],
+    });
+    check(probe === "名称,用时\n\"T1, 入弯\",12.346\n\"带\"\"引号\"\"\",1.000\n",
+      "前端 CSV 的转义/小数位和 Python 不一致: " + JSON.stringify(probe));
+
+    // 导出的兜底路径：这个环境没有 Blob/URL，必须退到剪贴板而不是抛出去
+    const exported = api.exportReportCSV(timeComp);
+    check(typeof exported === "string" && exported.length > 0,
+      "导出 CSV 在拿不到 Blob 时没有返回文本");
+    check(String(registry.get("toast").textContent).indexOf("剪贴板") >= 0,
+      "导出兜底时没有告诉用户 CSV 去哪了");
+
+    // 通道报告：按圈 → 行数 = 圈数 × 通道数；按区段 → 行数 = 区段数 × 通道数
+    const chComp = state.components.find((c) => c.type === "chreport");
+    check((chComp.config.channels || []).length > 0,
+      "通道报告没有默认通道（应该在加到工作表时从图上取几条）");
+    api.renderAll();
+    const chEl = SHEETEl(worksheet, chComp.id);
+    const chWrap = insideOf(chEl, "rwrap")[0];
+    const chRows = (String(chWrap._html).match(/<tr>/g) || []).length;
+    const laps = (api.data.laps || []).length;
+    check(chRows === laps * chComp.config.channels.length + 1,
+      "按圈分组的通道报告行数不对: " + chRows + " vs "
+      + (laps * chComp.config.channels.length + 1)
+      + " [" + chComp.config.channels.join(" / ") + "]");
+    check(String(chWrap._html).indexOf("标准差") >= 0 && String(chWrap._html).indexOf("绝对最大") >= 0,
+      "通道报告缺少绝对最大 / 标准差这两列");
+
+    // 按圈分组时"区段过滤"没有意义，下拉框要灰掉并说清怎么打开
+    const selectsAt = (comp) => insideOf(SHEETEl(worksheet, comp.id), "scattercfg")[0]._children
+      .filter((child) => child.tagName === "SELECT");
+    const lapSelects = selectsAt(chComp);
+    check(lapSelects.length === 3, "通道报告的配置栏应该有 3 个下拉框，实际 "
+      + lapSelects.length);
+    check(lapSelects[0].disabled === true
+      && String(lapSelects[0].title).indexOf("按区段") >= 0,
+      "按圈分组时区段过滤应该是灰的，并告诉用户切成「按区段」");
+    check(lapSelects[2].disabled === true, "按圈分组时选圈下拉框应该也是灰的");
+
+    chComp.config.by = "section";
+    api.buildWorksheet();
+    api.renderAll();
+    const sectionSelects = selectsAt(chComp);
+    check(sectionSelects[2].disabled === false, "切成按区段之后应该能选圈");
+    check(String(sectionSelects[2]._html).indexOf("参考圈") >= 0,
+      "选圈下拉框里没有「参考圈」这一项");
+    const sectionWrap = insideOf(SHEETEl(worksheet, chComp.id), "rwrap")[0];
+    const sectionRows = (String(sectionWrap._html).match(/<tr>/g) || []).length;
+    const sectionCount = (embedded.channels_section.rows.length)
+      / Math.max(1, embedded.channels_section.channels.length);
+    check(sectionRows === sectionCount * chComp.config.channels.length + 1,
+      "按区段分组的通道报告行数不对: " + sectionRows);
+
+    // 快照模式下不许偷偷去问服务端要报表
+    check(!httpCalls.some((call) => call.url.indexOf("/report") >= 0),
+      "快照模式下去请求了 /report：快照必须离线可用");
+    chComp.config.by = "lap";
+
+    // serve 模式：报表由 /report 提供，参数必须带全（后端只认这几个）
+    const savedApi = api.data.api;
+    api.data.api = "/api";
+    const chBundle = api.bundleOf(chComp);
+    chBundle.reportKey = "";
+    const beforeReport = httpCalls.length;
+    api.refreshReport(chComp).then(() => {}, () => {});
+    const reportCalls = httpCalls.slice(beforeReport)
+      .filter((call) => call.url.indexOf("/report") >= 0);
+    check(reportCalls.length === 1,
+      "serve 模式下没有向 /report 要表（拿到 " + reportCalls.length + " 个请求）");
+    if (reportCalls.length === 1) {
+      const url = decodeURIComponent(reportCalls[0].url);
+      check(url.indexOf("table=channels") >= 0 && url.indexOf("by=lap") >= 0,
+        "报表请求少了 table / by 参数: " + url);
+      check(url.indexOf("channels=") >= 0,
+        "报表请求没带要统计的通道: " + url);
+    }
+    api.data.api = savedApi;
+
+    // 改了区段 / 圈 / 数学通道之后，同一张表必须重算（dataVersion 进键）
+    timeComp.config.filter = "all";
+    api.renderAll();
+    const keyBefore = api.reportFetchKey(timeComp);
+    api.applySectionsResponse(Object.assign({}, api.sectionsState() || {}, { notice: "（测试）" }));
+    check(api.reportFetchKey(timeComp) !== keyBefore,
+      "区段改了之后报表没有失效：dataVersion 没进刷新键");
+
+    // 布局要靠 URL 带走：过滤与分组都得回来
+    timeComp.config.filter = "straight";
+    chComp.config.channels = chComp.config.channels.slice(0, 2);
+    const encoded = api.encodeLayout(state.components);
+    const decoded = api.decodeLayout(encoded);
+    const backTime = decoded.find((c) => c.type === "report");
+    const backCh = decoded.find((c) => c.type === "chreport");
+    check(backTime && backTime.config.filter === "straight",
+      "分享链接丢了时间报告的区段过滤");
+    check(backCh && (backCh.config.channels || []).join(",")
+      === chComp.config.channels.join(","),
+      "分享链接丢了通道报告的通道清单");
+    timeComp.config.filter = "all";
   }
 }
 

@@ -30,6 +30,30 @@ from i3pro import (  # noqa: E402
 )
 
 DATA = ROOT / "i2pro_data"
+
+
+def _borrow_sidecar(session: Path) -> tuple[Path, bytes | None]:
+    """Take a session's sidecar for one test, promising to give it back.
+
+    These tests write a real ``<场次>.laps.json`` next to a real log. A user who
+    has saved their own beacon edits there must get them back untouched - and an
+    out-of-range beacon of theirs must not stop the test either - so the file is
+    kept in memory and restored in ``finally``. Only a sidecar this test created
+    is deleted.
+    """
+    sidecar = session.parent / f"{session.stem}.laps.json"
+    kept = sidecar.read_bytes() if sidecar.exists() else None
+    if kept is not None:
+        sidecar.unlink()
+    return sidecar, kept
+
+
+def _return_sidecar(sidecar: Path, kept: bytes | None) -> None:
+    """Undo whatever ``_borrow_sidecar`` did, restoring the user's own edits."""
+    if kept is None:
+        sidecar.unlink(missing_ok=True)
+    else:
+        sidecar.write_bytes(kept)
 ENDURANCE = DATA / "20260524-耐久正赛.ld"
 HILL = DATA / "20260908-cjh 高避5圈.ld"
 
@@ -376,8 +400,7 @@ class TestServer(unittest.TestCase):
 
             # saving beacons writes the sidecar and re-cuts the laps
             import urllib.request as _u
-            sidecar = HILL.parent / f"{HILL.stem}.laps.json"
-            self.assertFalse(sidecar.exists(), "a stale sidecar would poison this test")
+            sidecar, kept_sidecar = _borrow_sidecar(HILL)
             payload = json.dumps({
                 "mode": "auto",
                 "beacons": [{"name": "测试信标", "lat": 22.0, "lon": 113.0}],
@@ -394,8 +417,7 @@ class TestServer(unittest.TestCase):
                 self.assertTrue(str(saved["saved"]).endswith(".laps.json"))
                 self.assertTrue(sidecar.exists())
             finally:
-                # never leave a sidecar behind: it would change every later test
-                sidecar.unlink(missing_ok=True)
+                _return_sidecar(sidecar, kept_sidecar)
 
             with self.assertRaises(urllib.error.HTTPError) as caught:
                 urllib.request.urlopen(base + "/api/session/nope/trace", timeout=15)
@@ -758,8 +780,7 @@ class TestBeaconEditingOverHttp(unittest.TestCase):
         thread.start()
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
         quoted = urllib.parse.quote(HILL.stem)
-        sidecar = HILL.parent / f"{HILL.stem}.laps.json"
-        self.assertFalse(sidecar.exists(), "a stale sidecar would poison this test")
+        sidecar, kept_sidecar = _borrow_sidecar(HILL)
 
         def get_json(path):
             with urllib.request.urlopen(base + path, timeout=30) as response:
@@ -847,8 +868,7 @@ class TestBeaconEditingOverHttp(unittest.TestCase):
                 f"/api/session/{quoted}/laps")["config"]["beacons"]],
                 ["左环A", "左环A 2"])
         finally:
-            # never leave a sidecar behind: it would change every later test
-            sidecar.unlink(missing_ok=True)
+            _return_sidecar(sidecar, kept_sidecar)
             httpd.shutdown()
             httpd.server_close()
             library.close()
@@ -863,8 +883,7 @@ class TestBeaconEditingOverHttp(unittest.TestCase):
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
         quoted = urllib.parse.quote(HILL.stem)
-        sidecar = HILL.parent / f"{HILL.stem}.laps.json"
-        self.assertFalse(sidecar.exists(), "a stale sidecar would poison this test")
+        sidecar, kept_sidecar = _borrow_sidecar(HILL)
 
         def get_json(path):
             with urllib.request.urlopen(base + path, timeout=30) as response:
@@ -900,7 +919,7 @@ class TestBeaconEditingOverHttp(unittest.TestCase):
             self.assertIn("没有切出新圈", same["notice"] or "",
                           "the UI was given nothing to tell the user with")
         finally:
-            sidecar.unlink(missing_ok=True)
+            _return_sidecar(sidecar, kept_sidecar)
             httpd.shutdown()
             httpd.server_close()
             library.close()
@@ -976,8 +995,7 @@ class TestBeaconUndoOverHttp(unittest.TestCase):
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
         quoted = urllib.parse.quote(HILL.stem)
-        sidecar = HILL.parent / f"{HILL.stem}.laps.json"
-        self.assertFalse(sidecar.exists(), "a stale sidecar would poison this test")
+        sidecar, kept_sidecar = _borrow_sidecar(HILL)
 
         def get_json(path):
             with urllib.request.urlopen(base + path, timeout=30) as response:
@@ -1084,8 +1102,7 @@ class TestBeaconUndoOverHttp(unittest.TestCase):
             self.assertEqual([b["name"] for b in on_disk()["beacons"]], ["左环"],
                              "被拒绝的撤销动了边车")
         finally:
-            # never leave a sidecar behind: it would change every later test
-            sidecar.unlink(missing_ok=True)
+            _return_sidecar(sidecar, kept_sidecar)
             httpd.shutdown()
             httpd.server_close()
             library.close()

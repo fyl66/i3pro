@@ -582,7 +582,9 @@ i2 Pro 的 **Missed Beacons**：车确实穿过了起终点，但没被检出，
 | 本地覆盖同名全局，且两条都能看出作用域；`shadowed` 列出被盖住的名字 | `TestMaths::test_local_overrides_global_and_both_are_visible` |
 | 缓存：同一份定义第二次不重算（返回同一个数组对象）；表达式一改立刻换新列 | `TestMaths::test_cache_reuses_the_column_until_the_definition_changes`、`test_cache_key_changes_with_the_expression_and_the_source` |
 | 派生列在下游与原生通道等价：`has` / `channel` / `unit` / `sample_rate` / 主时间基长度一致，通道索引里带 `derived: true` | `TestMaths::test_a_derived_column_looks_like_a_native_channel_downstream` |
-| 重复挂载不产生重复通道 | `TestMaths::test_attaching_twice_does_not_duplicate_the_channel` |
+| 重复挂载不产生重复通道；删掉定义后不留下取不到值的"幽灵通道" | `TestMaths::test_attaching_twice_does_not_duplicate_the_channel`、`test_removing_a_definition_does_not_leave_a_ghost_channel` |
+| **同名覆盖一条慢的原生通道**时，派生列不会再被按原生采样率拉一遍（曲线不被毁） | `TestMaths::test_a_derived_channel_that_shadows_a_slow_channel_is_kept_as_is` |
+| 派生通道**真的**参与切圈：给一场挂上 `Lap Number = round_down(integrate(1)/10)`，`laps.detect_laps` 就按这条派生序列切成 **46** 段（原生那条是 1 Hz 的常量 0） | 见下方实测 |
 | HTTP：存一条本地定义 → 侧车落盘 → `trace` 能取到该列（带单位）→ `info` 里 `derived: true` | `TestMathsOverHttp` |
 | HTTP：坏表达式在保存时就被 400 挡住，**且不改动已经存好的侧车**；同名两条也被挡住 | 同上 |
 | HTTP：`scope=global` 写进 `maths/global.json`，**不会把本地定义一起搬进本地文件** | 同上 |
@@ -617,6 +619,26 @@ i2 Pro 的 **Missed Beacons**：车确实穿过了起终点，但没被检出，
 3. **JSON 里的布尔值被写成了数字。** `_json_safe` 把 `isinstance(value, int)` 排在
    `bool` 前面，而 Python 里 `isinstance(True, int)` 为真，于是 `{"ok": true}` 变成
    `{"ok": 1}`、通道索引里的 `derived` 变成 `1`。布尔判断已挪到整数之前。
+
+**自查"派生通道参与切圈"这一条时又逮到一个真 bug（同名覆盖慢通道）**
+
+验收点第 6 条要求"派生通道能参与切圈、比圈与报表"。为了证明它不是一句空话，我把
+`Lap Number = round_down(integrate(1) / 10)` 挂到高避5圈上，`laps.detect_laps` 却只切出
+**1 段**（应当按每 10 秒一段切成 46 段）。追下去是：
+
+* 原生 `Lap Number` 是 **1 Hz、464 点**的常量通道；
+* 派生列在 **100 Hz、46400 点**的主时间基上；
+* 名字撞上之后，`log.channel('Lap Number')` 交回的是**原生**那条通道对象，于是
+  `derive.hold_to_master` 按它的 1 Hz 把 100 Hz 的派生列 `repeat(100)` 再截回 46400 点
+  ——取到的是开头那 100 个 0 拉长出来的常数列。**不报任何错，曲线直接被毁。**
+
+修法：`ld.is_derived_channel()` 作为唯一判据，`derive.hold_to_master`、`store.build_table`
+跳过重采样；`render.channel_index` / `render.trace` 对派生列报**定义里的单位**与**主采样率**
+（否则界面会拿一条 1 Hz 原生通道的元数据去描述 100 Hz 的曲线）。修完之后同样的探针切出
+**46 段**，`channel_index` 报 `rate: 100.0`、`derived: true`。
+
+顺带补上：`maths.detach()` —— 删掉一条定义后不能留下"名字还在列表里、点开却取不到值"的
+幽灵通道；`TestMaths::test_removing_a_definition_does_not_leave_a_ghost_channel` 盯着它。
 
 **已知缺口（不算做完的部分）**：`filter_cheby_*` 与 `rand_*` 不提供；单位标注
 （`'车轮速度'[km/h]`）接受但**忽略**，并在试算结果里原样告诉用户"不做单位换算"；
@@ -749,7 +771,7 @@ python -m unittest tests.test_i3pro.TestChannelGroups -v
 python -m unittest discover -s tests -v
 ```
 
-**通过判据**：`Ran 94 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）。
+**通过判据**：`Ran 96 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）。
 
 测试覆盖：
 
@@ -767,7 +789,7 @@ python -m unittest discover -s tests -v
 | `TestCsvReader` | i2 Pro CSV 导出结构解析 |
 | `TestChannelGroups` | 通道按单位分组：不重不漏、单位一致、状态通道识别 |
 | `TestPoints` | 散点原始样本、时间窗裁剪、超窗口自动 stride |
-| `TestMaths` | 数学通道引擎（29 项）：白名单与 AST 断言、函数集、区间统计的条件与复位、微分积分、平滑与低通、成环与前向引用、一条坏了不拖累其它、本地覆盖全局、缓存命中与失效、派生列在下游等价于原生通道 |
+| `TestMaths` | 数学通道引擎（31 项）：白名单与 AST 断言、函数集、区间统计的条件与复位、微分积分、平滑与低通、成环与前向引用、一条坏了不拖累其它、本地覆盖全局、缓存命中与失效、派生列在下游等价于原生通道 |
 | `TestMathsOverHttp` | 数学通道走到 HTTP：存本地 / 全局、侧车落盘、坏表达式 400 且不动已存侧车、同名拦截、`shadowed`、试算接口、函数表 |
 | `TestRender` | 静态/服务两种 payload、自包含性 |
 | `TestServer` | HTTP 端到端：场次列表、工作台页、通道、时间窗、散点、概览、对比圈、赛道、404 |

@@ -230,16 +230,22 @@ def downsample(
 def channel_index(log: ldmod.LogFile) -> list[dict]:
     """Name / unit / rate for every channel, so the UI can search all of them."""
     derived = getattr(log, "derived_names", ())
-    return [
-        {
-            "name": ch.name,
-            "unit": ch.unit,
-            "rate": ch.sample_rate,
-            "samples": ch.sample_count,
-            "derived": ch.name in derived,
-        }
-        for ch in log.channels
-    ]
+    derived_units = getattr(log, "derived_units", None) or {}
+    out = []
+    for ch in log.channels:
+        # 数学通道算出来的列在主时间基上，单位和采样率都以它的定义为准；
+        # 与一条慢的原生通道同名时，界面不能还显示那条原生通道的 1 Hz。
+        is_derived = ch.name in derived
+        out.append(
+            {
+                "name": ch.name,
+                "unit": derived_units.get(ch.name, ch.unit) if is_derived else ch.unit,
+                "rate": log.sample_rate if is_derived else ch.sample_rate,
+                "samples": ch.sample_count,
+                "derived": is_derived,
+            }
+        )
+    return out
 
 
 def trace(
@@ -265,8 +271,13 @@ def trace(
         )
     else:
         payload = downsample(time, values, distance, buckets)
-    payload["unit"] = log.channel(name).unit
-    payload["rate"] = log.channel(name).sample_rate
+    # 数学通道的单位来自它的定义，采样率是主时间基——哪怕它和一条慢的原生通道同名
+    channel = log.channel(name)
+    derived_units = getattr(log, "derived_units", None)
+    payload["unit"] = (derived_units or {}).get(name, channel.unit)
+    payload["rate"] = (
+        log.sample_rate if ldmod.is_derived_channel(log, channel) else channel.sample_rate
+    )
     return payload
 
 

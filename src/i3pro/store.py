@@ -54,7 +54,10 @@ def build_table(
     meta_channels = []
     used: set[str] = set()
     for ch in selected:
-        factor = max(1, int(round(rate / ch.sample_rate)))
+        # 派生列已经在主时间基上，不能再按原生采样率拉一遍（见 ld.is_derived_channel）
+        factor = 1 if ldmod.is_derived_channel(log, ch) else max(
+            1, int(round(rate / ch.sample_rate))
+        )
         values = log.values(ch)
         if factor > 1:
             values = _resample(values, factor)

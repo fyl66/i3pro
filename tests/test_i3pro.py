@@ -1374,16 +1374,18 @@ class _MathSession:
     is what lets every expression test run on a machine with no team data.
     """
 
-    def __init__(self, columns: dict, rate: float = 10.0, path="fake.ld"):
+    def __init__(self, columns: dict, rate: float = 10.0, path="fake.ld", rates: dict | None = None):
         self.columns = {k: np.asarray(v, dtype=np.float64) for k, v in columns.items()}
         self.sample_rate = float(rate)
         self.derived: dict[str, np.ndarray] = {}
         size = max(len(v) for v in self.columns.values())
         self.duration = (size - 1) / self.sample_rate
         self.path = Path(path)
+        rates = rates or {}
         self.channels = [
             ld.Channel(
-                name=name, short_name=name[:8], unit="", sample_rate=self.sample_rate,
+                name=name, short_name=name[:8], unit="",
+                sample_rate=float(rates.get(name, self.sample_rate)),
                 sample_count=len(values), data_offset=0, data_type=5, bytes_per_sample=4,
                 multiplier=1, divider=1, decimals=3, shift=0, channel_id=index, index=index,
             )
@@ -1713,6 +1715,39 @@ class TestMaths(unittest.TestCase):
             values, _errors = mathsmod.resolve_available(session, definitions)
             mathsmod.attach(session, values, definitions)
         self.assertEqual(len(session.channels), before + 1)
+
+    def test_a_derived_channel_that_shadows_a_slow_channel_is_kept_as_is(self):
+        """本地数学覆盖原生通道时最容易出的错：再按原生采样率拉一遍。
+
+        `Lap Number` 这类原生通道常常只有 1 Hz，而派生列在 100 Hz 的主时间基上。
+        如果下游仍按 1 Hz 对它做 repeat，取到的是开头一个常数值——曲线被整段毁掉，
+        而且不会报任何错。
+        """
+        rate, count = 10.0, 6
+        session = _MathSession({"计数器": np.zeros(count)}, rate=rate,
+                               rates={"计数器": 1.0})       # 原生只有 1 Hz
+        ramp = np.arange(count, dtype=np.float64)           # 主时间基上的斜坡
+        mathsmod.attach(session, {"计数器": ramp},
+                        [mathsmod.Definition("计数器", "0", unit="")])
+        held = derive.hold_to_master(session, "计数器")
+        self.assertEqual(held.size, count)
+        np.testing.assert_allclose(held, ramp)
+        entry = next(c for c in render.channel_index(session) if c["name"] == "计数器")
+        self.assertEqual(entry["rate"], rate, "同名覆盖时界面还在报原生通道的采样率")
+        self.assertTrue(entry["derived"])
+
+    def test_removing_a_definition_does_not_leave_a_ghost_channel(self):
+        session = self._session()
+        definitions = [mathsmod.Definition("临时通道", "1")]
+        values, _errors = mathsmod.resolve_available(session, definitions)
+        mathsmod.attach(session, values, definitions)
+        self.assertTrue(session.has("临时通道"))
+        before = len(session.channels)
+        # 定义被删掉 -> 下一次 apply 会用空集合再挂一次
+        mathsmod.attach(session, {}, [])
+        self.assertFalse(session.has("临时通道"), "删掉定义之后还留着幽灵通道")
+        self.assertEqual(len(session.channels), before - 1)
+        self.assertFalse(any(c["name"] == "临时通道" for c in render.channel_index(session)))
 
     def test_a_derived_channel_cannot_be_shadowed_by_a_stale_definition(self):
         """引用自己在定义阶段就被判成环，而不是算出一个越来越大的数列。"""

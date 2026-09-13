@@ -127,6 +127,18 @@ class Channel:
         )
 
 
+def is_derived_channel(session, channel: "Channel") -> bool:
+    """这个通道是数学通道算出来的吗（见 ``maths.attach``）？
+
+    派生列**已经在主时间基上**，所以任何"按原生采样率再拉一遍"的动作都必须跳过。
+    最容易踩的坑是一个派生通道和一条**慢**的原生通道同名（本地数学覆盖原生通道）：
+    那时 ``session.channel()`` 交回的是原生那条，采样率是 1 Hz，于是 100 Hz 的派生列
+    会被整段 repeat 再截断——取到的是开头那一小段常数值，而不是算出来的曲线。
+    """
+    names = getattr(session, "derived_names", None)
+    return bool(names) and channel.name in names
+
+
 @dataclass
 class LogFile:
     """A parsed ``.ld`` file. Sample blocks are memory mapped, not copied."""

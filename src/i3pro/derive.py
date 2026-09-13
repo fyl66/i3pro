@@ -65,7 +65,10 @@ def speed_series(log: ldmod.LogFile) -> np.ndarray:
 def hold_to_master(log: ldmod.LogFile, name: str) -> np.ndarray:
     ch = log.channel(name)
     values = log.values(ch)
-    factor = max(1, int(round(log.sample_rate / ch.sample_rate)))
+    # 数学通道算出来的列本来就在主时间基上；按原生采样率再拉一遍会把曲线毁掉
+    factor = 1 if ldmod.is_derived_channel(log, ch) else max(
+        1, int(round(log.sample_rate / ch.sample_rate))
+    )
     if factor > 1:
         values = np.repeat(values, factor)
     n = int(round(log.duration * log.sample_rate)) + 1

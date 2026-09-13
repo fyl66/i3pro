@@ -43,6 +43,7 @@ __all__ = [
     "resolve_available",
     "apply_to_session",
     "attach",
+    "detach",
     "config_path",
     "global_path",
     "load_local",
@@ -1173,6 +1174,7 @@ def attach(session, resolved: dict[str, np.ndarray], definitions: list[Definitio
     """
     from . import ld as ldmod
 
+    detach(session)
     meta = {d.name: d for d in definitions}
     added: list[str] = []
     existing = {ch.name for ch in session.channels}
@@ -1185,6 +1187,14 @@ def attach(session, resolved: dict[str, np.ndarray], definitions: list[Definitio
             session.derived_names = known
         except AttributeError:      # pragma: no cover - 只读会话
             pass
+    if hasattr(session, "derived_units"):
+        units = session.derived_units
+    else:
+        units = {}
+        try:
+            session.derived_units = units
+        except AttributeError:      # pragma: no cover
+            pass
     for name, values in resolved.items():
         definition = meta.get(name)
         if hasattr(session, "derived"):          # LogFile
@@ -1192,6 +1202,7 @@ def attach(session, resolved: dict[str, np.ndarray], definitions: list[Definitio
         elif hasattr(session, "columns"):        # CsvSession
             session.columns[name] = values
         known.add(name)
+        units[name] = (definition.unit if definition else "") or ""
         if name in existing:
             continue
         session.channels.append(
@@ -1214,3 +1225,31 @@ def attach(session, resolved: dict[str, np.ndarray], definitions: list[Definitio
         )
         added.append(name)
     return added
+
+
+def detach(session) -> None:
+    """撤掉上一次挂上去的数学通道。
+
+    删掉一条定义之后不能留下"幽灵通道"：那个名字还在通道列表里、点开却取不到值，
+    是比"删了没反应"更难查的毛病。
+    """
+    if not hasattr(session, "derived_names"):
+        return
+    names = session.derived_names
+    if not names:
+        return
+    has_derived = hasattr(session, "derived")
+    has_columns = hasattr(session, "columns")
+    has_units = hasattr(session, "derived_units")
+    for name in list(names):
+        if has_derived:
+            session.derived.pop(name, None)
+        elif has_columns:
+            session.columns.pop(name, None)
+        if has_units:
+            session.derived_units.pop(name, None)
+    # 只删我们自己加进去的：原生通道带着文件里的 channel_id，派生通道是 -1
+    session.channels = [
+        ch for ch in session.channels if not (ch.name in names and ch.channel_id < 0)
+    ]
+    names.clear()

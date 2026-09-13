@@ -2497,6 +2497,50 @@ if (embeddedSpec && embeddedSpec.series) {
     } else {
       check(false, "加不出两张散点组件");
     }
+
+    // 两张直方图（不同分箱数）同屏：同样各拿自己那一份（#21 验收条目点名的另一对）。
+    api.addComponentOfType("histogram");
+    api.addComponentOfType("histogram");
+    const hists = sheetState.components.filter((c) => c.type === "histogram").slice(-2);
+    const [histA, histB] = hists;
+    if (histA && histB) {
+      const mkHist = (name, boxes) => ({
+        channel: name, unit: "", count: boxes, embedded: false, window_label: "整场",
+        range: [0, boxes], stats: {},
+        bins: Array.from({ length: boxes }, (_, i) => ({ count: i + 1, x0: i, x1: i + 1 })),
+      });
+      const hDataA = mkHist("甲", 11);
+      const hDataB = mkHist("乙", 33);
+      for (const [comp, payload, name, bins] of [
+        [histA, hDataA, "甲", 11], [histB, hDataB, "乙", 33],
+      ]) {
+        comp.config.channel = name;
+        comp.config.bins = bins;
+        comp.config.window = "all";
+        const b = api.bundleOf(comp);
+        b.data = payload;
+        b.dataKey = api.componentSpec(comp).data.key(comp);
+        b.cacheKey = "";
+      }
+      api.renderAll();
+      check(api.bundleOf(histA).data === hDataA && api.bundleOf(histB).data === hDataB,
+        "两张直方图共用了一个数据槽（互相顶掉的旧毛病）");
+      check(String(api.bundleOf(histA).head.textContent).indexOf("11") >= 0
+        && String(api.bundleOf(histA).head.textContent).indexOf("甲") >= 0,
+        "第一张直方图画的不是自己那份分布: " + api.bundleOf(histA).head.textContent);
+      check(String(api.bundleOf(histB).head.textContent).indexOf("33") >= 0
+        && String(api.bundleOf(histB).head.textContent).indexOf("乙") >= 0,
+        "第二张直方图画的不是自己那份分布: " + api.bundleOf(histB).head.textContent);
+      const ids = [histA.id, histB.id];
+      sheetState.components = sheetState.components.filter((c) => ids.indexOf(c.id) < 0);
+      api.buildWorksheet();
+      check(ids.every((id) => {
+        const gone = { id: id };
+        return api.bundleOf(gone) === undefined;
+      }), "删掉直方图之后它的数据槽还留着（缓存残留）");
+    } else {
+      check(false, "加不出两张直方图组件");
+    }
     api.data.api = savedApiForScatter;
   }
 

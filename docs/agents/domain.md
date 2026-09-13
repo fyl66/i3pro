@@ -53,9 +53,10 @@ writing anything about lap timing:
 - **lap** is *the interval between two crossings of the same beacon*; a geometric loop on a
   figure-of-eight is a **loop**, never a lap.
 
-The code has not caught up with this yet: `laps.py` still separates `gate`/`gates` (position) from
-`beacons` (time). Reconcile to `beacons: [{name, lat?, lon?, time?}]` when next touching that file —
-`LapConfig.from_dict` must keep accepting the old shape so existing sidecars keep loading.
+The code matches this as of the beacon merge: `laps.Beacon` carries `name` + optional `lat`/`lon` +
+optional `time`, and `LapConfig.beacons` is the single list. `LapConfig.from_dict` still accepts the
+pre-merge shapes (`gate`, `gates`, bare float times) so sidecars written earlier keep loading —
+keep that compatibility until no such file can exist.
 
 ## Use the glossary's vocabulary
 

@@ -356,21 +356,26 @@ class TestServer(unittest.TestCase):
 
             # saving beacons writes the sidecar and re-cuts the laps
             import urllib.request as _u
+            sidecar = HILL.parent / f"{HILL.stem}.laps.json"
+            self.assertFalse(sidecar.exists(), "a stale sidecar would poison this test")
             payload = json.dumps({
-                "mode": "beacons",
-                "gates": [{"name": "测试信标", "lat": 22.0, "lon": 113.0}],
+                "mode": "auto",
+                "beacons": [{"name": "测试信标", "lat": 22.0, "lon": 113.0}],
             }).encode("utf-8")
-            request = _u.Request(
-                base + f"/api/session/{quoted}/laps", data=payload, method="PUT",
-                headers={"Content-Type": "application/json"},
-            )
-            with _u.urlopen(request, timeout=30) as response:
-                saved = json.loads(response.read().decode("utf-8"))
-            self.assertEqual(saved["config"]["gates"][0]["name"], "测试信标")
-            self.assertTrue(str(saved["saved"]).endswith(".laps.json"))
-            sidecar = (HILL.parent / f"{HILL.stem}.laps.json")
-            self.assertTrue(sidecar.exists())
-            sidecar.unlink()          # leave no trace in the data folder
+            try:
+                request = _u.Request(
+                    base + f"/api/session/{quoted}/laps", data=payload, method="PUT",
+                    headers={"Content-Type": "application/json"},
+                )
+                with _u.urlopen(request, timeout=30) as response:
+                    saved = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(saved["config"]["beacons"][0]["name"], "测试信标")
+                self.assertNotIn("gates", saved["config"])   # the old shape is gone
+                self.assertTrue(str(saved["saved"]).endswith(".laps.json"))
+                self.assertTrue(sidecar.exists())
+            finally:
+                # never leave a sidecar behind: it would change every later test
+                sidecar.unlink(missing_ok=True)
 
             with self.assertRaises(urllib.error.HTTPError) as caught:
                 urllib.request.urlopen(base + "/api/session/nope/trace", timeout=15)
@@ -420,17 +425,18 @@ class TestLapModes(unittest.TestCase):
                         "figure8 mode did not label any turn direction")
 
     @_needs(ENDURANCE)
-    def test_two_gates_give_two_independent_series(self):
+    def test_two_beacons_give_two_independent_series(self):
         """One beacon per loop is how a figure-of-eight is split per loop."""
         with ld.LogFile.read(ENDURANCE) as log:
             track = derive.gps_track(log)
             i_left = int(np.argmin(track["x"]))
             i_right = int(np.argmax(track["x"]))
             config = lapsmod.LapConfig(
-                mode="beacons",
-                gates=[
-                    ("左环", float(track["lat"][i_left]), float(track["lon"][i_left])),
-                    ("右环", float(track["lat"][i_right]), float(track["lon"][i_right])),
+                beacons=[
+                    lapsmod.Beacon("左环", lat=float(track["lat"][i_left]),
+                                   lon=float(track["lon"][i_left])),
+                    lapsmod.Beacon("右环", lat=float(track["lat"][i_right]),
+                                   lon=float(track["lon"][i_right])),
                 ],
             )
             laps = lapsmod.detect_from_config(log, config)
@@ -442,27 +448,78 @@ class TestLapModes(unittest.TestCase):
             for lap in series:
                 self.assertGreater(lap.end_time, lap.start_time)
 
+    @_needs(ENDURANCE)
+    def test_a_beacon_with_only_a_time_merges_into_the_nearest_series(self):
+        """i2 Pro's "Missed Beacons": enter the time, it joins that series."""
+        with ld.LogFile.read(ENDURANCE) as log:
+            track = derive.gps_track(log)
+            index = int(np.argmin(track["x"]))
+            placed = lapsmod.Beacon("左环", lat=float(track["lat"][index]),
+                                    lon=float(track["lon"][index]))
+            base = lapsmod.detect_from_config(log, lapsmod.LapConfig(beacons=[placed]))
+            self.assertTrue(base)
+            gap = base[1].start_time if len(base) > 1 else base[0].end_time
+            missed = lapsmod.Beacon("补", time=gap + 0.25)
+            merged = lapsmod.detect_from_config(
+                log, lapsmod.LapConfig(beacons=[placed, missed])
+            )
+        self.assertGreater(len(merged), len(base),
+                           "a hand-inserted crossing did not add a boundary")
+
+    def test_times_alone_cut_the_laps(self):
+        """Two hand-entered crossings and nothing else still cut one lap."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "x.ld"
+            config = lapsmod.LapConfig(
+                beacons=[lapsmod.Beacon("手工1", time=10.0),
+                         lapsmod.Beacon("手工2", time=40.0)]
+            )
+            back = lapsmod.LapConfig.from_dict(config.as_dict())
+        self.assertEqual([b.time for b in back.beacons], [10.0, 40.0])
+        self.assertFalse(back.beacons[0].has_position)
+
     def test_lap_config_round_trips_through_the_sidecar(self):
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "20260101-test.ld"
             config = lapsmod.LapConfig(
-                mode="beacons",
-                gate=(34.123456, 113.654321),
-                gates=[("左环", 34.1, 113.6), ("右环", 34.2, 113.7)],
-                beacons=[12.5, 33.25],
+                mode="figure8",
+                beacons=[
+                    lapsmod.Beacon("左环", lat=34.1, lon=113.6),
+                    lapsmod.Beacon("右环", lat=34.2, lon=113.7),
+                    lapsmod.Beacon("补", time=33.25),
+                ],
                 trusted={"左环 1": False},
             )
             path = lapsmod.save_config(log_path, config)
             self.assertEqual(path.name, "20260101-test.laps.json")
             back = lapsmod.load_config(log_path)
-        self.assertEqual(back.mode, "beacons")
-        self.assertEqual(back.gates[0], ("左环", 34.1, 113.6))
-        self.assertEqual(back.beacons, [12.5, 33.25])
+        self.assertEqual(back.mode, "figure8")
+        self.assertEqual(back.beacons[0].name, "左环")
+        self.assertAlmostEqual(back.beacons[0].lat, 34.1)
+        self.assertTrue(back.beacons[0].has_position)
+        self.assertIsNone(back.beacons[2].lat)
+        self.assertAlmostEqual(back.beacons[2].time, 33.25)
         self.assertFalse(back.trusted["左环 1"])
         # a missing sidecar means "no manual edits", never an exception
         self.assertEqual(lapsmod.load_config(Path(tmp) / "nope.ld").mode, "auto")
+
+    def test_every_older_sidecar_shape_still_loads(self):
+        """Beacons placed before the gate/time merge must survive the upgrade."""
+        legacy_shapes = [
+            {"mode": "beacons", "gate": [34.5, 113.5]},
+            {"mode": "beacons", "gates": [{"name": "左环", "lat": 34.1, "lon": 113.6}]},
+            {"mode": "beacons", "gates": [["左环", 34.1, 113.6]]},
+            {"mode": "beacons", "beacons": [12.5, 33.25]},
+        ]
+        for shape in legacy_shapes:
+            loaded = lapsmod.LapConfig.from_dict(shape)
+            self.assertEqual(len(loaded.beacons), 1 if "gate" in shape or "gates" in shape else 2,
+                             f"failed to load {shape}")
+            self.assertTrue(loaded.beacons[0].has_position or loaded.beacons[0].time is not None)
 
 
 class TestChannelGroups(unittest.TestCase):

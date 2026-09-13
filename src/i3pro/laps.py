@@ -29,6 +29,7 @@ from . import derive
 from . import ld as ldmod
 
 __all__ = [
+    "Beacon",
     "Lap",
     "LapConfig",
     "detect_laps",
@@ -631,6 +632,36 @@ def time_delta(ref: dict, cmp: dict, distance: np.ndarray | None = None) -> tupl
 
 # --------------------------------------------------------------- sidecar
 @dataclass
+class Beacon:
+    """**One crossing of the start/finish line** - not the line itself.
+
+    Its position (where the line is drawn) and its time (when the car went
+    through) are both attributes of the same thing. Detection gives the time
+    from the position; a missed crossing can be entered as a time alone.
+    One beacon yields one independent lap series.
+    """
+
+    name: str
+    lat: float | None = None
+    lon: float | None = None
+    time: float | None = None
+
+    @property
+    def has_position(self) -> bool:
+        return self.lat is not None and self.lon is not None
+
+    def as_dict(self) -> dict:
+        out: dict = {"name": self.name}
+        if self.lat is not None:
+            out["lat"] = round(float(self.lat), 7)
+        if self.lon is not None:
+            out["lon"] = round(float(self.lon), 7)
+        if self.time is not None:
+            out["time"] = round(float(self.time), 4)
+        return out
+
+
+@dataclass
 class LapConfig:
     """Everything the user has decided about this session's laps.
 
@@ -639,39 +670,62 @@ class LapConfig:
     travel with the data folder, be diffed in git, and ride along a share link.
     """
 
-    mode: str = "auto"                       # auto | run | figure8 | beacons
-    gate: tuple[float, float] | None = None  # manual start/finish as (lat, lon)
-    #: Named beacons. One gate = one lap series, so a figure-of-eight gets two
-    #: (left loop + right loop) and each is timed independently - which is the
-    #: only reliable way to tell the two loops apart on a self-crossing course.
-    gates: list[tuple[str, float, float]] = field(default_factory=list)
-    beacons: list[float] = field(default_factory=list)   # explicit crossing times
+    mode: str = "auto"                       # auto | run | figure8
+    #: Beacons in the sense defined above. One beacon = one lap series, so a
+    #: figure-of-eight gets two (left loop + right loop) and each is timed
+    #: independently - the only reliable way on a self-crossing course.
+    beacons: list[Beacon] = field(default_factory=list)
     trusted: dict[str, bool] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
             "mode": self.mode,
-            "gate": list(self.gate) if self.gate else None,
-            "gates": [{"name": n, "lat": lat, "lon": lon} for n, lat, lon in self.gates],
-            "beacons": [round(float(b), 4) for b in self.beacons],
+            "beacons": [b.as_dict() for b in self.beacons],
             "trusted": dict(self.trusted),
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "LapConfig":
-        gate = data.get("gate")
-        gates = [
-            (str(g.get("name") or f"信标{i + 1}"), float(g["lat"]), float(g["lon"]))
-            for i, g in enumerate(data.get("gates") or [])
-            if g.get("lat") is not None and g.get("lon") is not None
-        ]
+        """Read the current shape **and** every shape written before the merge.
+
+        Older sidecars stored the line as ``gate`` / ``gates`` and the times as
+        a bare list of ``beacons`` floats. Both must keep loading: a user who
+        placed beacons before the merge must not lose them.
+        """
+        beacons: list[Beacon] = []
+        for item in data.get("beacons") or []:
+            if isinstance(item, dict):
+                beacons.append(
+                    Beacon(
+                        name=str(item.get("name") or f"信标{len(beacons) + 1}"),
+                        lat=_opt_float(item.get("lat")),
+                        lon=_opt_float(item.get("lon")),
+                        time=_opt_float(item.get("time")),
+                    )
+                )
+            else:                                   # old: a bare crossing time
+                beacons.append(Beacon(name=f"信标{len(beacons) + 1}", time=float(item)))
+        for index, item in enumerate(data.get("gates") or []):   # old: named lines
+            if isinstance(item, dict) and item.get("lat") is not None:
+                beacons.append(
+                    Beacon(name=str(item.get("name") or f"信标{index + 1}"),
+                           lat=float(item["lat"]), lon=float(item.get("lon")))
+                )
+            elif isinstance(item, (list, tuple)) and len(item) == 3:  # (name, lat, lon)
+                beacons.append(Beacon(name=str(item[0]), lat=float(item[1]), lon=float(item[2])))
+        gate = data.get("gate")                     # old: a single unnamed line
+        if gate and len(gate) == 2:
+            beacons.append(Beacon(name=f"信标{len(beacons) + 1}",
+                                  lat=float(gate[0]), lon=float(gate[1])))
         return cls(
             mode=str(data.get("mode") or "auto"),
-            gate=(float(gate[0]), float(gate[1])) if gate else None,
-            gates=gates,
-            beacons=[float(b) for b in (data.get("beacons") or [])],
+            beacons=beacons,
             trusted={str(k): bool(v) for k, v in (data.get("trusted") or {}).items()},
         )
+
+
+def _opt_float(value) -> float | None:
+    return None if value is None else float(value)
 
 
 def config_path(ld_path: str | Path) -> Path:
@@ -701,41 +755,64 @@ def save_config(ld_path: str | Path, config: LapConfig) -> Path:
 def detect_from_config(log: ldmod.LogFile, config: LapConfig | None = None) -> list[Lap]:
     """Run detection using whatever the user configured for this session."""
     config = config if config is not None else load_config(log.path)
-    if config.gates:
-        return _laps_for_gates(log, config)
+    if config.beacons:
+        return _laps_for_beacons(log, config)
     mode = config.mode
-    if mode == "beacons" and not config.beacons:
-        mode = "auto"                     # nothing hand-placed yet
-    laps = detect_laps(
-        log,
-        method=mode,
-        gate=config.gate,
-        beacons=config.beacons or None,
-    )
+    if mode not in ("auto", "run", "figure8"):
+        mode = "auto"                     # unknown/legacy value -> automatic
+    laps = detect_laps(log, method=mode)
     for lap in laps:
         if lap.label in config.trusted:
             lap.complete = config.trusted[lap.label]
     return laps
 
 
-def _laps_for_gates(log: ldmod.LogFile, config: LapConfig) -> list[Lap]:
-    """One independent lap series per named beacon.
+def _laps_for_beacons(log: ldmod.LogFile, config: LapConfig) -> list[Lap]:
+    """One independent lap series per beacon.
 
-    This is how a figure-of-eight gets split per loop: put one beacon on each
-    loop and each loop is timed on its own, so there is nothing to guess. It is
-    also i2 Pro's model - laps are created between beacon crossings, and a
-    session may have several beacons (sector splits).
+    A figure-of-eight gets one beacon per loop, so each loop is timed on its own
+    and there is nothing to guess. A beacon that carries only a time is a
+    hand-inserted crossing (i2 Pro's "Missed Beacons"); it is merged into the
+    series it is closest to in time, or - when there is no placed beacon at all -
+    the times alone cut the laps.
     """
     distance = _distance_series(log)
-    laps: list[Lap] = []
-    for name, lat, lon in config.gates:
-        bounds = gps_laps(log, gate=(lat, lon))
-        bounds = [b for b in bounds if b[1] - b[0] >= 4.0]
-        labelled = [
-            (start, end, f"{name} {n}", complete)
-            for n, (start, end, _label, complete) in enumerate(bounds, start=1)
+    placed = [b for b in config.beacons if b.has_position]
+    timed = sorted(b.time for b in config.beacons if not b.has_position and b.time is not None)
+    if not placed:
+        if len(timed) < 2:
+            return []
+        bounds = [
+            (start, end, f"信标 {n}", True)
+            for n, (start, end) in enumerate(zip(timed, timed[1:]), start=1)
         ]
-        laps.extend(_lap_from_bounds(log, distance, labelled))
+        return _lap_from_bounds(log, distance, bounds)
+
+    series = []
+    for beacon in placed:
+        bounds = [b for b in gps_laps(log, gate=(beacon.lat, beacon.lon)) if b[1] - b[0] >= 4.0]
+        if not bounds:
+            continue
+        series.append({
+            "beacon": beacon,
+            "edges": [b[0] for b in bounds],
+            "end": bounds[-1][1],
+        })
+    for when in timed:                      # merge each missed crossing by time
+        if not series:
+            break
+        nearest = min(series, key=lambda s: min(abs(when - e) for e in s["edges"]))
+        nearest["edges"] = sorted(nearest["edges"] + [when])
+
+    laps: list[Lap] = []
+    for entry in series:
+        edges = sorted(entry["edges"] + [entry["end"]])
+        bounds = [
+            (start, end, f"{entry['beacon'].name} {n}", n not in (1, len(edges) - 1))
+            for n, (start, end) in enumerate(zip(edges, edges[1:]), start=1)
+            if end > start
+        ]
+        laps.extend(_lap_from_bounds(log, distance, bounds))
     laps.sort(key=lambda lap: lap.start_time)
     for index, lap in enumerate(laps):
         lap.index = index

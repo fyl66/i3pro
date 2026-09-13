@@ -106,7 +106,7 @@ def cmd_laps(args: argparse.Namespace) -> int:
                 if parsed is None:
                     print(f"# 忽略无法解析的信标: {spec!r}（格式 lat,lon[:名字]）")
                     continue
-                config.gates.append(parsed)
+                config.beacons.append(parsed)
             if args.save:
                 path = lapsmod.save_config(args.file, config)
                 print(f"# 已保存 {path.name}")
@@ -119,9 +119,11 @@ def cmd_laps(args: argparse.Namespace) -> int:
             return 1
         _print_table(lapsmod.lap_table(log, laps),
                      ["lap", "turn", "lap_time", "delta_to_best", "distance", "start_time", "end_time"])
-        if config.gates:
-            print(f"\n{len(config.gates)} 个信标: "
-                  + ", ".join(f"{n}({lat:.6f}, {lon:.6f})" for n, lat, lon in config.gates))
+        if config.beacons:
+            print(f"\n{len(config.beacons)} 个信标: "
+                  + ", ".join(f"{b.name}({b.lat:.6f}, {b.lon:.6f})"
+                              if b.has_position else f"{b.name}(t={b.time:.3f}s)"
+                              for b in config.beacons))
         print(f"切分方式: {config.mode}")
         if args.json:
             Path(args.json).write_text(
@@ -132,8 +134,10 @@ def cmd_laps(args: argparse.Namespace) -> int:
     return 0
 
 
-def _parse_gate(spec: str) -> tuple[str, float, float] | None:
-    """``lat,lon`` or ``lat,lon:名称`` -> (name, lat, lon)."""
+def _parse_gate(spec: str):
+    """``lat,lon`` or ``lat,lon:名称`` -> a positioned Beacon."""
+    from . import laps as _laps
+
     name = ""
     if ":" in spec:
         spec, name = spec.rsplit(":", 1)
@@ -144,7 +148,7 @@ def _parse_gate(spec: str) -> tuple[str, float, float] | None:
         lat, lon = float(parts[0]), float(parts[1])
     except ValueError:
         return None
-    return (name.strip() or f"信标{lat:.5f}", lat, lon)
+    return _laps.Beacon(name=name.strip() or f"信标{lat:.5f}", lat=lat, lon=lon)
 
 
 def cmd_delta(args: argparse.Namespace) -> int:

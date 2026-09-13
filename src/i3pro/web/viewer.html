@@ -456,7 +456,7 @@ const state = {
   overlay: (DATA && DATA.overlay) || null,
   track: (DATA && DATA.track) || null,
   points: null,
-  lapsConfig: { mode: "auto", gates: [], beacons: [], trusted: {} },
+  lapsConfig: { mode: "auto", beacons: [], trusted: {} },
   placeBeacon: false,
   pending: 0,
   windowKey: "",
@@ -2125,28 +2125,32 @@ function markLapRows() {
 function renderLapControls() {
   const sel = $("lapMode");
   if (!sel) return;
-  const modes = [["auto", "自动挑门"], ["run", "按运行分段"],
-                 ["figure8", "八字按环"], ["beacons", "只用信标"]];
+  // A placed beacon always wins; `mode` only decides what happens without one.
+  const modes = [["auto", "自动挑门"], ["run", "按运行分段"], ["figure8", "八字按环"]];
   sel.innerHTML = modes.map(([v, t]) => '<option value="' + v + '">' + t + "</option>").join("");
   sel.value = (state.lapsConfig && state.lapsConfig.mode) || "auto";
   sel.disabled = !DATA.api;
-  const gates = (state.lapsConfig && state.lapsConfig.gates) || [];
+  const beacons = (state.lapsConfig && state.lapsConfig.beacons) || [];
   const list = $("beaconList");
-  if (!gates.length) {
+  if (!beacons.length) {
     list.innerHTML = DATA.api
       ? '没有信标 —— 点「＋ 信标」，再点赛道图上的位置（八字就在左右环各点一个）。'
       : "快照模式：信标由生成时决定，要改请用 serve 模式。";
   } else {
-    list.innerHTML = "信标: " + gates.map((g, i) =>
-      '<span class="pill" title="' + g.lat.toFixed(6) + ", " + g.lon.toFixed(6) + '">'
-      + g.name + ' <a href="#" data-beacon="' + i + '" style="color:#ff5d6c;text-decoration:none">✕</a>'
-      + "</span>").join(" ");
+    list.innerHTML = "信标: " + beacons.map((b, i) => {
+      const where = (b.lat !== undefined && b.lat !== null)
+        ? b.lat.toFixed(6) + ", " + b.lon.toFixed(6)
+        : "t = " + Number(b.time || 0).toFixed(3) + " s（手工插入的穿越）";
+      return '<span class="pill" title="' + where + '">' + b.name
+        + ' <a href="#" data-beacon="' + i + '" style="color:#ff5d6c;text-decoration:none">✕</a>'
+        + "</span>";
+    }).join(" ");
     list.querySelectorAll("a[data-beacon]").forEach((link) => {
       link.addEventListener("click", (event) => {
         event.preventDefault();
-        const gates2 = (state.lapsConfig.gates || []).slice();
-        gates2.splice(Number(link.dataset.beacon), 1);
-        saveLaps(Object.assign({}, state.lapsConfig, { gates: gates2 }));
+        const next = (state.lapsConfig.beacons || []).slice();
+        next.splice(Number(link.dataset.beacon), 1);
+        saveLaps(Object.assign({}, state.lapsConfig, { beacons: next }));
       });
     });
   }
@@ -2185,10 +2189,10 @@ function onTrackClick(event, comp, bundle) {
   const lat0 = bundle.trackOrigin[0], lon0 = bundle.trackOrigin[1];
   const lat = lat0 + local.y / 110540.0;
   const lon = lon0 + local.x / (111320.0 * Math.cos(lat0 * Math.PI / 180));
-  const gates = (state.lapsConfig.gates || []).slice();
-  gates.push({ name: "信标" + (gates.length + 1), lat: lat, lon: lon });
+  const beacons = (state.lapsConfig.beacons || []).slice();
+  beacons.push({ name: "信标" + (beacons.length + 1), lat: lat, lon: lon });
   state.placeBeacon = false;
-  saveLaps(Object.assign({}, state.lapsConfig, { mode: "beacons", gates: gates }));
+  saveLaps(Object.assign({}, state.lapsConfig, { beacons: beacons }));
 }
 
 /**
@@ -2958,7 +2962,7 @@ function init() {
     renderLapControls();
     renderAll();
   });
-  state.lapsConfig = Object.assign({ mode: "auto", gates: [], beacons: [], trusted: {} },
+  state.lapsConfig = Object.assign({ mode: "auto", beacons: [], trusted: {} },
                                    DATA.laps_config || {});
   renderLapControls();
   $("chClear").addEventListener("click", () => {

@@ -268,11 +268,13 @@ Lap Editor 存在的理由。顺带还暴露一个更根本的问题：八字（
 | `run_laps()`：按"持续行驶 / 持续静止"分段（八字、直线加速、skidpad 的正确单位） | 完成 |
 | `figure8_laps()` + `turn_direction()`：按环分段并标注绕向 | 完成 |
 | `gps_laps(gate=...)`：用显式 (lat, lon) 起终点门替换自动挑门 | 完成 |
-| `LapConfig` + `<场次>.laps.json` 边车（mode / gate / **gates** / beacons / trusted） | 完成 |
+| `LapConfig` + `<场次>.laps.json` 边车（mode / **beacons** / trusted） | 完成 |
+| **信标 = 一次穿越**：位置与时刻是同一个 `Beacon` 的两个可选属性；归并前写下的旧侧车照旧能读 | 完成 |
 | **多信标**：一个信标一条独立圈速序列，`左环 n` / `右环 n` 并列 | 完成 |
-| CLI：`laps --mode run|figure8|beacons`、`--gate lat,lon:名字`（可重复）、`--save` | 完成 |
-| 交互式：赛道图上点一下放信标、信标列表可改名/删除 | **下一步** |
-| 圈速表里"插入漏掉的信标/圈"（i2 的 Missed Beacons） | **下一步** |
+| 手工插入的穿越时刻并进时间上最近的那条序列（i2 的 Missed Beacons 算法） | 完成 |
+| CLI：`laps --mode run|figure8`、`--gate lat,lon:名字`（可重复）、`--save` | 完成 |
+| 交互式：赛道图上点一下放信标、信标列表可删除 | 完成 |
+| 交互式：信标改名、在圈速表里对照某两圈**插入**一个时刻 | **下一步** |
 
 > 顺序理由：M6 已完成"显示层"，接下来的每一件都挂在它上面；数学通道是**其余一切的地基**，
 > 所以排在报表与直方图之前。

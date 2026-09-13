@@ -1033,11 +1033,12 @@ node tools\smoke_viewer.js "out\20260524-耐久正赛.html"       # 26 圈 / 23 
 | 整场没有页面级报错 | 无 `Runtime.exceptionThrown` |
 
 ```powershell
-python tools\verify_clicks.py                                              # 高避5圈 21/21
+python tools\verify_clicks.py                                              # 默认高避5圈 28/28
 python tools\verify_clicks.py --session "20260524-耐久正赛" --port 8752    # 耐久正赛 28/28
 ```
 
-两份金标准各 **21/21 通过**。逐帧截图落在 `out/shots/verify-*.png`（`out/` 已 gitignore），
+两份金标准各 **28/28 通过**（21 项是这一条刚建时的信标 / 区段 / 撤销，**7 项是 #9 直方图
+后来加的**，见 A34）。逐帧截图落在 `out/shots/verify-*.png`（`out/` 已 gitignore），
 想用眼睛复核时看它们。
 
 **边界（说清代价）**：
@@ -1269,43 +1270,6 @@ python -m unittest tests.test_i3pro.TestChannelGroups -v
 | `trace?channels=Vx KF&buckets=1200`（全程） | 秒级返回，约 1200 桶 |
 | `trace?channels=Vx KF&from=200&to=201`（1 秒） | **返回 100 个原始样本**，不是折线 |
 | 连续缩放 / 平移 | 无明显卡顿（每个请求 < 30 ms） |
-
----
-
-## A36 · 第四道回归的补充说明（与 A33 是同一件事，重复待合并）
-
-前三道回归里，`tools/smoke_viewer.js` 跑在**假 DOM** 上：它能证明"代码调用了它该调用的
-函数"，证明不了**点得到**——假 DOM 里元素没有面积、没有遮挡、没有 `pointer-events`，
-disabled 的控件照样派发 `click`。所以多了第四道回归：`tools/verify_clicks.py` 用 Edge
-自己的 DevTools 协议发真正的 `Input.dispatchMouseEvent` / `dispatchKeyEvent`，
-**真命中测试、真焦点、真键盘**，跑在金标准场次的**副本**上（随便点都不会碰到车队数据）。
-只用标准库，Edge 走系统自带那一份；没有 Edge 或没有数据时自动跳过（退出码 0）。
-
-```powershell
-python tools\verify_clicks.py                       # 28 项，全过退出 0
-python tools\verify_clicks.py --session "20260524-耐久正赛" --port 8790
-```
-
-**它抓到的三个 bug（都是"假 DOM 里看不出来"的）**：
-
-| # | 现象 | 根因 | 修法 |
-| --- | --- | --- | --- |
-| 1 | 缩到某一段之后按「全出」，视图**回不到全场** | `fullRange()` 问的是 `state.traces`，而 serve 模式下那是"当前这一段"，上限一路缩水 | 改问**全程概览**（整场的 900 桶）：时间轴用 `overview.time`，距离轴用 `overview.distance` |
-| 2 | 信标改名按过一次 `Esc` 之后再改、回车**静默不存** | `dirty` 被 `Esc` 关掉后再也没有地方重新置真（`input` 事件没接） | 输入框接 `input` 事件重新置脏；无头断言补"Esc 之后同一个框还能存" |
-| 3 | 区段表里"双击一行"在真命中测试下**几乎点不到** | 行中间是名字输入框（`flex:1`），双击它等于**选词** | 行尾加一个点得到的 `⤢`（与双击顶端色条同一件事），面板说明里写明"双击名字是选词" |
-
-**实测**：`python tools\verify_clicks.py` → **28 项检查：28 通过，0 失败**（21 项来自这一轮，
-后面 #9 的直方图又加了 7 项，见 A34；含上面三条各自的正向与反向断言：
-点 `⤢` 缩到那一段 / 双击输入框不跳视图 / 缩完「全出」回到 `[0.00, 463.48]`（整场 463.99 s）；
-真键盘改名后读边车确认那条信标真的叫新名字；`↶` 撤销真的退回上一步）。
-
-顺带修掉工具自己的两个问题：Windows 控制台默认 GBK，界面里的 `↶` / `⤢` 会让它在打印
-断言结果时 `UnicodeEncodeError` 崩在半途（现在强制 UTF-8）；`⤢` 那条断言有界重试三次
-（面板刚渲染完就点会命中旁边的输入框——竞态要报成"不稳定"，不能报成 PASS，也不能当成 bug 修）。
-
-**当时那一轮的回归**：`Ran 150 tests` + `OK`；`verify_ld_vs_csv` PASS（0 channel(s) outside
-tolerance）；两份金标准快照 `smoke_viewer.js` 均 PASS；无头断言点 **260** 个。
-（今天这四条是 174 项单测 / 308 个无头断言点 / 28 项真点击，见 A34、A35 与文末「全量回归」。）
 
 ---
 

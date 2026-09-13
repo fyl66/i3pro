@@ -81,6 +81,7 @@ src/i3pro/web/      前端模板（viewer.html；它是模板，数据由 render
 tools/              开发工具（解析对照、无头前端驱动、exe 打包）
 tests/              单测；依赖 i2pro_data/ 的用例在缺数据时自动 skip
 docs/               PLAN.md 规划 · ACCEPTANCE.md 验收清单 · ld-format.md 格式逆向记录
+maths/              全局数学通道定义（global.json，跨场次复用，可以进 git）
 out/                生成物（快照 HTML / Parquet），已 gitignore
 ```
 

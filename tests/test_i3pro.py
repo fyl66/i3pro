@@ -25,7 +25,9 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from i3pro import csvlog, derive, laps as lapsmod, ld, motec_csv, render, server, store  # noqa: E402
+from i3pro import (  # noqa: E402
+    csvlog, derive, laps as lapsmod, ld, maths as mathsmod, motec_csv, render, server, store,
+)
 
 DATA = ROOT / "i2pro_data"
 ENDURANCE = DATA / "20260524-耐久正赛.ld"
@@ -701,6 +703,47 @@ class TestBeaconEditing(unittest.TestCase):
         # ...and neither does an edit that added no crossing at all
         self.assertIsNone(lapsmod.insertion_notice(empty, lapsmod.LapConfig(), 7, 7))
 
+    @_needs(HILL)
+    def test_an_exported_snapshot_carries_the_new_name(self):
+        """Criterion 5 of #4: the share link and the snapshot carry the new name.
+
+        The *payload* is what has to carry it. The rendered file also contains
+        the template's own labels and default-name code (``信标`` twelve times),
+        so "the name appears in the HTML" proves nothing - that is why this looks
+        inside the injected ``const DATA = ...`` literal specifically.
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = Path(tmp) / HILL.name              # never beside the real data
+            copy.write_bytes(HILL.read_bytes())
+            out = Path(tmp) / "snap.html"
+            with ld.LogFile.read(copy) as log:
+                track = derive.gps_track(log)
+                index = int(np.searchsorted(track["time"], 120.0))
+                lapsmod.save_config(copy, lapsmod.LapConfig(
+                    mode="auto",
+                    beacons=[lapsmod.Beacon("弯心改名后", lat=float(track["lat"][index]),
+                                            lon=float(track["lon"][index])),
+                             lapsmod.Beacon("手工穿越", time=165.64)],
+                    trusted={"弯心改名后 1": False},
+                ))
+                render.render_html(log, out)
+            html = out.read_text(encoding="utf-8")
+            start = html.index("const DATA = ") + len("const DATA = ")
+            payload, end = json.JSONDecoder().raw_decode(html[start:])
+            template = html[:start] + html[start + end:]
+
+        self.assertEqual([b["name"] for b in payload["laps_config"]["beacons"]],
+                         ["弯心改名后", "手工穿越"])
+        self.assertEqual(payload["laps_config"]["trusted"], {"弯心改名后 1": False})
+        self.assertTrue(payload["laps"], "the beacon produced no laps at all")
+        self.assertTrue(all(row["lap"].startswith("弯心改名后 ") for row in payload["laps"]))
+        self.assertNotIn("信标", json.dumps(payload, ensure_ascii=False),
+                         "the payload still carries the default name")
+        self.assertIn("信标", template,
+                      "the template's own text moved into the payload check")
+
 
 class TestBeaconEditingOverHttp(unittest.TestCase):
     """#4 / #5 as the UI reaches them: one PUT carrying the whole config."""
@@ -1320,6 +1363,529 @@ class TestViewerScript(unittest.TestCase):
         )
         self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
         self.assertIn("instructions", finished.stdout)
+
+
+class _MathSession:
+    """A minimal session, so the maths engine can be tested without a ``.ld``.
+
+    The engine only asks a session for ``has`` / ``channel`` / ``values`` /
+    ``sample_rate`` / ``duration``, and ``attach`` writes into ``derived`` (the
+    same attribute a real ``LogFile`` has). Keeping this stub in the test file
+    is what lets every expression test run on a machine with no team data.
+    """
+
+    def __init__(self, columns: dict, rate: float = 10.0, path="fake.ld"):
+        self.columns = {k: np.asarray(v, dtype=np.float64) for k, v in columns.items()}
+        self.sample_rate = float(rate)
+        self.derived: dict[str, np.ndarray] = {}
+        size = max(len(v) for v in self.columns.values())
+        self.duration = (size - 1) / self.sample_rate
+        self.path = Path(path)
+        self.channels = [
+            ld.Channel(
+                name=name, short_name=name[:8], unit="", sample_rate=self.sample_rate,
+                sample_count=len(values), data_offset=0, data_type=5, bytes_per_sample=4,
+                multiplier=1, divider=1, decimals=3, shift=0, channel_id=index, index=index,
+            )
+            for index, (name, values) in enumerate(self.columns.items())
+        ]
+
+    def has(self, name: str) -> bool:
+        return name in self.columns or name in self.derived
+
+    def channel(self, name: str) -> ld.Channel:
+        for ch in self.channels:
+            if ch.name == name:
+                return ch
+        raise KeyError(name)
+
+    def values(self, name) -> np.ndarray:
+        key = name if isinstance(name, str) else name.name
+        if key in self.derived:
+            return self.derived[key]
+        return self.columns[key]
+
+    def time_base(self) -> np.ndarray:
+        return np.arange(self.channels[0].sample_count) / self.sample_rate
+
+    def close(self) -> None:
+        pass
+
+
+class TestMaths(unittest.TestCase):
+    """#3 的表达式引擎：白名单求值、作用域、缓存，全部走纯函数入口。"""
+
+    def _session(self):
+        rate, count = 10.0, 51
+        t = np.arange(count) / rate
+        return _MathSession(
+            {
+                "车速": 36.0 + 4.0 * np.sin(t),
+                "车轮速度": np.full(count, 36.0),
+                "刹车压力": np.where((t > 1.0) & (t < 3.0), 10.0, 0.0),
+                "坡度": np.linspace(0.0, 5.0, count),
+            },
+            rate=rate,
+        )
+
+    def _eval(self, text, session=None):
+        return mathsmod.evaluate(text, session or self._session())
+
+    # ------------------------------------------------------------ 求值本身
+    def test_arithmetic_precedence_and_constants(self):
+        values = self._eval("1 + 2 * 3 - 4 / 2")
+        self.assertEqual(values.size, 51)
+        self.assertAlmostEqual(float(values[0]), 5.0)
+        self.assertAlmostEqual(float(self._eval("pi")[0]), np.pi, places=6)
+        self.assertAlmostEqual(float(self._eval("2 ^ 3 ^ 2")[0]), 512.0)   # 右结合
+        self.assertAlmostEqual(float(self._eval("-(3) + 1")[0]), -2.0)
+
+    def test_channel_reference_needs_quotes_only_when_it_has_spaces(self):
+        session = _MathSession({"车轮速度": np.full(11, 30.0), "车速": np.full(11, 20.0)})
+        self.assertAlmostEqual(float(mathsmod.evaluate("'车轮速度' - 车速", session)[0]), 10.0)
+
+    def test_division_by_zero_is_infinite_not_a_crash(self):
+        values = self._eval("1 / 0")
+        self.assertTrue(np.all(np.isinf(values)))
+
+    def test_unknown_function_says_what_to_do(self):
+        with self.assertRaises(mathsmod.MathError) as caught:
+            mathsmod.compile_expr("nosuchfunc(1)")
+        self.assertIn("未知函数", str(caught.exception))
+        self.assertIn("函数", str(caught.exception))
+
+    def test_unknown_channel_says_what_to_do(self):
+        with self.assertRaises(mathsmod.MathError) as caught:
+            self._eval("'这个通道不存在' + 1")
+        self.assertIn("本场次没有这个通道", str(caught.exception))
+
+    def test_unbalanced_and_dangling_expressions_explain_themselves(self):
+        for text, fragment in (
+            ("1 +", "结尾还缺一个运算数"),
+            ("(1 + 2", "括号没配平"),
+            ("1 + 2)", "多余的右括号"),
+            ("'刹车压力", "收尾的单引号"),
+            ("1 @ 2", "看不懂的字符"),
+        ):
+            with self.subTest(text=text):
+                with self.assertRaises(mathsmod.MathError) as caught:
+                    mathsmod.compile_expr(text)
+                self.assertIn(fragment, str(caught.exception))
+
+    def test_wrong_argument_count_is_caught_at_compile_time(self):
+        with self.assertRaises(mathsmod.MathError) as caught:
+            mathsmod.compile_expr("choose(1, 2)")
+        self.assertIn("参数", str(caught.exception))
+        # 可选参数：integrate 只要一个参数也能编译
+        mathsmod.compile_expr("integrate('车速')")
+        mathsmod.compile_expr("smooth('车速')")
+
+    def test_whitelist_only_never_calls_eval(self):
+        """验收点里唯一一条能用机器判定的"不是 eval"：拿 AST 找调用名。
+
+        顺便证明宿主语言里那些能逃出白名单的写法在词法阶段就被挡住——
+        它们连编译都过不去，根本没有机会被执行。
+        """
+        import ast
+
+        source = (ROOT / "src" / "i3pro" / "maths.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        called = {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        for builtin in ("eval", "exec", "compile", "__import__", "getattr", "globals"):
+            self.assertNotIn(builtin, called, f"maths.py 调用了 {builtin}")
+        for hostile in (
+            "__import__('os').system('calc')",
+            "os.system('calc')",
+            "(lambda: 1)()",
+            "[x for x in range(3)]",
+            "{'a': 1}",
+        ):
+            with self.subTest(expr=hostile):
+                with self.assertRaises(mathsmod.MathError):
+                    mathsmod.compile_expr(hostile)
+
+    def test_unsupported_functions_say_why_and_what_to_use_instead(self):
+        with self.assertRaises(mathsmod.MathError) as caught:
+            mathsmod.compile_expr("filter_cheby_lp('车速', 5)")
+        message = str(caught.exception)
+        self.assertIn("filter_lp", message)
+        self.assertIn("numpy", message)
+
+    # --------------------------------------------------------- 区间与滤波
+    def test_interval_statistics_honour_condition_and_reset(self):
+        session = _MathSession({"刹车压力": np.array([0.0, 5.0, 10.0, 0.0, 20.0, 0.0])},
+                               rate=1.0)
+        # range_change 是"这一段从这里开始"的脉冲：两个脉冲把时间轴切成两段
+        values = mathsmod.evaluate(
+            "stat_max(刹车压力, 刹车压力 > 0, range_change(0, 2) + range_change(3, 5))",
+            session,
+        )
+        self.assertAlmostEqual(float(values[0]), 10.0)    # 第一段里有 5 与 10
+        self.assertAlmostEqual(float(values[2]), 10.0)
+        self.assertAlmostEqual(float(values[3]), 20.0)    # 第二段里只有 20
+        self.assertAlmostEqual(float(values[5]), 20.0)
+
+    def test_interval_statistics_reset_splits_but_condition_filters(self):
+        session = _MathSession({"刹车压力": np.array([0.0, 5.0, 10.0, 0.0, 20.0, 0.0])},
+                               rate=1.0)
+        # 只有一个脉冲时，后面全都算同一段——条件才是筛样本的那一半
+        single = mathsmod.evaluate(
+            "stat_max(刹车压力, 刹车压力 > 0, range_change(1, 3))", session
+        )
+        self.assertTrue(np.isnan(float(single[0])), "脉冲之前那一段没有合格样本")
+        self.assertAlmostEqual(float(single[4]), 20.0)
+        # 不带条件：连 0 也算进去，最大值不变但"有没有样本"变了
+        unfiltered = mathsmod.evaluate("stat_max(刹车压力, 1, range_change(1, 3))", session)
+        self.assertAlmostEqual(float(unfiltered[0]), 0.0)
+
+    def test_interval_statistic_without_qualified_samples_is_nan_not_zero(self):
+        session = _MathSession({"信号": np.array([1.0, 2.0, 3.0, 4.0])}, rate=1.0)
+        values = mathsmod.evaluate("stat_max(信号, 信号 > 99)", session)
+        self.assertTrue(np.all(np.isnan(values)),
+                        "空区间必须给 NaN：0 会被当成一次真实测量")
+
+    def test_derivative_of_a_ramp_is_the_slope(self):
+        session = _MathSession({"坡度": np.arange(11, dtype=np.float64)}, rate=10.0)
+        values = mathsmod.evaluate("derivative(坡度, 1)", session)
+        self.assertAlmostEqual(float(values[5]), 10.0, places=6)
+
+    def test_integrate_of_a_constant_is_a_ramp(self):
+        session = _MathSession({"常数": np.full(11, 2.0)}, rate=10.0)
+        values = mathsmod.evaluate("integrate(常数)", session)
+        self.assertAlmostEqual(float(values[0]), 0.0)
+        self.assertAlmostEqual(float(values[10]), 2.0, places=6)   # 10 步 × 0.1 s × 2
+
+    def test_smooth_reduces_ripple(self):
+        session = _MathSession({"带毛刺": np.tile([0.0, 10.0], 10)}, rate=10.0)
+        raw = session.values("带毛刺")
+        smoothed = mathsmod.evaluate("smooth(带毛刺, 5)", session)
+        self.assertLess(float(np.std(smoothed)), float(np.std(raw)))
+        self.assertEqual(smoothed.size, raw.size)
+
+    def test_low_pass_keeps_the_average_and_drops_the_ripple(self):
+        rate = 100.0
+        t = np.arange(501) / rate
+        session = _MathSession({"带噪声": np.sin(2 * np.pi * t) + 0.2 * np.sin(2 * np.pi * 40 * t)},
+                               rate=rate)
+        filtered = mathsmod.evaluate("filter_lp(带噪声, 5)", session)
+        self.assertLess(float(np.std(filtered)), float(np.std(session.values("带噪声"))))
+        self.assertAlmostEqual(float(np.mean(filtered)), 0.0, places=1)
+
+    def test_choose_flip_flop_and_invalid(self):
+        session = _MathSession({"x": np.array([0.0, 1.0, 2.0, -1.0, 0.0])}, rate=1.0)
+        chosen = mathsmod.evaluate("choose(x > 0, 10, -10)", session)
+        self.assertAlmostEqual(float(chosen[1]), 10.0)
+        self.assertAlmostEqual(float(chosen[3]), -10.0)
+        state = mathsmod.evaluate("flip_flop(x > 0.5, x < 0)", session)
+        self.assertAlmostEqual(float(state[1]), 1.0)
+        self.assertAlmostEqual(float(state[3]), 0.0)
+        invalid = mathsmod.evaluate("invalid()", session)
+        self.assertTrue(np.all(np.isnan(invalid)))
+
+    def test_time_range_helpers_gate_on_the_time_axis(self):
+        session = _MathSession({"x": np.ones(11)}, rate=1.0)
+        inside = mathsmod.evaluate("range_is(2, 4)", session)
+        self.assertAlmostEqual(float(inside[0]), 0.0)
+        self.assertAlmostEqual(float(inside[3]), 1.0)
+        self.assertAlmostEqual(float(inside[5]), 0.0)
+        edge = mathsmod.evaluate("range_change(2, 4)", session)
+        self.assertEqual(int(np.sum(edge)), 1)
+        self.assertAlmostEqual(float(edge[2]), 1.0)
+
+    # ------------------------------------------------------- 作用域与缓存
+    def test_local_scope_file_is_a_sibling_sidecar(self):
+        self.assertEqual(mathsmod.config_path(Path("x") / "场次.ld").name, "场次.maths.json")
+        self.assertEqual(mathsmod.global_path(Path("repo")).name, "global.json")
+        self.assertEqual(mathsmod.global_path(Path("repo")).parent.name, "maths")
+
+    def test_local_overrides_global_and_both_are_visible(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session = root / "场次.ld"
+            glob = mathsmod.MathSet(definitions=[
+                mathsmod.Definition("总G", "1", scope="global"),
+                mathsmod.Definition("只有全局", "2", scope="global"),
+            ])
+            glob.save(mathsmod.global_path(root))
+            mathsmod.MathSet(definitions=[
+                mathsmod.Definition("总G", "3", scope="local"),
+            ]).save(mathsmod.config_path(session))
+            effective = mathsmod.load_effective(session, root)
+            by_name = effective.by_name()
+            self.assertEqual(by_name["总G"].expr, "3")
+            self.assertEqual(by_name["总G"].scope, "local")
+            self.assertEqual(by_name["只有全局"].scope, "global")
+            self.assertEqual(effective.shadowed, ["总G"])
+            self.assertEqual(effective.scope_of("总G"), "local")
+
+    def test_one_broken_definition_does_not_take_the_others_down(self):
+        session = self._session()
+        values, errors = mathsmod.resolve_available(session, [
+            mathsmod.Definition("好的", "1 + 1"),
+            mathsmod.Definition("引用好的", "好的 * 2"),
+            mathsmod.Definition("坏的", "'没有这个通道' + 1"),
+            mathsmod.Definition("引用坏的", "坏的 + 1"),
+        ])
+        self.assertEqual(set(values), {"好的", "引用好的"})
+        self.assertEqual({e["name"] for e in errors}, {"坏的", "引用坏的"})
+        self.assertIn("没有这个通道", errors[0]["error"])
+
+    def test_a_cycle_is_reported_instead_of_recursing(self):
+        session = self._session()
+        with self.assertRaises(mathsmod.MathError) as caught:
+            mathsmod.resolve_all(session, [
+                mathsmod.Definition("甲", "乙 + 1"),
+                mathsmod.Definition("乙", "甲 + 1"),
+            ])
+        self.assertIn("绕成一个圈", str(caught.exception))
+
+    def test_forward_references_resolve(self):
+        session = self._session()
+        out = mathsmod.resolve_all(session, [
+            mathsmod.Definition("下游", "上游 * 2"),
+            mathsmod.Definition("上游", "3"),
+        ])
+        self.assertAlmostEqual(float(out["下游"][0]), 6.0)
+
+    def test_cache_key_changes_with_the_expression_and_the_source(self):
+        first = mathsmod.DerivedCache.key("x.ld", mathsmod.Definition("A", "1"), ("车速",))
+        second = mathsmod.DerivedCache.key("x.ld", mathsmod.Definition("A", "2"), ("车速",))
+        third = mathsmod.DerivedCache.key("x.ld", mathsmod.Definition("A", "1"), ("车轮速度",))
+        self.assertNotEqual(first, second)
+        self.assertNotEqual(first, third)
+
+    def test_cache_reuses_the_column_until_the_definition_changes(self):
+        import tempfile
+
+        session = self._session()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "场次.ld"
+            path.write_bytes(b"x")            # 指纹只要有这个文件就够
+            cache = mathsmod.DerivedCache()
+            definitions = [mathsmod.Definition("A", "'车速' * 2")]
+            first = mathsmod.resolve_all(session, definitions, cache, path)["A"]
+            second = mathsmod.resolve_all(session, definitions, cache, path)["A"]
+            self.assertIs(first, second, "没改定义却又算了一遍")
+            changed = mathsmod.resolve_all(
+                session, [mathsmod.Definition("A", "'车速' * 3")], cache, path
+            )["A"]
+            self.assertIsNot(changed, first, "表达式改了却还在用旧列")
+            self.assertAlmostEqual(float(changed[0]), float(first[0]) * 1.5, places=6)
+
+    # ------------------------------------------------------ 下游完全等价
+    def test_a_derived_column_looks_like_a_native_channel_downstream(self):
+        session = self._session()
+        definitions = [mathsmod.Definition("车速两倍", "车速 * 2", unit="km/h")]
+        values, errors = mathsmod.resolve_available(session, definitions)
+        self.assertEqual(errors, [])
+        added = mathsmod.attach(session, values, definitions)
+        self.assertEqual(added, ["车速两倍"])
+
+        self.assertTrue(session.has("车速两倍"))
+        channel = session.channel("车速两倍")
+        self.assertEqual(channel.unit, "km/h")
+        self.assertEqual(channel.sample_rate, session.sample_rate)
+        self.assertEqual(channel.sample_count, values["车速两倍"].size)
+
+        index = render.channel_index(session)
+        entry = next(item for item in index if item["name"] == "车速两倍")
+        self.assertTrue(entry["derived"])
+        self.assertFalse(
+            next(item for item in index if item["name"] == "车速")["derived"]
+        )
+        # 主时间基上的序列：图表、散点、切圈都按这个长度取
+        self.assertEqual(
+            derive.hold_to_master(session, "车速两倍").size,
+            derive.hold_to_master(session, "车速").size,
+        )
+
+    def test_attaching_twice_does_not_duplicate_the_channel(self):
+        session = self._session()
+        definitions = [mathsmod.Definition("车速两倍", "车速 * 2")]
+        before = len(session.channels)
+        for _ in range(2):
+            values, _errors = mathsmod.resolve_available(session, definitions)
+            mathsmod.attach(session, values, definitions)
+        self.assertEqual(len(session.channels), before + 1)
+
+    def test_a_derived_channel_cannot_be_shadowed_by_a_stale_definition(self):
+        """引用自己在定义阶段就被判成环，而不是算出一个越来越大的数列。"""
+        session = self._session()
+        with self.assertRaises(mathsmod.MathError):
+            mathsmod.resolve_all(session, [mathsmod.Definition("车速", "车速 + 1")])
+
+    def test_function_catalogue_covers_what_the_ticket_promised(self):
+        names = {item["name"] for item in mathsmod.function_catalogue()}
+        for expected in (
+            "sin", "cos", "tan", "ln", "log", "exp", "sqr", "sqrt", "power",
+            "int", "round", "round_down", "round_up", "frac", "sgn",
+            "min", "max", "abs",
+            "stat_min", "stat_max", "stat_mean", "stat_std_dev", "stat_start", "stat_end",
+            "smooth", "filter_lp", "filter_hp",
+            "derivative", "integrate", "choose", "invalid", "flip_flop",
+            "time_shift", "time_valid", "range_is", "range_change",
+            "bit_and", "bit_or", "bit_xor", "bit_not", "edge_delay", "hypot",
+        ):
+            self.assertIn(expected, names, f"函数表里缺 {expected}")
+        self.assertEqual(len(names), 53)
+
+
+class TestMathsOverHttp(unittest.TestCase):
+    """#3 走到界面之前的那一段：PUT/GET/POST + 侧车文件 + 作用域。"""
+
+    @_needs(HILL)
+    def test_saving_a_definition_reaches_the_viewer(self):
+        import tempfile
+        from http.server import ThreadingHTTPServer
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            copy = root / HILL.name
+            copy.write_bytes(HILL.read_bytes())
+            library = server.SessionLibrary([root], cache_size=1, maths_root=root)
+            httpd = ThreadingHTTPServer(
+                ("127.0.0.1", 0), server.make_handler(library, buckets=100)
+            )
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            base = f"http://127.0.0.1:{httpd.server_address[1]}"
+            quoted = urllib.parse.quote(copy.stem)
+
+            def request(path, method="GET", payload=None):
+                body = None if payload is None else json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(base + path, data=body, method=method)
+                if body is not None:
+                    req.add_header("Content-Type", "application/json")
+                try:
+                    with urllib.request.urlopen(req, timeout=60) as response:
+                        return response.status, json.loads(response.read().decode("utf-8"))
+                except urllib.error.HTTPError as exc:
+                    return exc.code, json.loads(exc.read().decode("utf-8"))
+
+            try:
+                # 空状态：没有定义，也没有报错
+                status, state = request(f"/api/session/{quoted}/maths")
+                self.assertEqual(status, 200)
+                self.assertEqual(state["definitions"], [])
+                self.assertEqual(state["errors"], [])
+                self.assertTrue(state["functions"])
+
+                # 存一条本地定义
+                status, state = request(
+                    f"/api/session/{quoted}/maths", "PUT",
+                    {"definitions": [{"name": "总G",
+                                      "expr": "sqrt('G Force Lat'^2 + 'G Force Long'^2)",
+                                      "unit": "g"}]},
+                )
+                self.assertEqual(status, 200, state)
+                self.assertEqual(state["saved"], f"{copy.stem}.maths.json")
+                self.assertEqual([d["name"] for d in state["definitions"]], ["总G"])
+                self.assertEqual(state["definitions"][0]["scope"], "local")
+                self.assertEqual(state["errors"], [])
+                self.assertTrue((root / f"{copy.stem}.maths.json").exists())
+                self.assertFalse((root / f"{copy.stem}.ldx").exists(),
+                                 "数学通道绝不能写回 MoTeC 格式")
+
+                # 派生列要能在图表接口里取到，并带上单位
+                status, trace = request(
+                    f"/api/session/{quoted}/trace?channels=" + urllib.parse.quote("总G")
+                    + "&buckets=10"
+                )
+                self.assertEqual(status, 200)
+                self.assertIn("总G", trace)
+                self.assertEqual(trace["总G"]["unit"], "g")
+                self.assertTrue(trace["总G"]["value"])
+
+                # 通道索引里要标出来它是算出来的
+                status, info = request(f"/api/session/{quoted}/info")
+                entry = next(c for c in info["channels"] if c["name"] == "总G")
+                self.assertTrue(entry["derived"])
+
+                # 试算：好式子给统计，坏式子给原因，语法错误直接 400
+                status, preview = request(
+                    f"/api/session/{quoted}/maths", "POST",
+                    {"expr": "'G Force Lat' * 2"},
+                )
+                self.assertEqual(status, 200)
+                self.assertTrue(preview["ok"])
+                self.assertEqual(preview["channels"], ["G Force Lat"])
+                status, preview = request(
+                    f"/api/session/{quoted}/maths", "POST", {"expr": "'没有的通道' + 1"}
+                )
+                self.assertEqual(status, 200)
+                self.assertFalse(preview["ok"])
+                self.assertIn("本场次没有这个通道", preview["error"])
+                status, preview = request(
+                    f"/api/session/{quoted}/maths", "POST", {"expr": "foo(1)"}
+                )
+                self.assertEqual(status, 400)
+                self.assertIn("未知函数", preview["error"])
+
+                # 坏表达式不进侧车
+                status, body = request(
+                    f"/api/session/{quoted}/maths", "PUT",
+                    {"definitions": [{"name": "坏", "expr": "1 +"}]},
+                )
+                self.assertEqual(status, 400)
+                self.assertIn("表达式", body["error"])
+                self.assertEqual(
+                    json.loads((root / f"{copy.stem}.maths.json").read_text("utf-8"))[
+                        "definitions"
+                    ][0]["name"],
+                    "总G",
+                    "被拒绝的表达式改动了已经存好的侧车",
+                )
+
+                # 同名两条要在保存前就挡住
+                status, body = request(
+                    f"/api/session/{quoted}/maths", "PUT",
+                    {"definitions": [{"name": "X", "expr": "1"},
+                                     {"name": "X", "expr": "2"}]},
+                )
+                self.assertEqual(status, 400)
+                self.assertIn("同名", body["error"])
+
+                # 全局作用域写进 maths/global.json，且不进本地侧车
+                status, state = request(
+                    f"/api/session/{quoted}/maths?scope=global", "PUT",
+                    {"definitions": [{"name": "垂直G", "expr": "'G Force Vert' + 1"}]},
+                )
+                self.assertEqual(status, 200, state)
+                self.assertEqual(state["scope"], "global")
+                self.assertTrue((root / "maths" / "global.json").exists())
+                local_names = [
+                    d["name"] for d in
+                    json.loads((root / f"{copy.stem}.maths.json").read_text("utf-8"))[
+                        "definitions"
+                    ]
+                ]
+                self.assertEqual(local_names, ["总G"],
+                                 "存全局时把本地定义一起搬进了本地文件")
+
+                # 本地同名覆盖全局：两条都在，界面能看出谁赢了
+                status, state = request(
+                    f"/api/session/{quoted}/maths", "PUT",
+                    {"definitions": [{"name": "垂直G", "expr": "'G Force Vert' + 2"},
+                                     {"name": "总G",
+                                      "expr": "sqrt('G Force Lat'^2 + 'G Force Long'^2)"}]},
+                )
+                self.assertEqual(status, 200, state)
+                self.assertEqual(state["shadowed"], ["垂直G"])
+                scopes = {d["name"]: d["scope"] for d in state["definitions"]}
+                self.assertEqual(scopes["垂直G"], "local")
+
+                # 函数表
+                status, catalogue = request("/api/maths/functions")
+                self.assertEqual(status, 200)
+                self.assertEqual(len(catalogue), 53)
+            finally:
+                httpd.shutdown()
+                library.close()
 
 
 if __name__ == "__main__":

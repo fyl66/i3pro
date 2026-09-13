@@ -558,6 +558,72 @@ i2 Pro 的 **Missed Beacons**：车确实穿过了起终点，但没被检出，
 
 ---
 
+## A28 · 数学通道编辑器（本地 + 全局作用域，ticket #3）
+
+写一条表达式就得到一个**新通道**，它在下游与原生通道没有区别：可勾选、可画图、可进散点、
+可参与切圈与报表。求值是白名单（`maths.py` 里一张函数表 + 逆波兰序列），**完全不碰 `eval`**。
+
+**两种作用域**：本地跟着场次（`<场次>.maths.json`），全局在仓库里（`maths/global.json`）。
+同名时**本地赢**，界面上用角标（本地 / 全局）把"这条规则影响谁"写清楚。
+
+**通过判据**：
+
+| 断言 | 命令 / 位置 |
+| --- | --- |
+| 白名单：`maths.py` 的 AST 里没有任何 `eval` / `exec` / `compile` / `__import__` 调用 | `TestMaths::test_whitelist_only_never_calls_eval` |
+| `__import__('os').system('calc')`、`os.system(...)`、`lambda`、列表推导**连编译都过不去** | 同上 |
+| 未知函数 / 未知通道 / 括号不配平 / 结尾缺运算数 / 看不懂的字符，各给一条**说下一步做什么**的中文报错 | `TestMaths::test_unknown_function_says_what_to_do`、`test_unknown_channel_says_what_to_do`、`test_unbalanced_and_dangling_expressions_explain_themselves` |
+| 函数集覆盖验收点列出的每一类（算术 / 三角 / 对数 / 取整 / min·max·abs / 区间统计 / 条件选择 / 无效标记 / 平滑滤波 / 微分积分），共 **53** 个 | `TestMaths::test_function_catalogue_covers_what_the_ticket_promised` |
+| `filter_cheby_*` / `rand_*` **明确不提供**，报错里说清原因与替代（`filter_lp` / `filter_hp`） | `TestMaths::test_unsupported_functions_say_why_and_what_to_use_instead` |
+| 区间统计：`reset` 切段、条件筛样本；段里没有合格样本时给 **NaN 而不是 0** | `TestMaths::test_interval_statistics_honour_condition_and_reset`、`test_interval_statistic_without_qualified_samples_is_nan_not_zero` |
+| 微分（斜坡 → 斜率）、积分（常数 → 斜坡）、平滑与低通（标准差下降）各一条数值断言 | `TestMaths::test_derivative_of_a_ramp_is_the_slope`、`test_integrate_of_a_constant_is_a_ramp`、`test_smooth_reduces_ripple`、`test_low_pass_keeps_the_average_and_drops_the_ripple` |
+| 引用成环报"绕成一个圈"，而不是递归到栈溢出；前向引用能解开 | `TestMaths::test_a_cycle_is_reported_instead_of_recursing`、`test_forward_references_resolve` |
+| 一条定义坏了不拖累其它条：能算的照算，坏的把原因列出来（含"引用了坏定义"的那条） | `TestMaths::test_one_broken_definition_does_not_take_the_others_down` |
+| 本地覆盖同名全局，且两条都能看出作用域；`shadowed` 列出被盖住的名字 | `TestMaths::test_local_overrides_global_and_both_are_visible` |
+| 缓存：同一份定义第二次不重算（返回同一个数组对象）；表达式一改立刻换新列 | `TestMaths::test_cache_reuses_the_column_until_the_definition_changes`、`test_cache_key_changes_with_the_expression_and_the_source` |
+| 派生列在下游与原生通道等价：`has` / `channel` / `unit` / `sample_rate` / 主时间基长度一致，通道索引里带 `derived: true` | `TestMaths::test_a_derived_column_looks_like_a_native_channel_downstream` |
+| 重复挂载不产生重复通道 | `TestMaths::test_attaching_twice_does_not_duplicate_the_channel` |
+| HTTP：存一条本地定义 → 侧车落盘 → `trace` 能取到该列（带单位）→ `info` 里 `derived: true` | `TestMathsOverHttp` |
+| HTTP：坏表达式在保存时就被 400 挡住，**且不改动已经存好的侧车**；同名两条也被挡住 | 同上 |
+| HTTP：`scope=global` 写进 `maths/global.json`，**不会把本地定义一起搬进本地文件** | 同上 |
+| HTTP：本地同名覆盖全局后，响应里 `shadowed` 列出被盖住的名字 | 同上 |
+| 试算接口：能算的给样本数 / 最小 / 最大 / 平均，通道不存在给原因，语法错误给 400 | 同上 |
+| UI：定义列表显示作用域角标与算不出来的原因；点一行把它装进编辑器且作用域跟着走 | `tools/smoke_viewer.js` 第 22 组 |
+| UI：保存时**只带同一个作用域**的定义；改名字是替换而不是留下旧名字 | 同上 |
+| UI：名字或表达式为空时**一个请求都不发** | 同上 |
+| UI：删掉一条全局定义只写全局文件（`scope=global`），且请求体里只剩全局定义 | 同上 |
+| UI：保存后的通道索引会刷新（新列出现在通道表里）；定义名里的尖括号被转义 | 同上 |
+| 命令行与网页一致：`render` / `snapshot` / `convert` 都先挂上数学通道再产出，派生列随 Parquet 一起落盘 | `i3pro render ... --out out/x.html`（通道数 +4）、`i3pro convert ...`（Parquet 里能读到 `总G`） |
+| 仓库自带的 `maths/global.json` 在**两份金标准数据上都算得出来**（0 条报错） | 见下方实测数字 |
+| 两份金标准数据实跑通过 | 两个快照的 `smoke_viewer.js` 均 `PASS` |
+
+**仓库自带的全局定义（实测，两份金标准都无报错）**
+
+| 定义 | 表达式 | 高避5圈 | 耐久正赛 |
+| --- | --- | --- | --- |
+| 总G | `sqrt('G Force Lat'^2 + 'G Force Long'^2)` | 0 – 2.228 g | 0 – 2.052 g |
+| 纵向加速度g | `'G Force Long'` | −1.16 – 0.71 g | −1.30 – 0.82 g |
+| 速度kmh | `'Vx KF'` | −0.14 – 87.89 km/h | −1.65 – 80.78 km/h |
+| 平滑纵向G | `smooth('G Force Long', 0.1)` | −0.916 – 0.588 g | −1.275 – 0.795 g |
+
+**两轴评审后补做的三件（"零参数函数"、"中文标识符"、"布尔值"）**
+
+1. **函数参数个数改成调用点决定。** 一开始把参数个数写死在函数表里，于是 `integrate(x)`、
+   `smooth(x)`、`stat_max(x)` 这些"后几个参数可省"的写法全部编译不过。现在由编译期数出
+   实参个数、写进逆波兰序列，参数个数不合法时**在保存前**就报出来（`1~3` 这种区间也会写清楚）。
+2. **标识符要吃中文。** 通道名是「车速」这种，原来的标识符规则只认 `[A-Za-z_]`，于是
+   `车速 * 2` 会报"看不懂的字符 `车`"，逼用户每条都打单引号。现在用 Unicode 的
+   `[^\W\d]\w*`，`车速 * 2` 与 `'车速' * 2` 等价。
+3. **JSON 里的布尔值被写成了数字。** `_json_safe` 把 `isinstance(value, int)` 排在
+   `bool` 前面，而 Python 里 `isinstance(True, int)` 为真，于是 `{"ok": true}` 变成
+   `{"ok": 1}`、通道索引里的 `derived` 变成 `1`。布尔判断已挪到整数之前。
+
+**已知缺口（不算做完的部分）**：`filter_cheby_*` 与 `rand_*` 不提供；单位标注
+（`'车轮速度'[km/h]`）接受但**忽略**，并在试算结果里原样告诉用户"不做单位换算"；
+二维查表与 `Setup Sheets` 不做（`AGENTS.md` 规则 9）。
+
+---
+
 ## A9 · 缩放模型（对齐 i2 Pro）
 
 i2 Pro 的缩放不是"滚轮放大"这么简单，它是一整套鼠标 + 键盘分工。照搬后必须逐条成立：
@@ -683,7 +749,7 @@ python -m unittest tests.test_i3pro.TestChannelGroups -v
 python -m unittest discover -s tests -v
 ```
 
-**通过判据**：`Ran 63 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）。
+**通过判据**：`Ran 94 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）。
 
 测试覆盖：
 
@@ -701,8 +767,10 @@ python -m unittest discover -s tests -v
 | `TestCsvReader` | i2 Pro CSV 导出结构解析 |
 | `TestChannelGroups` | 通道按单位分组：不重不漏、单位一致、状态通道识别 |
 | `TestPoints` | 散点原始样本、时间窗裁剪、超窗口自动 stride |
+| `TestMaths` | 数学通道引擎（29 项）：白名单与 AST 断言、函数集、区间统计的条件与复位、微分积分、平滑与低通、成环与前向引用、一条坏了不拖累其它、本地覆盖全局、缓存命中与失效、派生列在下游等价于原生通道 |
+| `TestMathsOverHttp` | 数学通道走到 HTTP：存本地 / 全局、侧车落盘、坏表达式 400 且不动已存侧车、同名拦截、`shadowed`、试算接口、函数表 |
 | `TestRender` | 静态/服务两种 payload、自包含性 |
 | `TestServer` | HTTP 端到端：场次列表、工作台页、通道、时间窗、散点、概览、对比圈、赛道、404 |
 | `TestIndependentParsers` | 第二套实现交叉验证、213 通道 CSV 全量对照 |
-| `TestViewerScript` | 无头驱动前端：脚本里 **107 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
+| `TestViewerScript` | 无头驱动前端：脚本里 **129 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
 | `TestLaunchers` | 一键启动：快照批量导出 + 索引页、缺数据目录的报错、端口占用自动换端口 |

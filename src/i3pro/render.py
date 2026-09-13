@@ -229,12 +229,14 @@ def downsample(
 
 def channel_index(log: ldmod.LogFile) -> list[dict]:
     """Name / unit / rate for every channel, so the UI can search all of them."""
+    derived = getattr(log, "derived_names", ())
     return [
         {
             "name": ch.name,
             "unit": ch.unit,
             "rate": ch.sample_rate,
             "samples": ch.sample_count,
+            "derived": ch.name in derived,
         }
         for ch in log.channels
     ]

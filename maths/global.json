@@ -1,0 +1,28 @@
+{
+  "definitions": [
+    {
+      "name": "总G",
+      "expr": "sqrt('G Force Lat'^2 + 'G Force Long'^2)",
+      "unit": "g",
+      "note": "合成加速度。两条金标准场次都算得出来（最大 2.228 g / 2.052 g）。"
+    },
+    {
+      "name": "纵向加速度g",
+      "expr": "'G Force Long'",
+      "unit": "g",
+      "note": "只是想给它一个中文名并在报表里直接用。"
+    },
+    {
+      "name": "速度kmh",
+      "expr": "'Vx KF'",
+      "unit": "km/h",
+      "note": "本场选用的车速通道；换车换场次时改成实际存在的那一条。"
+    },
+    {
+      "name": "平滑纵向G",
+      "expr": "smooth('G Force Long', 0.1)",
+      "unit": "g",
+      "note": "0.1 秒滑动平均，看纵向加速度的趋势而不是毛刺。"
+    }
+  ]
+}

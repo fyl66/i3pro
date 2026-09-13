@@ -26,7 +26,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import numpy as np
 
-from . import csvlog, derive, importer, laps as lapsmod, render, store
+from . import csvlog, derive, importer, laps as lapsmod, maths, render, store
 from . import ld as ldmod
 
 __all__ = ["SessionLibrary", "serve", "make_handler"]
@@ -46,10 +46,12 @@ def _json_safe(value):
         return _json_safe(value.tolist())
     if isinstance(value, (np.floating, float)):
         return None if not math.isfinite(float(value)) else float(value)
-    if isinstance(value, (np.integer, int)):
-        return int(value)
+    # 布尔要排在整数前面：Python 里 ``isinstance(True, int)`` 是真的，顺序反了
+    # 就会把 ``{"ok": true}`` 写成 ``{"ok": 1}``，界面拿到的"真/假"变成数字。
     if isinstance(value, (np.bool_, bool)):
         return bool(value)
+    if isinstance(value, (np.integer, int)):
+        return int(value)
     return value
 
 
@@ -60,11 +62,22 @@ def dumps(value) -> str:
 class SessionLibrary:
     """Discover ``.ld`` files under one or more roots and cache parsed logs."""
 
-    def __init__(self, roots: list[str | Path], cache_size: int = 3):
+    def __init__(
+        self,
+        roots: list[str | Path],
+        cache_size: int = 3,
+        maths_root: str | Path | None = None,
+    ):
         self.roots = [Path(r) for r in roots]
         self.cache_size = max(1, cache_size)
+        #: 全局数学定义（``<仓库>/maths/global.json``）的根目录。
+        self.maths_root = maths_root
         self._lock = threading.Lock()
         self._cache: OrderedDict[str, ldmod.LogFile] = OrderedDict()
+        self._maths_cache = maths.DerivedCache()
+        #: 场次文件 -> (会话对象身份, 定义指纹)。定义或数据一改就重算。
+        self._maths_attached: dict[str, tuple] = {}
+        self._maths_errors: dict[str, list[dict]] = {}
 
     # ------------------------------------------------------------- discovery
     def _paths(self) -> dict[str, Path]:
@@ -104,7 +117,42 @@ class SessionLibrary:
             while len(self._cache) > self.cache_size:
                 _old_key, old = self._cache.popitem(last=False)
                 old.close()
+        self.apply_maths(path, log)
         return log
+
+    # ------------------------------------------------------------------ maths
+    def apply_maths(self, path: str | Path, log) -> None:
+        """把这个场次生效的数学通道算出来挂上去；没变就不重算。"""
+        path = Path(path)
+        key = str(path)
+        stamp = (
+            id(log),
+            _file_stamp(maths.config_path(path)),
+            _file_stamp(maths.global_path(self.maths_root)),
+        )
+        if self._maths_attached.get(key) == stamp:
+            return
+        # 定义一变，旧的缓存列就都不作数了（包括引用关系变了的那种）
+        self._maths_cache.clear()
+        # 定义文件本身坏了也不影响看数据：apply_to_session 把原因当成一条报错返回
+        _added, errors = maths.apply_to_session(log, self.maths_root, self._maths_cache)
+        self._maths_errors[key] = errors
+        self._maths_attached[key] = stamp
+
+    def maths_state(self, name: str) -> dict:
+        """界面要的全部数学状态：生效的定义、谁盖住了谁、哪些算不出来。"""
+        path = self.path_of(name)
+        if path is None:
+            raise KeyError(name)
+        effective = maths.load_effective(path, self.maths_root)
+        return {
+            "definitions": [d.as_dict() | {"scope": d.scope} for d in effective.definitions],
+            "shadowed": list(effective.shadowed),
+            "errors": list(self._maths_errors.get(str(path), [])),
+            "local_path": maths.config_path(path).name,
+            "global_path": str(maths.global_path(self.maths_root)),
+            "functions": maths.function_catalogue(),
+        }
 
     def summary(self, name: str) -> dict:
         log = self.get(name)
@@ -144,6 +192,15 @@ class SessionLibrary:
 def _csv_arg(query: dict, key: str) -> list[str]:
     raw = (query.get(key) or [""])[0]
     return [c.strip() for c in raw.split(",") if c.strip()]
+
+
+def _file_stamp(path: str | Path) -> tuple:
+    """``(存在?, mtime_ns, size)``：判断一份侧车文件改没改过的便宜办法。"""
+    try:
+        stat = Path(path).stat()
+    except OSError:
+        return (False, 0, 0)
+    return (True, stat.st_mtime_ns, stat.st_size)
 
 
 def _float_arg(query: dict, key: str, default=None):
@@ -247,6 +304,11 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                 return self._error(404, "no such api path")
             if parts[0] == "sessions":
                 return self._json(library.listing())
+            if parts[0] == "maths":
+                # /api/maths/functions —— 表达式编辑器要的函数表
+                if len(parts) >= 2 and parts[1] == "functions":
+                    return self._json(maths.function_catalogue())
+                return self._error(404, "no such api path")
             if parts[0] == "upload":
                 return self.upload(query, method)
             if parts[0] != "session" or len(parts) < 3:
@@ -352,6 +414,14 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                     }
                 )
 
+            if action == "maths":
+                # 数学通道：GET 看当前生效的定义，PUT 存，POST 试算一条式子
+                if method == "PUT":
+                    return self.save_maths(name, log, query)
+                if method == "POST":
+                    return self.preview_maths(log)
+                return self._json(library.maths_state(name))
+
             if action == "at":
                 # Distance axis -> time: a crossing is a moment, but on the
                 # distance axis the cursor is metres. Answered from the distance
@@ -406,6 +476,96 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
             )
 
         # ------------------------------------------------------------ upload
+        # ------------------------------------------------------ maths editing
+        def _read_json(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b""
+            if not body:
+                raise ValueError("空请求体")
+            data = json.loads(body.decode("utf-8"))
+            if not isinstance(data, (dict, list)):
+                raise ValueError("需要一个 JSON 对象或数组")
+            return data
+
+        def save_maths(self, name: str, log, query: dict) -> None:
+            """PUT /api/session/<name>/maths[?scope=global] —— 存一份定义并重算。"""
+            scope = (query.get("scope") or ["local"])[0]
+            if scope not in ("local", "global"):
+                return self._error(400, f"scope 只能是 local 或 global，收到 {scope!r}")
+            try:
+                data = self._read_json()
+            except (ValueError, UnicodeDecodeError) as exc:
+                return self._error(400, str(exc))
+            if isinstance(data, list):
+                data = {"definitions": data}
+            try:
+                incoming = maths.MathSet.from_dict(data, scope=scope)
+            except maths.MathError as exc:
+                return self._error(400, str(exc))
+            # 语法在这一步就挡掉：坏式子不进侧车，省得下次打开场次才发现
+            for definition in incoming.definitions:
+                try:
+                    maths.compile_expr(definition.expr)
+                except maths.MathError as exc:
+                    return self._error(
+                        400, f"数学通道 `{definition.name}` 的表达式有问题：{exc}"
+                    )
+            names = [d.name for d in incoming.definitions]
+            duplicates = sorted({n for n in names if names.count(n) > 1})
+            if duplicates:
+                return self._error(
+                    400,
+                    f"同名数学通道出现多次：{'、'.join(duplicates)}。"
+                    f"一条定义一个名字，改掉重复的。",
+                )
+            target = (
+                maths.config_path(log.path)
+                if scope == "local"
+                else maths.global_path(library.maths_root)
+            )
+            try:
+                path = incoming.save(target)
+            except OSError as exc:
+                return self._error(500, f"写盘失败：{exc}")
+            # 定义变了 -> apply_maths 会因为指纹变化重新算一遍
+            library.apply_maths(log.path, log)
+            state = library.maths_state(name)
+            state["saved"] = path.name
+            state["scope"] = scope
+            self._json(state)
+
+        def preview_maths(self, log) -> None:
+            """POST /api/session/<n>/maths {expr} —— 存之前先试算一条式子。"""
+            try:
+                data = self._read_json()
+            except (ValueError, UnicodeDecodeError) as exc:
+                return self._error(400, str(exc))
+            expr = str((data or {}).get("expr", "")).strip() if isinstance(data, dict) else ""
+            if not expr:
+                return self._error(400, "需要 {\"expr\": \"...\"} 这样的请求体")
+            try:
+                plan = maths.compile_expr(expr)
+            except maths.MathError as exc:
+                return self._error(400, str(exc))
+            try:
+                values = maths.evaluate(expr, log)
+            except maths.MathError as exc:
+                return self._json({"ok": False, "error": str(exc), "channels": list(plan.channels)})
+            finite = values[np.isfinite(values)]
+            self._json(
+                {
+                    "ok": True,
+                    "channels": list(plan.channels),
+                    "functions": list(plan.functions),
+                    "notes": list(plan.notes),
+                    "samples": int(values.size),
+                    "finite": int(finite.size),
+                    "min": None if not finite.size else float(finite.min()),
+                    "max": None if not finite.size else float(finite.max()),
+                    "mean": None if not finite.size else float(finite.mean()),
+                }
+            )
+
         def upload(self, query: dict, method: str) -> None:
             """PUT /api/upload?name=<file.ld> with the raw bytes as the body.
 
@@ -651,9 +811,10 @@ def serve(
     open_browser: bool = False,
     ready: threading.Event | None = None,
     port_attempts: int = 10,
+    maths_root: str | Path | None = None,
 ) -> None:
     """Run the workbench server until Ctrl-C."""
-    library = SessionLibrary(roots, cache_size=cache_size)
+    library = SessionLibrary(roots, cache_size=cache_size, maths_root=maths_root)
     handler = make_handler(library, buckets)
     try:
         httpd = bind(host, port, handler, port_attempts)

@@ -16,6 +16,7 @@ from . import derive
 from . import ld as ldmod
 from . import render as rendermod
 from . import store
+from . import maths as mathsmod
 
 
 def _utf8_console() -> None:
@@ -88,6 +89,9 @@ def cmd_convert(args: argparse.Namespace) -> int:
     channels = [c.strip() for c in args.channels.split(",")] if args.channels else None
     for path in args.files:
         with csvlog.open_session(path) as log:
+            _added, maths_errors = mathsmod.apply_to_session(log, args.maths)
+            for item in maths_errors:
+                print(f"# 数学通道 {item['name'] or '(定义文件)'} 算不出来: {item['error']}")
             pq_path, meta_path = store.write_parquet(
                 log, args.out, channels=channels, master_rate=args.rate
             )
@@ -314,6 +318,9 @@ def cmd_render(args: argparse.Namespace) -> int:
     channels = [c.strip() for c in args.channels.split(",")] if args.channels else None
     out = Path(args.out) if args.out else Path("out") / f"{Path(args.file).stem}.html"
     with csvlog.open_session(args.file) as log:
+        _added, maths_errors = mathsmod.apply_to_session(log, args.maths)
+        for item in maths_errors:
+            print(f"# 数学通道 {item['name'] or '(定义文件)'} 算不出来: {item['error']}")
         out = rendermod.render_html(
             log, out, channels=channels, ref=args.ref, cmp=args.cmp, buckets=args.buckets
         )
@@ -344,6 +351,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         buckets=args.buckets,
         cache_size=args.cache,
         open_browser=args.open,
+        maths_root=args.maths,
     )
     return 0
 
@@ -366,6 +374,7 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
         print(f"  {path.name} ...", end="", flush=True)
         try:
             with csvlog.open_session(path) as log:
+                mathsmod.apply_to_session(log, args.maths)
                 laps: list = []
                 try:
                     laps = lapsmod.detect_laps(log)
@@ -537,6 +546,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", default="out")
     p.add_argument("--channels", help="逗号分隔的通道白名单")
     p.add_argument("--rate", type=float, help="输出采样率 (默认取日志最高采样率)")
+    p.add_argument("--maths", default=None,
+                   help="全局数学定义的根目录 (默认: 仓库根目录；派生列会一起写进 Parquet)")
     p.set_defaults(func=cmd_convert)
 
     p = sub.add_parser("laps", help="圈速表")
@@ -589,6 +600,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cmp", help="对比圈标签")
     p.add_argument("--buckets", type=int, default=rendermod.DEFAULT_BUCKETS,
                    help="每通道下采样像素列数")
+    p.add_argument("--maths", default=None,
+                   help="全局数学定义的根目录 (默认: 仓库根目录，读 maths/global.json)")
     p.set_defaults(func=cmd_render)
 
     p = sub.add_parser("serve", help="启动本地 Web 工作台 (局域网可共享链接)")
@@ -598,6 +611,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--buckets", type=int, default=rendermod.DEFAULT_BUCKETS)
     p.add_argument("--cache", type=int, default=3, help="内存中保留的已解析场次数量")
     p.add_argument("--open", action="store_true", help="启动后自动打开浏览器")
+    p.add_argument(
+        "--maths",
+        default=None,
+        help="全局数学定义的根目录 (默认: 仓库根目录，读 maths/global.json)",
+    )
     p.set_defaults(func=cmd_serve)
 
     p = sub.add_parser("snapshot", help="把每个场次导出成离线 HTML 快照")
@@ -606,6 +624,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--buckets", type=int, default=rendermod.DEFAULT_BUCKETS,
                    help="每通道下采样像素列数 (越大越清晰、文件越大)")
     p.add_argument("--open", action="store_true", help="生成后打开索引页")
+    p.add_argument("--maths", default=None,
+                   help="全局数学定义的根目录 (默认: 仓库根目录，读 maths/global.json)")
     p.set_defaults(func=cmd_snapshot)
 
     p = sub.add_parser("import", help="把 .ld/.ldx/.csv 导入数据目录（可拖拽到 导入数据.bat 上）")

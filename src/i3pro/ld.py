@@ -139,6 +139,9 @@ class LogFile:
     event_name: str
     channels: list[Channel]
     _buffer: mmap.mmap | None = field(default=None, repr=False, compare=False)
+    #: 数学通道算出来的列（见 ``maths.py``）。键为通道名，值是主时间基上的
+    #: float64 序列。它们没有 mmap 后备，所以 ``raw()`` 会拒绝而不是读出垃圾。
+    derived: dict[str, np.ndarray] = field(default_factory=dict, repr=False, compare=False)
 
     # ------------------------------------------------------------------ load
     @classmethod
@@ -264,6 +267,11 @@ class LogFile:
     def raw(self, name: str | Channel) -> np.ndarray:
         """Raw integer samples, no scaling applied."""
         ch = self.channel(name) if isinstance(name, str) else name
+        if ch.name in self.derived:
+            raise ValueError(
+                f"{ch.name} 是数学通道算出来的，没有原始整数样本。"
+                f"要它的数值请用 values()。"
+            )
         return np.frombuffer(
             self.buffer, dtype=ch.dtype, count=ch.sample_count, offset=ch.data_offset
         )
@@ -271,6 +279,9 @@ class LogFile:
     def values(self, name: str | Channel) -> np.ndarray:
         """Samples converted to engineering units (float64)."""
         ch = self.channel(name) if isinstance(name, str) else name
+        cached = self.derived.get(ch.name)
+        if cached is not None:
+            return cached
         raw = self.raw(ch)
         if ch.scale == 1.0:
             return raw.astype(np.float64)

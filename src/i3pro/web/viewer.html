@@ -140,6 +140,26 @@
   .guide { position:absolute; background:#4cc2ff; pointer-events:none; z-index:20; display:none; }
   .guide { top:0; bottom:0; width:1px; }
   .guide.h { left:0; right:0; top:auto; height:1px; width:auto; }
+  /* 数学通道：每行一条定义（名字 + 作用域角标 + 表达式 + 删除），
+     下面是可以展开的编辑器。作用域角标是这里唯一需要一眼看出的东西：
+     "这条规则到底是只影响本场，还是会影响以后每一场"。 */
+  .mdefs { display:flex; flex-direction:column; gap:3px; margin-top:4px; }
+  .mdef { display:flex; align-items:baseline; gap:6px; padding:3px 5px; border-radius:4px;
+          background:rgba(15,17,21,.58); cursor:pointer; }
+  .mdef .mname { color:var(--fg); font-weight:600; }
+  .mdef .mex { color:var(--muted); font-size:11px; overflow:hidden; text-overflow:ellipsis;
+               white-space:nowrap; flex:1; }
+  .mdef .msc { font-size:10px; padding:0 4px; border-radius:3px; border:1px solid #46505f; }
+  .mdef .msc.global { color:var(--warn); border-color:var(--warn); }
+  .mdef.bad { border:1px solid var(--bad); }
+  .mdef .merr { color:var(--bad); font-size:11px; }
+  .mdef .mdel { margin-left:auto; color:var(--muted); cursor:pointer; }
+  .mdef:hover .mdel { color:var(--bad); }
+  .medit { display:flex; flex-direction:column; gap:4px; margin-top:5px; }
+  .medit input, .medit select { width:100%; }
+  .mfuncs { max-height:190px; overflow:auto; margin-top:4px; font-size:11px; }
+  .mfuncs .mfunc { padding:2px 4px; border-bottom:1px solid #1d222b; }
+  .mfuncs .mfunc b { color:var(--accent); }
 </style>
 </head>
 <body>
@@ -190,6 +210,31 @@
         <button id="chVisible">只留可见</button>
       </div>
       <div id="channelList"></div>
+    </div>
+    <div class="group" id="mathsGroup">
+      <h2>数学通道 <span class="count" id="mathsCount"></span></h2>
+      <div class="mdefs" id="mathsList"></div>
+      <div class="hint" id="mathsNote"></div>
+      <div class="row" style="margin-top:5px">
+        <button id="mathsNew">＋ 新建通道</button>
+        <button id="mathsFuncs">函数表</button>
+      </div>
+      <div class="medit" id="mathsEdit" hidden>
+        <input type="text" id="mathsName" placeholder="名字，例如 滑移率">
+        <input type="text" id="mathsExpr" placeholder="表达式，例如 ('车轮速度' - '车速') / max('车速', 1)">
+        <input type="text" id="mathsUnit" placeholder="单位（可留空）">
+        <select id="mathsScope">
+          <option value="local">本地 —— 只在本场次生效</option>
+          <option value="global">全局 —— 以后每个场次都能用</option>
+        </select>
+        <div class="row">
+          <button id="mathsTest">试算</button>
+          <button id="mathsCommit">保存</button>
+          <button id="mathsCancel">取消</button>
+        </div>
+        <div class="hint" id="mathsPreview"></div>
+      </div>
+      <div class="mfuncs" id="mathsFuncList" hidden></div>
     </div>
   </aside>
   <section id="charts">
@@ -2433,6 +2478,298 @@ async function ensureOverlay() {
   }
 }
 
+/* ------------------------------------------------------------ 数学通道 */
+// 一条定义 = 一个名字 + 一条白名单表达式。求值全在服务端（`maths.py` 是唯一的
+// 实现），前端只做三件事：收集输入、把请求发出去、把服务端返回的定义与报错画
+// 回来。同一条规则不在两边各写一遍，也就不会慢慢长歪。
+const MATHS_SCOPE_LABEL = { local: "本地", global: "全局" };
+
+function escapeText(text) {
+  return String(text === null || text === undefined ? "" : text)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function mathsState() {
+  return state.maths || { definitions: [], shadowed: [], errors: [], functions: [] };
+}
+
+function mathsErrorFor(name) {
+  const hit = (mathsState().errors || []).find((e) => e.name === name);
+  return hit ? hit.error : null;
+}
+
+/**
+ * 定义列表。作用域角标是这里唯一要一眼看清的东西——"这条规则只影响本场，
+ * 还是会影响以后每一场"。算不出来的定义带红框和原因，而不是悄悄消失。
+ */
+function renderMathsList() {
+  const box = $("mathsList");
+  if (!box) return;
+  const info = mathsState();
+  const defs = info.definitions || [];
+  if (!defs.length) {
+    box.innerHTML = '<p class="hint">还没有数学通道。点「＋ 新建通道」写一条式子，'
+      + "算出来的通道会像原生通道一样出现在上面的列表里。</p>";
+  } else {
+    box.innerHTML = defs.map((d, i) => {
+      const bad = mathsErrorFor(d.name);
+      return '<div class="mdef' + (bad ? " bad" : "") + '" data-maths-row="' + i + '">'
+        + '<span class="mname">' + escapeText(d.name) + "</span>"
+        + '<span class="msc ' + (d.scope === "global" ? "global" : "local") + '">'
+        + (MATHS_SCOPE_LABEL[d.scope] || "本地") + "</span>"
+        + '<span class="mex">' + escapeText(d.expr) + "</span>"
+        + '<a class="mdel" data-maths-del="' + i + '" title="删掉这条定义">✕</a>'
+        + (bad ? '<div class="merr">' + escapeText(bad) + "</div>" : "")
+        + "</div>";
+    }).join("");
+  }
+  const count = $("mathsCount");
+  if (count) count.textContent = defs.length ? String(defs.length) : "";
+  const note = $("mathsNote");
+  if (note) {
+    const shadowed = info.shadowed || [];
+    if (!DATA || !DATA.api) {
+      note.textContent = "快照模式不能改数学通道；用 serve 模式打开就能加。";
+    } else if (shadowed.length) {
+      note.textContent = "这几条全局定义被同名的本地定义盖住了：" + shadowed.join("、")
+        + "（同名的本地赢）。";
+    } else {
+      note.textContent = "";
+    }
+  }
+  box.querySelectorAll("[data-maths-row]").forEach((row) => {
+    row.addEventListener("click", () => openMathsEditor(Number(row.dataset.mathsRow)));
+  });
+  box.querySelectorAll("[data-maths-del]").forEach((link) => {
+    link.addEventListener("click", (event) => {
+      if (event && event.preventDefault) event.preventDefault();
+      mathsDelete(Number(link.dataset.mathsDel));
+    });
+  });
+}
+
+/** 函数表：试算失败时用户最需要的就是"这里到底有哪些函数、怎么写"。 */
+function renderMathsFunctions() {
+  const box = $("mathsFuncList");
+  if (!box) return;
+  box.innerHTML = (mathsState().functions || []).map((f) => {
+    const arity = f.max_args < 0 ? (f.min_args + "+")
+      : (f.min_args === f.max_args ? String(f.min_args) : f.min_args + "~" + f.max_args);
+    return '<div class="mfunc"><b>' + escapeText(f.name) + "</b>(" + arity + ") "
+      + escapeText(f.doc) + "</div>";
+  }).join("");
+}
+
+function openMathsEditor(index) {
+  const defs = mathsState().definitions || [];
+  const def = index === null || index === undefined ? null : defs[index];
+  state.mathsEdit = { index: def ? index : null };
+  const box = $("mathsEdit");
+  if (box) box.hidden = false;
+  $("mathsName").value = def ? def.name : "";
+  $("mathsExpr").value = def ? def.expr : "";
+  $("mathsUnit").value = def ? (def.unit || "") : "";
+  $("mathsScope").value = def ? (def.scope || "local") : "local";
+  $("mathsPreview").textContent = def
+    ? "正在改 " + def.name + "；改完点「保存」。"
+    : "写好后先点「试算」看看能不能算出来，再保存。";
+}
+
+function closeMathsEditor() {
+  state.mathsEdit = { index: null };
+  const box = $("mathsEdit");
+  if (box) box.hidden = true;
+  // 清空输入框，这样「新建」从一个干净的表单开始，而不是接着上一条改
+  ["mathsName", "mathsExpr", "mathsUnit"].forEach((id) => {
+    const input = $(id);
+    if (input) input.value = "";
+  });
+  const out = $("mathsPreview");
+  if (out) out.textContent = "";
+}
+
+function mathsDraft() {
+  return {
+    name: ($("mathsName").value || "").trim(),
+    expr: ($("mathsExpr").value || "").trim(),
+    unit: ($("mathsUnit").value || "").trim(),
+    scope: $("mathsScope").value === "global" ? "global" : "local",
+  };
+}
+
+/**
+ * 要发给服务端的完整定义表。**只带同一个作用域的**：本地文件只该装本地定义，
+ * 否则把全局定义顺手写进本地，就变成了"每场都被覆盖一次"的隐形副作用。
+ */
+function mathsSaveList(draft) {
+  const info = mathsState();
+  const edit = state.mathsEdit || { index: null };
+  const original = edit.index === null ? null : (info.definitions || [])[edit.index];
+  const drop = original ? original.name : draft.name;
+  return (info.definitions || [])
+    .filter((d) => d.scope === draft.scope && d.name !== drop)
+    .map((d) => ({ name: d.name, expr: d.expr, unit: d.unit || "" }))
+    .concat([{ name: draft.name, expr: draft.expr, unit: draft.unit }]);
+}
+
+/** 服务端算完一次之后，把列表、报错、函数表一起换掉。 */
+function applyMathsResponse(data) {
+  state.maths = data;
+  closeMathsEditor();
+  renderMathsList();
+  renderMathsFunctions();
+  const errors = data.errors || [];
+  if (errors.length) {
+    toast("有 " + errors.length + " 条数学通道算不出来，见列表里的红字");
+  }
+}
+
+async function saveMathsDefinitions(scope, definitions) {
+  if (!DATA.api) { toast("快照模式不能改数学通道，用 serve 模式"); return null; }
+  try {
+    const res = await fetch(DATA.api + "/session/" + encodeURIComponent(DATA.session)
+      + "/maths?scope=" + encodeURIComponent(scope), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ definitions: definitions }),
+    });
+    const data = await res.json();
+    if (!res.ok) { toast("数学通道保存失败：" + (data.error || ("HTTP " + res.status))); return null; }
+    applyMathsResponse(data);
+    return data;
+  } catch (err) {
+    toast("数学通道保存失败：" + err.message);
+    return null;
+  }
+}
+
+async function mathsTest() {
+  const draft = mathsDraft();
+  const out = $("mathsPreview");
+  if (!out) return;
+  if (!draft.expr) { out.textContent = "先写一条表达式再试算。"; return; }
+  if (!DATA.api) { out.textContent = "快照模式不能试算，用 serve 模式。"; return; }
+  out.textContent = "正在算…";
+  try {
+    const res = await fetch(DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/maths", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expr: draft.expr }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      out.textContent = "算不出来：" + (data.error || ("HTTP " + res.status));
+      return;
+    }
+    out.textContent = "算出来了：" + data.samples + " 点，"
+      + (data.finite ? ("最小 " + fmt(data.min, 3) + " · 最大 " + fmt(data.max, 3)
+                        + " · 平均 " + fmt(data.mean, 3))
+                     : "这一列全是无效值")
+      + (data.notes && data.notes.length ? ("。" + data.notes.join(" ")) : "");
+  } catch (err) {
+    out.textContent = "试算失败：" + err.message;
+  }
+}
+
+async function mathsCommit() {
+  const draft = mathsDraft();
+  const out = $("mathsPreview");
+  if (out) out.textContent = "";
+  if (!draft.name) { if (out) out.textContent = "先给这个通道起个名字。"; return; }
+  if (!draft.expr) { if (out) out.textContent = "先写一条表达式。"; return; }
+  const data = await saveMathsDefinitions(draft.scope, mathsSaveList(draft));
+  if (!data) return;
+  // 存完顺手刷新通道索引：新通道要能马上在左边勾上，不用手动刷新页面
+  await refreshChannels();
+  if (selectChannel(draft.name)) {
+    buildWorksheet();
+    renderChannelList();
+    refreshWindowTraces(true).then(() => { refreshPoints().then(renderAll); });
+    renderAll();
+  }
+  if (out) out.textContent = "已保存到 " + (data.saved || "侧车文件");
+}
+
+function mathsDelete(index) {
+  if (!DATA.api) { toast("快照模式不能改数学通道，用 serve 模式"); return; }
+  const defs = mathsState().definitions || [];
+  const def = defs[index];
+  if (!def) return;
+  const rest = defs
+    .filter((d) => d.scope === def.scope && !(d.name === def.name))
+    .map((d) => ({ name: d.name, expr: d.expr, unit: d.unit || "" }));
+  saveMathsDefinitions(def.scope, rest).then((data) => {
+    if (data) toast("已删掉 " + def.name);
+  });
+}
+
+async function loadMaths() {
+  if (DATA && DATA.api) {
+    try {
+      const res = await fetch(DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/maths");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      state.maths = await res.json();
+    } catch (err) {
+      state.maths = { definitions: [], shadowed: [], errors: [], functions: [] };
+    }
+  }
+  renderMathsList();
+  renderMathsFunctions();
+}
+
+/**
+ * 通道索引换一份新的。数学通道保存后派生列变了，必须让左边的列表跟着变，
+ * 否则用户存完发现"通道还是找不到"。
+ */
+function reindexChannels(payload) {
+  if (!payload) return;
+  if (payload.channels) {
+    CHANNELS.clear();
+    payload.channels.forEach((c) => CHANNELS.set(c.name, c));
+    DATA.channels = payload.channels;
+  }
+  if (payload.status) {
+    STATUS.clear();
+    payload.status.forEach((n) => STATUS.add(n));
+    DATA.status = payload.status;
+  }
+  if (payload.groups) {
+    GROUPS.splice(0, GROUPS.length);
+    payload.groups.forEach((g) => GROUPS.push(g));
+    if ((payload.status || []).length) {
+      GROUPS.push({ key: "__status__", label: "状态与故障", unit: "",
+                    channels: payload.status.slice() });
+    }
+    DATA.groups = payload.groups;
+  }
+  renderChannelList();
+}
+
+async function refreshChannels() {
+  if (!DATA.api) return null;
+  try {
+    const res = await fetch(DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/info");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const payload = await res.json();
+    reindexChannels(payload);
+    return payload;
+  } catch (err) {
+    toast("通道列表刷新失败：" + err.message);
+    return null;
+  }
+}
+
+/** 把新算出来的通道直接挂到当前聚焦的图上 */
+function selectChannel(name) {
+  const comp = focusedComponent();
+  if (!comp || comp.type !== "graph") return false;
+  if (comp.config.channels.indexOf(name) >= 0) return false;
+  comp.config.channels.push(name);
+  state.dataVersion += 1;
+  return true;
+}
+
 function renderChannelList() {
   const term = $("chSearch").value.trim().toLowerCase();
   const list = $("channelList");
@@ -3147,6 +3484,15 @@ function init() {
   state.lapsConfig = Object.assign({ mode: "auto", beacons: [], trusted: {} },
                                    DATA.laps_config || {});
   renderLapControls();
+  $("mathsNew").addEventListener("click", () => openMathsEditor(null));
+  $("mathsCancel").addEventListener("click", closeMathsEditor);
+  $("mathsTest").addEventListener("click", mathsTest);
+  $("mathsCommit").addEventListener("click", mathsCommit);
+  $("mathsFuncs").addEventListener("click", () => {
+    const box = $("mathsFuncList");
+    box.hidden = !box.hidden;
+  });
+  loadMaths();
   $("chClear").addEventListener("click", () => {
     setSelectedChannels([]);
     buildWorksheet();
@@ -3211,6 +3557,13 @@ window.i3pro = {
   renderLapControls: renderLapControls, renameBeacon: renameBeacon,
   insertCrossing: insertCrossing, cursorTime: cursorTime,
   exactCursorTime: exactCursorTime, applyLapsResponse: applyLapsResponse,
+  renderMathsList: renderMathsList, openMathsEditor: openMathsEditor,
+  closeMathsEditor: closeMathsEditor, mathsDraft: mathsDraft,
+  mathsSaveList: mathsSaveList, applyMathsResponse: applyMathsResponse,
+  saveMathsDefinitions: saveMathsDefinitions, mathsDelete: mathsDelete,
+  mathsCommit: mathsCommit, mathsTest: mathsTest, loadMaths: loadMaths,
+  reindexChannels: reindexChannels, selectChannel: selectChannel,
+  mathsState: mathsState, escapeText: escapeText,
 };
 </script>
 </body>

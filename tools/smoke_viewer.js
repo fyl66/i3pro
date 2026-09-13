@@ -107,6 +107,22 @@ class Element {
       link.dataset.beacon = m[1];
       this._dels.push(link);
     }
+    // Maths definitions: one row per definition (clicking it opens the editor)
+    // and one delete link per row, same pattern as the beacon pills above.
+    this._mdefs = [];
+    this._mdels = [];
+    const mrow = /data-maths-row="(\d+)"/g;
+    while ((m = mrow.exec(this._html))) {
+      const row = new Element("div");
+      row.dataset.mathsRow = m[1];
+      this._mdefs.push(row);
+    }
+    const mdel = /data-maths-del="(\d+)"/g;
+    while ((m = mdel.exec(this._html))) {
+      const link = new Element("a");
+      link.dataset.mathsDel = m[1];
+      this._mdels.push(link);
+    }
     const idre = /id="([^"]+)"/g;
     while ((m = idre.exec(this._html))) {
       if (REGISTRY && !REGISTRY.has(m[1])) REGISTRY.set(m[1], new Element("div", m[1]));
@@ -149,6 +165,8 @@ class Element {
     if (selector === "tr[data-lap]" || selector === "tr") return this._rows;
     if (selector === "input[data-beacon-name]") return this._bnames || [];
     if (selector === "a[data-beacon]") return this._dels || [];
+    if (selector === "[data-maths-row]") return this._mdefs || [];
+    if (selector === "[data-maths-del]") return this._mdels || [];
     if (selector.indexOf("canvas") >= 0) return this._q.canvas ? [this._q.canvas] : [];
     if (selector === "input") return this._children.filter((c) => c.tagName === "INPUT");
     return [];
@@ -810,6 +828,112 @@ if (api) {
       "a notice from the server was not shown to the user");
     api.applyLapsResponse({ config: { mode: "auto", beacons: [], trusted: {} },
                             laps: rowsBefore });
+  }
+
+  // 22. maths channels: scope badge, error text, delete payload, channel index
+  const mathsHost = registry.get("mathsList");
+  check(!!mathsHost, "the maths channel list element is missing");
+  check(!!registry.get("mathsNew"), "the new-maths-channel button is missing");
+  check(!!registry.get("mathsCommit"), "the maths save button is missing");
+  check(!!registry.get("mathsFuncs"), "the function-table button is missing");
+  if (mathsHost) {
+    const apiBase = api.data.api;
+    api.data.api = "/api";
+    api.applyMathsResponse({
+      definitions: [
+        { name: "滑移率", expr: "('车轮速度' - '车速') / max('车速', 1)",
+          unit: "", scope: "local" },
+        { name: "总G", expr: "sqrt('G Force Lat'^2 + 'G Force Long'^2)",
+          unit: "g", scope: "global" },
+      ],
+      shadowed: ["总G"],
+      errors: [{ name: "滑移率", expr: "x",
+                 error: "表达式里用到通道 `车速`，本场次没有这个通道。" }],
+      functions: [{ name: "sqrt", min_args: 1, max_args: 1, doc: "平方根" }],
+    });
+    check(mathsHost._html.indexOf("滑移率") >= 0 && mathsHost._html.indexOf("总G") >= 0,
+      "the maths list does not show the definitions the server returned");
+    // 作用域必须一眼看得出来：本地只影响本场，全局影响以后每一场
+    check(mathsHost._html.indexOf(">本地<") >= 0 && mathsHost._html.indexOf(">全局<") >= 0,
+      "the maths list does not say which scope each definition is in");
+    check(mathsHost._html.indexOf("本场次没有这个通道") >= 0,
+      "a definition that cannot be evaluated is not shown as an error");
+    check(String(registry.get("mathsNote").textContent).indexOf("总G") >= 0,
+      "a local definition shadowing a global one is not reported");
+    check(mathsHost.querySelectorAll("[data-maths-row]").length === 2,
+      "expected one row per maths definition, got "
+      + mathsHost.querySelectorAll("[data-maths-row]").length);
+    check(String(registry.get("mathsFuncList")._html).indexOf("sqrt") >= 0,
+      "the function table is empty");
+
+    // 点一行 → 编辑器里出现那条定义，作用域也跟着走
+    mathsHost.querySelectorAll("[data-maths-row]")[1].dispatch("click", {});
+    const opened = api.mathsDraft();
+    check(opened.name === "总G" && opened.scope === "global",
+      "clicking a definition does not load it into the editor: " + JSON.stringify(opened));
+    check(registry.get("mathsEdit").hidden === false,
+      "clicking a definition does not open the editor");
+
+    // 保存时只能带同一个作用域的定义：本地文件里塞进全局定义，
+    // 会让那条全局定义在每一场都被本地版覆盖一次
+    state.mathsEdit = { index: 1 };
+    const globalOnly = api.mathsSaveList({ name: "总G", expr: "1", unit: "", scope: "global" });
+    check(globalOnly.length === 1 && globalOnly[0].name === "总G",
+      "saving a global definition must send only the global ones: "
+      + JSON.stringify(globalOnly));
+    state.mathsEdit = { index: 0 };
+    const renamed = api.mathsSaveList({ name: "滑移率2", expr: "1", unit: "", scope: "local" });
+    check(renamed.length === 1 && renamed[0].name === "滑移率2",
+      "renaming a local definition left the old name behind: " + JSON.stringify(renamed));
+
+    // 名字或表达式为空时不该发请求
+    api.closeMathsEditor();
+    const beforeEmpty = httpCalls.length;
+    api.mathsCommit();
+    check(httpCalls.length === beforeEmpty,
+      "saving an empty definition sent a request anyway");
+
+    // 删除一条全局定义：只写全局文件，且不能顺手把本地定义搬进去
+    const dels = mathsHost.querySelectorAll("[data-maths-del]");
+    check(dels.length === 2, "every maths definition needs a delete link, got " + dels.length);
+    const beforeDelete = httpCalls.length;
+    dels[1].dispatch("click", { preventDefault() {} });
+    const puts = httpCalls.slice(beforeDelete).filter(
+      (call) => call.method === "PUT" && call.url.indexOf("/maths") >= 0);
+    check(puts.length === 1, "deleting a definition must save through one PUT, got " + puts.length);
+    if (puts.length === 1) {
+      check(puts[0].url.indexOf("scope=global") >= 0,
+        "deleting a global definition must address the global file: " + puts[0].url);
+      const sent = JSON.parse(puts[0].body);
+      check(sent.definitions.length === 0,
+        "deleting the only global definition must send an empty list: " + puts[0].body);
+    }
+
+    // 存完以后的通道索引：新算出来的列必须出现在通道列表里
+    const beforeChannels = api.data.channels.length;
+    api.reindexChannels({
+      channels: api.data.channels.concat([
+        { name: "Σ力", unit: "g", rate: 100, samples: 10, derived: true },
+      ]),
+      groups: api.data.groups,
+      status: api.data.status || [],
+    });
+    check(api.data.channels.length === beforeChannels + 1
+          && api.data.channels.some((c) => c.name === "Σ力" && c.derived === true),
+      "the channel index did not take the derived column the server returned");
+
+    // 名字是用户输入：不能从标记里跑出去
+    api.applyMathsResponse({
+      definitions: [{ name: 'a<b>"c"', expr: "1", unit: "", scope: "local" }],
+      shadowed: [], errors: [], functions: [],
+    });
+    check(mathsHost._html.indexOf("&lt;b&gt;") >= 0 && mathsHost._html.indexOf("<b>") < 0,
+      "a maths name with angle brackets was not escaped");
+
+    api.applyMathsResponse({ definitions: [], shadowed: [], errors: [], functions: [] });
+    check(mathsHost._html.indexOf("还没有数学通道") >= 0,
+      "an empty definition list does not explain how to add one");
+    api.data.api = apiBase;
   }
 }
 

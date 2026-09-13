@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from i3pro import (  # noqa: E402
-    csvlog, derive, laps as lapsmod, ld, maths as mathsmod, motec_csv,
+    csvlog, derive, gpsfix, laps as lapsmod, ld, maths as mathsmod, motec_csv,
     notes as notesmod, render, report as reportmod, sections as sectionsmod,
     server, store,
 )
@@ -3170,6 +3170,351 @@ class TestNotesOverHttp(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+def _gps_session(path="fake.ld", rate: float = 10.0, gps_rate: float | None = None,
+                 speed: float | None = None):
+    """一条合成的 GPS 轨迹，好坏点都摆明：
+
+    * 开头 10 点是 (0, 0)——掉星时记录仪真给这个，不能当成位置；
+    * 中间一段正常走直线；
+    * 第 100 个采样**整体跳到 1.1 km 外并留在那**（真数据里 214~621 m 的那类）；
+    * 第 120~139 点又是 (0, 0)，也就是 2 秒空档。
+    """
+    n = 200
+    gps_rate = rate if gps_rate is None else gps_rate
+    lat = np.full(n, 22.6, dtype=np.float64)
+    lon = np.full(n, 114.0, dtype=np.float64)
+    lat[0:10] = 0.0
+    lon[0:10] = 0.0
+    for i in range(10, 100):
+        lat[i] = 22.6 + (i - 10) * 1e-6
+        lon[i] = 114.0 + (i - 10) * 1e-6
+    for i in range(100, 120):
+        lat[i] = 22.61 + (i - 100) * 1e-6
+        lon[i] = 114.01 + (i - 100) * 1e-6
+    lat[120:140] = 0.0
+    lon[120:140] = 0.0
+    for i in range(140, n):
+        lat[i] = 22.61 + (i - 140) * 1e-6
+        lon[i] = 114.01 + (i - 140) * 1e-6
+    columns: dict[str, np.ndarray] = {"GPS Latitude": lat, "GPS Longitude": lon}
+    if speed is not None:
+        columns["Vx KF"] = np.full(n, float(speed))
+    return _MathSession(
+        columns,
+        rate=rate,
+        path=path,
+        rates={"GPS Latitude": gps_rate, "GPS Longitude": gps_rate},
+    )
+
+
+class TestGpsFix(unittest.TestCase):
+    """#14 GPS 校正：坏定位被标出来，修正只在开关打开时动数值。"""
+
+    def test_bad_fix_is_dropped_not_used_as_origin(self):
+        log = _gps_session()
+        track = derive.gps_track(log)
+        self.assertEqual(track["dropped"]["no_fix"], 30, "(0,0) 的点要计数")
+        self.assertEqual(track["dropped"]["total"], 200)
+        # 一个 (0,0) 都不能留在轨迹里：留下的都是 22.6°N / 114°E 附近
+        self.assertGreater(float(np.min(np.abs(track["lat"]))), 20.0)
+        self.assertGreater(float(np.min(np.abs(track["lon"]))), 100.0)
+
+    def test_jump_and_hole_break_the_line(self):
+        track = derive.gps_track(_gps_session())
+        breaks = np.flatnonzero(track["breaks"]).tolist()
+        # 170 个保留点：跳点在保留后的第 90 个，空档在第 110 个
+        self.assertEqual(track["time"].size, 170)
+        self.assertEqual(breaks, [90, 110])
+        self.assertEqual(track["segments"], 3)
+        self.assertEqual(len(track["jump_rows"]), 1)
+        self.assertGreater(track["jump_rows"][0]["meters"], 1000.0, "1.1 km 的那一跳")
+        self.assertEqual(len(track["holes"]), 1)
+        self.assertAlmostEqual(track["holes"][0]["seconds"], 2.1, places=6)
+        # 跳变的两端都算坏点：说不好哪一边错
+        self.assertEqual(np.flatnonzero(track["jumps"]).tolist(), [89, 90])
+
+    def test_off_means_identical_numbers(self):
+        """关闭校正 = 数值逐点不变；只是多了几个标注字段。"""
+        log = _gps_session(speed=36.0)
+        base = derive.gps_track(log)
+        off = derive.gps_track(log, fix=gpsfix.FixConfig(enabled=False))
+        for key in ("time", "x", "y", "lat", "lon"):
+            self.assertTrue(np.array_equal(base[key], off[key]), key)
+        # 距离轴也不许动：关闭时仍是速度积分，而不是 GPS 路径长度
+        self.assertTrue(
+            np.array_equal(
+                derive.distance_series(log),
+                derive.distance_series(log, fix=gpsfix.FixConfig(enabled=False)),
+            )
+        )
+
+    def test_offset_in_seconds_and_in_update_periods(self):
+        log = _gps_session(rate=10.0)
+        base = derive.gps_track(log)
+        by_seconds = derive.gps_track(log, fix=gpsfix.FixConfig(enabled=True, offset_s=0.5))
+        self.assertAlmostEqual(
+            float(by_seconds["time"][0] - base["time"][0]), 0.5, places=9
+        )
+        # 2 个更新周期 @10 Hz = 0.2 s：换场次采样率变了也不用重算秒数
+        by_ratio = derive.gps_track(
+            log, fix=gpsfix.FixConfig(enabled=True, offset_ratio=2.0)
+        )
+        self.assertAlmostEqual(
+            float(by_ratio["time"][0] - base["time"][0]), 0.2, places=9
+        )
+
+    def test_resample_never_bridges_a_hole(self):
+        # 主采样 100 Hz、GPS 只有 10 Hz——这才是真数据的形状（C125 的 GPS 是 20/50 Hz）
+        log = _gps_session(rate=100.0, gps_rate=10.0)
+        fixed = derive.gps_track(
+            log, fix=gpsfix.FixConfig(enabled=True, resample=True)
+        )
+        self.assertGreater(fixed["time"].size, 170, "10 Hz -> 100 Hz 应该更密")
+        self.assertEqual(fixed["fix"]["samples_before"], 170)
+        self.assertEqual(fixed["fix"]["samples_after"], fixed["time"].size)
+        breaks = np.flatnonzero(fixed["breaks"])
+        # 3 段 -> 2 个接缝，接缝处必须断开（插值绝不跨过空档）
+        self.assertGreaterEqual(breaks.size, 2)
+        # 空档里不许有点：两段之间的时间差仍然是那 2.1 秒
+        gaps = np.diff(fixed["time"])
+        self.assertAlmostEqual(float(gaps.max()), 2.1, places=3)
+
+    def test_path_distance_skips_jumps_and_holes(self):
+        track = derive.gps_track(_gps_session())
+        distance = gpsfix.path_distance(
+            track["time"], track["x"], track["y"], track["breaks"]
+        )
+        # 1.1 km 的那一跳不能进距离：整段路只有 ~180 m
+        self.assertLess(float(distance[-1]), 500.0)
+        self.assertTrue(np.all(np.diff(distance) >= 0), "里程只能单调不减")
+
+    def test_distance_scope_switches_the_axis(self):
+        log = _gps_session(speed=36.0)
+        plain = derive.distance_series(log)
+        gps_axis = derive.distance_series(
+            log, fix=gpsfix.FixConfig(enabled=True, scope_distance=True)
+        )
+        self.assertTrue(np.all(np.diff(gps_axis) >= -1e-9), "距离轴要单调")
+        self.assertTrue(np.all(np.diff(plain) >= -1e-9), "速度积分的距离轴也单调")
+        # 36 km/h 走 19.9 s ≈ 199 m；GPS 路径只有那三段直线 ≈ 31 m。
+        # 两个基准必须明显不同，否则这条测试什么也没证明。
+        self.assertGreater(float(plain[-1]), 150.0)
+        self.assertLess(float(gps_axis[-1]), 60.0)
+        # 作用域关着 = 一个数都不动
+        off = derive.distance_series(
+            log, fix=gpsfix.FixConfig(enabled=True, scope_distance=False)
+        )
+        self.assertTrue(np.array_equal(plain, off))
+
+    def test_scope_decides_who_gets_the_correction(self):
+        log = _gps_session()
+        laps_only = gpsfix.FixConfig(enabled=True, scope_track=False, scope_laps=True)
+        self.assertFalse(gpsfix.resolve(log, laps_only, "track").enabled)
+        self.assertTrue(gpsfix.resolve(log, laps_only, "laps").enabled)
+        self.assertFalse(gpsfix.resolve(log, laps_only, "distance").enabled)
+        self.assertFalse(gpsfix.resolve(log, None, "track").enabled, "没侧车就是不校正")
+
+    def test_config_validation_speaks_chinese(self):
+        with self.assertRaises(ValueError) as caught:
+            gpsfix.FixConfig.from_dict({"offset_s": "快点"})
+        self.assertIn("gps.offset_s", str(caught.exception))
+        self.assertIn("秒", str(caught.exception))
+        with self.assertRaises(ValueError) as caught:
+            gpsfix.FixConfig.from_dict({"spike_kmh": 1e9})
+        self.assertIn("gps.spike_kmh", str(caught.exception))
+        with self.assertRaises(ValueError) as caught:
+            gpsfix.FixConfig.from_dict(["not", "an", "object"])
+        self.assertIn("JSON 对象", str(caught.exception))
+        config = gpsfix.FixConfig.from_dict({"enabled": True, "offset_s": 0.25})
+        self.assertTrue(config.enabled)
+        self.assertEqual(config.scope_distance, False, "距离轴默认不动")
+
+    def test_sidecar_roundtrip_and_corrupt_file(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "某场次.ld"
+            self.assertFalse(gpsfix.config_path(session).exists())
+            self.assertIsNone(gpsfix.load_config(session))
+            config = gpsfix.FixConfig(enabled=True, offset_s=0.5, spike_kmh=800.0)
+            path = gpsfix.save_config(session, config)
+            self.assertEqual(path.name, "某场次.gps.json")
+            self.assertEqual(gpsfix.load_config(session), config)
+            # 读路径遇到坏 JSON：当没设过，而不是让工作台打不开
+            path.write_text("{ 这不是 JSON", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                gpsfix.load_config(session)
+            log = _MathSession({"a": [0.0, 1.0]}, path=session)
+            self.assertFalse(gpsfix.for_log(log).enabled)
+
+    def test_summary_counts_what_is_wrong(self):
+        track = derive.gps_track(_gps_session())
+        info = gpsfix.summary(track)
+        self.assertEqual(info["no_fix"], 30)
+        self.assertEqual(info["jumps"], 1)
+        self.assertEqual(info["holes"], 1)
+        self.assertEqual(info["segments"], 3)
+        self.assertGreater(info["worst_jump_m"], 1000.0)
+        self.assertAlmostEqual(info["longest_hole_s"], 2.1, places=6)
+
+    @_needs(ENDURANCE)
+    def test_golden_endurance_spike_is_flagged(self):
+        """真数据：耐久正赛结尾有一次 214 m 的错位定位。"""
+        log = ld.LogFile.read(ENDURANCE)
+        try:
+            track = derive.gps_track(log)
+            self.assertEqual(len(track["jump_rows"]), 1)
+            self.assertAlmostEqual(track["jump_rows"][0]["meters"], 214.5, delta=0.5)
+            self.assertEqual(track["dropped"]["no_fix"], 0)
+            payload = render.track_payload(log)
+            self.assertEqual(len(payload["breaks"]), 1, "抽稀之后那一跳还得断着")
+            # 断的必须是**那 214 m 的幽灵线**，不是它前面那 0.2 m 的正常段：
+            # 抽稀把断点错算到桶首，真机上就会把这条 214 m 直线画出来（截图抓到过）
+            index = payload["breaks"][0]
+            xs, ys = np.asarray(payload["x"]), np.asarray(payload["y"])
+            phantom = float(np.hypot(xs[index] - xs[index - 1], ys[index] - ys[index - 1]))
+            self.assertGreater(phantom, 200.0, "被断开的那一段应该就是幽灵线")
+        finally:
+            log.close()
+
+    def test_downsample_keeps_the_break_on_the_right_segment(self):
+        """抽稀：源下标 ``i`` 上的断点属于**第 (i-1)//step 段**。"""
+        flags = np.zeros(120, dtype=bool)
+        flags[51] = True
+        # 25 个采样一个点 -> 断点落在第 2 段（抽稀下标 2 -> 3）上
+        self.assertEqual(
+            np.flatnonzero(render._downsample_breaks(flags, 25)).tolist(), [3]
+        )
+        flags = np.zeros(120, dtype=bool)
+        flags[50] = True
+        self.assertEqual(
+            np.flatnonzero(render._downsample_breaks(flags, 25)).tolist(), [2]
+        )
+        # 不断开时一个都不该有；step<=1（没抽稀）原样返回
+        self.assertEqual(render._downsample_breaks(np.zeros(120, dtype=bool), 25).sum(), 0)
+        raw = np.zeros(10, dtype=bool)
+        raw[4] = True
+        self.assertEqual(render._downsample_breaks(raw, 1).tolist(), raw.tolist())
+
+    @_needs(HILL)
+    def test_golden_hill_has_no_jumps(self):
+        """反例：高避 5 圈一个跳点都没有——阈值不是"总有东西可报"。"""
+        log = ld.LogFile.read(HILL)
+        try:
+            track = derive.gps_track(log)
+            self.assertEqual(track["jump_rows"], [])
+            self.assertEqual(track["dropped"]["no_fix"], 638)
+            # 开头那 12.76 秒没定位，它不算"空档"——轨迹就是从拿到定位那一刻开始的
+            self.assertEqual(track["holes"], [])
+            self.assertAlmostEqual(float(track["time"][0]), 12.76, delta=0.02)
+            self.assertEqual(track["segments"], 1)
+        finally:
+            log.close()
+
+
+class TestGpsFixOverHttp(unittest.TestCase):
+    """#14 走到界面之前的那一段：/gps 的 GET / PUT、侧车、以及"关了就别动数"。"""
+
+    @_needs(HILL)
+    def test_gps_endpoint(self):
+        import tempfile
+        from http.server import ThreadingHTTPServer
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            copy = root / HILL.name
+            copy.write_bytes(HILL.read_bytes())
+            original = copy.read_bytes()
+            library = server.SessionLibrary([root], cache_size=1, maths_root=root)
+            httpd = ThreadingHTTPServer(
+                ("127.0.0.1", 0), server.make_handler(library, buckets=50)
+            )
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            base = f"http://127.0.0.1:{httpd.server_address[1]}"
+            quoted = urllib.parse.quote(copy.stem)
+
+            def request(path, method="GET", payload=None):
+                data = None if payload is None else json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(base + path, data=data, method=method)
+                if data is not None:
+                    req.add_header("Content-Type", "application/json")
+                try:
+                    with urllib.request.urlopen(req, timeout=180) as response:
+                        return response.status, json.loads(response.read().decode("utf-8"))
+                except urllib.error.HTTPError as exc:
+                    return exc.code, json.loads(exc.read().decode("utf-8"))
+
+            try:
+                status, body = request(f"/api/session/{quoted}/gps")
+                self.assertEqual(status, 200, body)
+                self.assertFalse(body["config"]["enabled"], "没存过侧车就是不校正")
+                self.assertFalse(body["stored"])
+                self.assertEqual(body["summary"]["no_fix"], 638)
+                self.assertEqual(body["summary"]["jumps"], 0)
+                self.assertIsNone(body["applied"])
+
+                # 关闭状态下的轨迹：PUT 前后必须逐点一致（这是 #14 的硬条件）
+                status, before = request(f"/api/session/{quoted}/track?points=400")
+                self.assertEqual(status, 200, before)
+                status, body = request(
+                    f"/api/session/{quoted}/gps", "PUT",
+                    {"config": {"enabled": False, "offset_s": 0.0}},
+                )
+                self.assertEqual(status, 200, body)
+                self.assertEqual(body["saved"], f"{copy.stem}.gps.json")
+                status, after = request(f"/api/session/{quoted}/track?points=400")
+                self.assertEqual(before["x"], after["x"])
+                self.assertEqual(before["time"], after["time"])
+                self.assertEqual(before["breaks"], after["breaks"])
+
+                # 打开校正 + 时间偏移：轨迹的时刻整体平移，配置落进侧车
+                status, body = request(
+                    f"/api/session/{quoted}/gps", "PUT",
+                    {"config": {"enabled": True, "offset_s": 5.0, "resample": True,
+                                "scope_track": True, "scope_laps": True}},
+                )
+                self.assertEqual(status, 200, body)
+                self.assertTrue(body["config"]["enabled"])
+                self.assertEqual(body["applied"]["offset_s"], 5.0)
+                self.assertTrue(body["applied"]["resampled"])
+                on_disk = json.loads(
+                    (root / f"{copy.stem}.gps.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(on_disk["offset_s"], 5.0)
+                status, track = request(f"/api/session/{quoted}/track?points=400")
+                self.assertTrue(track["fix"]["enabled"])
+                self.assertAlmostEqual(
+                    track["time"][0] - before["time"][0], 5.0, delta=1e-6
+                )
+
+                # 参数不合规：400，而且侧车一个字节都不许动
+                status, body = request(
+                    f"/api/session/{quoted}/gps", "PUT",
+                    {"config": {"enabled": True, "offset_s": 999}},
+                )
+                self.assertEqual(status, 400, body)
+                self.assertIn("gps.offset_s", body["error"])
+                self.assertEqual(
+                    json.loads(
+                        (root / f"{copy.stem}.gps.json").read_text("utf-8")
+                    )["offset_s"],
+                    5.0,
+                )
+                self.assertEqual(copy.read_bytes(), original, ".ld 是只读的")
+
+                # 关掉校正：又回到"一个数都不动"
+                status, body = request(
+                    f"/api/session/{quoted}/gps", "PUT", {"config": {"enabled": False}}
+                )
+                self.assertEqual(status, 200, body)
+                status, track = request(f"/api/session/{quoted}/track?points=400")
+                self.assertEqual(track["time"], before["time"])
+                self.assertEqual(track["x"], before["x"])
+            finally:
+                httpd.shutdown()
+                library.close()
 
 
 class TestHistogram(unittest.TestCase):

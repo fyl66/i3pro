@@ -1516,6 +1516,93 @@ python tools\verify_clicks.py                # 40 项检查：40 通过，0 失�
 
 ---
 
+## A38 · GPS 校正（ticket #14）
+
+C125 的定位有三种坏法，都不是"接口声明"能看出来的，得在这批日志上量：
+
+1. **掉星时给 `(0, 0)`**——不滤掉就等于把车放到几内亚湾，距离轴、轨迹与切圈一起被带歪。
+   `高避5圈` 有 **638 个**（开头 12.76 s 一段），`20260912-TV0` 有 **32256 个**（占 44.9%）。
+2. **卫星数不足**：`GPS Sats Used` 通道在有些场次是死的（`高避5圈` 恒 0、`TV0` 恒 −1），
+   拿来当唯一判据会把整场判死，所以只在**采样数对得上**时才用它。
+3. **跳点**：经纬度看着完全合法，但定位**整体跳到几百米外并留在那里**。这批数据里
+   16 个场次有 **12 个**能测到（>200 km/h 的相邻跳变），最狠的是 `FSS_jhy_endu` 的
+   **621 m / 105 s**、`高避陈君灏` 的 **495 m / 0.30 s**，黄金数据 `耐久正赛` 里也有一次
+   **214.5 m / 0.05 s**（隐含 15443 km/h）。
+
+**16 个场次里一个孤立毛刺都没有**，每一次都是"跳过去就不回来"。所以这一版**不删点**
+（删哪一边都是猜），做的是**断开连线 + 标出来**：轨迹图不再画一条不存在的直线，
+切圈也不会把一次跳变当成一次过门。
+
+| # | 交付物 | 在哪 |
+| --- | --- | --- |
+| ① | 纯函数（标注 / 时移 / 分段插值 / 路径里程 / 侧车） | `src/i3pro/gpsfix.py`（`classify` / `annotate` / `correct` / `path_distance` / `resolve` / `load_config` / `save_config`） |
+| ② | 单元测试 15 项 | `tests/test_i3pro.py` 的 `TestGpsFix`（14 项）与 `TestGpsFixOverHttp`（1 项，覆盖 GET / PUT / 侧车 / 400 / `.ld` 字节不变） |
+| ③ | 无头交互断言（第 31 组） | `tools/smoke_viewer.js` |
+| ④ | 本条 | `docs/ACCEPTANCE.md` |
+| ⑤ | 两份金标准实跑 | `高避5圈`（638 个空定位 / 0 个跳点）与 `耐久正赛`（1 个跳点 / 0 个空定位）单测直接钉住，快照 smoke 均 PASS |
+
+**通过判据**（可复制，在本机跑出来的）：
+
+```powershell
+python -m unittest discover -s tests -v                          # Ran 204 tests + OK（含 TestGpsFix 15 项）
+python tools\verify_ld_vs_csv.py                                 # PASS - 0 channel(s) outside tolerance
+node tools\smoke_viewer.js "out\20260524-耐久正赛.html"          # PASS（第 31 组）
+python tools\verify_clicks.py                                    # 51 项检查：51 通过，0 失败（#14 那 8 条）
+python tools\verify_clicks.py --session "20260524-耐久正赛"       # 53 项检查：53 通过，0 失败（真跳点那一场多 2 条）
+```
+
+**三件事分开**，这是这一版的核心设计：
+
+* **标注**永远算（`breaks` / `jumps` / `holes` / `dropped`），和开关无关——"这段数据不可信"
+  本身就是结论，不该藏在某个开关后面。
+* **修正**（时间偏移、插值到主采样率）只在 `enabled` 打开时动数值。
+* **作用域**（`scope_track` / `scope_laps` / `scope_distance`）决定修正结果给谁用。
+
+实测（真 Edge，`tools/verify_clicks.py` 的 #14 那 8 条）：
+
+| 做了什么 | 结果 |
+| --- | --- |
+| 真鼠标点「启用校正」 | 复选框真的翻了（假 DOM 里 disabled 的控件也照样派发 click，这一步只有真浏览器算数） |
+| 真点「应用」 | `高避5圈.gps.json` 出现，`enabled: true` |
+| 应用之后 | 页面**真的重新载入**，新页面里 `i3pro.data.gps.config.enabled === true` |
+| 真键盘打 `5`，再点「应用」 | 重载后轨迹第一点 **12.76 s → 17.76 s**，正好平移 5 秒（"效果在轨迹上可见"不是口号） |
+| 面板那行字 | "已应用：时间偏移 5 s、保持原始采样、没有要断开的地方" |
+| 没跳点/没空档的场次 | 页头**不**说"断开"、`breaks` 为空——阈值不是"总有东西可报" |
+| 有跳点的场次（`耐久正赛`） | 页头写"断开 1 处"、`breaks=[1533]`，而且**被断开的那一段长度 214.4 m**——断的是幽灵线本身，不是它前面那 0.2 m 的正常线段 |
+
+**真机截图抓到的一个真 bug**（值得单独记）：抽稀时把断点算在了"桶首"，于是
+`breaks` 指向了跳变**前面**那一段，真正该断的 214 m 幽灵线照样画了出来——
+无头断言当时是绿的（它验的是"断开处少画一段线"，而确实少画了一段，只是错的那段）。
+是 `out/shots/gps-track-endurance.png` 里那条通向红点的蓝线露的馅。修法是
+`render._downsample_breaks`：源下标 `i` 上的断点属于抽稀后的第 `(i-1)//step` 段，
+现在单测与真浏览器断言各钉了一条（`test_downsample_keeps_the_break_on_the_right_segment`
+与"被断开的那一段就是幽灵线本身"）。
+
+**关闭校正 = 一个数都不动**（ticket 的硬条件）：`TestGpsFix.test_off_means_identical_numbers`
+对 `time` / `x` / `y` / `lat` / `lon` 逐点 `array_equal`，HTTP 那条测试再验一次
+`PUT enabled=false` 前后 `/track` 的 `x` / `time` / `breaks` 完全一致。
+
+**量出来的代价与收益**：
+
+| 项 | 数值（本机实测） |
+| --- | --- |
+| `耐久正赛` serve 模式整套 payload | **0.203 s**（其中区段自动切分 0.172 s、GPS 校正面板 0.002 s） |
+| 单次 `gps_track`（38860 点） | 0.002 s |
+| 距离轴换用 GPS 路径（`20260524-耐久正赛`，scope_distance 打开） | 速度积分 **19696.1 m** vs GPS 路径 **20215.2 m**，差 **2.64%** |
+| 抽稀后仍保留的断点数（`TV0`，1500 点载荷） | 59 处（原始 112 处跳点 + 3 段空档，同一格内的合并） |
+
+**边界（说清代价，也写清没做什么）**：
+
+* **距离轴默认不跟着变**：圈速、区段、报表都建立在速度积分的距离轴上，换基准要用户
+  自己点头。实测两条轴差 2.64%，换成 GPS 路径会让已存的区段边界（按米写的）对不上。
+* **空档里不插值**：`resample` 是"按段插值"，段与段之间留一个时间跳变，宁可少画也不编。
+* **跳点阈值 200 km/h** 是"车做不到"的物理界（这批日志最快 78.7 km/h）。实测它会连 GPS
+  噪声一起报（`TV0` 报 112 处、中位只有 2.2 m）；要只看真错位就把阈值调到 800。
+* **快照模式只能看**：能显示标注与断线（载荷里已经带上了），改不了——按钮禁用并说明原因。
+* **不重采样到 100 Hz 之外**：主采样率就是这个场次自己的速率，没有选项。
+
+---
+
 ## 全量回归
 
 ```powershell
@@ -1525,9 +1612,9 @@ node tools\smoke_viewer.js out\<场次>.html   # 3. 无头驱动前端：PASS
 python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘：全过（没有 Edge 的机器打印 SKIP，不算通过）
 ```
 
-**通过判据**：`Ran 189 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）；
+**通过判据**：`Ran 204 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）；
 `PASS - 0 channel(s) outside tolerance`；`PASS - workbench ran headless ... interactions verified`；
-`40 项检查：40 通过，0 失败`。**四条全绿才算改完**（AGENTS.md 规则 7）。
+`51 项检查：51 通过，0 失败`。**四条全绿才算改完**（AGENTS.md 规则 7）。
 
 测试覆盖：
 
@@ -1558,6 +1645,7 @@ python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘�
 | `TestIndependentParsers` | 第二套实现交叉验证、213 通道 CSV 全量对照 |
 | `TestBeaconUndo` | 撤销的纯函数层：什么是"同一版"、什么时候没有可撤销的一步、交回去的是上一版本身 |
 | `TestBeaconUndoOverHttp` | 撤销走真实 `PUT`：改名 / 插入 / 删除各自一步回到原样、`trusted` 迁移、落盘、一次无改动的保存不吃掉上一步、没有可撤销的一步时 400 并说明下一步、页面注入的 `laps_can_undo` 三态 |
-| `TestViewerScript` | 无头驱动前端：脚本里 **336 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
+| `TestViewerScript` | 无头驱动前端：脚本里 **354 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
 | `TestNotes` / `TestNotesOverHttp` | 注释（#15，15 项）：文字折行与截断、时刻校验的下一步、增删改不改原表、距离在主采样上插值、轨迹取最近抽稀点、越界不猜位置、侧车往返与坏文件、**注释不动圈速表**、HTTP 的 PUT 落盘 / 400 说明下一步 / `.ld` 字节不变 |
+| `TestGpsFix` / `TestGpsFixOverHttp` | GPS 校正（#14，15 项）：`(0,0)` 只计数不进轨迹、跳点与空档各自断开、跳变两端都算坏点、**关掉校正逐点不变**、按秒与按更新周期两种偏移、分段插值绝不跨空档、路径里程跳过跳变、距离轴作用域的开关、抽稀后断点必须落在**跨着跳变的那一段**上、参数校验的中文下一步、侧车往返与坏文件、金标准（耐久 1 个 214.5 m 跳点且断的就是那 214 m 幽灵线 / 高避 0 跳点 638 个空定位）；HTTP 的 GET / PUT / 落盘 / 400 不动侧车 / `.ld` 字节不变 |
 | `TestLaunchers` | 一键启动：快照批量导出 + 索引页、缺数据目录的报错、端口占用自动换端口 |

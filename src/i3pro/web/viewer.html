@@ -58,6 +58,10 @@
   button.on { background:#1d3b52; border-color:var(--accent); }
   button:disabled { opacity:.4; cursor:default; }
   .row { display:flex; gap:5px; flex-wrap:wrap; margin-bottom:6px; align-items:center; }
+  .chk { display:flex; align-items:center; gap:4px; font-size:11px; color:var(--muted);
+         border:1px solid var(--line); border-radius:5px; padding:3px 7px; cursor:pointer; }
+  .chk input { margin:0; }
+  .chk:hover { border-color:var(--accent); }
   .chart { background:var(--panel); border:1px solid var(--line); border-radius:7px;
            margin-bottom:6px; position:relative; }
   .chart.focus { border-color:var(--accent); }
@@ -264,6 +268,31 @@
       <div class="hint">点文字就地改（<kbd>回车</kbd> 保存 · <kbd>Esc</kbd> 取消）· ✕ 删除。
         注释只是记号，不参与切圈、比圈与报表。</div>
       <div class="notes" id="notesList"></div>
+    </div>
+    <div class="group" id="gpsGroup">
+      <h2>GPS 校正 <span class="count" id="gpsCount"></span></h2>
+      <div class="hint" id="gpsNote"></div>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="gpsEnabled"> 启用校正</label>
+        <label class="chk"><input type="checkbox" id="gpsResample"> 插值到主采样率</label>
+      </div>
+      <div class="row">
+        <input type="number" id="gpsOffset" step="0.05" min="-60" max="60"
+               title="固定时间偏移（秒）：正数 = 定位比记录仪时间戳晚，把定位往前挪">
+        <input type="number" id="gpsRatio" step="1" min="-50" max="50"
+               title="按 GPS 更新周期计的偏移（个周期）：慢定位的固定延迟常常正好是几个周期">
+        <input type="number" id="gpsSpike" step="10" min="20" max="5000"
+               title="跳点阈值（km/h）：相邻两点隐含速度超过它就算坏点。200 = 车做不到，800 = 只留真错位">
+      </div>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="gpsScopeTrack"> 轨迹</label>
+        <label class="chk"><input type="checkbox" id="gpsScopeLaps"> 切圈</label>
+        <label class="chk"><input type="checkbox" id="gpsScopeDistance"> 距离轴</label>
+        <button id="gpsApply" title="存进本场次的侧车并重新载入">应用</button>
+      </div>
+      <div class="hint">坏定位（空定位 / 卫星不足 / 跳点）**永远**标注出来，和开关无关；
+        上面这个开关决定要不要按时移与插值去**修正**它。轨迹图不会跨着空档或跳点连线。
+        距离轴默认不动：圈速、区段、报表都建立在速度积分的距离轴上，换基准要自己点头。</div>
     </div>
     <div class="group" id="valuesGroup">
       <h2>光标值 <span class="count" id="cursorInfo"></span></h2>
@@ -751,6 +780,8 @@ const state = {
   //: 位置由 Python 算好（`notes.marks`）：distance 在主采样上插值、x/y 取最近的抽稀点。
   notes: (DATA && DATA.notes) || [],
   showNotes: true,
+  //: GPS 校正（#14）：配置 + "这段数据坏在哪"的计数；侧车 `<场次>.gps.json`。
+  gps: (DATA && DATA.gps) || null,
   placeBeacon: false,
   pending: 0,
   windowKey: "",
@@ -3349,8 +3380,12 @@ function renderTrackComponent(comp, b) {
   const py = (y) => c.h - oy - (y - y0) * scale;
   const speeds = track.speed;
   const vmin = Math.min.apply(null, speeds), vmax = Math.max.apply(null, speeds);
+  // 断开处不连线：空档（掉星）与跳点（一次 214 m 的错位定位）都算。这条轨迹是
+  // 抽稀过的，断开的判定由服务端在抽稀**之前**算好（`breaks` 是抽稀后的下标）。
+  const breakAt = new Set(track.breaks || []);
   ctx.lineWidth = 2.2;
   for (let i = 1; i < xs.length; i++) {
+    if (breakAt.has(i)) continue;
     const f = (speeds[i] - vmin) / (vmax - vmin || 1);
     ctx.strokeStyle = "hsl(" + (210 - 210 * f) + ",90%," + (34 + 26 * f) + "%)";
     ctx.beginPath();
@@ -3372,6 +3407,8 @@ function renderTrackComponent(comp, b) {
   };
   if (state.datumOn && state.datum !== null) mark(state.datum, "#ffb454", 3.6);
   if (state.cursor !== null) mark(state.cursor, "#fff", 4.2);
+  // 跳点画成红点：断线告诉用户"这里不连"，红点告诉用户"这里跳过"。
+  for (const when of (track.jump_times || [])) mark(when, "#ff6b6b", 3.4);
   // 注释：轨迹图上画成琥珀色的点 + 一行字。位置来自服务端算好的 x/y（局部米坐标，
   // 和这条轨迹同一套坐标系），没有 GPS 或者注释落在抽稀轨迹之外时是 null——那就不画。
   if (state.showNotes) {
@@ -3405,6 +3442,8 @@ function renderTrackComponent(comp, b) {
   b.trackOrigin = track.origin || null;
   b.head.textContent = vmin.toFixed(0) + "–" + vmax.toFixed(0) + " km/h ("
     + (track.speed_channel || "-") + ") · " + (x1 - x0).toFixed(0) + "×" + (y1 - y0).toFixed(0) + " m"
+    + ((track.breaks && track.breaks.length) ? (" · 断开 " + track.breaks.length + " 处") : "")
+    + ((track.holes && track.holes.length) ? (" · 空档 " + track.holes.length + " 段") : "")
     + (windowed ? " · 当前时间段" : "")
     + (state.placeBeacon ? " · 点一下放信标" : "");
 }
@@ -4233,6 +4272,144 @@ async function removeNoteAt(index) {
     .filter((_, i) => i !== index)
     .map((n) => ({ time: n.time, text: n.text }));
   await saveNotes(next);
+}
+
+/* ------------------------------------------------------------ GPS 校正 #14 */
+/* 三件事分开：坏定位**永远**标注（那是数据质量的事实），开关决定要不要按时移
+   与插值**修正**它，作用域决定修正结果给谁用（轨迹 / 切圈 / 距离轴）。配置存
+   `<场次>.gps.json` 侧车，`.ld` 永远只读。 */
+
+/** 这一场的 GPS 校正载荷（快照里是注入的，serve 模式拉服务端的）。 */
+function gpsState() {
+  return state.gps || (DATA && DATA.gps) || null;
+}
+
+/** 面板上那句话：「这段数据坏在哪」+（开着的话）「改了什么」。 */
+function gpsNoteText(info) {
+  if (!info) return "这一页没有 GPS 校正面板（用「报表」之前的旧快照导出一份新的）。";
+  if (info.error) return "读 GPS 侧车出错：" + info.error;
+  const s = info.summary;
+  if (!s) return info.notice || "这场记录没有可用的 GPS 轨迹。";
+  const parts = [];
+  parts.push(s.jumps
+    ? ("跳点 " + s.jumps + " 处（最大 " + fmt(s.worst_jump_m, 1) + " m）")
+    : "没有跳点");
+  parts.push(s.no_fix ? ("空定位 " + s.no_fix + " 点") : "没有空定位");
+  if (s.low_sats) parts.push("卫星数不足 " + s.low_sats + " 点");
+  parts.push(s.holes
+    ? ("空档 " + s.holes + " 段（最长 " + fmt(s.longest_hole_s, 1) + " s）")
+    : "没有空档");
+  let text = "标记：" + parts.join(" · ") + "。";
+  if (info.applied) {
+    const bits = [];
+    bits.push(info.applied.offset_s
+      ? ("时间偏移 " + fmt(info.applied.offset_s, 2) + " s") : "没有时间偏移");
+    bits.push(info.applied.resampled
+      ? ("插值到主采样率 " + info.applied.samples_before + " → " + info.applied.samples + " 点")
+      : "保持原始采样");
+    bits.push(info.applied.breaks
+      ? ("断开 " + info.applied.breaks + " 处") : "没有要断开的地方");
+    text += "已应用：" + bits.join("、") + "。";
+  } else if (s.jumps || s.holes || s.no_fix) {
+    text += "上面这些只是标注；要真的修正，把「启用校正」打开。";
+  }
+  // notice 与计数都要在：只说 notice 会把"数据坏在哪"一起吞掉
+  return (info.notice ? (info.notice + "　") : "") + text;
+}
+
+function renderGps() {
+  const note = $("gpsNote");
+  if (!note) return;
+  const info = gpsState();
+  const config = (info && info.config) || null;
+  note.textContent = gpsNoteText(info);
+  $("gpsCount").textContent = config && config.enabled
+    ? ((info && info.applied && info.applied.segments > 1)
+        ? info.applied.segments + " 段" : "已启用")
+    : "";
+  const editable = !!(DATA && DATA.api);
+  const set = (id, value) => { const el = $(id); if (el) el.value = value; };
+  const check = (id, value) => { const el = $(id); if (el) el.checked = !!value; };
+  if (config) {
+    check("gpsEnabled", config.enabled);
+    check("gpsResample", config.resample);
+    check("gpsScopeTrack", config.scope_track);
+    check("gpsScopeLaps", config.scope_laps);
+    check("gpsScopeDistance", config.scope_distance);
+    set("gpsOffset", config.offset_s);
+    set("gpsRatio", config.offset_ratio);
+    set("gpsSpike", config.spike_kmh);
+  }
+  ["gpsEnabled", "gpsResample", "gpsOffset", "gpsRatio", "gpsSpike",
+   "gpsScopeTrack", "gpsScopeLaps", "gpsScopeDistance", "gpsApply"].forEach((id) => {
+    const el = $(id);
+    if (el) el.disabled = !editable;
+  });
+  if (!editable) {
+    note.textContent += "（快照模式：能看，改不了——用 serve 模式打开这一场）";
+  }
+}
+
+async function saveGps(config, okMessage) {
+  if (!DATA.api) { toast("快照模式不能改 GPS 校正，用 serve 模式"); return null; }
+  try {
+    const res = await fetch(DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/gps", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: config }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast("GPS 校正没保存：" + (data.error || ("HTTP " + res.status)));
+      return null;
+    }
+    state.gps = data;
+    renderGps();
+    if (okMessage) toast(okMessage);
+    return data;
+  } catch (err) {
+    toast("GPS 校正没保存：" + err.message + "（本地服务还在吗？）");
+    return null;
+  }
+}
+
+/**
+ * 应用：整份配置交给服务端（校验只有一份实现），成功之后**重新载入页面**。
+ *
+ * 不做局部刷新是有意的：校正会改切圈边界、每条圈的里程与距离轴，页面上到处都
+ * 是它们的下游（圈速表 / 区段带子 / 报表 / 双圈对比）。一处一处去补，迟早会漏
+ * 掉一处，然后同一个数字在两个面板里不一样——那正是这个仓库最怕的事。
+ */
+async function applyGps() {
+  const num = (id, fallback) => {
+    const raw = $(id) ? Number($(id).value) : NaN;
+    return Number.isFinite(raw) ? raw : fallback;
+  };
+  const config = {
+    enabled: $("gpsEnabled").checked,
+    resample: $("gpsResample").checked,
+    offset_s: num("gpsOffset", 0),
+    offset_ratio: num("gpsRatio", 0),
+    spike_kmh: num("gpsSpike", 200),
+    scope_track: $("gpsScopeTrack").checked,
+    scope_laps: $("gpsScopeLaps").checked,
+    scope_distance: $("gpsScopeDistance").checked,
+  };
+  const saved = await saveGps(config, "GPS 校正已存进侧车，正在重新载入…");
+  if (saved) setTimeout(() => window.location.reload(), 350);
+}
+
+async function loadGps() {
+  if (!DATA || !DATA.api) { renderGps(); return null; }
+  try {
+    const res = await fetch(DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/gps");
+    if (!res.ok) return null;
+    state.gps = await res.json();
+    renderGps();
+    return state.gps;
+  } catch (err) {
+    return null;
+  }
 }
 
 /* ------------------------------------------------------------ 数学通道 */
@@ -5808,6 +5985,9 @@ function init() {
   }
   renderSections();
   loadSections();
+  if ($("gpsApply")) $("gpsApply").addEventListener("click", applyGps);
+  renderGps();
+  loadGps();
   $("chClear").addEventListener("click", () => {
     setSelectedChannels([]);
     buildWorksheet();
@@ -5882,6 +6062,8 @@ window.i3pro = {
   renderNotes: renderNotes, addNoteAtCursor: addNoteAtCursor,
   updateNoteText: updateNoteText, removeNoteAt: removeNoteAt, saveNotes: saveNotes,
   drawNotes: drawNotes, noteAt: noteAt,
+  gpsState: gpsState, gpsNoteText: gpsNoteText, renderGps: renderGps, saveGps: saveGps,
+  applyGps: applyGps, loadGps: loadGps, renderTrackComponent: renderTrackComponent,
   renderMathsList: renderMathsList, openMathsEditor: openMathsEditor,
   closeMathsEditor: closeMathsEditor, mathsDraft: mathsDraft,
   mathsSaveList: mathsSaveList, applyMathsResponse: applyMathsResponse,

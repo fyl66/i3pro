@@ -585,6 +585,129 @@ class Checker:
                    any(b.get("time") is not None for b in disk["beacons"]))
         return disk
 
+    def gps(self, work_dir, session):
+        """#14：真鼠标勾「启用校正」、真键盘打时间偏移、真点「应用」。
+
+        这条只有真浏览器给得了答案的地方在两处：勾选与按钮**点得到**（假 DOM 里
+        disabled 的控件照样派发 click），以及"应用之后页面会重新载入"——重载是
+        刻意的（校正会改切圈边界、每条圈的里程与距离轴，下游太多），所以要真的
+        等到新页面起来，再读**新页面**里的轨迹，看它有没有按偏移量平移。
+        """
+        path = os.path.join(work_dir, session + ".gps.json")
+        if os.path.exists(path):
+            os.remove(path)
+
+        def on_disk():
+            if not os.path.exists(path):
+                return None
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    return json.load(handle)
+            except (OSError, ValueError):
+                return None
+
+        def rect(element_id):
+            raw = self.js("JSON.stringify(__rectOf('%s'))" % element_id)
+            return json.loads(raw) if raw and raw != "null" else None
+
+        def note_text():
+            return self.js("(document.getElementById('gpsNote')||{}).textContent||''")
+
+        def first_time():
+            return self.js("(i3pro.data.track&&i3pro.data.track.time||[null])[0]")
+
+        def wait_ready(timeout=25.0):
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                try:
+                    if self.js("!!(window.i3pro && i3pro.state && i3pro.data"
+                               " && i3pro.data.track && i3pro.data.gps)"):
+                        return True
+                except Exception:
+                    pass
+                time.sleep(0.25)
+            return False
+
+        self.check("#14 面板给出了这一场的坏定位计数",
+                   "标记：" in note_text(), note_text()[:80])
+        self.check("#14 缺省不校正（侧车还没写过）", on_disk() is None)
+        self.check("#14 「应用」在 serve 模式下点得到", not rect("gpsApply")["disabled"])
+        before_time = first_time()
+
+        # 1) 真鼠标勾上、真点应用 -> 侧车出现，页面重载
+        box = rect("gpsEnabled")
+        self.browser.click(box["x"], box["y"], self.session)
+        time.sleep(0.2)
+        self.check("#14 真鼠标点得动「启用校正」",
+                   self.js("document.getElementById('gpsEnabled').checked") is True)
+        apply_box = rect("gpsApply")
+        self.browser.click(apply_box["x"], apply_box["y"], self.session)
+        time.sleep(0.6)
+        disk = on_disk()
+        self.check("#14 点「应用」把配置写进侧车", bool(disk) and disk.get("enabled") is True,
+                   disk)
+        reloaded = wait_ready()
+        self.check("#14 应用之后页面重新载入并带上新配置", reloaded
+                   and self.js("i3pro.data.gps.config.enabled") is True)
+        if not reloaded:
+            return
+        # 重载会把注入的 HELPERS 一起冲掉，__rectOf / __center 得重新注入
+        self.browser.js(HELPERS, self.session)
+        self.check("#14 重载后面板说得出改了什么", "已应用" in note_text(), note_text()[:90])
+
+        # 2) 真键盘打 5 秒偏移，再应用 -> 新页面里轨迹整体平移 5 秒
+        offset_box = rect("gpsOffset")
+        self.browser.click(offset_box["x"], offset_box["y"], self.session)
+        self.browser.key_named("a", "KeyA", 65, self.session, modifiers=2)
+        self.browser.key("5", self.session)
+        self.check("#14 真键盘打得进时间偏移",
+                   str(self.js("document.getElementById('gpsOffset').value")) == "5")
+        apply_box = rect("gpsApply")
+        self.browser.click(apply_box["x"], apply_box["y"], self.session)
+        time.sleep(0.6)
+        disk = on_disk() or {}
+        self.check("#14 时间偏移存进了侧车", abs(float(disk.get("offset_s", 0)) - 5.0) < 1e-9,
+                   disk)
+        if not wait_ready():
+            self.check("#14 改偏移后页面重新载入", False)
+            return
+        self.browser.js(HELPERS, self.session)
+        after_time = first_time()
+        self.check("#14 轨迹真的平移了 5 秒（效果看得见，不只是存了个数）",
+                   after_time is not None and before_time is not None
+                   and abs((after_time - before_time) - 5.0) < 0.05,
+                   "%s -> %s" % (before_time, after_time))
+        # 页头说了"断开 N 处"，载荷里就得真有那么多断点；反过来，一场一个跳点、
+        # 一段空档都没有时（高避5圈）页头也不许凭空说有。两边一起判，是因为
+        # 单看一边都对得出来："总有东西可报"和"永远不报"都能骗过一半的断言。
+        head = self.js("(function(){var b=i3pro.bundleOf(i3pro.state.components"
+                       ".filter(function(c){return c.type==='track';})[0]);"
+                       "return b&&b.head?b.head.textContent:'';})()")
+        breaks = json.loads(self.js(
+            "JSON.stringify((i3pro.data.track&&i3pro.data.track.breaks)||[])") or "[]")
+        jumped = self.js("(i3pro.data.gps.summary||{}).jumps") or 0
+        self.check("#14 页头与载荷一致：真有断点才写「断开」，没有就不写",
+                   ("断开" in (head or "")) == (len(breaks) > 0),
+                   "%s | breaks=%s | 跳点=%s" % (head, breaks, jumped))
+        if jumped:
+            self.check("#14 这一场真有跳点，答案里就得有那处断开",
+                       len(breaks) > 0 and "断开 1 处" in (head or ""),
+                       "%s | breaks=%s" % (head, breaks))
+            # 断的必须是那 214 m 的幽灵线，而不是它前面那段正常线：抽稀一旦把断点
+            # 错算到桶首，图上就会画出一条通向跳点的直线（这一条正是真机截图抓出来的）
+            phantom = self.js(
+                "(function(){var t=i3pro.data.track,x=breaks=t.breaks||[];"
+                "if(!x.length)return 0;var i=x[0];"
+                "return Math.hypot(t.x[i]-t.x[i-1],t.y[i]-t.y[i-1]);})()")
+            self.check("#14 被断开的那一段就是幽灵线本身（不是它前面那段）",
+                       float(phantom or 0) > 200.0, "断开的段长 %s m" % phantom)
+
+        # 3) 收尾：删掉侧车，别把这一场的校正状态留给下一次运行
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
     def notes(self, work_dir, session):
         """#15：真鼠标加一条注释、真键盘改字、真点 ✕ 删掉，每一步都要落到侧车。
 
@@ -1279,6 +1402,7 @@ def main(argv=None):
             checker.histogram()
             checker.axis()
             checker.notes(work_dir, args.session)
+            checker.gps(work_dir, args.session)
             errors = browser.page_errors()
             checker.check("整场没有页面级报错", not errors, errors[:3])
         bad = [name for name, ok in checker.results if not ok]

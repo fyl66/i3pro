@@ -2164,6 +2164,100 @@ if (embeddedSpec && embeddedSpec.series) {
     api.renderNotes();
     api.renderAll();
   }
+
+  // 31. GPS 校正（#14）：坏定位**永远**标注（那是数据质量的事实），开关只决定
+  //     要不要按时移 / 插值去修正；轨迹图上不许跨着空档或跳点连线。
+  {
+    const gpsNote = registry.get("gpsNote");
+    check(!!gpsNote, "GPS 校正面板没建出来");
+
+    api.state.gps = {
+      config: { enabled: false, offset_s: 0, offset_ratio: 0, resample: false,
+                spike_kmh: 200, gap_s: 1, scope_track: true, scope_laps: true,
+                scope_distance: false },
+      stored: false, error: null, applied: null, notice: null,
+      summary: { samples: 38860, no_fix: 638, low_sats: 0, jumps: 1, worst_jump_m: 214.48,
+                 holes: 2, longest_hole_s: 279.4, segments: 3, spike_kmh: 200,
+                 gap_s: 1, rate: 20 },
+    };
+    api.renderGps();
+    const off = String(gpsNote.textContent);
+    check(off.indexOf("跳点 1 处") >= 0 && off.indexOf("214.5") >= 0,
+      "面板没念出跳点: " + off);
+    check(off.indexOf("空定位 638 点") >= 0, "面板没念出空定位: " + off);
+    check(off.indexOf("空档 2 段") >= 0 && off.indexOf("279.4") >= 0,
+      "面板没念出空档: " + off);
+    check(off.indexOf("启用校正") >= 0, "没开的时候要说清怎么开: " + off);
+    check(registry.get("gpsEnabled").checked === false, "缺省就不是开启");
+    check(Number(registry.get("gpsSpike").value) === 200, "阈值没填进输入框");
+
+    api.state.gps = {
+      config: { enabled: true, offset_s: 0.25, offset_ratio: 0, resample: true,
+                spike_kmh: 800, gap_s: 1, scope_track: true, scope_laps: true,
+                scope_distance: false },
+      stored: true, error: null, notice: null,
+      summary: { samples: 38860, no_fix: 638, low_sats: 0, jumps: 1, worst_jump_m: 214.48,
+                 holes: 2, longest_hole_s: 279.4, segments: 3, spike_kmh: 800,
+                 gap_s: 1, rate: 20 },
+      applied: { enabled: true, offset_s: 0.25, resampled: true, samples_before: 38860,
+                 samples: 194292, segments: 4, breaks: 4, scope_track: true, scope_laps: true,
+                 scope_distance: false },
+    };
+    api.renderGps();
+    const on = String(gpsNote.textContent);
+    check(on.indexOf("已应用") >= 0 && on.indexOf("0.25") >= 0,
+      "开了之后要念出改了什么: " + on);
+    check(on.indexOf("194292") >= 0 && on.indexOf("断开 4 处") >= 0,
+      "插值点数与断开段数都要念出来: " + on);
+    check(registry.get("gpsEnabled").checked === true
+      && registry.get("gpsResample").checked === true,
+      "配置没回填到复选框");
+    check(registry.get("gpsScopeDistance").checked === false,
+      "距离轴缺省不跟着变（圈速/区段/报表都建在速度积分的距离轴上）");
+    check(registry.get("gpsApply").disabled === !api.data.api,
+      "快照模式下「应用」该是禁用的");
+
+    const trackComp = api.state.components.find((c) => c.type === "track");
+    check(!!trackComp, "这张工作表里没有轨迹组件，断线那条没验到");
+    if (trackComp) {
+      const b = api.bundleOf(trackComp);
+      const xs = [], ys = [], sp = [], tm = [];
+      for (let i = 0; i < 21; i++) {
+        xs.push(i * 5); ys.push((i % 5) * 3); sp.push(40 + i); tm.push(i * 0.1);
+      }
+      trackComp.config.window = "all";
+      api.state.mode = "time";
+      api.state.track = { x: xs, y: ys, speed: sp, time: tm, breaks: [], jump_times: [],
+                          holes: [], speed_channel: "Vx KF", origin: [22.6, 114.0] };
+      let seen = calls.lineTo;
+      api.renderTrackComponent(trackComp, b);
+      const whole = calls.lineTo - seen;
+      check(whole > 0, "整条轨迹一段线都没画");
+
+      api.state.track.breaks = [7, 13];
+      seen = calls.lineTo;
+      api.renderTrackComponent(trackComp, b);
+      check(calls.lineTo - seen === whole - 2,
+        "断开两处就该少画两段线：整条 " + whole + "，断开后 " + (calls.lineTo - seen));
+      check(String(b.head.textContent).indexOf("断开 2 处") >= 0,
+        "抬头要说清断了几处: " + b.head.textContent);
+
+      api.state.track.jump_times = [0.6];
+      const arcs = calls.arc;
+      api.renderTrackComponent(trackComp, b);
+      check(calls.arc > arcs, "跳点要在轨迹图上画成红点");
+
+      // 没有 breaks 字段的旧载荷不能崩：老快照 / 老接口照旧画得出来
+      api.state.track = { x: xs, y: ys, speed: sp, time: tm, speed_channel: "Vx KF",
+                          origin: [22.6, 114.0] };
+      seen = calls.lineTo;
+      api.renderTrackComponent(trackComp, b);
+      check(calls.lineTo - seen === whole, "没有 breaks 字段时该按整条画");
+    }
+    api.state.track = (api.data && api.data.track) || null;
+    api.state.gps = (api.data && api.data.gps) || null;
+    api.renderGps();
+  }
 }
 
 /* --------------------------------------------------------------- DOM checks */

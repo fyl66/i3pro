@@ -26,6 +26,7 @@ from typing import Iterable
 import numpy as np
 
 from . import derive
+from . import gpsfix
 from . import ld as ldmod
 
 __all__ = [
@@ -312,13 +313,17 @@ def gps_laps(
     speed_threshold: float = 8.0,
     heading_tolerance: float = math.radians(75.0),
     gate: tuple[float, float] | None = None,
+    fix: "gpsfix.FixConfig | None" = None,
 ) -> list[tuple[float, float, str, bool]]:
     """Start/finish gate crossing detection on the GPS trajectory.
 
     ``gate`` is an explicit (lat, lon) start/finish point - the manual beacon the
     user drops on the track map. Without it the gate is chosen automatically.
+    ``fix`` 是这一场的 GPS 校正；只有它自己开着 ``enabled`` 且 ``scope_laps``
+    打开时才生效（关闭时与旧实现完全一致）。
     """
-    track = derive.gps_track(log)
+    config = gpsfix.resolve(log, fix, "laps")
+    track = derive.gps_track(log, fix=config, scope="laps")
     t = track["time"]
     x, y = track["x"], track["y"]
     master_t = _master_time(log)
@@ -343,6 +348,9 @@ def gps_laps(
     # Split the track where the receiver dropped out: a position jump across a
     # gap must never be mistaken for a start/finish crossing.
     gaps = np.flatnonzero(np.diff(t) > 1.5) + 1
+    if config.enabled and "breaks" in track:
+        # 校正打开时，跳点也当成一次断开：一次 214 m 的错位定位不该被认成过门。
+        gaps = np.union1d(gaps, np.flatnonzero(track["breaks"]))
     segments = [s for s in np.split(np.arange(len(t)), gaps) if s.size > 2]
 
     # Driving phase: first moment the car is *sustainedly* moving.
@@ -402,9 +410,13 @@ def gps_laps(
     return bounds
 
 
-def winding_laps(log: ldmod.LogFile, min_lap_time: float = 8.0) -> list[tuple[float, float, str, bool]]:
+def winding_laps(
+    log: ldmod.LogFile,
+    min_lap_time: float = 8.0,
+    fix: "gpsfix.FixConfig | None" = None,
+) -> list[tuple[float, float, str, bool]]:
     """Laps from the angle swept around the centroid of the GPS track."""
-    track = derive.gps_track(log)
+    track = derive.gps_track(log, fix=gpsfix.resolve(log, fix, "laps"), scope="laps")
     t, x, y = track["time"], track["x"], track["y"]
     cx, cy = float(np.mean(x)), float(np.mean(y))
     angle = np.unwrap(np.arctan2(y - cy, x - cx))
@@ -492,6 +504,7 @@ def detect_laps(
     method: str = "auto",
     gate: tuple[float, float] | None = None,
     beacons: list[float] | None = None,
+    fix: "gpsfix.FixConfig | None" = None,
     **kwargs,
 ) -> list[Lap]:
     """Split a log into laps and attach cumulative distance to each one.
@@ -499,12 +512,15 @@ def detect_laps(
     ``gate`` is an explicit start/finish point as (lat, lon) - it replaces the
     automatically chosen one. ``beacons`` is an explicit list of crossing times
     in seconds, which wins over everything else.
+    ``fix`` 是这一场的 GPS 校正（``gpsfix.FixConfig``）：距离轴按 ``scope_distance``、
+    切圈按 ``scope_laps`` 决定要不要用它。
     """
+    laps_fix = gpsfix.resolve(log, fix, "laps")
     try:
-        distance = derive.distance_series(log)
+        distance = derive.distance_series(log, fix=fix)
     except ValueError:
         # dead speed bus: fall back to the GPS path length
-        track = derive.gps_track(log)
+        track = derive.gps_track(log, fix=laps_fix, scope="laps")
         rate = log.sample_rate
         time = _master_time(log)
         gps_speed = np.gradient(track["x"]), np.gradient(track["y"])
@@ -519,7 +535,7 @@ def detect_laps(
             if end > start
         ]
     elif gate is not None:
-        bounds = gps_laps(log, gate=gate, **kwargs)
+        bounds = gps_laps(log, gate=gate, fix=fix, **kwargs)
     elif method in ("auto", "beacon"):
         label_channel = _counter_channel(log, LAP_NUMBER_CHANNELS)
         if label_channel:
@@ -531,15 +547,15 @@ def detect_laps(
             elif method == "beacon":
                 raise ValueError(f"{log.path.name}: no live beacon/lap channel")
             else:
-                bounds = gps_laps(log, **kwargs)
+                bounds = gps_laps(log, fix=fix, **kwargs)
     elif method == "gps":
-        bounds = gps_laps(log, **kwargs)
+        bounds = gps_laps(log, fix=fix, **kwargs)
     elif method == "winding":
-        bounds = winding_laps(log, **kwargs)
+        bounds = winding_laps(log, fix=fix, **kwargs)
     elif method == "run":
         bounds = run_laps(log, **kwargs)
     elif method == "figure8":
-        bounds = figure8_laps(log, **kwargs)
+        bounds = figure8_laps(log, fix=fix, **kwargs)
     else:
         raise ValueError(f"unknown lap detection method: {method!r}")
     min_time = kwargs.get("min_lap_time", 8.0)
@@ -548,7 +564,7 @@ def detect_laps(
     laps = _lap_from_bounds(log, distance, bounds)
     if method == "figure8":
         try:
-            track = derive.gps_track(log)
+            track = derive.gps_track(log, fix=laps_fix, scope="laps")
         except ValueError:
             track = None
         if track is not None:
@@ -599,11 +615,12 @@ def overlay(
     laps: list[Lap],
     channels: list[str],
     step: float = 1.0,
+    fix: "gpsfix.FixConfig | None" = None,
 ) -> dict:
     """Resample the given laps onto one shared distance grid."""
     rate = log.sample_rate
     time = _master_time(log)
-    distance = derive.distance_series(log)
+    distance = derive.distance_series(log, fix=fix)
     distance = distance[: time.size]
     series = {name: derive.hold_to_master(log, name) for name in channels}
 
@@ -1010,22 +1027,30 @@ def save_config(ld_path: str | Path, config: LapConfig) -> Path:
     return path
 
 
-def detect_from_config(log: ldmod.LogFile, config: LapConfig | None = None) -> list[Lap]:
+def detect_from_config(
+    log: ldmod.LogFile,
+    config: LapConfig | None = None,
+    fix: "gpsfix.FixConfig | None" = None,
+) -> list[Lap]:
     """Run detection using whatever the user configured for this session."""
     config = config if config is not None else load_config(log.path)
     if config.beacons:
-        return _laps_for_beacons(log, config)
+        return _laps_for_beacons(log, config, fix=fix)
     mode = config.mode
     if mode not in ("auto", "run", "figure8"):
         mode = "auto"                     # unknown/legacy value -> automatic
-    laps = detect_laps(log, method=mode)
+    laps = detect_laps(log, method=mode, fix=fix)
     for lap in laps:
         if lap.label in config.trusted:
             lap.complete = config.trusted[lap.label]
     return laps
 
 
-def _laps_for_beacons(log: ldmod.LogFile, config: LapConfig) -> list[Lap]:
+def _laps_for_beacons(
+    log: ldmod.LogFile,
+    config: LapConfig,
+    fix: "gpsfix.FixConfig | None" = None,
+) -> list[Lap]:
     """One independent lap series per beacon.
 
     A figure-of-eight gets one beacon per loop, so each loop is timed on its own
@@ -1034,13 +1059,17 @@ def _laps_for_beacons(log: ldmod.LogFile, config: LapConfig) -> list[Lap]:
     series it is closest to in time, or - when no placed beacon produced a series
     - into the boundaries the session already has.
     """
-    distance = distance_on_master(log)
+    distance = distance_on_master(log, fix=fix)
     placed = [b for b in config.beacons if b.has_position]
     timed = sorted(b.time for b in config.beacons if not b.has_position and b.time is not None)
 
     series = []
     for beacon in placed:
-        bounds = [b for b in gps_laps(log, gate=(beacon.lat, beacon.lon)) if b[1] - b[0] >= 4.0]
+        bounds = [
+            b
+            for b in gps_laps(log, gate=(beacon.lat, beacon.lon), fix=fix)
+            if b[1] - b[0] >= 4.0
+        ]
         if not bounds:
             continue
         series.append({
@@ -1050,7 +1079,7 @@ def _laps_for_beacons(log: ldmod.LogFile, config: LapConfig) -> list[Lap]:
         })
 
     if not series:
-        laps = _laps_with_inserted_crossings(log, config, distance)
+        laps = _laps_with_inserted_crossings(log, config, distance, fix=fix)
     else:
         for when in timed:                  # merge each missed crossing by time
             nearest = min(series, key=lambda s: min(abs(when - e) for e in s["edges"]))
@@ -1074,7 +1103,10 @@ def _laps_for_beacons(log: ldmod.LogFile, config: LapConfig) -> list[Lap]:
 
 
 def _laps_with_inserted_crossings(
-    log: ldmod.LogFile, config: LapConfig, distance: np.ndarray
+    log: ldmod.LogFile,
+    config: LapConfig,
+    distance: np.ndarray,
+    fix: "gpsfix.FixConfig | None" = None,
 ) -> list[Lap]:
     """Insert hand-entered crossings into the boundaries the session already has.
 
@@ -1088,7 +1120,7 @@ def _laps_with_inserted_crossings(
     )
     mode = config.mode if config.mode in ("auto", "run", "figure8") else "auto"
     try:
-        base = detect_laps(log, method=mode)
+        base = detect_laps(log, method=mode, fix=fix)
     except ValueError:
         base = []
     if base:
@@ -1104,12 +1136,14 @@ def _laps_with_inserted_crossings(
     return _flag_implausible(_lap_from_bounds(log, distance, bounds))
 
 
-def distance_on_master(log: ldmod.LogFile) -> np.ndarray:
+def distance_on_master(
+    log: ldmod.LogFile, fix: "gpsfix.FixConfig | None" = None
+) -> np.ndarray:
     """Cumulative distance on the master time base, with the GPS fallback."""
     try:
-        return derive.distance_series(log)
+        return derive.distance_series(log, fix=fix)
     except ValueError:
-        track = derive.gps_track(log)
+        track = derive.gps_track(log, fix=gpsfix.resolve(log, fix, "distance"), scope="distance")
         time = _master_time(log)
         speed = np.hypot(np.gradient(track["x"]), np.gradient(track["y"])) * track["rate"]
         return np.interp(time, track["time"], np.cumsum(speed) / track["rate"])

@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import derive, histogram as histogrammod, laps as lapsmod
+from . import derive, gpsfix, histogram as histogrammod, laps as lapsmod
 from . import notes as notesmod, report as reportmod, sections as sectionsmod
 from . import ld as ldmod
 from . import spectrum as spectrummod
@@ -490,6 +490,32 @@ def downsample(
     return out
 
 
+def _downsample_breaks(breaks: np.ndarray, step: int) -> np.ndarray:
+    """抽稀时"断开"一个字都不能丢：一格里面断过一次，这一格就断。
+
+    轨迹载荷会被抽稀到 1500 点，而跳点可能只有一个采样（0.05 s），直接按步长取值
+    会把它整段丢掉——那样图上又会连出一条不存在的直线。
+
+    **断在哪一段**才是容易错的地方：``breaks[i]`` 指的是"第 ``i-1`` 与第 ``i`` 个点
+    之间不许连线"。抽稀之后，第 ``k`` 个点代表源数据第 ``k*step`` 个采样，所以源
+    下标 ``i`` 处那个断点落在**被画出来的**第 ``t = (i-1)//step`` 段里（第 ``t`` 与
+    第 ``t+1`` 个抽稀点之间），要断的是那一段，不是桶首那一段。早先按桶首算，结果
+    跳过了跳变前面那 0.2 m 的正常段，反而把 214 m 的幽灵线画了出来（真机截图抓到的）。
+    """
+    flags = np.asarray(breaks, dtype=bool)
+    if step <= 1 or flags.size == 0:
+        return flags.copy()
+    # shifted[j] = flags[j+1]：把"落在第 i 个点上的断点"挪到第 i-1 位上，这样
+    # 按桶取 or 得到的就是"(i-1)//step == 桶号"的那个断点
+    shifted = np.zeros_like(flags)
+    shifted[:-1] = flags[1:]
+    in_bucket = np.maximum.reduceat(shifted, np.arange(0, flags.size, step))
+    out = np.zeros_like(in_bucket)
+    out[1:] = in_bucket[:-1]
+    out[0] = False
+    return out
+
+
 def channel_index(log: ldmod.LogFile) -> list[dict]:
     """Name / unit / rate for every channel, so the UI can search all of them."""
     derived = getattr(log, "derived_names", ())
@@ -630,6 +656,7 @@ def track_payload(
     points: int = 1500,
     start: float | None = None,
     end: float | None = None,
+    fix: "gpsfix.FixConfig | None" = None,
 ) -> dict | None:
     """GPS trajectory in local metres, coloured by the best available speed.
 
@@ -637,20 +664,39 @@ def track_payload(
     returned - i2 Pro's GPS Track component can plot either the whole selected
     data or just the zoomed data, and showing the lap you are looking at is what
     makes the map useful while analysing a corner.
+
+    ``breaks`` 是给画线用的：里面每个下标都表示"这里不许和上一点连线"。
+    空档（掉星）与跳点（一次 214 m 的错位定位）都算断开——轨迹图上不画一条
+    不存在的直线，比画出来再说"其实那里没数据"要诚实。
     """
     try:
-        track = derive.gps_track(log)
+        # fix=None -> 按这个场次侧车里的「轨迹」作用域；显式传配置则原样用
+        track = derive.gps_track(log, fix=fix)
     except ValueError:
         return None
     time = track["time"]
     x, y = track["x"], track["y"]
     lat, lon = track["lat"], track["lon"]
+    breaks = np.asarray(track.get("breaks", np.zeros(time.size, dtype=bool)), dtype=bool)
+    if breaks.size != time.size:
+        breaks = np.zeros(time.size, dtype=bool)
+    jump_rows = list(track.get("jump_rows") or [])
+    holes = list(track.get("holes") or [])
     if start is not None or end is not None:
         lo = 0 if start is None else int(np.searchsorted(time, start))
         hi = time.size if end is None else int(np.searchsorted(time, end))
         lo, hi = max(0, lo), min(time.size, hi)
         time, x, y = time[lo:hi], x[lo:hi], y[lo:hi]
         lat, lon = lat[lo:hi], lon[lo:hi]
+        breaks = breaks[lo:hi]
+        jump_rows = [
+            r for r in jump_rows if (start is None or r["to"] >= start)
+            and (end is None or r["from"] <= end)
+        ]
+        holes = [
+            h for h in holes if (start is None or h["to"] >= start)
+            and (end is None or h["from"] <= end)
+        ]
     if time.size < 2:
         return None
     speed_name = next((n for n in SPEED_FOR_COLORING if log.has(n)), None)
@@ -660,6 +706,7 @@ def track_payload(
         master = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
         speed = np.interp(time, master, derive.hold_to_master(log, speed_name))
     step = max(1, time.size // max(1, points))
+    breaks_out = _downsample_breaks(breaks, step)
     return {
         "x": np.round(x[::step], 2).tolist(),
         "y": np.round(y[::step], 2).tolist(),
@@ -668,9 +715,69 @@ def track_payload(
         "speed_channel": speed_name,
         "lat": np.round(lat[::step], 7).tolist(),
         "lon": np.round(lon[::step], 7).tolist(),
+        # 抽稀之后"要不要断开"：只要这一格里断过一次，这一格就断
+        "breaks": [int(i) for i in np.flatnonzero(breaks_out)],
+        "jump_times": [round(float(r["from"]), 3) for r in jump_rows],
+        "holes": [
+            {
+                "from": round(float(h["from"]), 3),
+                "to": round(float(h["to"]), 3),
+                "seconds": round(float(h["seconds"]), 3),
+            }
+            for h in holes
+        ],
+        "fix": track.get("fix"),
+        "dropped": track.get("dropped"),
         # local frame origin, so a click on the map can be turned back into lat/lon
         "origin": list(track.get("origin") or (float(track["lat"][0]), float(track["lon"][0]))),
     }
+
+
+def gps_payload(log: ldmod.LogFile, config: "gpsfix.FixConfig | None" = None) -> dict:
+    """GPS 校正面板的载荷：当前配置 + "这段数据坏在哪"的实测计数。
+
+    计数永远按**原始**轨迹算（那才是"数据有多脏"的答案）；校正生效时另外给一份
+    ``applied``，说明它到底改了什么。面板上两句话都在，用户不用猜。
+    """
+    stored = None
+    error = None
+    try:
+        stored = gpsfix.load_config(log.path)
+    except ValueError as exc:
+        error = str(exc)
+    cfg = config if config is not None else (stored or gpsfix.FixConfig())
+    out: dict = {
+        "config": cfg.as_dict(),
+        "stored": stored is not None,
+        "error": error,
+        "summary": None,
+        "applied": None,
+        "notice": None,
+    }
+    try:
+        # 只用来数坏点：阈值按用户设的走，但不做时移 / 插值
+        base = derive.gps_track(
+            log,
+            fix=gpsfix.FixConfig(spike_kmh=cfg.spike_kmh, gap_s=cfg.gap_s),
+        )
+    except ValueError as exc:
+        out["notice"] = f"这场记录没有可用的 GPS 轨迹：{exc}"
+        return out
+    out["summary"] = gpsfix.summary(base, cfg)
+    if cfg.enabled and cfg.scope_track:
+        fixed = derive.gps_track(log, fix=cfg, scope="track")
+        out["applied"] = {
+            **(fixed.get("fix") or {}),
+            "segments": int(fixed.get("segments") or 1),
+            # 断开几处 = 抽稀前算出来的断点数（空档 + 跳点），不是"分了几段"
+            "breaks": int(np.count_nonzero(fixed.get("breaks"))),
+            "samples": int(np.asarray(fixed["time"]).size),
+        }
+    elif cfg.enabled:
+        # 校正开着、但「轨迹」这一格没勾：图上看到的还是原始定位。不说清楚，
+        # 用户会以为校正没生效，然后去调偏移量。
+        out["notice"] = "校正已开，但「轨迹」这一格没勾——图上画的仍是原始定位。"
+    return out
 
 
 def notes_payload(log: ldmod.LogFile, track: dict | None = None) -> list[dict]:
@@ -872,6 +979,8 @@ def build_payload(
         # 由 /api/session/<名>/notes 现算（那边拿得到 GPS 轨迹）。
         "notes": notes_payload(log, track),
         "sections": sections_payload(log, recognized),
+        # GPS 校正（ticket #14）：面板要的配置 + 这段数据坏在哪的实测计数
+        "gps": gps_payload(log),
         "report": (
             _snapshot_report_or_error(log, recognized, selected) if with_report else None
         ),

@@ -30,6 +30,7 @@ import numpy as np
 from . import (
     csvlog,
     derive,
+    gpsfix,
     histogram as histogrammod,
     importer,
     laps as lapsmod,
@@ -560,6 +561,13 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                     return self.save_notes(log)
                 return self._json({"notes": render.notes_payload(log, render.track_payload(log))})
 
+            if action == "gps":
+                # GPS 校正（ticket #14）：GET 看当前配置 + "这段数据坏在哪"的计数，
+                # PUT 存整份配置。侧车 `<场次>.gps.json`，`.ld` 永远只读。
+                if method == "PUT":
+                    return self.save_gps(log)
+                return self._json(render.gps_payload(log))
+
             if action == "report":
                 # 时间报告 / 通道报告（ticket #11）。GET 一张或两张表；
                 # 带 csv=time|channels 时直接吐 CSV，方便命令行与队友核对。
@@ -756,6 +764,36 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
             return lapsmod.undo_config(current, library.laps_undo_slot(log.path)) is not None
 
         # ------------------------------------------------------------ upload
+        def save_gps(self, log) -> None:
+            """PUT /api/session/<name>/gps：整份 GPS 校正配置。
+
+            只认整份（和区段、注释一个规矩）：增量合并会让"关掉一半"这种状态
+            没法表达。参数校验全在 ``gpsfix.FixConfig.from_dict`` 一处，报错带
+            下一步（哪个字段、什么范围）。
+            """
+            try:
+                data = self._read_json()
+            except (ValueError, UnicodeDecodeError) as exc:
+                return self._error(400, str(exc))
+            if not isinstance(data, dict):
+                return self._error(400, "需要一个 JSON 对象")
+            raw = data.get("config") if isinstance(data.get("config"), dict) else data
+            try:
+                config = gpsfix.FixConfig.from_dict(raw)
+            except ValueError as exc:
+                return self._error(400, str(exc))
+            try:
+                path = gpsfix.save_config(log.path, config)
+            except OSError as exc:
+                return self._error(
+                    500,
+                    f"GPS 侧车写不进去（{type(exc).__name__}: {exc}）。"
+                    f"检查 {gpsfix.config_path(log.path)} 所在目录能不能写。",
+                )
+            payload = render.gps_payload(log, config)
+            payload["saved"] = path.name
+            self._json(payload)
+
         def save_sections(self, log) -> None:
             """PUT /api/session/<name>/sections：重切（``auto``）或手工改边界 / 名字。
 

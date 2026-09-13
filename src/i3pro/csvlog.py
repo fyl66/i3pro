@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import math
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -221,6 +221,15 @@ class CsvSession:
     log_time: str
     event_name: str
     report: list[dict]
+    #: 数学通道的列放进 ``columns``（CSV 没有原生/派生的存储之分），名字与单位
+    #: 和 ``.ld`` 会话一样在这里**声明**，下游走同一条缝（见 channels.py，ticket #18）。
+    derived_names: set[str] = field(default_factory=set)
+    derived_units: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def derived_target(self) -> dict[str, np.ndarray]:
+        """数学通道的列放哪（CSV 会话与原生列同住 ``columns``）。"""
+        return self.columns
 
     def channel(self, name: str) -> ldmod.Channel:
         for ch in self.channels:

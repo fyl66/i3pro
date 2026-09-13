@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import channels as channelsmod
 from . import derive, gpsfix, histogram as histogrammod, laps as lapsmod
 from . import notes as notesmod, report as reportmod, sections as sectionsmod
 from . import ld as ldmod
@@ -377,16 +378,17 @@ def spectrum(
             f"名字里含空格 / 括号 / 短横线的，在表达式里要用单引号括起来。"
         )
     channel = log.channel(name)
-    derived = ldmod.is_derived_channel(log, channel)
-    # 派生列（数学通道）在主时间基上，原生通道用自己那一档。
-    fs = float(log.sample_rate if derived else channel.sample_rate)
+    # 数学通道在主时间基上，原生通道用自己那一档——这条规则只在 channels.py 里实现
+    # （ticket #18；以前这里、切圈、Parquet 各写了一遍）。
+    derived = channelsmod.is_derived(log, channel)
+    fs = channelsmod.sample_rate(log, channel)
     values = np.asarray(log.values(channel), dtype=np.float64)
     lo = 0 if start is None else max(0, int(round(float(start) * fs)))
     hi = values.size if end is None else min(values.size, int(round(float(end) * fs)))
     if hi <= lo:
         return {
             "channel": name,
-            "unit": channel.unit,
+            "unit": channelsmod.unit(log, channel),
             "frequencies": [], "power": [],
             "points": 0, "sample_rate": fs, "nyquist": fs / 2.0,
             "resolution": None, "segments": 0, "samples": 0,
@@ -403,7 +405,7 @@ def spectrum(
     payload["frequencies"] = [float(v) for v in payload["frequencies"]]
     payload["power"] = [float(v) for v in payload["power"]]
     payload["channel"] = name
-    payload["unit"] = channel.unit
+    payload["unit"] = channelsmod.unit(log, channel)
     payload["derived"] = derived
     payload["window_range"] = [round(lo / fs, 4), round(max(lo, hi - 1) / fs, 4)]
     if name.endswith(" Temp") and payload["peak_frequency"] and payload["peak_frequency"] < 0.05:
@@ -518,23 +520,9 @@ def _downsample_breaks(breaks: np.ndarray, step: int) -> np.ndarray:
 
 def channel_index(log: ldmod.LogFile) -> list[dict]:
     """Name / unit / rate for every channel, so the UI can search all of them."""
-    derived = getattr(log, "derived_names", ())
-    derived_units = getattr(log, "derived_units", None) or {}
-    out = []
-    for ch in log.channels:
-        # 数学通道算出来的列在主时间基上，单位和采样率都以它的定义为准；
-        # 与一条慢的原生通道同名时，界面不能还显示那条原生通道的 1 Hz。
-        is_derived = ch.name in derived
-        out.append(
-            {
-                "name": ch.name,
-                "unit": derived_units.get(ch.name, ch.unit) if is_derived else ch.unit,
-                "rate": log.sample_rate if is_derived else ch.sample_rate,
-                "samples": ch.sample_count,
-                "derived": is_derived,
-            }
-        )
-    return out
+    # 数学通道算出来的列在主时间基上，单位和采样率都以它的定义为准；与一条慢的原生
+    # 通道同名时，界面不能还显示那条原生通道的 1 Hz。差别只在 channels.py 里判一次。
+    return [channelsmod.info(log, ch) for ch in log.channels]
 
 
 def trace(
@@ -561,12 +549,10 @@ def trace(
     else:
         payload = downsample(time, values, distance, buckets)
     # 数学通道的单位来自它的定义，采样率是主时间基——哪怕它和一条慢的原生通道同名
+    # （这条判断在 channels.py 里，ticket #18）
     channel = log.channel(name)
-    derived_units = getattr(log, "derived_units", None)
-    payload["unit"] = (derived_units or {}).get(name, channel.unit)
-    payload["rate"] = (
-        log.sample_rate if ldmod.is_derived_channel(log, channel) else channel.sample_rate
-    )
+    payload["unit"] = channelsmod.unit(log, channel)
+    payload["rate"] = channelsmod.sample_rate(log, channel)
     return payload
 
 

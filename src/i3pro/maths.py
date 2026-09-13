@@ -1499,39 +1499,22 @@ def attach(session, resolved: dict[str, np.ndarray], definitions: list[Definitio
     """把算出来的列挂到场次上，让下游（图表、切圈、报表）当原生通道用。
 
     ``.ld`` 会话把列放进 ``LogFile.derived``，CSV 会话放进 ``CsvSession.columns``
-    ——两条来源共用同一套下游代码，不需要各自加分支。
+    ——两条来源共用同一套下游代码，不需要各自加分支。**放哪儿由 ``channels.py``
+    问会话自己**（``derived_target``），这里不再用 ``hasattr`` 嗅探会话类型。
     """
+    from . import channels as channelsmod
     from . import ld as ldmod
 
     detach(session)
     meta = {d.name: d for d in definitions}
     added: list[str] = []
     existing = {ch.name for ch in session.channels}
-    # 让下游（通道索引、界面角标）能一眼看出哪些是算出来的
-    if hasattr(session, "derived_names"):
-        known = session.derived_names
-    else:
-        known = set()
-        try:
-            session.derived_names = known
-        except AttributeError:      # pragma: no cover - 只读会话
-            pass
-    if hasattr(session, "derived_units"):
-        units = session.derived_units
-    else:
-        units = {}
-        try:
-            session.derived_units = units
-        except AttributeError:      # pragma: no cover
-            pass
     for name, values in resolved.items():
         definition = meta.get(name)
-        if hasattr(session, "derived"):          # LogFile
-            session.derived[name] = values
-        elif hasattr(session, "columns"):        # CsvSession
-            session.columns[name] = values
-        known.add(name)
-        units[name] = (definition.unit if definition else "") or ""
+        # 列、名字、单位一起交给 channels：界面角标与下游用的就是这三样
+        channelsmod.attach(
+            session, name, values, (definition.unit if definition else "") or ""
+        )
         if name in existing:
             continue
         session.channels.append(
@@ -1562,23 +1545,13 @@ def detach(session) -> None:
     删掉一条定义之后不能留下"幽灵通道"：那个名字还在通道列表里、点开却取不到值，
     是比"删了没反应"更难查的毛病。
     """
-    if not hasattr(session, "derived_names"):
-        return
-    names = session.derived_names
+    from . import channels as channelsmod
+
+    names = set(channelsmod.names(session))
     if not names:
         return
-    has_derived = hasattr(session, "derived")
-    has_columns = hasattr(session, "columns")
-    has_units = hasattr(session, "derived_units")
-    for name in list(names):
-        if has_derived:
-            session.derived.pop(name, None)
-        elif has_columns:
-            session.columns.pop(name, None)
-        if has_units:
-            session.derived_units.pop(name, None)
+    channelsmod.clear(session)
     # 只删我们自己加进去的：原生通道带着文件里的 channel_id，派生通道是 -1
     session.channels = [
         ch for ch in session.channels if not (ch.name in names and ch.channel_id < 0)
     ]
-    names.clear()

@@ -9,6 +9,7 @@ Run:  python -m unittest discover -s tests -v
 from __future__ import annotations
 
 import json
+import dataclasses
 import os
 import shutil
 import subprocess
@@ -27,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from i3pro import (  # noqa: E402
-    csvlog, derive, gpsfix, laps as lapsmod, ld, maths as mathsmod, motec_csv,
+    channels, csvlog, derive, gpsfix, laps as lapsmod, ld, maths as mathsmod, motec_csv,
     notes as notesmod, render, report as reportmod, sections as sectionsmod,
     server, store,
 )
@@ -1570,6 +1571,62 @@ class TestViewerScript(unittest.TestCase):
         self.assertIn("instructions", finished.stdout)
 
 
+class TestComponentRegistry(unittest.TestCase):
+    """ticket #17：每种显示形式只在注册表里声明一次。
+
+    守的是"再加一种显示形式要改几处"这件事本身——前端唯一会被反复加东西的
+    地方就是它。已经迁进注册表的类型，代码里不该再有 `type === "..."` 那种
+    分派；还没迁完的（#19 图表类 / #20 表格与仪表类）不在此列。
+
+    这里只扫源码，跑不了注册表本身；注册表"真的管用"由无头驱动的第 32 组断言
+    （`tools/smoke_viewer.js`）负责——它会新加一个只声明过的形式并走完
+    添加下拉 → 标题 → 默认配置 → 渲染 → 分享链接往返。
+    """
+
+    VIEWER = ROOT / "src" / "i3pro" / "web" / "viewer.html"
+    DRIVER = ROOT / "tools" / "smoke_viewer.js"
+
+    #: 迁移完成的类型：它们的形状只该由注册表声明说了算。
+    MIGRATED = ("delta", "status", "track")
+
+    def test_已迁移的类型不再留类型分派分支(self):
+        source = self.VIEWER.read_text(encoding="utf-8")
+        for name in self.MIGRATED:
+            for pattern in (f'type === "{name}"', f"type !== \"{name}\"",
+                            f"type === '{name}'"):
+                self.assertNotIn(
+                    pattern, source,
+                    f"{name} 既然已经迁进注册表，就不该再有 {pattern} 这种分派；"
+                    "要么把漏掉的那处也交给声明，要么把状态改回未迁移。",
+                )
+
+    def test_注册表里三类形式各自声明了该声明的东西(self):
+        source = self.VIEWER.read_text(encoding="utf-8")
+        declared = {
+            'render: renderDeltaComponent,': "Δ 的 render",
+            'render: renderStatusComponent,': "状态与故障的 render",
+            "needs: (comp, add) => (DATA.status || []).forEach(add),": "状态通道的取数需求",
+            'hotkey: "e",': "E 键归谁管",
+            'defaults: () => ({ channel: null, window: "all" }),': "轨迹的默认配置",
+            "controls: trackControls,": "轨迹的控件条",
+            'hooks: (comp, b) => b.canvas.addEventListener("click"': "轨迹的点击事件",
+            "refreshWindow:": "缩放后要不要重新取数",
+            "render: renderTrackComponent,": "轨迹的 render",
+        }
+        for needle, what in declared.items():
+            self.assertIn(needle, source, f"注册表里少了{what}")
+
+    def test_自检用的形式只在无头驱动里注册(self):
+        """队员的浏览器里不许出现「只有标题（自检）」这种东西。"""
+        source = self.VIEWER.read_text(encoding="utf-8")
+        self.assertIn('window.__I3PRO_SELFTEST__', source,
+                      "注册表里的自检形式必须挂在 __I3PRO_SELFTEST__ 上，"
+                      "否则它会出现在队员的「＋ 添加组件」下拉里")
+        driver = self.DRIVER.read_text(encoding="utf-8")
+        self.assertIn("__I3PRO_SELFTEST__: true", driver,
+                      "无头驱动没设自检标记，第 32 组断言就等于没跑")
+
+
 class _MathSession:
     """A minimal session, so the maths engine can be tested without a ``.ld``.
 
@@ -1577,12 +1634,18 @@ class _MathSession:
     ``sample_rate`` / ``duration``, and ``attach`` writes into ``derived`` (the
     same attribute a real ``LogFile`` has). Keeping this stub in the test file
     is what lets every expression test run on a machine with no team data.
+
+    ``derived_target`` / ``derived_names`` / ``derived_units`` 是 ticket #18 定的
+    显式契约：会话自己声明数学通道的列放哪、叫什么、什么单位，``channels.py``
+    不去嗅探对象有哪些属性。真实的 ``LogFile`` / ``CsvSession`` 同样声明这三样。
     """
 
     def __init__(self, columns: dict, rate: float = 10.0, path="fake.ld", rates: dict | None = None):
         self.columns = {k: np.asarray(v, dtype=np.float64) for k, v in columns.items()}
         self.sample_rate = float(rate)
         self.derived: dict[str, np.ndarray] = {}
+        self.derived_names: set[str] = set()
+        self.derived_units: dict[str, str] = {}
         size = max(len(v) for v in self.columns.values())
         self.duration = (size - 1) / self.sample_rate
         self.path = Path(path)
@@ -1599,6 +1662,10 @@ class _MathSession:
 
     def has(self, name: str) -> bool:
         return name in self.columns or name in self.derived
+
+    @property
+    def derived_target(self) -> dict:
+        return self.derived
 
     def channel(self, name: str) -> ld.Channel:
         for ch in self.channels:
@@ -2132,6 +2199,200 @@ class TestMaths(unittest.TestCase):
         self.assertIs(again["乙"], second["乙"])
 
 
+class TestChannelSeam(unittest.TestCase):
+    """ticket #18：数学通道与原生通道的差别只写在 ``channels.py`` 一处。
+
+    这些断言故意写得"像删除测试"：不是测某个函数算得对，而是测**别的模块没有
+    再判一遍"这是不是数学通道"**。以前这条规则在五个地方各写了一遍，本项目因此
+    出过两次真错（慢通道被同名派生列盖住后采样率取错、频谱按原生采样率切窗口）。
+    """
+
+    SRC = ROOT / "src" / "i3pro"
+
+    #: 只允许出现在 channels.py 里的写法（别处出现就说明这条规则又被抄了一份）。
+    FORBIDDEN = (
+        "is_derived_channel",
+        'hasattr(session, "derived',
+        "if derived else",
+        "if is_derived else",
+    )
+
+    def _shadow_session(self):
+        """数学通道**盖住一条慢的原生通道**：最容易把下游算错的那种场次。"""
+        rate, count = 10.0, 6
+        session = _MathSession({"计数器": np.zeros(count)}, rate=rate,
+                               rates={"计数器": 1.0})       # 原生只有 1 Hz
+        ramp = np.arange(count, dtype=np.float64)            # 主时间基上的斜坡
+        mathsmod.attach(session, {"计数器": ramp},
+                        [mathsmod.Definition("计数器", "0", unit="圈")])
+        return session, ramp, rate
+
+    @staticmethod
+    def _hold_reference(log, channel) -> np.ndarray:
+        """旧实现逐字抄一份，当"逐点一致"的判据用（ticket #18 之前那一版）。"""
+        values = log.values(channel)
+        factor = max(1, int(round(log.sample_rate / channel.sample_rate)))
+        if factor > 1:
+            values = np.repeat(values, factor)
+        n = int(round(log.duration * log.sample_rate)) + 1
+        if values.size < n:
+            pad = values[-1] if values.size else 0.0
+            values = np.concatenate([values, np.full(n - values.size, pad)])
+        return values[:n]
+
+    # ------------------------------------------------------------ 这条缝本身
+    def test_the_rule_lives_in_exactly_one_module(self):
+        offenders = []
+        for path in sorted(self.SRC.glob("*.py")):
+            if path.name == "channels.py":
+                continue
+            text = path.read_text(encoding="utf-8")
+            offenders += [
+                f"{path.name}: {pattern}"
+                for pattern in self.FORBIDDEN
+                if pattern in text
+            ]
+        self.assertEqual(
+            offenders, [],
+            "这些地方又自己判了一遍「是不是数学通道」——该改成调用 channels.py",
+        )
+
+    def test_a_session_must_declare_where_derived_columns_go(self):
+        """不给声明就报错并说下一步，而不是悄悄少一支分支。"""
+
+        class Rude:
+            sample_rate = 10.0
+            channels: list = []
+
+        with self.assertRaises(TypeError) as ctx:
+            channels.slot(Rude())
+        self.assertIn("derived_target", str(ctx.exception))
+        self.assertIn("在会话类上补一个同名属性", str(ctx.exception))
+
+        with self.assertRaises(TypeError) as ctx:
+            channels.names(Rude())
+        self.assertIn("derived_names", str(ctx.exception))
+
+    def test_both_real_session_types_declare_the_same_three_things(self):
+        for session in (ld.LogFile, csvlog.CsvSession):
+            declared = {item.name for item in dataclasses.fields(session)}
+            for attribute in ("derived_names", "derived_units"):
+                self.assertIn(
+                    attribute, declared,
+                    f"{session.__name__} 没有声明 {attribute}——下游就得靠 hasattr 猜了",
+                )
+            self.assertIsInstance(
+                getattr(session, "derived_target"), property,
+                f"{session.__name__} 没有声明 derived_target",
+            )
+
+    # ------------------------------------------------------------ 元数据一条路
+    def test_native_channels_keep_their_own_rate_and_unit(self):
+        session = _MathSession({"慢": np.zeros(6), "快": np.zeros(6)},
+                               rate=10.0, rates={"慢": 2.0})
+        slow, fast = session.channel("慢"), session.channel("快")
+        self.assertFalse(channels.is_derived(session, slow))
+        self.assertEqual(channels.sample_rate(session, slow), 2.0)
+        self.assertEqual(channels.hold_factor(session, slow, 10.0), 5)
+        self.assertEqual(channels.hold_factor(session, fast, 10.0), 1)
+        # 目标时间基比通道还慢时不去抽稀：保持用的因子最少是 1
+        self.assertEqual(channels.hold_factor(session, fast, 1.0), 1)
+
+    def test_a_derived_channel_is_held_once_even_when_it_shadows_a_slow_channel(self):
+        session, ramp, rate = self._shadow_session()
+        channel = session.channel("计数器")
+        self.assertTrue(channels.is_derived(session, channel))
+        self.assertEqual(channels.sample_rate(session, channel), rate)
+        self.assertEqual(channels.hold_factor(session, channel, rate), 1)
+        self.assertEqual(channels.unit(session, channel), "圈",
+                         "同名覆盖时单位也要用定义里的，不是文件里那条原生通道的")
+        self.assertEqual(
+            render.channel_index(session),
+            [{"name": "计数器", "unit": "圈", "rate": rate,
+              "samples": ramp.size, "derived": True}],
+        )
+
+    def test_a_derived_column_reaches_parquet_as_itself(self):
+        """Parquet 也走同一条缝：盖住慢原生通道时不能写出重复的常数值。"""
+        session, ramp, _rate = self._shadow_session()
+        session.device = "C125"
+        session.log_date = session.log_time = session.event_name = ""
+        table, meta = store.build_table(session, channels=["计数器"])
+        np.testing.assert_array_equal(table.column("计数器").to_numpy(), ramp)
+        self.assertEqual(meta["channels"][0]["name"], "计数器")
+
+    # --------------------------------------------------- 挂载 / 卸载不走嗅探
+    def test_attach_and_detach_go_through_the_declaration(self):
+        session = _MathSession({"车速": np.full(6, 2.0)}, rate=10.0)
+        definitions = [mathsmod.Definition("两倍", "车速 * 2", unit="km/h")]
+        values, errors = mathsmod.resolve_available(session, definitions)
+        self.assertEqual(errors, [])
+        self.assertEqual(mathsmod.attach(session, values, definitions), ["两倍"])
+        self.assertEqual(channels.names(session), {"两倍"})
+        self.assertEqual(channels.units(session), {"两倍": "km/h"})
+        np.testing.assert_array_equal(channels.slot(session)["两倍"], values["两倍"])
+        mathsmod.detach(session)
+        self.assertEqual(channels.names(session), set())
+        self.assertEqual(channels.units(session), {})
+        self.assertEqual(channels.slot(session), {})
+        self.assertFalse(session.has("两倍"))
+
+    # ------------------------------------------------- 没挂数学通道时逐点一致
+    def _assert_session_is_unchanged(self, path: Path):
+        """一场真实数据：没有数学通道时，元数据与「保持到主时间基」与旧实现逐点一致。"""
+        with ld.LogFile.read(path) as log:
+            self.assertEqual(channels.names(log), set())
+            index = render.channel_index(log)
+            self.assertEqual(len(index), len(log.channels))
+            for position, channel in enumerate(log.channels):
+                self.assertEqual(
+                    channels.hold_factor(log, channel, log.sample_rate),
+                    max(1, int(round(log.sample_rate / channel.sample_rate))),
+                    f"{channel.name}: 保持因子与旧公式不一致",
+                )
+                self.assertEqual(
+                    index[position],
+                    {"name": channel.name, "unit": channel.unit,
+                     "rate": channel.sample_rate, "samples": channel.sample_count,
+                     "derived": False},
+                    f"{channel.name}: 通道索引与旧实现不一致",
+                )
+            slowest = min(log.channels, key=lambda ch: ch.sample_rate)
+            for channel in (slowest, log.channels[0], log.channels[5]):
+                np.testing.assert_array_equal(
+                    derive.hold_to_master(log, channel.name),
+                    self._hold_reference(log, channel),
+                    err_msg=f"{channel.name}: 保持到主时间基的结果变了",
+                )
+
+    @_needs(HILL)
+    def test_the_hill_session_without_maths_channels_is_unchanged_point_by_point(self):
+        self._assert_session_is_unchanged(HILL)
+
+    @_needs(ENDURANCE)
+    def test_the_endurance_session_without_maths_channels_is_unchanged(self):
+        self._assert_session_is_unchanged(ENDURANCE)
+
+    @_needs(DATA / "20260522-yjw第二次直线3.72.csv")
+    def test_a_csv_session_uses_the_same_seam(self):
+        """CSV 会话的列和原生列同住 ``columns``：挂上、取元数据、撤下都要走同一条缝。"""
+        with csvlog.read_csv_session(DATA / "20260522-yjw第二次直线3.72.csv") as session:
+            definitions = [mathsmod.Definition("车速两倍", "'GPS Speed' * 2", unit="km/h")]
+            values, errors = mathsmod.resolve_available(session, definitions)
+            self.assertEqual(errors, [])
+            self.assertEqual(mathsmod.attach(session, values, definitions), ["车速两倍"])
+            self.assertIn("车速两倍", session.columns)
+            self.assertEqual(channels.names(session), {"车速两倍"})
+            self.assertEqual(channels.units(session), {"车速两倍": "km/h"})
+            channel = session.channel("车速两倍")
+            self.assertTrue(channels.is_derived(session, channel))
+            self.assertEqual(channels.sample_rate(session, channel), session.sample_rate)
+            self.assertEqual(channels.hold_factor(session, channel, session.sample_rate), 1)
+            mathsmod.detach(session)
+            self.assertNotIn("车速两倍", session.columns)
+            self.assertEqual(channels.names(session), set())
+
+
 class TestSections(unittest.TestCase):
     """#7 赛道区段：切分本身是不依赖框架的纯函数，先用合成数据钉死它。"""
 
@@ -2587,6 +2848,10 @@ class _TableLog:
         self.sample_rate = float(rate)
         self.duration = float(seconds)
         self.path = Path("合成场次.ld")
+        # 数学通道的安放处（ticket #18：会话自己声明，下游不去嗅探属性）
+        self.derived: dict[str, np.ndarray] = {}
+        self.derived_names: set[str] = set()
+        self.derived_units: dict[str, str] = {}
         count = int(round(self.duration * self.sample_rate)) + 1
         self._channels: dict[str, _TableChannel] = {}
         for name, spec in (channels or {}).items():
@@ -2608,6 +2873,10 @@ class _TableLog:
 
     def has(self, name):
         return name in self._channels
+
+    @property
+    def derived_target(self):
+        return self.derived
 
     def channel(self, name):
         return self._channels[name]

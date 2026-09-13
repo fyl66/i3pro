@@ -127,18 +127,6 @@ class Channel:
         )
 
 
-def is_derived_channel(session, channel: "Channel") -> bool:
-    """这个通道是数学通道算出来的吗（见 ``maths.attach``）？
-
-    派生列**已经在主时间基上**，所以任何"按原生采样率再拉一遍"的动作都必须跳过。
-    最容易踩的坑是一个派生通道和一条**慢**的原生通道同名（本地数学覆盖原生通道）：
-    那时 ``session.channel()`` 交回的是原生那条，采样率是 1 Hz，于是 100 Hz 的派生列
-    会被整段 repeat 再截断——取到的是开头那一小段常数值，而不是算出来的曲线。
-    """
-    names = getattr(session, "derived_names", None)
-    return bool(names) and channel.name in names
-
-
 @dataclass
 class LogFile:
     """A parsed ``.ld`` file. Sample blocks are memory mapped, not copied."""
@@ -154,6 +142,16 @@ class LogFile:
     #: 数学通道算出来的列（见 ``maths.py``）。键为通道名，值是主时间基上的
     #: float64 序列。它们没有 mmap 后备，所以 ``raw()`` 会拒绝而不是读出垃圾。
     derived: dict[str, np.ndarray] = field(default_factory=dict, repr=False, compare=False)
+    #: 挂上来的是哪几条、各自什么单位。**在这里声明**（而不是等 ``maths.attach`` 临时
+    #: 挂一个属性上来）是 ticket #18 的要点：下游只认 ``channels.py`` 那一条缝，
+    #: 不需要用 ``hasattr`` 猜这个会话支不支持数学通道。
+    derived_names: set[str] = field(default_factory=set, repr=False, compare=False)
+    derived_units: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
+
+    @property
+    def derived_target(self) -> dict[str, np.ndarray]:
+        """数学通道的列放哪（``.ld`` 会话放在 ``derived``；见 ``channels.slot``）。"""
+        return self.derived
 
     # ------------------------------------------------------------------ load
     @classmethod

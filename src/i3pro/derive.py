@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import channels as channelsmod
 from . import gpsfix
 from . import ld as ldmod
 
@@ -67,10 +68,8 @@ def speed_series(log: ldmod.LogFile) -> np.ndarray:
 def hold_to_master(log: ldmod.LogFile, name: str) -> np.ndarray:
     ch = log.channel(name)
     values = log.values(ch)
-    # 数学通道算出来的列本来就在主时间基上；按原生采样率再拉一遍会把曲线毁掉
-    factor = 1 if ldmod.is_derived_channel(log, ch) else max(
-        1, int(round(log.sample_rate / ch.sample_rate))
-    )
+    # 「数学通道已经在主时间基上、别再拉一遍」这条规则只写在 channels.py 里（ticket #18）
+    factor = channelsmod.hold_factor(log, ch, log.sample_rate)
     if factor > 1:
         values = np.repeat(values, factor)
     n = int(round(log.duration * log.sample_rate)) + 1

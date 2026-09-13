@@ -632,10 +632,14 @@ i2 Pro 的 **Missed Beacons**：车确实穿过了起终点，但没被检出，
   `derive.hold_to_master` 按它的 1 Hz 把 100 Hz 的派生列 `repeat(100)` 再截回 46400 点
   ——取到的是开头那 100 个 0 拉长出来的常数列。**不报任何错，曲线直接被毁。**
 
-修法：`ld.is_derived_channel()` 作为唯一判据，`derive.hold_to_master`、`store.build_table`
+修法：设一个「这条通道是不是算出来的」判据，`derive.hold_to_master`、`store.build_table`
 跳过重采样；`render.channel_index` / `render.trace` 对派生列报**定义里的单位**与**主采样率**
 （否则界面会拿一条 1 Hz 原生通道的元数据去描述 100 Hz 的曲线）。修完之后同样的探针切出
 **46 段**，`channel_index` 报 `rate: 100.0`、`derived: true`。
+
+> 这个判据当年落在 `ld.is_derived_channel()`，于是同一个问题在五个调用点各判了一遍；
+> ticket #18 把它们统一收进 `channels.py`（见 A39）。这段历史留着，是因为它正好说明
+> 为什么那条缝值得存在。
 
 顺带补上：`maths.detach()` —— 删掉一条定义后不能留下"名字还在列表里、点开却取不到值"的
 幽灵通道；`TestMaths::test_removing_a_definition_does_not_leave_a_ghost_channel` 盯着它。
@@ -1603,6 +1607,144 @@ python tools\verify_clicks.py --session "20260524-耐久正赛"       # 53 项�
 
 ---
 
+## A39 · 通道接缝：数学通道与原生通道只差一处（ticket #18）
+
+`CONTEXT.md` 那句话——数学通道「除此之外与原生通道完全一样」——以前在**五个地方**各写了一遍
+（`derive.hold_to_master`、`store.build_table`、`render.trace`、`render.spectrum`、
+`render.channel_index`），写法都是「派生就换采样率」。本项目因此出过两次真错：一条数学通道
+和一条**慢**的原生通道同名时（本地定义覆盖原生通道）下游仍按原生那档再 `repeat`，曲线被整段
+毁掉且不报错；频谱按原生采样率切窗口，慢通道的台阶被当成高频。
+
+现在两类通道的差别只在 `src/i3pro/channels.py` 里实现一次：采样率、单位、保持因子、列放在哪。
+调用方调一条接口拿元数据，不再需要问「这条是不是派生出来的」。
+
+| # | 交付物 | 在哪 |
+| --- | --- | --- |
+| ① | 纯函数（`slot` / `names` / `units` / `is_derived` / `unit` / `sample_rate` / `hold_factor` / `info` / `attach` / `clear`） | `src/i3pro/channels.py` |
+| ② | 单元测试 10 项 | `tests/test_i3pro.py` 的 `TestChannelSeam` |
+| ③ | 无头交互断言 | **不适用**：这一票不改界面（没有新组件、新按钮、新状态），没有"点了才出现"的东西可断言。前端能看见的两项（通道索引里的 `derived` 角标与 `rate`）由 ② 的 `render.channel_index` 断言与既有的 smoke 数学通道那一组覆盖 |
+| ④ | 本条 | `docs/ACCEPTANCE.md` |
+| ⑤ | 两份金标准实跑 | `高避5圈`（437 条通道、169 条慢通道）与 `耐久正赛`：**逐条**核对保持因子与通道索引，每场另取 3 条（最慢的一条 + 第 1、6 条）与旧实现逐点 `array_equal`；两份快照 `smoke_viewer.js` 均 PASS |
+
+**通过判据**（可复制，在本机跑出来的）：
+
+```powershell
+python -m unittest discover -s tests -v                     # Ran 217 tests + OK（含 TestChannelSeam 10 项）
+python tools\verify_ld_vs_csv.py                            # PASS - 0 channel(s) outside tolerance
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"   # PASS
+node tools\smoke_viewer.js "out\20260524-耐久正赛.html"      # PASS
+python tools\verify_clicks.py                               # 51 项检查：51 通过，0 失败
+```
+
+**三条验收判据对应到哪条断言**：
+
+* **「派生就换采样率」的重写归零** → `test_the_rule_lives_in_exactly_one_module`。它不是测
+  某个函数算得对，而是**扫源码**：`is_derived_channel`、`hasattr(session, "derived…`、
+  `if derived else`、`if is_derived else` 这四种写法只要出现在 `channels.py` 之外就红。
+  这一条是防止这条缝再被抄回去的（本项目已经有两次前科）。
+* **挂载/卸载不再靠 `hasattr` 探测能力** → `maths.attach` / `maths.detach` 只调
+  `channels.attach` / `channels.clear`；会话必须**显式声明** `derived_target`（放列的 dict）、
+  `derived_names`、`derived_units`。没声明就报 `TypeError` 并写明下一步
+  （`test_a_session_must_declare_where_derived_columns_go` 验错误文本，
+  `test_both_real_session_types_declare_the_same_three_things` 验 `LogFile` 与 `CsvSession`
+  都声明了这三样，`test_attach_and_detach_go_through_the_declaration` 验挂上/撤下的往返）。
+  实测这条严格性**立刻抓到两个没声明的测试替身**（`_MathSession`、`_TableLog`），两个都补了声明——
+  这正是「新加一种会话，忘了声明就立刻红」想要的效果。
+* **场次里没有数学通道时行为逐点一致** → `test_a_session_without_maths_channels_is_unchanged_point_by_point`：
+  在 `高避5圈`（437 条通道、主采样率 100 Hz、其中 **169 条**慢通道要 repeat）上，
+  逐条比对保持因子与旧公式 `max(1, round(master / ch))`、逐条比对通道索引五元组
+  （`name` / `unit` / `rate` / `samples` / `derived`），再对最慢的一条与第 1、6 条
+  `np.testing.assert_array_equal` 逐点比对 `hold_to_master` 与旧实现。
+* **同名覆盖原生慢通道那条已知坑** → `test_a_derived_channel_is_held_once_even_when_it_shadows_a_slow_channel`
+  （保持因子 1、采样率 = 主采样率、单位取定义里的「圈」、通道索引只有一条），
+  外加原有的 `test_a_derived_channel_that_shadows_a_slow_channel_is_kept_as_is` 继续盯着
+  「曲线没被 repeat 毁掉」这个可见后果。
+* **Parquet 也走同一条缝** → `test_a_derived_column_reaches_parquet_as_itself`：盖住慢原生通道的
+  派生列写进 `store.build_table` 后与源列逐点相等（以前这里也有一份"派生就换采样率"的副本，
+  但没有任何断言盯着"同名覆盖"的那种输入）。
+
+**顺手改掉的一处不一致**：`render.spectrum` 给同名覆盖的派生通道回报的是**原生通道的单位**
+（载荷里的 `unit` 取 `channel.unit`），现在与通道索引、图表一致，取定义里的单位。
+两种情形下 `rate` 都已经是主采样率，所以频率轴没变，变的是那一栏单位文字。
+
+**边界**：这一票是纯重构，界面、HTTP 端点、侧车格式、`.ld` 读取路径一个字节都没改；
+`channels.hold_factor` 的语义与旧公式**逐点相同**（`max(1, round(目标采样率 / 通道采样率))`，
+派生通道恒为 1），`store.build_table` 的 `--rate` 行为也没变（目标时间基可以不是主采样率，
+数学通道仍只重复 1 次——那是它已经在主时间基上的意思，不是"跟着 `--rate` 走"）。
+
+---
+
+## A40 · 组件类型注册表（ticket #17）
+
+架构评审选出的第一件事：在这个仓库里"再加一种显示形式"是**最高频的动作**，而它当时要改
+七个地方——`viewer.html` 里散落着 **88 处** `type === "…"` 分派（本机实测
+`rg -o 'type === "' … | Measure-Object`）。这一步先把**声明表**立起来，并把三类最简单的
+形式（时间差 Δ / 状态与故障带 / 赛道轨迹）迁过去。**行为零变化**是硬要求：这一票不改任何
+界面上看得见的东西，只改"它由谁说了算"。
+
+| # | 交付物 | 在哪 |
+| --- | --- | --- |
+| ① | 注册表 + 通用分派（纯数据 + 取声明的小函数） | `src/i3pro/web/viewer.html` 的 `COMPONENT_TYPES` / `specOf` |
+| ② | 单元测试 3 项 | `tests/test_i3pro.py` 的 `TestComponentRegistry` |
+| ③ | 无头交互断言（第 32 组，**+18 个断言点**） | `tools/smoke_viewer.js` |
+| ④ | 本条 | `docs/ACCEPTANCE.md` |
+| ⑤ | 两份金标准实跑 | `高避5圈`（7 圈）与 `耐久正赛`（26 圈）快照 smoke 均 PASS |
+
+**通过判据**（可复制，在本机跑出来的）：
+
+```powershell
+python -m unittest discover -s tests -v      # Ran 215 tests + OK
+python tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"   # PASS（第 32 组）
+python tools\smoke_viewer.js "out\20260524-耐久正赛.html"      # PASS（第 32 组）
+rg -o 'type === "' src\i3pro\web\viewer.html | Measure-Object  # 73（这一票之前 88）
+```
+
+**一条声明里能说什么**（`COMPONENT_TYPES` 的字段；没写就是这种形式不需要那件事）：
+
+| 字段 | 说什么 |
+| --- | --- |
+| `label` / `cols` / `rows` | 标题、默认宽度（网格列）与高度（行） |
+| `tabular` | DOM 表格而不是 canvas（报表类） |
+| `defaults(o)` | 默认配置 |
+| `title(comp)` | 标题栏那行字；缺省用 `label` |
+| `needs(comp, add)` | 这个组件要用到哪些通道（一次取数喂整张表） |
+| `controls(comp, b, body)` | 控件条 |
+| `hooks(comp, b)` | canvas 上的事件 |
+| `refreshWindow(comp)` | 缩放窗口变了要不要重新取数：返回 Promise 或 null |
+| `render(comp, b)` | 画 |
+| `encode(comp)` / `decode(comp, payload)` | 分享链接里的紧凑载荷 |
+
+**"行为不许变"是怎么证出来的**（第 32 组断言，逐条对应）：
+
+| 迁移点 | 迁移前 | 迁移后 | 证据 |
+| --- | --- | --- | --- |
+| 渲染分派 | `renderComponents` 里六个 `else if` | 有 `render` 声明就走它，其余留过渡分支 | 三类形式在两条金标准上都画出来了 |
+| 默认配置 | `makeComponent` 里的 `if (type === "track")` 两行 | `track` 声明 `defaults()` | 预设里的轨迹组件仍是"整场"（第 16b 组） |
+| 缩放重取数 | `scheduleRefresh` 里判 `type === "track" && window === "zoom"` | `track` 声明 `refreshWindow()` | 窗口切换仍会去问 `/track`（第 16b 组） |
+| 通道需求 | `neededChannels` 里 `else if (type === "status")` | `status` 声明 `needs()` | 状态通道仍随一次取数一起要来 |
+| 控件条 | `buildWorksheet` 里整段 `if (type === "track")` | `track` 声明 `controls()` | 轨迹的"全程 / 当前时间段"下拉仍在（第 16b 组） |
+| canvas 事件 | `if (type === "track")` 里挂 click | `track` 声明 `hooks()` | 点轨迹仍能放信标（第 21 组） |
+| 分享链接 | `encodeLayout` 的三元链里 `c.type === "track"` | `track` 声明 `encode` / `decode` | 三类形式的往返都保住 config（第 32 组） |
+| E 键 | 写死 `type === "status"` | `status` 声明 `hotkey: "e"`，按声明查 | 按 E 仍是加/去状态组件（第 10 组） |
+
+**顺带修正的一处旧缺陷**：轨迹的分享链接载荷原来只有通道名，`window`（整场 / 当前时间段）
+**进不了链接**——按 i2 Pro 的说法就是"分享出去的图少了一半设置"。现在载荷是
+`通道名|窗口`，而**老链接（没有 `|`）照旧解成整场**，第 32 组专门钉了这条向后兼容。
+
+**边界（说清代价）**：
+
+* 迁移是**分批**的：图表类（图 / 散点 / 直方图 / 频谱，#19）与表格 + 仪表类
+  （仪表 / 时间报告 / 通道报告 / GPS 面板，#20）还没迁，上面那 73 处 `type === "…"`
+  里的大部分是它们。等 #20 收口，这张过渡表才该整段消失。
+* 注册表里还有一条**只给验收用**的"只有标题（自检）"形式：它挂在
+  `window.__I3PRO_SELFTEST__` 上，队员的浏览器里不会注册（无头驱动会设这个标记）。
+  它存在的理由只有一个——证明"加一种显示形式"真的只要一条声明：
+  第 32 组会把它加进工作表、读出它的标题与默认配置、走一遍分享链接往返，再拿掉。
+* 这一票**不碰** Python，也不动任何界面上看得见的东西：验收里关于外观的部分
+  （时间轴、圈速表、报表）仍然是它们自己那几条。
+
+---
+
 ## 全量回归
 
 ```powershell
@@ -1612,7 +1754,7 @@ node tools\smoke_viewer.js out\<场次>.html   # 3. 无头驱动前端：PASS
 python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘：全过（没有 Edge 的机器打印 SKIP，不算通过）
 ```
 
-**通过判据**：`Ran 204 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）；
+**通过判据**：`Ran 217 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）；
 `PASS - 0 channel(s) outside tolerance`；`PASS - workbench ran headless ... interactions verified`；
 `51 项检查：51 通过，0 失败`。**四条全绿才算改完**（AGENTS.md 规则 7）。
 
@@ -1645,7 +1787,9 @@ python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘�
 | `TestIndependentParsers` | 第二套实现交叉验证、213 通道 CSV 全量对照 |
 | `TestBeaconUndo` | 撤销的纯函数层：什么是"同一版"、什么时候没有可撤销的一步、交回去的是上一版本身 |
 | `TestBeaconUndoOverHttp` | 撤销走真实 `PUT`：改名 / 插入 / 删除各自一步回到原样、`trusted` 迁移、落盘、一次无改动的保存不吃掉上一步、没有可撤销的一步时 400 并说明下一步、页面注入的 `laps_can_undo` 三态 |
-| `TestViewerScript` | 无头驱动前端：脚本里 **354 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
+| `TestViewerScript` | 无头驱动前端：脚本里 **372 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
+| `TestComponentRegistry` | 组件类型注册表（#17，3 项）：已迁移的类型不再留 `type === "…"` 分派、三类形式各自声明该声明的东西、自检形式只挂在无头驱动的标记上 |
+| `TestChannelSeam` | 通道接缝（#18，8 项）：那条规则只准写在一个模块里（扫源码）、会话必须显式声明三样、原生通道保留自己的采样率与单位、同名覆盖时保持因子/采样率/单位、Parquet 写出的是派生列本身、挂载与卸载走声明、金标准 437 条通道逐条与旧公式一致（无数学通道时逐点不变） |
 | `TestNotes` / `TestNotesOverHttp` | 注释（#15，15 项）：文字折行与截断、时刻校验的下一步、增删改不改原表、距离在主采样上插值、轨迹取最近抽稀点、越界不猜位置、侧车往返与坏文件、**注释不动圈速表**、HTTP 的 PUT 落盘 / 400 说明下一步 / `.ld` 字节不变 |
 | `TestGpsFix` / `TestGpsFixOverHttp` | GPS 校正（#14，15 项）：`(0,0)` 只计数不进轨迹、跳点与空档各自断开、跳变两端都算坏点、**关掉校正逐点不变**、按秒与按更新周期两种偏移、分段插值绝不跨空档、路径里程跳过跳变、距离轴作用域的开关、抽稀后断点必须落在**跨着跳变的那一段**上、参数校验的中文下一步、侧车往返与坏文件、金标准（耐久 1 个 214.5 m 跳点且断的就是那 214 m 幽灵线 / 高避 0 跳点 638 个空定位）；HTTP 的 GET / PUT / 落盘 / 400 不动侧车 / `.ld` 字节不变 |
 | `TestLaunchers` | 一键启动：快照批量导出 + 索引页、缺数据目录的报错、端口占用自动换端口 |

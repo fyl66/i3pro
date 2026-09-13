@@ -19,6 +19,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from . import channels as channelsmod
 from . import ld as ldmod
 
 __all__ = [
@@ -54,10 +55,9 @@ def build_table(
     meta_channels = []
     used: set[str] = set()
     for ch in selected:
-        # 派生列已经在主时间基上，不能再按原生采样率拉一遍（见 ld.is_derived_channel）
-        factor = 1 if ldmod.is_derived_channel(log, ch) else max(
-            1, int(round(rate / ch.sample_rate))
-        )
+        # 目标时间基可能是 --rate 给的那一档，但「数学通道已经在主时间基上」这条规则
+        # 仍然只由 channels.py 回答（ticket #18）。
+        factor = channelsmod.hold_factor(log, ch, rate)
         values = log.values(ch)
         if factor > 1:
             values = _resample(values, factor)

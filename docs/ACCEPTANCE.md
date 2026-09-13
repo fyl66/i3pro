@@ -2005,7 +2005,7 @@ sheet，同一份内容）：日志文件名、场次、导出范围（人话 + 
 python -m unittest tests.test_i3pro.TestExportRanges tests.test_i3pro.TestExportSampling tests.test_i3pro.TestExportFiles tests.test_i3pro.TestExportErrors tests.test_i3pro.TestExportEstimate tests.test_i3pro.TestExportTimestampIndex -v
 # -> Ran 24 tests / OK
 
-# 2. 界面拼出来的参数就是服务端认的那几个（第 29 组）
+# 2. 界面拼出来的参数就是服务端认的那几个（smoke 里的「导出数据面板」那一组）
 node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"    # -> PASS
 
 # 3. 真浏览器真鼠标：点开面板 -> 预估 -> 真下载一个文件（第 4 道回归的导出那几条）
@@ -2035,7 +2035,7 @@ python -m i3pro export "i2pro_data\20260524-耐久正赛.ld"    --rate 10 --out 
 
 1. **距离段被当成秒**：面板选「指定距离段」而主索引还停在「时间」时，`1200–1850` 会按
    `axis=time` 发出去——导出的是 **1200–1850 秒**那一段，一声不响。现在范围自己决定轴
-   （`exportAxisOf`：距离段=米、时间段=秒），并且把主索引下拉锁到对应档位。无头第 29 组两条
+   （`exportAxisOf`：距离段=米、时间段=秒），并且把主索引下拉锁到对应档位。无头那一组的两条
    断言（距离段 → `axis=distance`、时间段 → `axis=time`）钉住这件事。
 2. **统一采样率的右端不闭合**：10 Hz 导出 0–463.99 s 的场次，末行原来只到 **463.9**
    （`floor(span×rate)` 那个格点）。现在"左闭右闭"在格点之外补上终点本身，实测末行

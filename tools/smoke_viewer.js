@@ -43,6 +43,11 @@ function makeContext() {
     get(target, key) {
       if (key in target) return target[key];
       if (typeof key === "symbol") return undefined;
+      if (key === "measureText") {
+        // 真 canvas 会去量字；假 canvas 给个像样的数就行——注释那行字要先量宽度
+        // 才好铺底色条，返回 undefined 会让"文字画不出来"变成一个假 bug。
+        return (text) => ({ width: String(text).length * 6 });
+      }
       return () => { if (key in calls) calls[key] += 1; };
     },
     set(target, key, value) { target[key] = value; return true; },
@@ -127,6 +132,23 @@ class Element {
       link.dataset.mathsDel = m[1];
       this._mdels.push(link);
     }
+    // Notes (#15): one text box and one delete link per note, same pattern.
+    this._ntext = [];
+    this._ndels = [];
+    const ntext = /data-note-text="(\d+)"[^>]*?value="([^"]*)"/g;
+    while ((m = ntext.exec(this._html))) {
+      const box = new Element("input");
+      box.dataset.noteText = m[1];
+      box.value = m[2].replace(/&quot;/g, '"').replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+      this._ntext.push(box);
+    }
+    const ndel = /data-note-del="(\d+)"/g;
+    while ((m = ndel.exec(this._html))) {
+      const link = new Element("a");
+      link.dataset.noteDel = m[1];
+      this._ndels.push(link);
+    }
     const idre = /id="([^"]+)"/g;
     while ((m = idre.exec(this._html))) {
       if (REGISTRY && !REGISTRY.has(m[1])) REGISTRY.set(m[1], new Element("div", m[1]));
@@ -171,6 +193,8 @@ class Element {
     if (selector === "a[data-beacon]") return this._dels || [];
     if (selector === "[data-maths-row]") return this._mdefs || [];
     if (selector === "[data-maths-del]") return this._mdels || [];
+    if (selector === "input[data-note-text]") return this._ntext || [];
+    if (selector === "a[data-note-del]") return this._ndels || [];
     if (selector.indexOf("canvas") >= 0) return this._q.canvas ? [this._q.canvas] : [];
     if (selector === "input") return this._children.filter((c) => c.tagName === "INPUT");
     return [];
@@ -2054,6 +2078,91 @@ if (embeddedSpec && embeddedSpec.series) {
     const zoomLabels = labelsFor(231.7, 232.2);
     check(wholeLabels > 0 && zoomLabels > 0, "no axis labels were drawn at all");
     api.zoomTo(0, 463.99);
+  }
+
+  // 30. 注释（#15）：它有自己的侧车，图上是虚线，列表里能就地改，快照只读。
+  //     位置由 Python 算好（distance / x / y），这里验的是"画得出来、改得进去、
+  //     而且不碰圈速表"——真鼠标那几种状态归 tools/verify_clicks.py。
+  {
+    const notesHost = registry.get("notesList");
+    const lapRowsBefore = (registry.get("lapTable")._rows || []).length;
+
+    const comp = api.state.components.find((c) => c.type === "graph")
+      || api.state.components[0];
+    const ctx = api.bundleOf(comp).canvas.getContext("2d");
+    const pad = { l: 64, r: 18, t: 6, b: 18 };
+
+    // 快照里没有 DATA.notes 时：列表给一句能照做的提示，按钮是禁的
+    api.state.notes = [];
+    api.renderNotes();
+    check(notesHost.querySelectorAll("input[data-note-text]").length === 0,
+      "空注释表不该有输入框");
+    check(registry.get("addNote").disabled === !api.data.api,
+      "快照模式下「＋ 注释」该是禁用的");
+    check(String(notesHost.innerHTML).indexOf("还没") >= 0
+      || String(notesHost.innerHTML).indexOf("没有注释") >= 0,
+      "空注释表要给一句提示，现在写的是: " + notesHost.innerHTML);
+
+    // 一条注释：列表、计数、图上的虚线都该出来
+    api.state.notes = [{ time: 231.74, text: "这里换了刹车点", distance: 987.6,
+                         x: 12.3, y: 4.5 }];
+    api.renderNotes();
+    const boxes = notesHost.querySelectorAll("input[data-note-text]");
+    check(boxes.length === 1 && boxes[0].value === "这里换了刹车点",
+      "注释没进列表: " + JSON.stringify(boxes.map((b) => b.value)));
+    check(String(registry.get("notesCount").textContent).indexOf("1") >= 0,
+      "注释条数没显示: " + registry.get("notesCount").textContent);
+
+    api.state.mode = "time";
+    let seen = { stroke: calls.stroke, fillText: calls.fillText, fillRect: calls.fillRect };
+    api.drawNotes(ctx, pad, 800, 200, 200, 260, true);
+    check(calls.stroke > seen.stroke && calls.fillText > seen.fillText
+      && calls.fillRect > seen.fillRect,
+      "时间轴上的注释没画出来（虚线 / 文字 / 底色至少要各画一次）");
+    // 窗口之外不画：范围是 200–260 s，注释在 231.74 s 之外时一条线都不该有
+    seen = { stroke: calls.stroke, fillText: calls.fillText };
+    api.drawNotes(ctx, pad, 800, 200, 0, 100, true);
+    check(calls.stroke === seen.stroke && calls.fillText === seen.fillText,
+      "窗口外的注释不该画出来");
+    // 「显示」关掉之后，画布上一个像素都不该多
+    api.state.showNotes = false;
+    seen = { stroke: calls.stroke, fillText: calls.fillText, fillRect: calls.fillRect };
+    api.drawNotes(ctx, pad, 800, 200, 200, 260, true);
+    check(calls.stroke === seen.stroke && calls.fillText === seen.fillText
+      && calls.fillRect === seen.fillRect,
+      "关掉「显示」之后注释还在画");
+    api.state.showNotes = true;
+
+    // 距离轴：用 Python 算好的 distance 落位；没算出来（null）就不画，不猜
+    api.state.mode = "distance";
+    seen = { stroke: calls.stroke };
+    api.drawNotes(ctx, pad, 800, 200, 900, 1100, false);
+    check(calls.stroke > seen.stroke, "距离轴上的注释没按 distance 落位");
+    api.state.notes = [{ time: 231.74, text: "没有距离", distance: null }];
+    seen = { stroke: calls.stroke };
+    api.drawNotes(ctx, pad, 800, 200, 900, 1100, false);
+    check(calls.stroke === seen.stroke, "没有距离就不该猜一个位置画出来");
+
+    // 注释不是信标：加了注释，圈速表一行都不能变
+    api.state.mode = "time";
+    api.renderAll();
+    check((registry.get("lapTable")._rows || []).length === lapRowsBefore,
+      "注释不该动圈速表：加之前 " + lapRowsBefore + " 行，加之后 "
+      + (registry.get("lapTable")._rows || []).length + " 行");
+
+    // 就地改文字：回车提交走 saveNotes（快照模式没有服务，所以只是本地回写）
+    const box = notesHost.querySelectorAll("input[data-note-text]")[0];
+    const kept = box.value;
+    box.value = "改过的字";
+    box.dispatch("input", {});
+    box.dispatch("keydown", { key: "Enter", preventDefault() {} });
+    check(box.value === "改过的字", "改注释文字的输入框状态不对: " + box.value);
+    box.dispatch("keydown", { key: "Escape", preventDefault() {} });
+    check(box.value === kept, "Esc 之后输入框该弹回原文字，现在是 " + box.value);
+
+    api.state.notes = (api.data.notes || []).slice();
+    api.renderNotes();
+    api.renderAll();
   }
 }
 

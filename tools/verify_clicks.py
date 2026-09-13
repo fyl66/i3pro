@@ -585,6 +585,103 @@ class Checker:
                    any(b.get("time") is not None for b in disk["beacons"]))
         return disk
 
+    def notes(self, work_dir, session):
+        """#15：真鼠标加一条注释、真键盘改字、真点 ✕ 删掉，每一步都要落到侧车。
+
+        另外两条只有真浏览器给得了的答案：那行字**真的画在画布上**（`AXIS_HOOK`
+        把每次 fillText 都记下来了），以及加注释**没有动圈速表**（注释不是信标）。
+        """
+        path = os.path.join(work_dir, session + ".notes.json")
+        if os.path.exists(path):
+            os.remove(path)
+        self.js("(function(){i3pro.state.notes=[];i3pro.renderNotes();"
+                "i3pro.state.view=fullRange();i3pro.renderAll();return true;})()")
+        time.sleep(0.4)
+
+        def on_disk():
+            if not os.path.exists(path):
+                return None
+            with open(path, encoding="utf-8") as handle:
+                return json.load(handle)
+
+        def button():
+            return json.loads(self.js("JSON.stringify(__rectOf('addNote'))"))
+
+        def lap_rows():
+            return int(self.js(
+                "document.querySelectorAll('#lapTable tr[data-lap]').length") or 0)
+
+        rows_before = lap_rows()
+        self.check("#15 「＋ 注释」在 serve 模式下可点", not button()["disabled"])
+
+        # 1) 先把光标清掉：没光标时说清"先把鼠标移到图上"，而不是默默加在 0 s
+        self.js("(function(){i3pro.state.cursor=null;i3pro.renderAll();return true;})()")
+        self.browser.click(button()["x"], button()["y"], self.session)
+        time.sleep(0.4)
+        self.check("#15 没设光标就按＋注释 -> 说清楚先移鼠标，并且不落盘",
+                   on_disk() is None and "鼠标" in self.toast(), self.toast())
+
+        # 2) 真点在图上 -> 真点＋注释 -> 侧车里多一条，时刻就是光标那儿
+        x = self.js("__px((lane()[0]+lane()[1])/2)")
+        y = self.js("__py(60)")
+        self.browser.click(x, y, self.session)
+        cursor = self.js("i3pro.exactCursorTime()")
+        self.browser.click(button()["x"], button()["y"], self.session)
+        time.sleep(1.0)
+        disk = on_disk() or {}
+        rows = disk.get("notes") or []
+        self.check("#15 真点「＋ 注释」-> 侧车里多一条，时刻是光标处",
+                   len(rows) == 1 and abs(rows[0]["time"] - (cursor or 0)) < 0.01,
+                   "t=%s，光标 %s，盘上 %s" % (rows[0]["time"] if rows else None,
+                                              cursor, rows))
+
+        # 3) 真键盘改那行字：光标已经落在新加的那一行里（省掉再去点一下）
+        box = json.loads(self.js(
+            "(function(){var b=document.querySelector('#notesList input[data-note-text]');"
+            "return b?JSON.stringify({value:b.value,x:__center(b).x,y:__center(b).y,"
+            "focused:document.activeElement===b}):null;})()"))
+        self.browser.click(box["x"], box["y"], self.session)
+        self.browser.key_named("a", "KeyA", 65, self.session, modifiers=2)
+        self.browser.insert_text("这里换了刹车点", self.session)
+        self.browser.key_named("Enter", "Enter", 13, self.session)
+        time.sleep(1.0)
+        rows = (on_disk() or {}).get("notes") or []
+        self.check("#15 真键盘改字 + 回车 -> 侧车里的文字变了",
+                   len(rows) == 1 and rows[0]["text"] == "这里换了刹车点",
+                   json.dumps(rows, ensure_ascii=False))
+
+        # 4) 那行字真的画在画布上（读的是真浏览器记下来的 fillText）
+        fills = json.loads(self.js("JSON.stringify((window.__fills||[]).slice(-4000))"))
+        drawn = [f["t"] for f in fills if "刹车点" in str(f.get("t", ""))]
+        self.check("#15 注释真的画在图上（真画布上的那行字）", bool(drawn), drawn[:3])
+        self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-notes.png"), self.session)
+
+        # 5) Esc 取消不落盘
+        before = open(path, "rb").read()
+        self.browser.click(box["x"], box["y"], self.session)
+        self.browser.key_named("a", "KeyA", 65, self.session, modifiers=2)
+        self.browser.insert_text("改了但不算数", self.session)
+        self.browser.key_named("Escape", "Escape", 27, self.session)
+        time.sleep(0.5)
+        self.check("#15 Esc 取消 -> 侧车一个字节没动",
+                   open(path, "rb").read() == before,
+                   json.dumps((on_disk() or {}).get("notes"), ensure_ascii=False))
+
+        # 6) 注释不是信标：加了注释，圈速表一行都不许变
+        self.check("#15 加了注释之后圈速表一行没变（注释不参与切圈）",
+                   lap_rows() == rows_before,
+                   "加之前 %d 行，加之后 %d 行" % (rows_before, lap_rows()))
+
+        # 7) 真点 ✕ 删掉
+        delete = json.loads(self.js(
+            "(function(){var a=document.querySelector('#notesList a[data-note-del]');"
+            "return a?JSON.stringify(__center(a)):null;})()"))
+        self.browser.click(delete["x"], delete["y"], self.session)
+        time.sleep(1.0)
+        rows = (on_disk() or {}).get("notes") or []
+        self.check("#15 真点 ✕ -> 侧车里的那条没了", rows == [],
+                   json.dumps(rows, ensure_ascii=False))
+
     def histogram(self):
         """#9：直方图——加得出来、画得出来、缩放会重问、门槛报错能照做。
 
@@ -1181,6 +1278,7 @@ def main(argv=None):
             checker.rename(sidecar)
             checker.histogram()
             checker.axis()
+            checker.notes(work_dir, args.session)
             errors = browser.page_errors()
             checker.check("整场没有页面级报错", not errors, errors[:3])
         bad = [name for name, ok in checker.results if not ok]

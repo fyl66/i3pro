@@ -27,8 +27,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from i3pro import (  # noqa: E402
-    csvlog, derive, laps as lapsmod, ld, maths as mathsmod, motec_csv, render,
-    report as reportmod, sections as sectionsmod, server, store,
+    csvlog, derive, laps as lapsmod, ld, maths as mathsmod, motec_csv,
+    notes as notesmod, render, report as reportmod, sections as sectionsmod,
+    server, store,
 )
 
 DATA = ROOT / "i2pro_data"
@@ -2937,6 +2938,231 @@ class TestReportOverHttp(unittest.TestCase):
                 self.assertEqual(caught.exception.code, 400)
                 message = json.loads(caught.exception.read().decode("utf-8"))["error"]
                 self.assertIn("filter 只认", message)
+            finally:
+                httpd.shutdown()
+                library.close()
+
+
+class TestNotes(unittest.TestCase):
+    """#15 注释：纯函数层。位置算得对不对、规则说得清不清楚，都在这里。"""
+
+    def test_clean_text_折行与超长(self):
+        self.assertEqual(notesmod.clean_text("  这里换了\n刹车点  "), "这里换了 刹车点")
+        self.assertEqual(notesmod.clean_text(None), "")
+        self.assertEqual(len(notesmod.clean_text("字" * 500)), notesmod.MAX_TEXT)
+
+    def test_normalize_去空并按时刻排序(self):
+        notes = notesmod.normalize(
+            [{"time": 30.0, "text": "晚"}, {"time": 10.0, "text": "早"}], 60.0
+        )
+        self.assertEqual([n.text for n in notes], ["早", "晚"])
+        self.assertEqual(notesmod.normalize(None, 60.0), [])
+
+    def test_normalize_空文字说下一步(self):
+        with self.assertRaises(notesmod.NoteError) as caught:
+            notesmod.normalize([{"time": 1.0, "text": "   "}], 60.0)
+        message = str(caught.exception)
+        self.assertIn("第 1 条", message)
+        self.assertIn("写一句", message)          # 报错要说下一步，不只是"错了"
+
+    def test_normalize_时刻越界报出合法区间(self):
+        with self.assertRaises(notesmod.NoteError) as caught:
+            notesmod.normalize([{"time": 99.0, "text": "太晚"}], 60.0)
+        message = str(caught.exception)
+        self.assertIn("0–60.000 s", message)
+        self.assertIn("99.000", message)
+
+    def test_normalize_时刻不是数(self):
+        with self.assertRaises(notesmod.NoteError) as caught:
+            notesmod.normalize([{"time": "刚才", "text": "x"}], 60.0)
+        self.assertIn("鼠标移到图上", str(caught.exception))
+
+    def test_normalize_坏结构(self):
+        with self.assertRaises(notesmod.NoteError):
+            notesmod.normalize({"time": 1.0}, 60.0)
+        with self.assertRaises(notesmod.NoteError):
+            notesmod.normalize(["第 3 条被我手写成了字符串"], 60.0)
+
+    def test_normalize_条数上限(self):
+        rows = [{"time": 1.0, "text": "x"}] * (notesmod.MAX_NOTES + 1)
+        with self.assertRaises(notesmod.NoteError) as caught:
+            notesmod.normalize(rows, 60.0)
+        self.assertIn("先删掉几条", str(caught.exception))
+
+    def test_add_update_remove_不改传进来的那份(self):
+        base = [notesmod.Note(10.0, "早")]
+        grown = notesmod.add_note(base, 5.0, "更早", 60.0)
+        self.assertEqual([n.text for n in grown], ["更早", "早"])
+        self.assertEqual([n.text for n in base], ["早"])          # 原表没被动
+        edited = notesmod.update_note(grown, 1, " 改过 ", 60.0)
+        self.assertEqual(edited[1], notesmod.Note(10.0, "改过"))  # 时刻不动
+        self.assertEqual([n.text for n in notesmod.remove_note(edited, 0)], ["改过"])
+
+    def test_update_remove_索引对不上时说下一步(self):
+        notes = [notesmod.Note(10.0, "早")]
+        with self.assertRaises(notesmod.NoteError) as caught:
+            notesmod.update_note(notes, 3, "x", 60.0)
+        self.assertIn("已经不在了", str(caught.exception))
+        with self.assertRaises(notesmod.NoteError) as caught:
+            notesmod.remove_note(notes, 3)
+        self.assertIn("刷新", str(caught.exception))
+
+    def test_marks_距离在主采样上插值(self):
+        rows = notesmod.marks(
+            [notesmod.Note(1.5, "弯心")],
+            None,
+            master_time=[0.0, 1.0, 2.0],
+            master_distance=[0.0, 10.0, 20.0],
+        )
+        self.assertEqual(rows[0]["distance"], 15.0)
+        self.assertIsNone(rows[0]["x"])
+
+    def test_marks_落在序列之外不猜(self):
+        rows = notesmod.marks(
+            [notesmod.Note(9.0, "界外")],
+            None,
+            master_time=[0.0, 1.0, 2.0],
+            master_distance=[0.0, 10.0, 20.0],
+        )
+        self.assertIsNone(rows[0]["distance"])
+
+    def test_marks_轨迹取最近的抽稀点(self):
+        track = {"time": [0.0, 10.0, 20.0], "x": [0.0, 100.0, 200.0],
+                 "y": [0.0, 5.0, 12.0]}
+        rows = notesmod.marks([notesmod.Note(11.0, "近的")], track)
+        self.assertEqual((rows[0]["x"], rows[0]["y"]), (100.0, 5.0))
+        far = notesmod.marks([notesmod.Note(60.0, "界外")], track)
+        self.assertIsNone(far[0]["x"])
+
+    def test_侧车往返_坏文件不炸(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "场次.ld"
+            path = notesmod.save_notes(session, [notesmod.Note(12.5, "这里换了刹车点")])
+            self.assertEqual(path.name, "场次.notes.json")
+            back = notesmod.load_notes(session)
+            self.assertEqual([(n.time, n.text) for n in back], [(12.5, "这里换了刹车点")])
+            path.write_text("{ 这不是 JSON", encoding="utf-8")
+            self.assertEqual(notesmod.load_notes(session), [])
+            self.assertFalse(session.exists())          # 侧车永远不会去写 .ld
+
+    def test_注释不参与切圈也不改报表(self):
+        """注释写坏了，圈速表一个数都不该动——它有自己的侧车，就是为了这个。"""
+        if not HILL.exists():
+            self.skipTest("sample log not present")
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            copy = root / HILL.name
+            copy.write_bytes(HILL.read_bytes())
+            with ld.LogFile.read(copy) as log:
+                before = [(l.label, round(l.lap_time, 6)) for l in render.detect(log)]
+                # 12.5 s 还在发车区（距离是 0），所以取圈中间的两个时刻
+                notesmod.save_notes(copy, [notesmod.Note(200.0, "这里换了刹车点"),
+                                           notesmod.Note(220.0, "出弯早给油")])
+                after = [(l.label, round(l.lap_time, 6)) for l in render.detect(log)]
+                self.assertEqual(before, after)
+                self.assertTrue(before)
+                # 报表面上的数也不该被注释碰到：注释不是通道，也不是区段。
+                payload = render.notes_payload(log)
+                self.assertEqual(len(payload), 2)
+                self.assertIsNotNone(payload[0]["distance"])
+                self.assertGreater(payload[1]["distance"], payload[0]["distance"])
+                # 快照也要带上注释：`build_payload` 一起嵌进去，分享链接打开的
+                # 是同一份（serve 模式页面 payload 走的是同一个出口）。
+                full = render.build_payload(log, channels=["Vx KF"], buckets=200)
+                self.assertEqual([n["text"] for n in full["notes"]],
+                                 ["这里换了刹车点", "出弯早给油"])
+                self.assertIsNotNone(full["notes"][0]["x"], "快照里要能画到轨迹图上")
+                page = render.render_page(full)
+                self.assertIn("这里换了刹车点", page)
+
+
+class TestNotesOverHttp(unittest.TestCase):
+    """#15 走到界面之前的那一段：/notes 的 GET / PUT、报错与落盘。"""
+
+    @_needs(HILL)
+    def test_notes_endpoint(self):
+        import tempfile
+        from http.server import ThreadingHTTPServer
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            copy = root / HILL.name
+            copy.write_bytes(HILL.read_bytes())
+            original = copy.read_bytes()
+            library = server.SessionLibrary([root], cache_size=1, maths_root=root)
+            httpd = ThreadingHTTPServer(
+                ("127.0.0.1", 0), server.make_handler(library, buckets=50)
+            )
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            base = f"http://127.0.0.1:{httpd.server_address[1]}"
+            quoted = urllib.parse.quote(copy.stem)
+
+            def request(path, method="GET", payload=None):
+                data = None if payload is None else json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(base + path, data=data, method=method)
+                if data is not None:
+                    req.add_header("Content-Type", "application/json")
+                try:
+                    with urllib.request.urlopen(req, timeout=120) as response:
+                        return response.status, json.loads(response.read().decode("utf-8"))
+                except urllib.error.HTTPError as exc:
+                    return exc.code, json.loads(exc.read().decode("utf-8"))
+
+            try:
+                status, body = request(f"/api/session/{quoted}/notes")
+                self.assertEqual(status, 200, body)
+                self.assertEqual(body["notes"], [])
+
+                status, body = request(
+                    f"/api/session/{quoted}/notes", "PUT",
+                    {"notes": [{"time": 231.74, "text": "这里换了刹车点"}]},
+                )
+                self.assertEqual(status, 200, body)
+                self.assertEqual(body["saved"], f"{copy.stem}.notes.json")
+                self.assertEqual(body["notes"][0]["text"], "这里换了刹车点")
+                self.assertIsNotNone(body["notes"][0]["distance"], "距离轴要能落点")
+                on_disk = json.loads(
+                    (root / f"{copy.stem}.notes.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(on_disk["notes"][0]["time"], 231.74)
+
+                status, body = request(f"/api/session/{quoted}/notes")
+                self.assertEqual(len(body["notes"]), 1)
+
+                status, body = request(
+                    f"/api/session/{quoted}/notes", "PUT",
+                    {"notes": [{"time": 1.0, "text": "  "}]},
+                )
+                self.assertEqual(status, 400, body)
+                self.assertIn("写一句", body["error"])
+
+                status, body = request(
+                    f"/api/session/{quoted}/notes", "PUT",
+                    {"notes": [{"time": 99999.0, "text": "太晚"}]},
+                )
+                self.assertEqual(status, 400, body)
+                self.assertIn("0–", body["error"])
+
+                status, body = request(f"/api/session/{quoted}/notes", "PUT", {"n": []})
+                self.assertEqual(status, 400, body)
+                self.assertIn("notes", body["error"])
+
+                # 存不下的时候，盘上那一份不许被半途改掉
+                self.assertEqual(
+                    json.loads((root / f"{copy.stem}.notes.json").read_text("utf-8"))["notes"][0]["text"],
+                    "这里换了刹车点",
+                )
+                self.assertEqual(copy.read_bytes(), original, ".ld 是只读的")
+
+                status, body = request(
+                    f"/api/session/{quoted}/notes", "PUT", {"notes": []}
+                )
+                self.assertEqual(status, 200, body)
+                self.assertEqual(body["notes"], [])
             finally:
                 httpd.shutdown()
                 library.close()

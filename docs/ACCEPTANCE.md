@@ -1468,6 +1468,54 @@ tolerance`）；两份金标准快照 `smoke_viewer.js` 均 PASS（7 圈 / 26 �
 
 ---
 
+## A37 · 注释组件（ticket #15）
+
+i2 Pro 的 Notes：在数据上放一条带文字的标记（"这里换了刹车点"），复盘时一眼看到。
+它和**信标**是两码事——信标是穿过一次线、会切圈；注释只是记号。
+
+| # | 交付物 | 在哪 |
+| --- | --- | --- |
+| ① | 纯函数（校验 / 增删改 / 落点 / 侧车） | `src/i3pro/notes.py`（`normalize` / `add_note` / `update_note` / `remove_note` / `marks`） |
+| ② | 单元测试 15 项 | `tests/test_i3pro.py` 的 `TestNotes`（13 项）与 `TestNotesOverHttp`（1 项，另有 1 项金标准实跑） |
+| ③ | 无头交互断言（第 30 组） | `tools/smoke_viewer.js` |
+| ④ | 本条 | `docs/ACCEPTANCE.md` |
+| ⑤ | 两份金标准实跑 | `高避5圈`（7 圈）与 `耐久正赛`（26 圈）快照 smoke 均 PASS |
+
+**通过判据**（可复制，在本机跑出来的）：
+
+```powershell
+python -m unittest discover -s tests -v      # Ran 189 tests + OK
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"   # PASS（第 30 组）
+python tools\verify_clicks.py                # 40 项检查：40 通过，0 失败（#15 那 8 条）
+```
+
+实测（真 Edge，截图 `out/shots/verify-notes.png`）：
+
+| 做了什么 | 结果 |
+| --- | --- |
+| 没设光标就按「＋ 注释」 | toast 说"先把鼠标移到图上"，侧车不落盘 |
+| 真点图上 + 真点「＋ 注释」 | 侧车多一条，`time` = 231.74 s（就是光标处） |
+| 真键盘改成「这里换了刹车点」+ 回车 | 侧车里那句就是它 |
+| 那行字真的画出来了 | 捕到的真画布 `fillText` 里有 `这里换了刹车点` |
+| `Esc` 取消 | 侧车一个字节没动（逐字节比对） |
+| 加注释前后数圈速表 | **9 行 → 9 行**（注释不参与切圈） |
+| 真点 ✕ | 侧车里那条没了 |
+
+**位置怎么算**（为什么不是前端插值）：`notes.marks` 在**主采样序列**上按时刻插值出距离
+（100 Hz 的格子，误差小于一个像素），轨迹图上取**最近的抽稀采样**（抽稀点之间隔着几米，
+插值没有意义）。没有 GPS、或这条注释落在序列之外时给 `null`，界面就只画时间轴、不画轨迹，
+不猜一个位置出来。
+
+**边界（说清代价）**：
+
+* 快照模式只能看不能改：按钮禁用，点它会说"用 serve 模式打开"——快照里没有服务可写。
+* 文字上限 200 字、一场最多 500 条；写超了报错会带上"先删掉几条"这种下一步。
+* 双圈对比模式下「＋ 注释」不加：那根距离轴对应两条圈，说不清落在哪一条。
+* 注释**不进**圈速表、比圈与报表——它有自己的一张侧车文件，写坏了也不会动圈速一个数
+  （`TestNotes.test_注释不参与切圈也不改报表` 就是钉这一条）。
+
+---
+
 ## 全量回归
 
 ```powershell
@@ -1479,7 +1527,7 @@ python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘�
 
 **通过判据**：`Ran 174 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）；
 `PASS - 0 channel(s) outside tolerance`；`PASS - workbench ran headless ... interactions verified`；
-`32 项检查：32 通过，0 失败`。**四条全绿才算改完**（AGENTS.md 规则 7）。
+`40 项检查：40 通过，0 失败`。**四条全绿才算改完**（AGENTS.md 规则 7）。
 
 测试覆盖：
 
@@ -1510,5 +1558,6 @@ python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘�
 | `TestIndependentParsers` | 第二套实现交叉验证、213 通道 CSV 全量对照 |
 | `TestBeaconUndo` | 撤销的纯函数层：什么是"同一版"、什么时候没有可撤销的一步、交回去的是上一版本身 |
 | `TestBeaconUndoOverHttp` | 撤销走真实 `PUT`：改名 / 插入 / 删除各自一步回到原样、`trusted` 迁移、落盘、一次无改动的保存不吃掉上一步、没有可撤销的一步时 400 并说明下一步、页面注入的 `laps_can_undo` 三态 |
-| `TestViewerScript` | 无头驱动前端：脚本里 **323 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
+| `TestViewerScript` | 无头驱动前端：脚本里 **336 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
+| `TestNotes` / `TestNotesOverHttp` | 注释（#15，15 项）：文字折行与截断、时刻校验的下一步、增删改不改原表、距离在主采样上插值、轨迹取最近抽稀点、越界不猜位置、侧车往返与坏文件、**注释不动圈速表**、HTTP 的 PUT 落盘 / 400 说明下一步 / `.ld` 字节不变 |
 | `TestLaunchers` | 一键启动：快照批量导出 + 索引页、缺数据目录的报错、端口占用自动换端口 |

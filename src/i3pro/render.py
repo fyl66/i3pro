@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from . import derive, histogram as histogrammod, laps as lapsmod
-from . import report as reportmod, sections as sectionsmod
+from . import notes as notesmod, report as reportmod, sections as sectionsmod
 from . import ld as ldmod
 from . import spectrum as spectrummod
 
@@ -39,6 +39,7 @@ __all__ = [
     "groups",
     "pick_channels",
     "track_payload",
+    "notes_payload",
     "sections_payload",
     "report_payload",
     "snapshot_report",
@@ -672,6 +673,25 @@ def track_payload(
     }
 
 
+def notes_payload(log: ldmod.LogFile, track: dict | None = None) -> list[dict]:
+    """这一场的注释 + 落点：时刻、文字、距离轴上的位置、轨迹图上的 x/y。
+
+    读的是 `<场次>.notes.json`（写坏了就当没有，见 ``notes.load_notes``）。位置在这里
+    算，界面只负责画：距离在主采样序列上插值（100 Hz 的格子，误差小于一个像素），
+    轨迹取最近的那个抽稀采样（抽稀点之间隔着几米，插值没有意义）。
+    """
+    notes = notesmod.load_notes(log.path)
+    if not notes:
+        return []
+    try:
+        distance = lapsmod.distance_on_master(log)
+    except ValueError:
+        return notesmod.marks(notes, track)
+    master = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
+    size = min(master.size, distance.size)
+    return notesmod.marks(notes, track, master[:size], distance[:size])
+
+
 def sections_payload(
     log: ldmod.LogFile,
     laps=None,
@@ -826,6 +846,7 @@ def build_payload(
 
     channel_groups, status_channels = groups(log)
     speed_name = derive.speed_channel(log)
+    track = track_payload(log) if with_track else None
     return {
         "meta": {
             **log.metadata(),
@@ -844,8 +865,12 @@ def build_payload(
         "overlay": overlay,
         "ref": None if chosen_ref is None else chosen_ref.label,
         "cmp": None if chosen_cmp is None else chosen_cmp.label,
-        "track": track_payload(log) if with_track else None,
+        "track": track,
         "laps_config": lapsmod.load_config(log.path).as_dict(),
+        # 注释：一张自己的侧车（`<场次>.notes.json`），不参与切圈 / 比圈 / 报表。
+        # 快照把落点一起内嵌；serve 模式 /info 不内嵌轨迹，所以 x/y 是 None，
+        # 由 /api/session/<名>/notes 现算（那边拿得到 GPS 轨迹）。
+        "notes": notes_payload(log, track),
         "sections": sections_payload(log, recognized),
         "report": (
             _snapshot_report_or_error(log, recognized, selected) if with_report else None

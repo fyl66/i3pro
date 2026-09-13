@@ -33,6 +33,7 @@ from . import (
     histogram as histogrammod,
     importer,
     laps as lapsmod,
+    notes as notesmod,
     spectrum as spectrummod,
     maths,
     render,
@@ -552,6 +553,13 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                     return self.save_sections(log)
                 return self._json(render.sections_payload(log, render.detect(log)))
 
+            if action == "notes":
+                # 注释（ticket #15）：GET 拿这一场的注释与落点，PUT 存整张表。
+                # 它有自己的侧车 `<场次>.notes.json`，和信标 / 区段互不影响。
+                if method == "PUT":
+                    return self.save_notes(log)
+                return self._json({"notes": render.notes_payload(log, render.track_payload(log))})
+
             if action == "report":
                 # 时间报告 / 通道报告（ticket #11）。GET 一张或两张表；
                 # 带 csv=time|channels 时直接吐 CSV，方便命令行与队友核对。
@@ -687,6 +695,39 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                 )
             self._commit_laps(log, config, current, notice="已撤销上一步信标编辑",
                               forget_undo=True)
+
+        def save_notes(self, log) -> None:
+            """PUT /api/session/<name>/notes：整张注释表（客户端发全量）。
+
+            规则只有一份实现（``notes.normalize``）：文字不能为空、时刻要落在这一场里、
+            最多 500 条。这里不做别的判断——注释**不参与**切圈 / 比圈 / 报表，
+            所以存完只回新表，不需要重算圈速（这正是它和信标最大的区别）。
+            """
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b""
+            if not body:
+                return self._error(400, "空请求体：注释表要带 {\"notes\": [...]} 一起发过来")
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError) as exc:
+                return self._error(400, f"JSON 解析失败: {exc}")
+            if not isinstance(data, dict) or "notes" not in data:
+                return self._error(
+                    400,
+                    '注释表要写成 {"notes": [{"time": 12.5, "text": "……"}]}，'
+                    "现在这个请求体里没有 notes 字段。",
+                )
+            try:
+                notes = notesmod.normalize(data.get("notes"), log.duration)
+            except notesmod.NoteError as exc:
+                return self._error(400, str(exc))
+            path = notesmod.save_notes(log.path, notes)
+            self._json(
+                {
+                    "saved": path.name,
+                    "notes": render.notes_payload(log, render.track_payload(log)),
+                }
+            )
 
         def _commit_laps(self, log, config, previous, notice=None, forget_undo=False) -> None:
             """落盘 → 重算圈速表 → 记下"上一步"，三条编辑路径共用这一段。"""

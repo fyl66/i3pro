@@ -90,6 +90,18 @@
   .pill input.bname:focus { background:var(--panel); border-color:var(--accent); outline:none; }
   .pill .btime { color:var(--muted); font-size:10px; font-style:normal; }
   .pill a.del { color:#ff5d6c; text-decoration:none; font-size:11px; }
+  /* notes: one row per note - the moment, the line of text, and a delete link */
+  .notes { display:flex; flex-direction:column; gap:3px; margin-top:4px; }
+  .note { display:flex; align-items:center; gap:5px; background:var(--panel2);
+          border:1px solid var(--line); border-radius:5px; padding:1px 6px 1px 5px; }
+  .note .ntime { color:#ffd166; font-size:10px; font-variant-numeric:tabular-nums;
+                 min-width:7ch; }
+  .note input.ntext { flex:1; min-width:6ch; background:transparent; border:1px solid transparent;
+                      color:var(--fg); font-size:11px; font-family:inherit; padding:1px 3px;
+                      border-radius:4px; }
+  .note input.ntext:hover { background:#ffffff12; }
+  .note input.ntext:focus { background:var(--panel); border-color:var(--accent); outline:none; }
+  .note a.del { color:#ff5d6c; text-decoration:none; font-size:11px; }
   .scattercfg { display:flex; gap:5px; align-items:center; flex-wrap:wrap; font-size:11px;
                 padding:2px 9px 0; color:var(--muted); }
   .scattercfg select { font-size:11px; padding:2px 5px; max-width:150px; }
@@ -242,6 +254,16 @@
       <div class="slist" id="sectionsList"></div>
       <div class="hint">点「弯 / 直」切换种类 · 改名字或起点距离就存下来（<kbd>回车</kbd> 保存）·
         <kbd>G</kbd> 旁边的「区段」按钮可把带子从图上收起来</div>
+    </div>
+    <div class="group" id="notesGroup">
+      <h2>注释 <span class="count" id="notesCount"></span></h2>
+      <div class="row">
+        <button id="addNote" title="在光标处放一条注释（先点「＋ 注释」，再把鼠标移到图上）">＋ 注释</button>
+        <button id="toggleNotes" class="on" title="在时间轴与轨迹图上显示注释">显示</button>
+      </div>
+      <div class="hint">点文字就地改（<kbd>回车</kbd> 保存 · <kbd>Esc</kbd> 取消）· ✕ 删除。
+        注释只是记号，不参与切圈、比圈与报表。</div>
+      <div class="notes" id="notesList"></div>
     </div>
     <div class="group" id="valuesGroup">
       <h2>光标值 <span class="count" id="cursorInfo"></span></h2>
@@ -725,6 +747,10 @@ const state = {
   sectionsForce: false,
   //: 服务内存里还留着一版可以撤销的配置？由服务的响应说了算，界面不猜。
   canUndo: false,
+  //: 注释（#15）：自己的侧车 `<场次>.notes.json`，图上那几条虚线就是它。
+  //: 位置由 Python 算好（`notes.marks`）：distance 在主采样上插值、x/y 取最近的抽稀点。
+  notes: (DATA && DATA.notes) || [],
+  showNotes: true,
   placeBeacon: false,
   pending: 0,
   windowKey: "",
@@ -2035,8 +2061,11 @@ function renderGraphComponent(comp, b) {
   const r = lane();
   const padBase = axisPad();
   panels.forEach((panel) => {
-    drawCursorLines(ctx, { l: padBase.l, r: padBase.r, t: panel.top + padBase.t, b: padBase.b },
-                    c.w - padBase.l - padBase.r, panel.panelH - padBase.t - padBase.b, r[0], r[1]);
+    const clip = { l: padBase.l, r: padBase.r, t: panel.top + padBase.t, b: padBase.b };
+    const plotW = c.w - padBase.l - padBase.r;
+    const plotH = panel.panelH - padBase.t - padBase.b;
+    drawNotes(ctx, clip, plotW, plotH, r[0], r[1], panel.top === 0);
+    drawCursorLines(ctx, clip, plotW, plotH, r[0], r[1]);
   });
   renderGraphHead(comp, b, groups, panels, overlapped);
 }
@@ -3343,6 +3372,28 @@ function renderTrackComponent(comp, b) {
   };
   if (state.datumOn && state.datum !== null) mark(state.datum, "#ffb454", 3.6);
   if (state.cursor !== null) mark(state.cursor, "#fff", 4.2);
+  // 注释：轨迹图上画成琥珀色的点 + 一行字。位置来自服务端算好的 x/y（局部米坐标，
+  // 和这条轨迹同一套坐标系），没有 GPS 或者注释落在抽稀轨迹之外时是 null——那就不画。
+  if (state.showNotes) {
+    const range = windowed ? windowRange() : null;
+    ctx.font = "11px Segoe UI";
+    ctx.textAlign = "left";
+    for (const note of state.notes || []) {
+      if (note.x === null || note.x === undefined || note.y === null || note.y === undefined) continue;
+      if (range && (note.time < range.from || note.time > range.to)) continue;
+      const nx = px(note.x), ny = py(note.y);
+      ctx.fillStyle = "#ffd166";
+      ctx.beginPath();
+      ctx.arc(nx, ny, 3.6, 0, Math.PI * 2);
+      ctx.fill();
+      const text = noteText(note, 16);
+      const width = ctx.measureText(text).width;
+      ctx.fillStyle = "#0d1017cc";
+      ctx.fillRect(nx + 4, ny - 17, width + 4, 13);
+      ctx.fillStyle = "#ffd166";
+      ctx.fillText(text, nx + 6, ny - 7);
+    }
+  }
   // Remember how to turn a click back into track coordinates (beacon placement).
   b.toData = (clientX, clientY) => {
     const rect = canvas.getBoundingClientRect();
@@ -4005,6 +4056,183 @@ async function ensureOverlay() {
   } catch (err) {
     toast("对比圈加载失败: " + err.message);
   }
+}
+
+/* ------------------------------------------------------------ 注释组件 #15 */
+/* i2 Pro 的 Notes：在数据上放一条带文字的标记，复盘时一眼看到"这里换了刹车点"。
+   它和**信标**是两码事——信标是穿过一次线、会切圈；注释只是记号，所以它走自己的
+   侧车 `<场次>.notes.json`：改注释不会动圈速表一个数，切圈 / 比圈 / 报表也都不看它。
+   位置由 Python 算好（`notes.marks`：距离在主采样序列上插值、轨迹取最近的抽稀点），
+   这里只负责画与编辑——同一条规则不在两边各写一遍。 */
+
+/** 注释在当前横轴上的位置：时间轴是时刻，距离轴用服务端算好的距离。 */
+function noteAt(note) {
+  return state.mode === "time" ? note.time : note.distance;
+}
+
+function noteText(note, limit) {
+  const text = String(note.text || "");
+  return text.length > limit ? text.slice(0, limit - 1) + "…" : text;
+}
+
+/** 图上的注释：一条琥珀色虚线，第一块绘图区里再写上那行字。 */
+function drawNotes(ctx, pad, plotW, plotH, x0, x1, withText) {
+  if (!state.showNotes) return;
+  const notes = state.notes || [];
+  if (!notes.length) return;
+  ctx.save();
+  ctx.strokeStyle = "#ffd166aa";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 3]);
+  ctx.font = "11px Segoe UI";
+  ctx.textAlign = "left";
+  for (const note of notes) {
+    const value = noteAt(note);
+    if (value === null || value === undefined || value < x0 || value > x1) continue;
+    const px = pad.l + ((value - x0) / (x1 - x0 || 1)) * plotW;
+    ctx.beginPath();
+    ctx.moveTo(px, pad.t);
+    ctx.lineTo(px, pad.t + plotH);
+    ctx.stroke();
+    if (!withText) continue;
+    // 文字压在图的下沿（上沿是通道图例，会盖住）：先铺一条底色再写字，
+    // 不然曲线穿过去就看不清了。
+    ctx.setLineDash([]);
+    const text = noteText(note, 22);
+    const width = ctx.measureText(text).width;
+    const tx = Math.max(pad.l + 2, Math.min(px + 3, pad.l + plotW - width - 3));
+    ctx.fillStyle = "#0d1017cc";
+    ctx.fillRect(tx - 2, pad.t + plotH - 15, width + 4, 14);
+    ctx.fillStyle = "#ffd166";
+    ctx.fillText(text, tx, pad.t + plotH - 4);
+    ctx.setLineDash([4, 3]);
+  }
+  ctx.restore();
+}
+
+function noteRow(note, index) {
+  return '<div class="note"><i class="ntime">' + Number(note.time).toFixed(3) + " s</i>"
+    + '<input class="ntext" data-note-text="' + index + '" value="' + esc(note.text) + '"'
+    + (DATA.api ? "" : " readonly")
+    + ' title="点一下改文字，回车保存，Esc 取消">'
+    + '<a class="del" href="#" data-note-del="' + index + '" title="删掉这条注释">✕</a></div>';
+}
+
+function renderNotes() {
+  const list = $("notesList");
+  if (!list) return;
+  const notes = state.notes || [];
+  $("notesCount").textContent = notes.length ? notes.length + " 条" : "";
+  if (!notes.length) {
+    list.innerHTML = '<span class="hint">' + (DATA.api
+      ? "还没有注释 —— 先把鼠标移到图上，点「＋ 注释」，写一句「这里换了刹车点」，回车保存。"
+      : "这场没有注释。注释在 serve 模式里加，加过之后会一起嵌进快照。") + "</span>";
+  } else {
+    list.innerHTML = notes.map(noteRow).join("");
+    list.querySelectorAll("input[data-note-text]").forEach((box) => {
+      const index = Number(box.dataset.noteText);
+      const original = box.value;
+      // 和信标名一样：改一次字就重新"脏"。少了这一行，按过一次 Esc 之后再打字
+      // 按回车会静默不存（A33 实测抓过同一类 bug）。
+      let dirty = true;
+      box.addEventListener("input", () => { dirty = true; });
+      const commit = () => {
+        if (!dirty) return;
+        dirty = false;
+        if (box.value !== original) updateNoteText(index, box.value);
+      };
+      box.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") { event.preventDefault(); commit(); box.blur(); }
+        else if (event.key === "Escape") {
+          event.preventDefault();
+          dirty = false;
+          box.value = original;
+          box.blur();
+        }
+      });
+      box.addEventListener("blur", commit);
+      box.addEventListener("focus", () => {
+        if (!DATA.api) toast("快照模式不能改注释，用 serve 模式打开");
+      });
+    });
+    list.querySelectorAll("a[data-note-del]").forEach((link) => {
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        removeNoteAt(Number(link.dataset.noteDel));
+      });
+    });
+  }
+  $("addNote").disabled = !DATA.api;
+  $("addNote").title = DATA.api
+    ? "在光标处放一条注释（先把鼠标移到图上）"
+    : "快照模式不能加注释：用 serve 模式打开这一场";
+  $("toggleNotes").classList.toggle("on", !!state.showNotes);
+}
+
+/** 注释表整份交给服务端：校验（文字不能空、时刻要落在这一场里）只有一份实现。 */
+async function saveNotes(next) {
+  if (!DATA.api) { toast("快照模式不能改注释，用 serve 模式打开"); return false; }
+  try {
+    const res = await fetch(DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/notes", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ notes: next }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast(data.error || ("保存注释失败：HTTP " + res.status));
+      return false;
+    }
+    state.notes = data.notes || [];
+    renderNotes();
+    renderAll();
+    return true;
+  } catch (err) {
+    toast("保存注释失败：" + err.message + "（本地服务还在吗？）");
+    return false;
+  }
+}
+
+/** ＋ 注释：加在光标处——i2 Pro 里就是"在当前位置放一条 Note"。 */
+async function addNoteAtCursor() {
+  if (!DATA.api) { toast("快照模式不能加注释，用 serve 模式打开"); return; }
+  const quick = cursorTime();
+  const when = (state.mode === "distance" && quick !== null)
+    ? await exactCursorTime(quick) : quick;
+  if (when === null) {
+    toast(state.mode === "overlay"
+      ? "双圈对比的距离轴对应两条圈，切到时间轴再加注释"
+      : "先把鼠标移到图上，再按「＋ 注释」");
+    return;
+  }
+  const next = (state.notes || []).map((n) => ({ time: n.time, text: n.text }));
+  next.push({ time: when, text: "新注释" });
+  if (!(await saveNotes(next))) return;
+  toast("已加在 " + when.toFixed(3) + " s —— 写上这行字，按回车保存");
+  // 直接把光标放进刚加的那一行，省掉"再去点一下那个框"
+  const box = document.querySelector('#notesList input[data-note-text][value="新注释"]')
+    || document.querySelector("#notesList input[data-note-text]");
+  if (box) { box.focus(); if (box.select) box.select(); }
+}
+
+async function updateNoteText(index, text) {
+  if (!DATA.api) { toast("快照模式不能改注释，用 serve 模式打开"); return; }
+  const notes = state.notes || [];
+  if (!notes[index]) return;
+  const clean = String(text === null || text === undefined ? "" : text).trim();
+  if (!clean) { toast("注释不能空着：写一句话，或者按 ✕ 删掉它"); return; }
+  if (clean === notes[index].text) return;
+  const next = notes.map((n) => ({ time: n.time, text: n.text }));
+  next[index] = { time: next[index].time, text: clean };
+  await saveNotes(next);
+}
+
+async function removeNoteAt(index) {
+  if (!DATA.api) { toast("快照模式不能删注释，用 serve 模式打开"); return; }
+  const next = (state.notes || [])
+    .filter((_, i) => i !== index)
+    .map((n) => ({ time: n.time, text: n.text }));
+  await saveNotes(next);
 }
 
 /* ------------------------------------------------------------ 数学通道 */
@@ -5504,11 +5732,18 @@ function init() {
     renderAll();
   });
   $("addCrossing").addEventListener("click", () => { insertCrossing(); });
+  $("addNote").addEventListener("click", () => { addNoteAtCursor(); });
+  $("toggleNotes").addEventListener("click", () => {
+    state.showNotes = !state.showNotes;
+    renderNotes();
+    renderAll();
+  });
   state.lapsConfig = Object.assign({ mode: "auto", beacons: [], trusted: {} },
                                    DATA.laps_config || {});
   state.canUndo = !!DATA.laps_can_undo;
   $("undoLaps").addEventListener("click", () => { undoBeaconEdit(); });
   renderLapControls();
+  renderNotes();
   $("mathsNew").addEventListener("click", () => openMathsEditor(null));
   $("mathsCancel").addEventListener("click", closeMathsEditor);
   $("mathsTest").addEventListener("click", mathsTest);
@@ -5644,6 +5879,9 @@ window.i3pro = {
   renderLapControls: renderLapControls, renameBeacon: renameBeacon,
   insertCrossing: insertCrossing, cursorTime: cursorTime,
   exactCursorTime: exactCursorTime, applyLapsResponse: applyLapsResponse,
+  renderNotes: renderNotes, addNoteAtCursor: addNoteAtCursor,
+  updateNoteText: updateNoteText, removeNoteAt: removeNoteAt, saveNotes: saveNotes,
+  drawNotes: drawNotes, noteAt: noteAt,
   renderMathsList: renderMathsList, openMathsEditor: openMathsEditor,
   closeMathsEditor: closeMathsEditor, mathsDraft: mathsDraft,
   mathsSaveList: mathsSaveList, applyMathsResponse: applyMathsResponse,

@@ -347,6 +347,24 @@ class TestServer(unittest.TestCase):
             self.assertIn("config", laps)
             self.assertGreaterEqual(len([l for l in laps["laps"] if l["complete"]]), 5)
 
+            # a CSV session must be reachable through the same web path
+            csv_stem = "20260522-yjw第二次直线3.72"
+            if (DATA / f"{csv_stem}.csv").exists():
+                listed = [s["name"] for s in get_json("/api/sessions")]
+                self.assertIn(csv_stem, listed)          # the .ld keeps the plain name
+                if (DATA / f"{csv_stem}.ld").exists():
+                    # both sources exist -> the CSV must not be shadowed
+                    self.assertIn(f"{csv_stem} (csv)", listed)
+                    csv_stem = f"{csv_stem} (csv)"
+                csv_quoted = urllib.parse.quote(csv_stem)
+                csv_trace = get_json(
+                    f"/api/session/{csv_quoted}/trace"
+                    "?channels=GPS%20Speed&from=10&to=12&buckets=200"
+                )
+                self.assertTrue(csv_trace["GPS Speed"]["time"])
+                csv_page = get_text(f"/session/{csv_quoted}")
+                self.assertIn('"format": "csv"', csv_page)
+
             # windowed GPS track, for the "only the selected time range" view
             windowed = get_json(f"/api/session/{quoted}/track?from=200&to=230&points=4000")
             self.assertLessEqual(max(windowed["time"]), 230.5)
@@ -561,6 +579,9 @@ class TestCsvSession(unittest.TestCase):
             self.assertAlmostEqual(session.sample_rate, 100.0, places=3)
             self.assertGreater(session.duration, 800)
             self.assertEqual(session.metadata()["format"], "csv")
+            # the metadata block above the table is used, not ignored
+            self.assertEqual(session.device, "C125")
+            self.assertEqual(session.header["rate_from"], "元数据")
             self.assertTrue(session.has("GPS Speed"))
             self.assertEqual(len(session.values("GPS Speed")),
                              session.channel("GPS Speed").sample_count)
@@ -663,6 +684,47 @@ class TestCsvSession(unittest.TestCase):
         self.assertGreater(float(distance[-1]), 100.0)
         self.assertTrue(laps)
         self.assertGreater(max(lap.distance for lap in laps), 50.0)
+
+    def test_unit_signal_fills_a_blank_unit_and_flags_a_mismatch(self):
+        """The unit is a matching signal: it fills gaps and calls out conflicts."""
+        import tempfile
+
+        rows = ["Time,Vx KF,GPS Speed", "s,,mph", "0.00,10,1", "0.01,20,2", "0.02,30,3"]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "units.csv"
+            path.write_text("\n".join(rows), encoding="utf-8")
+            session = csvlog.read_csv_session(path)
+        cells = {e["column"]: e for e in session.report if e.get("status") == "通道"}
+        self.assertEqual(session.channel("Vx KF").unit, "km/h")   # blank -> filled
+        self.assertIn("单位不符", cells["GPS Speed"]["warning"])
+        self.assertEqual(cells["Vx KF"]["rate_from"], "时间列")
+
+    def test_csv_is_an_accepted_import(self):
+        from i3pro import importer
+
+        self.assertIn(".csv", importer.ALLOWED_SUFFIXES)
+        self.assertEqual(importer.safe_name("别的队给的.csv"), "别的队给的.csv")
+        with self.assertRaises(ValueError):
+            importer.safe_name("notes.txt")
+
+    @_needs(DATA / "20260524-耐久正赛.csv")
+    def test_a_csv_session_can_compare_two_laps_on_the_distance_axis(self):
+        """The ticket's criterion: a CSV session must be comparable, not just cut."""
+        with csvlog.read_csv_session(DATA / "20260524-耐久正赛.csv") as session:
+            laps = [l for l in lapsmod.detect_laps(session) if l.complete]
+            self.assertGreaterEqual(len(laps), 2)
+            channel = session.channels[1].name
+            result = lapsmod.overlay(session, laps[:2], [channel], step=5.0)
+            distance = np.asarray(result["distance"])
+            self.assertTrue(np.all(np.diff(distance) > 0))
+            for row in result["laps"]:
+                self.assertEqual(len(row["time"]), distance.size)
+                self.assertEqual(len(row[channel]), distance.size)
+            _, delta = lapsmod.time_delta(result["laps"][0], result["laps"][1], distance)
+            self.assertTrue(np.isfinite(delta).any())
+            table = lapsmod.lap_table(session, laps)
+        self.assertEqual(len(table), len(laps))
+        self.assertIn("lap_time", table[0])
 
 
 class TestPoints(unittest.TestCase):

@@ -39,6 +39,32 @@ MAP_SUFFIX = ".map.json"
 #: Column names that mean "this is the time axis".
 TIME_NAMES = frozenset({"time", "t", "timestamp", "times", "time s"})
 
+#: The unit each canonical channel normally carries, taken from the team's own
+#: `C125` logs. Used to *check* a matched column, and to fill a unit the file
+#: left blank. Only entries we have actually observed are listed.
+CANONICAL_UNITS = {
+    "Vx KF": "km/h", "GPS Speed": "km/h", "Ground Speed": "km/h",
+    "SpeedFL": "km/h", "SpeedFR": "km/h", "SpeedRL": "km/h", "SpeedRR": "km/h",
+    "G Force Lat": "G", "G Force Long": "G", "G Force Vert": "G",
+    "GPS Heading": "deg", "Battery Power": "kW",
+    "AMKFR ActualTorqueValue": "NM",
+}
+
+#: Metadata keys an i2 Pro export writes above the table.
+META_KEYS = ("Device", "Log Date", "Log Time", "Sample Rate", "Venue",
+             "Driver", "Vehicle", "Comment", "Event")
+
+
+def _metadata(rows: list[list[str]], head: int) -> dict[str, str]:
+    """Read the key/value rows an i2 Pro export puts above the table."""
+    found: dict[str, str] = {}
+    for row in rows[:head]:
+        cells = [c.strip() for c in row if c.strip()]
+        for i in range(0, len(cells) - 1, 2):
+            if cells[i] in META_KEYS:
+                found.setdefault(cells[i], cells[i + 1])
+    return found
+
 
 def _map_path(path: str | Path) -> Path:
     return Path(path).with_suffix(MAP_SUFFIX)
@@ -167,7 +193,7 @@ def _looks_numeric(text: str) -> bool:
         return False
 
 
-def _decimals_of(series: pd.Series, source: list[str] | None) -> int:
+def _decimals_of(source: list[str] | None) -> int:
     """Display precision: how many digits the file actually writes."""
     if source:
         best = 0
@@ -322,6 +348,17 @@ def read_csv_session(
     if not math.isfinite(rate) or rate <= 0:
         raise ValueError(f"{path.name}: 时间列不是单调递增")
 
+    # The other two matching signals: the metadata block's declared sample rate,
+    # and the unit each canonical channel normally carries.
+    meta = _metadata(rows, head)
+    rate_from = "时间列"
+    try:
+        meta_rate = float(meta.get("Sample Rate", ""))
+    except ValueError:
+        meta_rate = 0.0
+    if meta_rate > 0 and abs(meta_rate - rate) / meta_rate < 0.05:
+        rate, rate_from = meta_rate, "元数据"
+
     channels: list[ldmod.Channel] = []
     columns: dict[str, np.ndarray] = {}
     report: list[dict] = []
@@ -357,7 +394,13 @@ def read_csv_session(
         unit = units.get(key, "")
         if not unit and has_unit_row and i < len(unit_row):
             unit = str(unit_row[i]).strip()
-        decimals = _decimals_of(None, [f"{v:g}" for v in values[:200]])
+        expected = CANONICAL_UNITS.get(name)
+        warning = ""
+        if expected and not unit and matched_by in ("原名", "别名", "手工指定"):
+            unit = expected                       # the file left the unit blank
+        elif expected and unit and unit.lower() != expected.lower():
+            warning = f"单位不符：文件写 {unit}，该通道通常是 {expected}"
+        decimals = _decimals_of([f"{v:g}" for v in values[:200]])
         channels.append(ldmod.Channel(
             name=name, short_name="", unit=unit, sample_rate=rate,
             sample_count=int(values.size), data_offset=0, data_type=0,
@@ -368,15 +411,18 @@ def read_csv_session(
         columns[name] = values
         report.append({"column": raw_name, "status": "通道", "name": name,
                        "matched_by": matched_by, "unit": unit, "rate": rate,
+                       "rate_from": rate_from, "warning": warning,
                        "samples": int(values.size)})
 
     if not channels:
         raise ValueError(f"{path.name}: 没有可用的通道列")
     return CsvSession(
         path=path, channels=channels, columns=columns, time=time,
-        sample_rate=rate, duration=float(time[-1] - time[0]), header={},
-        device="CSV", log_date="", log_time="",
-        event_name=path.stem, report=report,
+        sample_rate=rate, duration=float(time[-1] - time[0]),
+        header={"rate_from": rate_from, "metadata": meta},
+        device=meta.get("Device", "CSV"), log_date=meta.get("Log Date", ""),
+        log_time=meta.get("Log Time", ""),
+        event_name=meta.get("Event") or path.stem, report=report,
     )
 
 

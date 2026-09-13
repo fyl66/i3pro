@@ -74,7 +74,12 @@ class SessionLibrary:
                 continue
             for pattern in ("*.ld", "*.csv"):
                 for path in sorted(root.rglob(pattern)):
-                    found.setdefault(path.stem, path)
+                    name = path.stem
+                    if name in found:
+                        # Two sources, one stem: keep both, so a CSV export of a
+                        # session that also has its .ld is not silently hidden.
+                        name = f"{name} ({path.suffix.lstrip('.').lower()})"
+                    found.setdefault(name, path)
         return found
 
     def names(self) -> list[str]:

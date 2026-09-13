@@ -976,7 +976,7 @@ node tools\smoke_viewer.js "out\20260524-耐久正赛.html"       # 26 圈 / 23 
 * 距离轴模式下不画带子（各圈走线长度不同，见 A30），所以那儿的双击是切回时间轴再缩，
   不是"在距离轴上缩到某一段"。
 
-**当前结果**：`TestSections` 19 项、全套 **150 项单测 OK**；`verify_ld_vs_csv` PASS；
+**当时的结果**（本条验收时；全套现在 189 项）：`TestSections` 19 项、全套 **150 项单测 OK**；`verify_ld_vs_csv` PASS；
 两份金标准快照 smoke 均 PASS（无头断言点 260）；同一批交互在**真浏览器真鼠标**下
 也过（A33 的 21 项，含"全出要回到全场"）。
 
@@ -1149,7 +1149,7 @@ node tools\smoke_viewer.js "out\20260524-耐久正赛.html"       # 26 圈 / 23 
 另外把表改成显式 `<thead>/<tbody>`：浏览器虽然会自动补，但表头要 `sticky` 钉住，
 外边数行数、读表头也不该把表头行算进数据行。
 
-**当前结果**：`TestReport` + `TestReportOverHttp` 18 项、全套 **150 项单测 OK**；
+**当时的结果**（本条验收时；全套现在 189 项）：`TestReport` + `TestReportOverHttp` 18 项、全套 **150 项单测 OK**；
 `verify_ld_vs_csv` PASS；两份金标准快照 smoke 均 PASS；真 Edge 验收 17/17。
 
 ---
@@ -1525,7 +1525,7 @@ node tools\smoke_viewer.js out\<场次>.html   # 3. 无头驱动前端：PASS
 python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘：全过（没有 Edge 的机器打印 SKIP，不算通过）
 ```
 
-**通过判据**：`Ran 174 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）；
+**通过判据**：`Ran 189 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）；
 `PASS - 0 channel(s) outside tolerance`；`PASS - workbench ran headless ... interactions verified`；
 `40 项检查：40 通过，0 失败`。**四条全绿才算改完**（AGENTS.md 规则 7）。
 

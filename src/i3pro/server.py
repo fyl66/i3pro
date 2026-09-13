@@ -41,6 +41,7 @@ from . import (
     report as reportmod,
     sections,
     store,
+    timebase,
 )
 from . import ld as ldmod
 
@@ -396,7 +397,7 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
 
             if action == "trace":
                 names = _csv_arg(query, "channels") or render.pick_channels(log)
-                time = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
+                time = timebase.axis(log)
                 try:
                     distance = derive.distance_series(log)[: time.size]
                 except ValueError:
@@ -421,7 +422,7 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                 names = _csv_arg(query, "channels")
                 if not names:
                     return self._error(400, "points requires ?channels=")
-                time = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
+                time = timebase.axis(log)
                 return self._json(
                     render.points(
                         log,
@@ -447,7 +448,7 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                         f"本场次没有 {channel!r} 这条通道。先在左侧「通道」里搜一下名字，"
                         f"或者把 ?channel= 换成 /api/session/<名>/info 里列出的通道名。",
                     )
-                time = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
+                time = timebase.axis(log)
                 gate = (query.get("gate") or [None])[0] or None
                 colour = (query.get("colour") or [None])[0] or None
                 try:
@@ -507,7 +508,7 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                 )
                 if name is None or not log.has(name):
                     return self._json(None)
-                time = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
+                time = timebase.axis(log)
                 payload = render.trace(
                     log, name, time, None, _int_arg(query, "buckets", 900)
                 )

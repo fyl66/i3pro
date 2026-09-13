@@ -25,6 +25,7 @@ from . import derive, gpsfix, histogram as histogrammod, laps as lapsmod
 from . import notes as notesmod, report as reportmod, sections as sectionsmod
 from . import ld as ldmod
 from . import spectrum as spectrummod
+from . import timebase
 
 __all__ = [
     "render_html",
@@ -309,7 +310,7 @@ def snapshot_histograms(
     不内嵌区段窗口：区段是"每条圈 × 每个区段"，26 条圈的场次会变成几百份，
     快照会大到发不出去。要看某个区段的分布，缩放之后在 serve 模式下看。
     """
-    time = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
+    time = timebase.axis(log)
     windows: list[dict] = [{
         "key": "all", "label": "整场", "start": 0.0,
         "end": round(float(log.duration), 4),
@@ -689,7 +690,7 @@ def track_payload(
     if speed_name is None:
         speed = np.zeros(time.size)
     else:
-        master = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
+        master = timebase.axis(log)
         speed = np.interp(time, master, derive.hold_to_master(log, speed_name))
     step = max(1, time.size // max(1, points))
     breaks_out = _downsample_breaks(breaks, step)
@@ -780,7 +781,7 @@ def notes_payload(log: ldmod.LogFile, track: dict | None = None) -> list[dict]:
         distance = lapsmod.distance_on_master(log)
     except ValueError:
         return notesmod.marks(notes, track)
-    master = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
+    master = timebase.axis(log)
     size = min(master.size, distance.size)
     return notesmod.marks(notes, track, master[:size], distance[:size])
 
@@ -907,7 +908,7 @@ def build_payload(
     with_spectra: bool = False,
 ) -> dict:
     """Everything the workbench needs. Traces are only embedded in static mode."""
-    time = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
+    time = timebase.axis(log)
     try:
         distance = derive.distance_series(log)[: time.size]
     except ValueError:

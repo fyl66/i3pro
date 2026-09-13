@@ -28,7 +28,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import derive, laps as lapsmod
+from . import derive, laps as lapsmod, timebase
 
 __all__ = [
     "BASIS_LABELS",
@@ -198,7 +198,7 @@ def measure_unit(basis: str) -> str:
 def measure_series(log, basis: str) -> np.ndarray:
     """主时间基上的测度（非负）。切分的唯一输入，纯列函数。"""
     rate = float(log.sample_rate) or 1.0
-    size = int(round(log.duration * rate)) + 1
+    size = timebase.length(log, rate)
     if basis == "curvature":
         return _gps_curvature(log, size, rate)
     if basis == "lateral_g":

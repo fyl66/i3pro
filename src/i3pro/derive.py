@@ -18,6 +18,7 @@ import numpy as np
 from . import channels as channelsmod
 from . import gpsfix
 from . import ld as ldmod
+from . import timebase
 
 __all__ = [
     "SPEED_CANDIDATES",
@@ -72,7 +73,7 @@ def hold_to_master(log: ldmod.LogFile, name: str) -> np.ndarray:
     factor = channelsmod.hold_factor(log, ch, log.sample_rate)
     if factor > 1:
         values = np.repeat(values, factor)
-    n = int(round(log.duration * log.sample_rate)) + 1
+    n = timebase.length(log)
     if values.size < n:
         pad = values[-1] if values.size else 0.0
         values = np.concatenate([values, np.full(n - values.size, pad)])
@@ -139,8 +140,7 @@ def gps_distance(
         np.asarray(track["y"], dtype=float),
         track.get("breaks"),
     )
-    n = int(round(log.duration * log.sample_rate)) + 1
-    master = np.arange(n) / log.sample_rate
+    master = timebase.axis(log)
     # 零阶保持：定位是抽样点，两点之间车走了多少是未知的，不插值
     index = np.clip(np.searchsorted(time, master, side="right") - 1, 0, time.size - 1)
     return distance[index]

@@ -28,6 +28,7 @@ import numpy as np
 from . import derive
 from . import gpsfix
 from . import ld as ldmod
+from . import timebase
 
 __all__ = [
     "Beacon",
@@ -138,11 +139,6 @@ def _counter_channel(
         if int(np.sum(steps > 0.5)) >= min_steps and values.max() - values.min() >= min_steps:
             return name
     return None
-
-
-def _master_time(log: ldmod.LogFile) -> np.ndarray:
-    n = int(round(log.duration * log.sample_rate)) + 1
-    return np.arange(n, dtype=np.float64) / log.sample_rate
 
 
 def _lap_from_bounds(
@@ -326,7 +322,7 @@ def gps_laps(
     track = derive.gps_track(log, fix=config, scope="laps")
     t = track["time"]
     x, y = track["x"], track["y"]
-    master_t = _master_time(log)
+    master_t = timebase.axis(log)
     try:
         speed = np.interp(t, master_t, derive.speed_series(log))
     except ValueError:
@@ -469,7 +465,7 @@ def run_laps(
     meaningful unit is one attempt, i.e. from when the car pulls away to when it
     stops again.
     """
-    time = _master_time(log)
+    time = timebase.axis(log)
     speed = derive.speed_series(log) / 3.6      # km/h -> m/s
     moving = speed > max(0.0, stop_speed / 3.6)
     index = np.flatnonzero(moving)
@@ -522,11 +518,11 @@ def detect_laps(
         # dead speed bus: fall back to the GPS path length
         track = derive.gps_track(log, fix=laps_fix, scope="laps")
         rate = log.sample_rate
-        time = _master_time(log)
+        time = timebase.axis(log)
         gps_speed = np.gradient(track["x"]), np.gradient(track["y"])
         gps_speed = np.hypot(*gps_speed) * track["rate"]  # m/s on the GPS grid
         distance = np.interp(time, track["time"], np.cumsum(gps_speed) / track["rate"])
-    time = _master_time(log)
+    time = timebase.axis(log)
     if beacons:
         edges = sorted(float(b) for b in beacons)
         bounds = [
@@ -619,7 +615,7 @@ def overlay(
 ) -> dict:
     """Resample the given laps onto one shared distance grid."""
     rate = log.sample_rate
-    time = _master_time(log)
+    time = timebase.axis(log)
     distance = derive.distance_series(log, fix=fix)
     distance = distance[: time.size]
     series = {name: derive.hold_to_master(log, name) for name in channels}
@@ -953,7 +949,7 @@ def time_at_distance(log: ldmod.LogFile, distance: float) -> float | None:
         series = np.asarray(distance_on_master(log), dtype=np.float64)
     except ValueError:
         return None
-    time = np.asarray(_master_time(log), dtype=np.float64)
+    time = np.asarray(timebase.axis(log), dtype=np.float64)
     count = min(series.size, time.size)
     series, time = series[:count], time[:count]
     if count < 2 or not math.isfinite(distance):
@@ -1144,6 +1140,6 @@ def distance_on_master(
         return derive.distance_series(log, fix=fix)
     except ValueError:
         track = derive.gps_track(log, fix=gpsfix.resolve(log, fix, "distance"), scope="distance")
-        time = _master_time(log)
+        time = timebase.axis(log)
         speed = np.hypot(np.gradient(track["x"]), np.gradient(track["y"])) * track["rate"]
         return np.interp(time, track["time"], np.cumsum(speed) / track["rate"])

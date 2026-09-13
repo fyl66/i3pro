@@ -1834,6 +1834,58 @@ python tools\verify_clicks.py
 
 ---
 
+## A43 · 主时间基：一个场次的时间轴只有一处答案（ticket #22）
+
+**做了什么**：新增 `src/i3pro/timebase.py`，`length(source, rate=None)` /
+`axis(source, rate=None)` / `rate_of(source, rate=None)` 是"这条轴多长、步长多少"
+唯一的那一处。删掉两份私有实现（`laps._master_time`、`maths._master_axis`），
+`report.master_time` 留名但改成一行委托。`cli` / `derive` / `render` / `server` /
+`laps` / `report` / `sections` / `store` 全部改从它取轴。
+
+**实测数字**（都是下面命令跑出来的）：
+
+| 事项 | 改动前 | 改动后 |
+| --- | --- | --- |
+| 票面那条命令命中的副本（`sample_rate` 写法） | 14 处 / 7 个模块 | **1 处**（`timebase.py`） |
+| 同一条规则的**全部**写法（含 `store` / `sections` 把变量叫 `rate` 的两处） | 16 处 / 9 个模块 | **1 处** |
+| `tests` 里自己再算一遍 | 7 处 | **0 处** |
+| 高避 5 圈的主时间基 | 46400 点，末点 463.99 s，和 10764568.0 | 同上（逐点相同） |
+| 耐久正赛的主时间基 | 194300 点，末点 1942.99 s，和 188761478.5 | 同上（逐点相同） |
+
+两份金标准的数字是改动**前**用 `laps._master_time` / `report.master_time` 跑出来
+冻进单测的；轴是 `arange(长度) / 步长`，所以"长度 + 首末点 + 和"对上就等于逐点相同
+（`TestTimebase` 里三个数字都比对）。无头驱动跑两份金标准快照的画布统计
+（1000083 / 1047584 条线段、762112 / 772137 个点矩形）改动前后一字不差。
+
+**可复制命令与通过判据**：
+
+```powershell
+# 1. 规则只剩一处（src 1 行、tests 0 行，单测两件都钉住）
+python -m unittest tests.test_i3pro.TestTimebase -v      # -> Ran 5 tests / OK
+rg -n 'int\(round\(.*sample_rate.*\)\) \+ 1' src         # -> 1 行：src\i3pro\timebase.py
+rg -n 'int\(round\(.*sample_rate.*\)\) \+ 1' tests       # -> 无输出
+
+# 2. 两个出口取的是同一条轴 + --rate 换的是同一个答案
+python -m unittest tests.test_i3pro.TestTimebase -v
+# -> test_parquet_报表_取的是一条轴 ... ok
+#    test_rate_换的是同一个答案 ... ok（50 Hz 时 Parquet 的 time 列 = timebase.axis(log, 50.0)）
+
+# 3. 四道回归
+python -m unittest discover -s tests -v                  # -> Ran 225 tests / OK
+python tools\verify_ld_vs_csv.py                         # -> PASS - 0 channel(s) outside tolerance
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
+node tools\smoke_viewer.js "out\20260524-耐久正赛.html"  # -> 两条都 PASS
+python tools\verify_clicks.py                            # -> 51 项检查：51 通过，0 失败
+```
+
+**关于 `--rate` 的一个如实说明**：`i3pro convert --rate 50` 会让 Parquet 的轴按
+50 Hz 重建（`length(log, 50.0)` = 23201 点，末点 464.0 s）。这**不是**与画图那条轴
+不一致，而是"同一个答案换了一档采样率"——`store.build_table` 与
+`timebase.axis(log, 50.0)` 逐点相同（单测钉住）。默认（不给 `--rate`）时三处出口
+逐点相同。
+
+---
+
 ## 全量回归
 
 ```powershell
@@ -1843,7 +1895,7 @@ node tools\smoke_viewer.js out\<场次>.html   # 3. 无头驱动前端：PASS
 python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘：全过（没有 Edge 的机器打印 SKIP，不算通过）
 ```
 
-**通过判据**：`Ran 220 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）；
+**通过判据**：`Ran 225 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）；
 `PASS - 0 channel(s) outside tolerance`；`PASS - workbench ran headless ... interactions verified`；
 `51 项检查：51 通过，0 失败`。**四条全绿才算改完**（AGENTS.md 规则 7）。
 
@@ -1882,3 +1934,4 @@ python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘�
 | `TestNotes` / `TestNotesOverHttp` | 注释（#15，15 项）：文字折行与截断、时刻校验的下一步、增删改不改原表、距离在主采样上插值、轨迹取最近抽稀点、越界不猜位置、侧车往返与坏文件、**注释不动圈速表**、HTTP 的 PUT 落盘 / 400 说明下一步 / `.ld` 字节不变 |
 | `TestGpsFix` / `TestGpsFixOverHttp` | GPS 校正（#14，15 项）：`(0,0)` 只计数不进轨迹、跳点与空档各自断开、跳变两端都算坏点、**关掉校正逐点不变**、按秒与按更新周期两种偏移、分段插值绝不跨空档、路径里程跳过跳变、距离轴作用域的开关、抽稀后断点必须落在**跨着跳变的那一段**上、参数校验的中文下一步、侧车往返与坏文件、金标准（耐久 1 个 214.5 m 跳点且断的就是那 214 m 幽灵线 / 高避 0 跳点 638 个空定位）；HTTP 的 GET / PUT / 落盘 / 400 不动侧车 / `.ld` 字节不变 |
 | `TestLaunchers` | 一键启动：快照批量导出 + 索引页、缺数据目录的报错、端口占用自动换端口 |
+| `TestTimebase` | 主时间基（#22，5 项）：那条公式在 `src` 里只剩 `timebase.py` 一处、`tests` 里 0 处、两份金标准的轴与改动前逐点相同（长度 / 首末点 / 和）、Parquet 与报表取的是同一条轴、`--rate` 换的是同一个答案 |

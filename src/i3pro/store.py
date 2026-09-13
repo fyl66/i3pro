@@ -21,6 +21,7 @@ import pyarrow.parquet as pq
 
 from . import channels as channelsmod
 from . import ld as ldmod
+from . import timebase
 
 __all__ = [
     "write_parquet",
@@ -50,7 +51,9 @@ def build_table(
     """Materialise a log into a wide Arrow table on the master time base."""
     rate = float(master_rate or log.sample_rate)
     selected = [log.channel(n) for n in channels] if channels else list(log.channels)
-    n = int(round(log.duration * rate)) + 1
+    # 轴有多长只有一处答案（ticket #22）：`--rate` 换的是同一个答案，
+    # 不是另造一条轴。
+    n = timebase.length(log, rate)
     arrays: dict[str, pa.Array] = {}
     meta_channels = []
     used: set[str] = set()

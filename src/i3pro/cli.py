@@ -18,6 +18,7 @@ from . import render as rendermod
 from . import report as reportmod
 from . import store
 from . import maths as mathsmod
+from . import timebase
 
 
 def _utf8_console() -> None:
@@ -270,7 +271,7 @@ def cmd_export(args: argparse.Namespace) -> int:
         explicit_time = any(n.lower() == "time" for n in names)
         cols: dict[str, np.ndarray] = {}
         if not explicit_time:
-            cols["Time"] = np.arange(0, int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
+            cols["Time"] = timebase.axis(log)
         for name in names:
             if name.lower() == "time":
                 continue

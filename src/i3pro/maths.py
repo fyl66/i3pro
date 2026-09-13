@@ -29,6 +29,7 @@ from pathlib import Path
 import numpy as np
 
 from . import derive
+from . import timebase
 
 __all__ = [
     "MathError",
@@ -1300,12 +1301,6 @@ def _session_series(session, name: str, size: int) -> np.ndarray:
     return np.concatenate([values, np.full(size - values.size, pad)]).astype(np.float64)
 
 
-def _master_axis(session) -> tuple[np.ndarray, float]:
-    n = int(round(session.duration * session.sample_rate)) + 1
-    rate = float(session.sample_rate) or 1.0
-    return np.arange(n, dtype=np.float64) / rate, rate
-
-
 def resolve_all(
     session,
     definitions: list[Definition],
@@ -1317,7 +1312,8 @@ def resolve_all(
 
     自己引用自己（直接或绕一圈）会报错，而不是递归到栈溢出。
     """
-    time, rate = _master_axis(session)
+    time = timebase.axis(session)
+    rate = timebase.rate_of(session)
     ctx = Context(time=time, rate=rate)
     if session_path is not None:
         path: object = session_path
@@ -1482,7 +1478,8 @@ def evaluate(
     extra: dict[str, np.ndarray] | None = None,
 ) -> np.ndarray:
     """在 ``session`` 上直接算一条式子（不求值依赖的定义）。调试与预览用。"""
-    time, rate = _master_axis(session)
+    time = timebase.axis(session)
+    rate = timebase.rate_of(session)
     ctx = Context(time=time, rate=rate)
     plan = compile_expr(text, known=known_names(session, tuple(extra or {})))
     extra = extra or {}

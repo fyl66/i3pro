@@ -39,7 +39,7 @@ from typing import Iterable, Sequence
 
 import numpy as np
 
-from . import derive, laps as lapsmod, sections as sectionsmod
+from . import derive, laps as lapsmod, sections as sectionsmod, timebase
 
 __all__ = [
     "STAT_LABELS",
@@ -87,9 +87,12 @@ THEORETICAL_NOTE = (
 
 
 def master_time(log) -> np.ndarray:
-    """主时间基（秒），和载荷、轨迹、距离轴用的是同一条。"""
-    count = int(round(log.duration * log.sample_rate)) + 1
-    return np.arange(count) / float(log.sample_rate or 1.0)
+    """主时间基（秒），和载荷、轨迹、距离轴用的是同一条。
+
+    这条轴的定义只在 `timebase` 里（ticket #22）；这里留个名字是为了不破坏
+    已经导出的接口，它自己不再算一遍。
+    """
+    return timebase.axis(log)
 
 
 def _finite(values) -> np.ndarray:

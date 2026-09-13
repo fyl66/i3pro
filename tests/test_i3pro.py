@@ -31,7 +31,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from i3pro import (  # noqa: E402
     channels, csvlog, derive, gpsfix, laps as lapsmod, ld, maths as mathsmod, motec_csv,
     notes as notesmod, render, report as reportmod, sections as sectionsmod,
-    server, store,
+    server, store, timebase,
 )
 
 DATA = ROOT / "i2pro_data"
@@ -1128,7 +1128,7 @@ class TestDistanceAxisLookup(unittest.TestCase):
             distance = np.maximum.accumulate(
                 np.asarray(lapsmod.distance_on_master(log), dtype=float)
             )
-            time = np.asarray(lapsmod._master_time(log), dtype=float)
+            time = np.asarray(timebase.axis(log), dtype=np.float64)
             rate = log.sample_rate
             changed = np.flatnonzero(np.diff(distance) != 0)
             starts = np.concatenate([[0], changed + 1])
@@ -1153,7 +1153,7 @@ class TestDistanceAxisLookup(unittest.TestCase):
             distance = np.maximum.accumulate(
                 np.asarray(lapsmod.distance_on_master(log), dtype=float)
             )
-            time = np.asarray(lapsmod._master_time(log), dtype=float)
+            time = np.asarray(timebase.axis(log), dtype=np.float64)
             rate = log.sample_rate
             moving = np.flatnonzero(
                 (np.diff(distance, prepend=distance[0]) > 0)
@@ -1382,7 +1382,7 @@ class TestPoints(unittest.TestCase):
     @_needs(HILL)
     def test_points_are_raw_and_windowed(self):
         with ld.LogFile.read(HILL) as log:
-            time = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
+            time = timebase.axis(log)
             payload = render.points(
                 log, ["Vx KF", "G Force Lat"], time, start=200.0, end=210.0, max_points=100000
             )
@@ -1397,7 +1397,7 @@ class TestPoints(unittest.TestCase):
     @_needs(HILL)
     def test_points_stride_when_the_window_is_huge(self):
         with ld.LogFile.read(HILL) as log:
-            time = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
+            time = timebase.axis(log)
             payload = render.points(log, ["Vx KF"], time, max_points=100)
         self.assertGreater(payload["stride"], 1)
         self.assertLessEqual(len(payload["time"]), 200)
@@ -1706,6 +1706,96 @@ class TestComponentRegistry(unittest.TestCase):
         driver = self.DRIVER.read_text(encoding="utf-8")
         self.assertIn("__I3PRO_SELFTEST__: true", driver,
                       "无头驱动没设自检标记，第 32 组断言就等于没跑")
+
+
+class TestTimebase(unittest.TestCase):
+    """ticket #22：主时间基只有一处答案。
+
+    三件事：那条规则在 `src` 里只剩一行（`tests` 里 0 行）；两份金标准场次的轴与
+    改动前**逐点相同**；Parquet 与画图 / 服务取的是同一条轴，`--rate` 换的也是
+    同一个答案。
+
+    这里的金标准数字是 2026-09-13、`2a5da62` **之前**实测冻住的（当时
+    `laps._master_time` 与 `report.master_time` 两条私有实现逐点 `array_equal`）。
+    轴是 `arange(长度) / 步长`，所以"长度 + 首末点 + 和"都对上就等于逐点相同。
+    """
+
+    HILL_LENGTH = 46400
+    HILL_RATE = 100.0
+    HILL_LAST = 463.99
+    HILL_SUM = 10764568.0
+    ENDURANCE_LENGTH = 194300
+    ENDURANCE_RATE = 100.0
+    ENDURANCE_LAST = 1942.99
+    ENDURANCE_SUM = 188761478.5
+
+    #: 那条规则长什么样（写成变量，省得它在消息里被当成第二个副本）。
+    RULE = re.compile(r"int\(round\(.*sample_rate.*\)\) \+ 1")
+
+    def _rule_hits(self, folder: str) -> list[str]:
+        hits = []
+        for path in sorted((ROOT / folder).rglob("*.py")):
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if self.RULE.search(line):
+                    hits.append(f"{path.relative_to(ROOT).as_posix()}:{number}")
+        return hits
+
+    def test_主时间基的公式在源码里只剩一处(self):
+        src = self._rule_hits("src")
+        self.assertEqual(
+            len(src), 1,
+            "主时间基的公式在 src 里只该剩一处（`timebase.py`），实际：" + repr(src),
+        )
+        self.assertTrue(
+            src[0].startswith("src/i3pro/timebase.py:"),
+            f"那一处该在 timebase.py，实际是 {src[0]}",
+        )
+        self.assertEqual(
+            self._rule_hits("tests"), [],
+            "测试里也要从 timebase 取轴：自己再算一遍就等于给这条规则又开了个副本",
+        )
+
+    @_needs(HILL)
+    def test_高避的轴与改动前逐点相同(self):
+        with ld.LogFile.read(HILL) as log:
+            axis = timebase.axis(log)
+            self.assertEqual(timebase.rate_of(log), self.HILL_RATE)
+        self.assertEqual(axis.size, self.HILL_LENGTH)
+        self.assertEqual(axis.dtype, np.float64)
+        self.assertEqual(float(axis[0]), 0.0)
+        self.assertEqual(float(axis[-1]), self.HILL_LAST)
+        self.assertAlmostEqual(float(axis.sum()), self.HILL_SUM, places=3)
+
+    @_needs(ENDURANCE)
+    def test_耐久正赛的轴与改动前逐点相同(self):
+        with ld.LogFile.read(ENDURANCE) as log:
+            axis = timebase.axis(log)
+            self.assertEqual(timebase.rate_of(log), self.ENDURANCE_RATE)
+        self.assertEqual(axis.size, self.ENDURANCE_LENGTH)
+        self.assertEqual(float(axis[-1]), self.ENDURANCE_LAST)
+        self.assertAlmostEqual(float(axis.sum()), self.ENDURANCE_SUM, places=3)
+
+    @_needs(HILL)
+    def test_parquet_报表_取的是一条轴(self):
+        """三处出口（Parquet 列 / 报表 / 画图服务用的 timebase）给的是同一条轴。"""
+        with ld.LogFile.read(HILL) as log:
+            table, meta = store.build_table(log, channels=["Vx KF"])
+            parquet_time = np.asarray(table.column("time").to_pylist(), dtype=np.float64)
+            expected = timebase.axis(log)
+            np.testing.assert_array_equal(parquet_time, expected)
+            np.testing.assert_array_equal(reportmod.master_time(log), expected)
+            self.assertEqual(meta["rows"], expected.size)
+
+    @_needs(HILL)
+    def test_rate_换的是同一个答案(self):
+        """`--rate` 让 Parquet 换采样率时，换的是同一个答案而不是第二条轴。"""
+        with ld.LogFile.read(HILL) as log:
+            table, meta = store.build_table(log, channels=["Vx KF"], master_rate=50.0)
+            parquet_time = np.asarray(table.column("time").to_pylist(), dtype=np.float64)
+            np.testing.assert_array_equal(parquet_time, timebase.axis(log, 50.0))
+            self.assertEqual(meta["rows"], timebase.length(log, 50.0))
+            self.assertNotEqual(meta["rows"], timebase.length(log))
+            self.assertEqual(meta["sample_rate"], 50.0)
 
 
 class _MathSession:
@@ -2315,7 +2405,7 @@ class TestChannelSeam(unittest.TestCase):
         factor = max(1, int(round(log.sample_rate / channel.sample_rate)))
         if factor > 1:
             values = np.repeat(values, factor)
-        n = int(round(log.duration * log.sample_rate)) + 1
+        n = timebase.length(log)
         if values.size < n:
             pad = values[-1] if values.size else 0.0
             values = np.concatenate([values, np.full(n - values.size, pad)])
@@ -2933,7 +3023,7 @@ class _TableLog:
         self.derived: dict[str, np.ndarray] = {}
         self.derived_names: set[str] = set()
         self.derived_units: dict[str, str] = {}
-        count = int(round(self.duration * self.sample_rate)) + 1
+        count = timebase.length(self)
         self._channels: dict[str, _TableChannel] = {}
         for name, spec in (channels or {}).items():
             values, unit = spec if isinstance(spec, tuple) else (spec, "")
@@ -3971,7 +4061,7 @@ class TestHistogram(unittest.TestCase):
         from i3pro import histogram as hist
 
         with ld.LogFile.read(HILL) as log:
-            time = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
+            time = timebase.axis(log)
             out = render.histogram(log, "Vx KF", time, bins=10, start=100.0, end=200.0,
                                    colour="G Force Lat")
             self.assertEqual(out["unit"], "km/h")
@@ -3989,7 +4079,7 @@ class TestHistogram(unittest.TestCase):
         from i3pro import histogram as hist
 
         with ld.LogFile.read(HILL) as log:
-            time = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
+            time = timebase.axis(log)
             by_channel = render.histogram(log, "Brake Signal", time, bins=8, gate="Vx KF")
             self.assertGreater(by_channel["excluded"], 0)
             self.assertLessEqual(by_channel["count"] + by_channel["excluded"], time.size)
@@ -4005,8 +4095,7 @@ class TestHistogram(unittest.TestCase):
         from i3pro import histogram as hist
 
         with ld.LogFile.read(HILL) as toolong:
-            time = np.arange(int(round(toolong.duration * toolong.sample_rate)) + 1) \
-                / toolong.sample_rate
+            time = timebase.axis(toolong)
             with self.assertRaises(ValueError) as caught:
                 render.histogram(toolong, "根本没有这条通道", time, bins=8)
             self.assertIn("先", str(caught.exception))

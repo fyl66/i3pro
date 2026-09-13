@@ -3817,6 +3817,232 @@ class TestNotesOverHttp(unittest.TestCase):
                 library.close()
 
 
+class TestApiLayerWithoutASocket(unittest.TestCase):
+    """API 层：不起 socket、不读 socket，也能把一个动作当函数调（ticket #23）。
+
+    拆之前，"HTTP 怎么回"和"这个动作算什么"写在同一个 769 行的请求闭包里，
+    每个动作都要跑一遍 ``HTTPConnection`` 才能验证——慢，而且失败信息常常只剩
+    一句"连接被重置"。现在 ``Api.handle`` 就是一个函数：``(parts, query,
+    method, body) -> Response``。
+    """
+
+    def setUp(self):
+        from i3pro import api, library
+        self.api = api
+        self.library = library.SessionLibrary(LIBRARY_ROOTS, cache_size=1)
+        self.client = api.Api(self.library)
+
+    def tearDown(self):
+        self.library.close()
+
+    def test_路由表里的每个动作都有实现(self):
+        """加一个动作 = 加一行；这一行指向的方法必须真的在（打错字就是 500）。"""
+        call = self.api._Call
+        for action, method in call.ACTIONS.items():
+            self.assertTrue(
+                hasattr(call, method),
+                f"ACTIONS 里 {action!r} 指向 {method!r}，但这一层没有这个方法——"
+                f"改名时漏了这一行。",
+            )
+
+    def test_动作清单就是文档里那一份(self):
+        expected = {
+            "info", "trace", "points", "histogram", "spectrum", "overview", "overlay",
+            "track", "laps", "sections", "notes", "gps", "report", "maths", "at", "export",
+        }
+        self.assertEqual(set(self.api._Call.ACTIONS), expected,
+                         "动作清单变了：加/删动作请把这条与 docs/ACCEPTANCE.md 一起改")
+
+    def test_每个请求都拿得到一个回复(self):
+        """返回 ``None`` 的路由会把连接晾着（2026-09-14 拆服务时真的踩到过）。"""
+        for parts in (["sessions"], ["nope"], ["session", "nope", "info"],
+                      ["session", "nope", "nope"], []):
+            response = self.client.handle(parts, {}, "GET")
+            self.assertIsInstance(response, self.api.Response)
+            self.assertGreaterEqual(response.status, 200)
+
+    def test_未知会话与未知动作各自报自己的错(self):
+        if not (DATA.exists() and any(DATA.glob("*.ld"))):
+            self.skipTest("缺 i2pro_data/ 数据")
+        unknown_action = self.client.handle(["session", "没有这个场次", "没有这个动作"], {}, "GET")
+        self.assertEqual(unknown_action.status, 404)
+        self.assertIn("未知场次", unknown_action.body.decode("utf-8"))
+        name = self.library.names()[0]
+        response = self.client.handle(["session", name, "没有这个动作"], {}, "GET")
+        self.assertEqual(response.status, 404)
+        text = response.body.decode("utf-8")
+        self.assertIn("没有 '没有这个动作' 这个动作", text)
+        self.assertIn("trace", text)          # 报错里带上"认得的动作"
+
+    def test_请求体是按需读的(self):
+        """上传可能 100 MB：不碰请求体的动作不该把它读进内存。"""
+        from i3pro import api as apimod
+        reads = []
+
+        class Counter(apimod.Body):
+            def read(self):
+                reads.append(self.length)
+                return super().read()
+
+        self.client.handle(["sessions"], {}, "GET", Counter(64, None, b"x" * 64))
+        self.assertEqual(reads, [], "列表动作把请求体读了")
+
+
+class TestStructureOfTheSplit(unittest.TestCase):
+    """结构性重构的守卫（ticket #23 / #24）：**概念住在哪个文件**只留一个答案。
+
+    这些用例不看行为（行为由功能用例管），只看"同一件事有没有被搬回去"。
+    搬回去的代价写在各自的 ticket 里：加一个 API 动作要在 700 行的闭包里翻，
+    加一条切圈规则要在 1100 行的模块里翻。
+    """
+
+    SOURCE = ROOT / "src" / "i3pro"
+
+    def _text(self, name: str) -> str:
+        return (self.SOURCE / name).read_text(encoding="utf-8")
+
+    def _code(self, name: str) -> str:
+        """只有"真的会执行"的那部分：去掉模块 docstring、注释与 TYPE_CHECKING 块。
+
+        扫源码的守卫最容易犯的错是把**注释里提到的名字**当成代码（"不 import api"
+        这句话本身会被 ``assertNotIn("import api")`` 抓住）。所以先剥掉这些。
+        """
+        text = re.sub(r'^""".*?"""', "", self._text(name), count=1, flags=re.S)
+        text = re.sub(r"\nif TYPE_CHECKING:.*?(?=\n\S)", "", text, flags=re.S)
+        return "\n".join(
+            line for line in text.splitlines() if not line.lstrip().startswith("#")
+        )
+
+    # ---------------------------------------------------------- #23 服务端
+    def test_server_只剩_HTTP_管道(self):
+        server = self._code("server.py")
+        self.assertLess(len(self._text("server.py").splitlines()), 420,
+                        "server.py 又长回来了（拆之前 1274 行，拆完 367 行）")
+        for needle in ('if action == "', "def act_"):
+            self.assertNotIn(
+                needle, server,
+                f"server.py 里还有 {needle!r}——动作分派与请求体都属于 i3pro.api，"
+                f"server.py 只该收字节、发字节。",
+            )
+        # 读 socket 只能有一个地方（`_read_body`，而且要按需调用）：动作自己不碰
+        # 请求体，所以"100 MB 的上传不会因为看一眼列表就先读进内存"。
+        self.assertEqual(server.count("self.rfile.read"), 1,
+                         "读 socket 的地方只该是 _read_body 这一处")
+        self.assertIn("def _read_body(", server)
+
+    def test_动作分派只有一张表(self):
+        api = self._code("api.py")
+        self.assertIn("    ACTIONS = {", api)
+        self.assertNotIn('if action == "', api,
+                         "api.py 里又出现了 if/elif 长链：加一个动作应当是加一行")
+
+    def test_库不反向依赖服务(self):
+        library = self._code("library.py")
+        self.assertEqual(
+            re.findall(r"^\s*(?:from \.(?:api|server)\b|import (?:api|server)\b)",
+                       library, re.M),
+            [], "library 被 api/server 依赖，不能反过来 import 它们（会成环）",
+        )
+
+    def test_老名字仍然可用(self):
+        from i3pro import api, library
+        self.assertIs(server.SessionLibrary, library.SessionLibrary)
+        self.assertTrue(callable(server.make_handler))
+        self.assertTrue(callable(server.bind))
+        self.assertTrue(callable(library._json_safe))       # 文档与老调用方引用的名字
+        self.assertEqual(api.MAX_UPLOAD_BYTES, 2 * 1024 * 1024 * 1024)
+
+    def test_动作响应带得动附件头(self):
+        from i3pro.api import Response
+        response = Response(200, b"a,b\n", "text/csv; charset=utf-8",
+                            (("Content-Disposition", "attachment; filename=x.csv"),))
+        self.assertEqual(response.headers[0][0], "Content-Disposition")
+        self.assertFalse(response.close)
+
+    # ------------------------------------------------------------- #24 切圈
+    def test_信标配置住在_beacons(self):
+        beacons = self._text("beacons.py")
+        for needle in ("class Beacon:", "class LapConfig:", "def reconcile_edits(",
+                       "def check_new_crossings(", "def undo_config(", "def load_config(",
+                       "def save_config(", "def unique_name(", "def merge_crossings("):
+            self.assertIn(needle, beacons, f"beacons.py 少了 {needle!r}")
+
+    def test_距离轴与圈差住在_axes(self):
+        axes = self._text("axes.py")
+        for needle in ("def overlay(", "def time_delta(", "def time_at_distance(",
+                       "def distance_on_master("):
+            self.assertIn(needle, axes, f"axes.py 少了 {needle!r}")
+
+    def test_laps_只剩切圈(self):
+        laps = self._text("laps.py")
+        for needle in ("def overlay(", "def time_at_distance(", "def distance_on_master(",
+                       "def reconcile_edits(", "def load_config(", "def save_config(",
+                       "class LapConfig:", "class Beacon:"):
+            self.assertNotIn(
+                needle, laps,
+                f"laps.py 里又有 {needle!r}——它现在只切圈；信标与配置在 beacons.py，"
+                f"距离轴与圈差在 axes.py（需要的话 import 进来，别复制一份）。",
+            )
+        self.assertLess(len(laps.splitlines()), 800,
+                        "laps.py 又长回来了（拆之前 1145 行，拆完 748 行）")
+
+    def test_三个模块共用同一份对象(self):
+        from i3pro import axes, beacons, laps
+        self.assertIs(laps.LapConfig, beacons.LapConfig)
+        self.assertIs(laps.Beacon, beacons.Beacon)
+        self.assertIs(laps.overlay, axes.overlay)
+        self.assertIs(laps.time_at_distance, axes.time_at_distance)
+        self.assertIs(laps.load_config, beacons.load_config)
+
+    def test_切圈之外的两个模块不反向依赖切圈(self):
+        for name in ("beacons.py", "axes.py"):
+            self.assertEqual(
+                re.findall(r"^\s*(?:from \.laps\b|import laps\b)", self._code(name), re.M),
+                [],
+                f"{name} 被 laps 依赖，运行时不能反过来 import laps（会成环）；"
+                f"只是标注用的类型请放进 if TYPE_CHECKING。",
+            )
+
+
+class TestExportPanelSendsTheRightRequest(unittest.TestCase):
+    """导出面板拼出来的参数，必须就是 ``export.parse_request`` 认得的那几个。
+
+    这里只钉**参数名与语义**（面板 → 查询串）；取数与落盘由 Python 一侧的导出用例
+    钉。真浏览器里点「导出」→ 落一个文件，由 ``tools/verify_clicks.py`` 负责
+    （假 DOM 里 fetch 永远失败，验不了下载）。
+    """
+
+    DRIVER = ROOT / "tools" / "smoke_viewer.js"
+    VIEWER = ROOT / "src" / "i3pro" / "web" / "viewer.html"
+
+    def test_无头驱动里有一组导出面板断言(self):
+        driver = self.DRIVER.read_text(encoding="utf-8")
+        for needle in ("exportDlg", "exportURL", "applyExportPlan", "exportMoment",
+                       "exportPreset", "exportFilename", "estimate=1"):
+            self.assertIn(needle, driver,
+                          f"tools/smoke_viewer.js 里少了 {needle!r}；"
+                          f"面板的行为要有无头断言，不能只靠肉眼点。")
+
+    def test_采样率档位两边一致(self):
+        """界面那个下拉不是手写的：它由 JS 里那张表建出来，必须和 Python 那张一样。"""
+        from i3pro import export as exportmod
+        viewer = self.VIEWER.read_text(encoding="utf-8")
+        match = re.search(r"const EXPORT_RATES = \[(.*?)\];", viewer)
+        self.assertIsNotNone(match, "面板里没有 EXPORT_RATES 这张表")
+        numbers = [float(x) for x in match.group(1).replace(" ", "").split(",") if x]
+        self.assertEqual(numbers, list(exportmod.RATES),
+                         "面板的采样率档位与 export.RATES 不一致：两边说的是同一件事")
+
+    def test_面板选项与导出模块对齐(self):
+        from i3pro import export as exportmod
+        viewer = self.VIEWER.read_text(encoding="utf-8")
+        for method in exportmod.RESAMPLE_METHODS:
+            self.assertIn(f'value="{method}"', viewer,
+                          f"面板少了重采样方法 {method!r}（export.RESAMPLE_METHODS 里有）")
+        for value in (*exportmod.FORMATS, *exportmod.LAYOUTS, *exportmod.AXES):
+            self.assertIn(f'value="{value}"', viewer, f"面板少了 {value!r} 这个选项")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

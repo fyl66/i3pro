@@ -2544,6 +2544,140 @@ if (embeddedSpec && embeddedSpec.series) {
     api.data.api = savedApiForScatter;
   }
 
+
+/* ------------------------------------- 导出数据面板（ticket #23/#24 的前端一半）
+ * 这一组钉三件事：面板能把选择拼成服务端认的参数、预估文案照服务端的数写、
+ * 快照模式下不给"点了没反应"。真下载由 tools/verify_clicks.py 在真 Edge 里走。
+ */
+const exportDlg = registry.get("exportDlg");
+const exportGo = registry.get("exportGo");
+check(!!registry.get("dataBtn"), "工具栏里没有「导出数据」按钮");
+// 假 DOM 不解析 hidden 属性，所以"默认关着"按 markup 查（真浏览器里由 #24 的真点击验收）
+check(html.indexOf('<div id="exportDlg" hidden>') >= 0, "导出面板默认应当是关着的");
+if (api && exportDlg) {
+  const savedApi = api.data.api;
+  const fields = (cfg) => { api.applyExportConfig(cfg); };
+  api.openExportDialog();
+  check(exportDlg.hidden === false, "点「导出数据」没有打开面板");
+  check(String(registry.get("exportPlan").innerHTML).indexOf("快照") >= 0,
+    "快照模式下没告诉用户导出要 serve 模式: " + registry.get("exportPlan").innerHTML);
+  check(exportGo.disabled === true, "快照模式下「导出」按钮应当是灰的");
+
+  // 采样率下拉必须是文档里那一串（Auto + 8 档 + 自定义）
+  const rateOptions = String(registry.get("exportRate").innerHTML);
+  const wantRates = ["auto", "1", "5", "10", "20", "50", "100", "200", "500", "custom"];
+  check(wantRates.every((r) => rateOptions.indexOf('value="' + r + '"') >= 0),
+    "采样率下拉少了档位: " + rateOptions.replace(/\n/g, ""));
+
+  // 服务端算的预估照原样落到面板上（行数 / 列数 / 体积 / 分表 / 警告 / 范围）
+  // 形状就是契约 §5 那一份：只有 rows / columns / bytes / sheets / warnings
+  api.applyExportPlan({
+    rows: 46400, columns: 446, bytes: 186000000, sheets: 2,
+    warnings: ["原始采样模式下，比主时间基慢的 3 条通道大部分行是空的"],
+  });
+  const planText = String(registry.get("exportPlan").innerHTML);
+  check(planText.indexOf("46,400") >= 0, "预估里没写行数: " + planText);
+  check(planText.indexOf("446") >= 0, "预估里没写列数: " + planText);
+  check(planText.indexOf("MB") >= 0 || planText.indexOf("GB") >= 0, "预估里没写体积: " + planText);
+  check(planText.indexOf("2 张表") >= 0, "预估里没写分几张表: " + planText);
+  check(planText.indexOf("慢的 3 条通道") >= 0, "预估里的警告没显示: " + planText);
+  check(String(registry.get("exportPlan").className).indexOf("warn") >= 0,
+    "有警告时预估没有走 warn 样式");
+
+  // 12.5s / 1200m 这类写法在这里就归一化，服务端只收到数字
+  check(api.exportMoment("12.5s").value === "12.5" && api.exportMoment("12.5s").absolute === false,
+    "12.5s 没有被当成相对秒");
+  check(api.exportMoment("1200m").value === "1200", "1200m 没有被当成米数");
+  check(api.exportMoment("2026-09-14 12:34:56.789").absolute === true,
+    "绝对时间没有被认出来是绝对时间");
+  check(api.exportMoment("12:35:10.123").absolute === true, "裸时钟没有被当成绝对时间");
+
+  // 面板 -> 查询参数：这一串就是 export.parse_request 认得的那几个名字
+  fields({ range: "time", from: "12.5s", to: "18", channels: "all", maths: true,
+           rate: "10", custom: "", resample: "linear", meta: true,
+           axis: "time", format: "csv", layout: "wide" });
+  const timeUrl = api.exportURL(api.exportConfig(), false).href;
+  ["axis=time", "from=12.5", "to=18", "channels=all", "maths=1", "rate=10",
+   "resample=linear", "format=csv", "layout=wide", "metadata=1", "bundle=1",
+  ].forEach((bit) => {
+    check(timeUrl.indexOf(bit) >= 0, "时间段导出的参数里少了 " + bit + "：" + timeUrl);
+  });
+  check(timeUrl.indexOf("estimate=") < 0, "下载请求里不该带 estimate=");
+  check(api.exportURL(api.exportConfig(), true).href.indexOf("estimate=1") >= 0,
+    "预估请求没带 estimate=1（契约里这个开关叫 estimate）");
+
+  // 距离段 + 日期时间 = 明确报错（不是静默当成 0）
+  fields({ range: "distance", from: "2026-09-14 12:34:56", to: "1850m", channels: "all",
+           maths: true, rate: "auto", custom: "", resample: "hold", meta: false,
+           axis: "distance", format: "xlsx", layout: "wide" });
+  const badDistance = api.exportURL(api.exportConfig(), false);
+  check(!!badDistance.error && badDistance.error.indexOf("米") >= 0,
+    "距离段填了日期时间却没有报错: " + JSON.stringify(badDistance));
+
+  // Excel 一律宽表；自定义采样率才露出数字框
+  check(registry.get("exportLayout").disabled === true, "选 Excel 时布局应当锁死成宽表");
+  check(registry.get("exportLayout").value === "wide", "选 Excel 时布局没有回到宽表");
+  fields({ range: "all", from: "", to: "", channels: "all", maths: true, rate: "custom",
+           custom: "250", resample: "nearest", meta: false, axis: "time",
+           format: "csv", layout: "long" });
+  check(registry.get("exportRateCustom").hidden === false, "选了自定义却没露出数字框");
+  const customUrl = api.exportURL(api.exportConfig(), false).href;
+  check(customUrl.indexOf("rate=250") >= 0, "自定义采样率没有进参数: " + customUrl);
+  check(customUrl.indexOf("layout=long") >= 0 && customUrl.indexOf("bundle=1") < 0,
+    "长表 / 不要元数据的参数不对: " + customUrl);
+
+  // 勾选的通道：走 selected + names
+  fields({ range: "all", from: "", to: "", channels: "selected", maths: false,
+           rate: "auto", custom: "", resample: "linear", meta: false, axis: "time",
+           format: "csv", layout: "wide" });
+  const picked = api.selectedChannels();
+  const selectedUrl = api.exportURL(api.exportConfig(), false).href;
+  check(picked.length > 0 && selectedUrl.indexOf("channels=selected") >= 0
+    && selectedUrl.indexOf("maths=0") >= 0,
+    "「只导出勾选的通道」没有拼成 selected + names: " + selectedUrl);
+
+  // 选中圈：取那一圈的起止秒
+  fields({ range: "lap", from: "", to: "", channels: "all", maths: true, rate: "auto",
+           custom: "", resample: "linear", meta: false, axis: "time", format: "csv",
+           layout: "wide" });
+  const lapPreset = api.exportPreset(api.exportConfig());
+  check(lapPreset && typeof lapPreset.from === "number" && lapPreset.to > lapPreset.from,
+    "「当前选中圈」没有给出这一圈的起止: " + JSON.stringify(lapPreset));
+
+  // 光标 A–B：没放基准光标时要说清下一步，放了才给区间
+  api.state.datumOn = false;
+  const noCursor = api.exportPreset({ range: "cursor" });
+  check(!!noCursor.error && noCursor.error.indexOf("基准光标") >= 0,
+    "没放基准光标时没有给出下一步: " + JSON.stringify(noCursor));
+  api.state.datumOn = true;
+  api.state.datum = 12.5;
+  api.state.cursor = 18.25;
+  const ab = api.exportPreset({ range: "cursor" });
+  check(ab && ab.from === 12.5 && ab.to === 18.25, "光标 A–B 区间不对: " + JSON.stringify(ab));
+
+  // 记住上次的配置（下次打开面板还是这一套）
+  fields({ range: "time", from: "3", to: "4", channels: "all", maths: true, rate: "20",
+           custom: "", resample: "linear", meta: true, axis: "time", format: "csv",
+           layout: "wide" });
+  api.data.api = "/api";                       // 假装是 serve 模式，让预估真的发一次请求
+  api.refreshExportPlan();
+  const last = httpCalls[httpCalls.length - 1];
+  check(!!last && last.url.indexOf("/api/session/") >= 0 && last.url.indexOf("/export?") >= 0
+    && last.url.indexOf("estimate=1") >= 0,
+    "预估请求没有打到 /api/session/<场次>/export?estimate=1: " + (last && last.url));
+  check(api.exportSaved().range === "time" && api.exportSaved().rate === "20",
+    "上次的导出配置没有记住: " + JSON.stringify(api.exportSaved()));
+  api.closeExportDialog();
+  check(exportDlg.hidden === true, "关掉面板之后它还开着");
+
+  // 下载文件名：中文名走 filename*=UTF-8''，普通写法也认
+  check(api.exportFilename("attachment; filename*=UTF-8''%E4%B8%AD.csv") === "中.csv",
+    "没有解出带中文的 filename*");
+  check(api.exportFilename('attachment; filename="plain.csv"') === "plain.csv",
+    "没有解出普通 filename=");
+  api.data.api = savedApi;
+}
+
 /* --------------------------------------------------------------- DOM checks */
 const header = registry.get("fileInfo");
 check(header && header.innerHTML.indexOf(".ld") >= 0, "header was not populated");

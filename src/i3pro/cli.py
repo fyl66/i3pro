@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import csvlog, laps as lapsmod
+from . import csvlog, export as exportmod, laps as lapsmod
 from . import derive
 from . import ld as ldmod
 from . import render as rendermod
@@ -264,34 +264,74 @@ def cmd_delta(args: argparse.Namespace) -> int:
 
 
 def cmd_export(args: argparse.Namespace) -> int:
-    import numpy as np
+    """导出数据（CSV / Excel）。语义与界面上的「导出数据」面板完全一样。
 
+    注意：这条命令的默认行为在 2026-09-14 变过一次——旧版固定按主采样率把慢通道
+    "保持"上去、第一列叫 ``Time``；现在默认 ``--rate auto``（保留各通道原始采样点、
+    主索引列叫 ``time_s``），要旧行为就写 ``--rate 100 --resample hold``。
+    """
     with csvlog.open_session(args.file) as log:
-        names = [c.strip() for c in args.channels.split(",")] if args.channels else ["Time"] + [c.name for c in log.channels]
-        explicit_time = any(n.lower() == "time" for n in names)
-        cols: dict[str, np.ndarray] = {}
-        if not explicit_time:
-            cols["Time"] = timebase.axis(log)
-        for name in names:
-            if name.lower() == "time":
-                continue
-            if not log.has(name):
-                print(f"# skipped (not in log): {name}")
-                continue
-            ch = log.channel(name)
-            factor = max(1, int(round(log.sample_rate / ch.sample_rate)))
-            values = log.values(ch)
-            if factor > 1:
-                values = np.repeat(values, factor)
-            cols[name] = values
-    out = Path(args.out)
-    length = min(len(v) for v in cols.values())
-    with out.open("w", encoding="utf-8-sig", newline="") as fh:
-        writer = csv.writer(fh)
-        writer.writerow(list(cols))
-        for i in range(length):
-            writer.writerow([f"{cols[c][i]:.6g}" for c in cols])
-    print(f"wrote {out} ({length} rows x {len(cols)} columns)")
+        _added, maths_errors = mathsmod.apply_to_session(log, args.maths_file)
+        for item in maths_errors:
+            print(f"# 数学通道 {item['name'] or '(定义文件)'} 算不出来: {item['error']}")
+        names = args.names or args.channels
+        params = {
+            "channels": "selected" if names and names.lower() != "all" else "all",
+            "names": names or "",
+            "maths": "1" if args.maths else "0",
+            "axis": args.axis,
+            "rate": args.rate,
+            "resample": args.resample,
+            "layout": args.layout,
+            "format": args.format,
+            "metadata": "1" if args.metadata else "0",
+            "bundle": "1" if args.bundle else "0",
+        }
+        if args.from_ is not None:
+            params["from"] = args.from_
+        if args.to is not None:
+            params["to"] = args.to
+        if args.absolute:
+            params["absolute"] = "1"
+        try:
+            request = exportmod.parse_request(log, params)
+            info = exportmod.plan(log, request)
+        except exportmod.ExportError as exc:
+            print(f"导出不了：{exc}", file=sys.stderr)
+            return 2
+        if args.estimate:
+            print(json.dumps(info, ensure_ascii=False, indent=2))
+            return 0
+        if not args.out:
+            print("要写文件就必须给 --out <路径>；只想看预计行数就加 --estimate。",
+                  file=sys.stderr)
+            return 2
+        out = Path(args.out)
+        shown = [0.0]
+
+        def progress(done, total):
+            import time
+
+            now = time.time()
+            if now - shown[0] < 1.0 and (total is None or done < total):
+                return
+            shown[0] = now
+            if total:
+                print(f"\r导出中 {done}/{total} 行（{done * 100 // max(total, 1)}%）",
+                      end="", flush=True)
+
+        try:
+            stats = exportmod.write(log, request, out, progress=progress)
+        except exportmod.ExportError as exc:
+            print(f"\n导出不了：{exc}", file=sys.stderr)
+            return 2
+    print(
+        f"\n已导出 {out}：{stats['rows']} 行 × {stats['columns']} 列，"
+        f"{stats['bytes'] / 1e6:.1f} MB（{args.format} / {args.layout} / "
+        f"{request.range_label}）"
+    )
+    for warning in info.get("warnings", []):
+        print(f"# 提醒：{warning}")
     return 0
 
 
@@ -632,10 +672,49 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", help="输出 JSON 路径")
     p.set_defaults(func=cmd_delta)
 
-    p = sub.add_parser("export", help="导出 CSV")
+    p = sub.add_parser(
+        "export",
+        help="导出数据：CSV / Excel，范围 / 通道 / 采样率 / 主索引都能选",
+        description=(
+            "把场次导出成 CSV 或 Excel。范围左闭右闭；默认 rate=auto（保留各通道"
+            "原始采样点，宽表以并集为索引、缺失留空）。旧写法 "
+            "`i3pro export x.ld --channels A,B --out y.csv` 仍然能用。"
+        ),
+    )
     p.add_argument("file")
-    p.add_argument("--channels", help="逗号分隔的通道 (默认全部)")
-    p.add_argument("--out", required=True)
+    p.add_argument("--out", help="写到哪个文件（--estimate 时可以不给）")
+    p.add_argument("--channels", help="逗号分隔的通道名，或 all（默认 all）")
+    p.add_argument("--names", help="同 --channels（界面上叫「手动勾选」）")
+    p.add_argument("--maths", dest="maths", action="store_true", default=True,
+                   help="导出数学通道（默认开）")
+    p.add_argument("--no-maths", dest="maths", action="store_false",
+                   help="只导出原生通道")
+    p.add_argument("--maths-file", default=None,
+                   help="额外的数学通道定义文件（同 convert --maths）")
+    p.add_argument("--from", dest="from_", default=None,
+                   help="起点：相对秒（12.5）或绝对时间（与 --absolute 一起）")
+    p.add_argument("--to", default=None, help="终点：同 --from 的写法")
+    p.add_argument("--absolute", action="store_true",
+                   help="--from/--to 是绝对时间（2026-09-14 12:34:56.789）")
+    p.add_argument("--axis", default="time", choices=["time", "distance"],
+                   help="主索引：time=相对秒（默认），distance=米")
+    p.add_argument("--rate", default="auto",
+                   help="auto（默认，原始采样）或统一采样率，如 10 / 100 / 200")
+    p.add_argument("--resample", default="linear",
+                   choices=["linear", "hold", "nearest", "mean"],
+                   help="统一采样率时的重采样方法；mean 只对降采样有意义")
+    p.add_argument("--layout", default="wide", choices=["wide", "long"],
+                   help="wide=一行一个采样点；long=timestamp,channel,value,unit")
+    p.add_argument("--format", default="csv", choices=["csv", "xlsx"],
+                   help="csv（默认，UTF-8 带 BOM）或 xlsx")
+    p.add_argument("--metadata", dest="metadata", action="store_true", default=True,
+                   help="xlsx 带「元数据」sheet（默认开）")
+    p.add_argument("--no-metadata", dest="metadata", action="store_false",
+                   help="不要元数据")
+    p.add_argument("--bundle", action="store_true",
+                   help="CSV 与 metadata.json 打成一个 zip")
+    p.add_argument("--estimate", action="store_true",
+                   help="只打印预计行数 / 列数 / 体积，不写文件")
     p.set_defaults(func=cmd_export)
 
     p = sub.add_parser("query", help="对 Parquet 数据集执行 SQL")

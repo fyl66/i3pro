@@ -22,6 +22,7 @@ dispatchKeyEvent（真命中测试、真焦点、真键盘），跑在**金标�
 """
 import argparse
 import base64
+import glob
 import http.client
 import json
 import math
@@ -30,6 +31,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -1252,6 +1254,100 @@ class Checker:
         self.js("i3pro.state.mode='time';i3pro.state.view=[0,%r];i3pro.renderAll();true" % duration)
         time.sleep(0.4)
 
+    def export(self, work_dir):
+        """#23/#24：真点「导出数据」→ 面板拿到服务端的预估 → 真落一个文件。
+
+        假 DOM 验不了这一段：``fetch`` 在那里永远失败、``URL.createObjectURL`` 也
+        不存在。这里用真实的下载行为，连"临时文件不许残留"一起钉住。
+        """
+        point = json.loads(self.js(
+            "(function(){var b=document.getElementById('dataBtn');"
+            "b.scrollIntoView({block:'nearest'});"
+            "var r=b.getBoundingClientRect();"
+            "return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2});})()"
+        ))
+        self.browser.click(point["x"], point["y"], self.session)
+        self.check("点工具栏的「导出数据」打开了面板",
+                   self.js("!document.getElementById('exportDlg').hidden"))
+        # 面板一开就向服务端要一次预估（不是界面自己拍的数）
+        got_plan = self.browser.wait_for(
+            "document.getElementById('exportPlan').textContent.indexOf('行') > 0",
+            self.session, timeout=30,
+        )
+        self.check("面板显示服务端算出的预估", got_plan,
+                   self.js("document.getElementById('exportPlan').textContent"))
+
+        download_dir = os.path.join(work_dir, "_downloads")
+        shutil.rmtree(download_dir, ignore_errors=True)
+        os.makedirs(download_dir)
+        self.browser.call("Browser.setDownloadBehavior",
+                          {"behavior": "allow", "downloadPath": download_dir})
+        # 只导 2 秒、10 Hz：验的是"这条路通"，不是"能导多少"
+        self.js(
+            "i3pro.applyExportConfig({range:'time',from:'10',to:'12',channels:'all',"
+            "maths:true,rate:'10',custom:'',resample:'linear',meta:false,axis:'time',"
+            "format:'csv',layout:'wide'}); i3pro.refreshExportPlan(); true"
+        )
+        small = self.browser.wait_for(
+            "document.getElementById('exportPlan').textContent.indexOf('21') >= 0",
+            self.session, timeout=30,
+        )
+        self.check("把范围改成 10–12 s、10 Hz 之后预估变成 21 行", small,
+                   self.js("document.getElementById('exportPlan').textContent"))
+
+        go = json.loads(self.js(
+            "(function(){var b=document.getElementById('exportGo');"
+            "var r=b.getBoundingClientRect();"
+            "return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2});})()"
+        ))
+        before_errors = len(self.browser.page_errors())
+        self.browser.click(go["x"], go["y"], self.session)
+        self.browser.wait_for(
+            "document.getElementById('exportPlan').textContent.indexOf('已导出') >= 0",
+            self.session, timeout=60,
+        )
+        plan = self.js("document.getElementById('exportPlan').textContent")
+        self.check("点「导出」之后面板说已导出（真的走完了 fetch + Blob）",
+                   "已导出" in plan, plan)
+
+        landed = []
+        for _ in range(160):
+            landed = [f for f in os.listdir(download_dir) if not f.endswith(".crdownload")]
+            if landed:
+                break
+            time.sleep(0.25)
+        if landed:
+            path = os.path.join(download_dir, landed[0])
+            with open(path, "rb") as handle:
+                head = handle.read(4096)
+            first = head.decode("utf-8-sig", "replace").splitlines()[0]
+            self.check("浏览器真的落了一个文件在下载目录", os.path.getsize(path) > 0,
+                       "%s (%d B)" % (landed[0], os.path.getsize(path)))
+            self.check("文件名来自 Content-Disposition（中文名没被吃掉）",
+                       landed[0].endswith(".csv") and "-" in landed[0], landed[0])
+            self.check("CSV 带 BOM（Excel 双击不乱码）", head.startswith(b"\xef\xbb\xbf"))
+            self.check("首行表头是 time_s + 通道名 [单位]",
+                       first.startswith("time_s,") and "[" in first, first[:90])
+            self.check("行数与面板报的一致（21 行数据 + 1 行表头）",
+                       len(open(path, "rb").read().decode("utf-8-sig").splitlines()) == 22)
+        else:
+            # 旧版无头偶尔不落盘。退一步：同一台服务、同一条路，在页面里直接取一次，
+            # 断言写成"接口那一半过了"，不冒充"真下载过了"。
+            probe = self.js(
+                "(async()=>{const r=await fetch(i3pro.exportURL(i3pro.exportConfig(),false).href);"
+                "const t=await r.text();return r.status+'|'+t.slice(0,90);})()"
+            )
+            self.check("下载没落盘时改验接口：200 + 首行表头",
+                       str(probe).startswith("200|time_s,"), str(probe)[:120])
+
+        leftovers = glob.glob(os.path.join(tempfile.gettempdir(), "i3pro-export-*"))
+        self.check("导出临时目录没残留（成功路径也要删）", not leftovers, leftovers[:3])
+        self.check("导出过程没有页面级报错",
+                   len(self.browser.page_errors()) == before_errors,
+                   self.browser.page_errors()[:3])
+        # 收尾：把面板关掉，后面的用例在干净状态下跑
+        self.js("i3pro.closeExportDialog(); true")
+
     def rename(self, sidecar):
         """#4 / #6：就地改名（回车存、Esc 撤）+ 撤销。
 
@@ -1399,6 +1495,7 @@ def main(argv=None):
             checker.sections()
             checker.crossings(sidecar)
             checker.rename(sidecar)
+            checker.export(work_dir)
             checker.histogram()
             checker.axis()
             checker.notes(work_dir, args.session)

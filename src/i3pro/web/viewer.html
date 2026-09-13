@@ -208,6 +208,34 @@
   .srow .szoom { color:var(--muted); text-decoration:none; padding:0 3px; }
   .srow .szoom:hover { color:var(--accent); }
   .srow.dim { opacity:.55; }
+
+  /* 导出数据面板：范围 / 通道 / 采样 / 格式（ticket #23/#24） */
+  #exportDlg { position:fixed; inset:0; z-index:60; display:flex; align-items:center;
+               justify-content:center; background:rgba(8,10,13,.62); }
+  #exportDlg[hidden] { display:none; }
+  #exportDlg .box { width:600px; max-width:94vw; max-height:88vh; overflow:auto;
+                    background:#161a21; border:1px solid #2b313c; border-radius:10px;
+                    padding:14px 16px 12px; box-shadow:0 18px 60px #0008; }
+  #exportDlg h3 { margin:0 0 4px; font-size:14px; }
+  #exportDlg .sub { color:var(--muted); font-size:11px; margin-bottom:10px; }
+  #exportDlg .frow { display:flex; align-items:center; gap:8px; margin:6px 0; font-size:12px; }
+  #exportDlg .frow > label { width:78px; color:var(--muted); flex:none; }
+  #exportDlg .frow select, #exportDlg .frow input { flex:1; min-width:0; }
+  #exportDlg input[type=checkbox] { flex:none; }
+  #exportDlg .chk { display:flex; align-items:center; gap:5px; color:#cfd6e4; font-size:12px; }
+  #exportDlg .plan { background:#12151b; border:1px solid #2b313c; border-radius:6px;
+                     padding:8px 10px; font-size:12px; margin:10px 0 8px; line-height:1.6; }
+  #exportDlg .plan b { color:var(--accent); font-weight:600; }
+  #exportDlg .warn { color:var(--warn); }
+  #exportDlg .plan.warn { border-color:#4a3a1a; }
+  #exportDlg .plan.error { color:#ff9aa4; border-color:#5a2b33; }
+  #exportDlg .foot { display:flex; align-items:center; gap:8px; justify-content:flex-end;
+                     margin-top:10px; }
+  #exportDlg .foot .grow { flex:1; }
+  #exportDlg .bar { height:6px; background:#222833; border-radius:3px; overflow:hidden;
+                    margin:8px 0 0; }
+  #exportDlg .bar > i { display:block; height:100%; width:0; background:var(--accent);
+                        transition:width .12s linear; }
 </style>
 </head>
 <body>
@@ -222,6 +250,7 @@
   <button id="resetView">重置</button>
   <button id="shareBtn">分享链接</button>
   <button id="pngBtn">导出 PNG</button>
+  <button id="dataBtn" title="把这一段、这几条通道按原始或统一采样率导出成 CSV / Excel">导出数据</button>
 </header>
 <main>
   <aside>
@@ -368,6 +397,80 @@
   </section>
 </main>
 <div id="toast"></div>
+
+<div id="exportDlg" hidden>
+  <div class="box">
+    <h3>导出数据</h3>
+    <div class="sub" id="exportSub">选范围、通道、采样与格式；导出的是原始数值，不做平滑。</div>
+
+    <div class="frow">
+      <label>范围</label>
+      <select id="exportRange">
+        <option value="all">全部日志</option>
+        <option value="view">当前视图</option>
+        <option value="lap">当前选中圈</option>
+        <option value="cursor">光标 A–B 区间</option>
+        <option value="time">指定时间段</option>
+        <option value="distance">指定距离段</option>
+      </select>
+    </div>
+    <div class="frow" id="exportFromRow" hidden>
+      <label>起 → 止</label>
+      <input type="text" id="exportFrom" placeholder="12.5s 或 2026-09-14 12:34:56.789">
+      <input type="text" id="exportTo" placeholder="18.0s 或 12:35:10.123">
+    </div>
+    <div class="frow">
+      <label>通道</label>
+      <select id="exportChannels">
+        <option value="all">全部通道</option>
+        <option value="selected">侧边栏勾选的通道</option>
+      </select>
+      <label class="chk"><input type="checkbox" id="exportMaths" checked> 含数学通道</label>
+    </div>
+    <div class="frow">
+      <label>采样</label>
+      <select id="exportRate"></select>
+      <input type="number" id="exportRateCustom" min="0.1" max="10000" step="1" hidden>
+    </div>
+    <div class="frow">
+      <label>对齐</label>
+      <select id="exportResample">
+        <option value="linear">线性插值</option>
+        <option value="hold">前值保持</option>
+        <option value="nearest">最近邻</option>
+        <option value="mean">区间均值（降采样）</option>
+      </select>
+      <label class="chk"><input type="checkbox" id="exportMeta" checked> 附元数据</label>
+    </div>
+    <div class="frow">
+      <label>主索引</label>
+      <select id="exportAxis">
+        <option value="time">时间 time_s</option>
+        <option value="distance">距离 distance_m</option>
+      </select>
+    </div>
+    <div class="frow">
+      <label>格式</label>
+      <select id="exportFormat">
+        <option value="csv">CSV</option>
+        <option value="xlsx">Excel .xlsx</option>
+      </select>
+      <select id="exportLayout">
+        <option value="wide">宽表（一行一个时刻）</option>
+        <option value="long">长表（channel/value）</option>
+      </select>
+    </div>
+
+    <div class="plan" id="exportPlan">正在估算…</div>
+    <div class="bar" id="exportBar" hidden><i id="exportFill"></i></div>
+
+    <div class="foot">
+      <span class="grow" id="exportMsg"></span>
+      <button id="exportCancel">关闭</button>
+      <button id="exportGo">导出</button>
+    </div>
+  </div>
+</div>
 <script>
 const DATA = /*__I3PRO_DATA__*/null;
 const PALETTE = ["#4cc2ff","#ffb454","#35d07f","#ff5d6c","#b48cff","#4ce0d2",
@@ -5843,6 +5946,347 @@ function exportPNG() {
   toast("已导出 PNG");
 }
 
+/* --------------------------------------------------- 导出数据（ticket #23/#24）
+ * 面板只干三件事：把选择拼成查询参数、向服务端要一份预估、把文件收下来。
+ * 取数与落盘全在 Python（`src/i3pro/export.py`），所以界面、命令行、快照导出的
+ * 数字永远是同一个答案——界面这一层**不做任何重采样**，也不自己拼 CSV。
+ */
+const EXPORT_STORE = "i3pro.export.v1";
+const EXPORT_RATES = [1, 5, 10, 20, 50, 100, 200, 500];
+const EXPORT_FIELDS = [
+  "exportRange", "exportChannels", "exportMaths", "exportRate", "exportRateCustom",
+  "exportResample", "exportMeta", "exportAxis", "exportFormat", "exportLayout",
+  "exportFrom", "exportTo",
+];
+
+let exportBusy = false;
+let exportAbort = null;
+let exportPlanSeq = 0;
+let exportPlanTimer = null;
+let exportFilenameFrom = "";
+
+function exportDefaults() {
+  return {
+    range: "all", from: "", to: "", channels: "all", maths: true,
+    rate: "auto", custom: "", resample: "linear", meta: true,
+    axis: "time", format: "csv", layout: "wide",
+  };
+}
+
+/** 上次用过的配置（localStorage）；坏了就当默认，不因为一条坏记录打不开面板。 */
+function exportSaved() {
+  try {
+    const raw = localStorage.getItem(EXPORT_STORE);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (parsed && typeof parsed === "object") return Object.assign(exportDefaults(), parsed);
+  } catch (err) { /* 私密模式 / 坏 JSON：用默认值 */ }
+  return exportDefaults();
+}
+
+function exportRemember(cfg) {
+  try { localStorage.setItem(EXPORT_STORE, JSON.stringify(cfg)); } catch (err) {}
+}
+
+function exportConfig() {
+  const rate = $("exportRate").value;
+  return {
+    range: $("exportRange").value,
+    from: $("exportFrom").value.trim(),
+    to: $("exportTo").value.trim(),
+    channels: $("exportChannels").value,
+    maths: !!$("exportMaths").checked,
+    rate: rate,
+    custom: $("exportRateCustom").value,
+    resample: $("exportResample").value,
+    meta: !!$("exportMeta").checked,
+    axis: $("exportAxis").value,
+    format: $("exportFormat").value,
+    layout: $("exportLayout").value,
+  };
+}
+
+function applyExportConfig(cfg) {
+  $("exportRange").value = cfg.range;
+  $("exportFrom").value = cfg.from;
+  $("exportTo").value = cfg.to;
+  $("exportChannels").value = cfg.channels;
+  $("exportMaths").checked = cfg.maths !== false;
+  $("exportRate").value = cfg.rate === "custom" ? "custom" : String(cfg.rate);
+  $("exportRateCustom").value = cfg.custom || "";
+  $("exportResample").value = cfg.resample;
+  $("exportMeta").checked = cfg.meta !== false;
+  $("exportAxis").value = cfg.axis;
+  $("exportFormat").value = cfg.format;
+  $("exportLayout").value = cfg.layout;
+  syncExportFields();
+}
+
+/** 只有「指定」这一档才要起止；只有「自定义」才要那个数字框。 */
+function syncExportFields() {
+  const cfg = exportConfig();
+  const typed = cfg.range === "time" || cfg.range === "distance";
+  $("exportFromRow").hidden = !typed;
+  $("exportRateCustom").hidden = cfg.rate !== "custom";
+  $("exportFrom").placeholder = cfg.range === "distance"
+    ? "1200m" : "12.5s 或 2026-09-14 12:34:56.789";
+  $("exportTo").placeholder = cfg.range === "distance" ? "1850m" : "18.0s 或 12:35:10.123";
+  const excel = cfg.format === "xlsx";
+  $("exportLayout").disabled = excel;      // Excel 一律宽表：长表在表格里没法看
+  if (excel) $("exportLayout").value = "wide";
+}
+
+/** 界面状态里现成的三个范围：当前视图 / 选中圈 / 光标 A–B。取不到就说下一步。 */
+function exportPreset(cfg) {
+  if (cfg.range === "view") {
+    const r = lane();
+    return {
+      from: r[0], to: r[1],
+      axis: state.mode === "distance" ? "distance" : "time",
+      label: state.mode === "distance" ? "当前视图（距离）" : "当前视图",
+    };
+  }
+  if (cfg.range === "lap") {
+    const row = (DATA.laps || []).filter((l) => l.lap === state.ref)[0];
+    if (!row) return { error: "还没选圈：先在右边「圈速」表里点一行（或按 F 跳到最快圈），再回来导出。" };
+    return { from: row.start_time, to: row.end_time, axis: "time", label: "圈 " + row.lap };
+  }
+  if (cfg.range === "cursor") {
+    if (!state.datumOn || state.datum === null) {
+      return { error: "没有 A–B：按 D 打开基准光标，把鼠标放到 A 的位置按空格；再移到 B 按空格。" };
+    }
+    if (state.cursor === null) return { error: "把鼠标移到图上（让光标落在 B），再点导出。" };
+    const a = Math.min(state.datum, state.cursor);
+    const b = Math.max(state.datum, state.cursor);
+    return {
+      from: a, to: b,
+      axis: state.mode === "distance" ? "distance" : "time",
+      label: state.mode === "distance" ? "光标 A–B（距离）" : "光标 A–B",
+    };
+  }
+  return null;
+}
+
+/** ``12.5s`` / ``1200m`` → 数字；``2026-09-14 12:34:56.789`` → 绝对时间（原样发）。 */
+function exportMoment(text) {
+  const clean = String(text || "").trim();
+  const bare = clean.replace(/[sS秒]$/, "").replace(/[mM米]$/, "");
+  if (/^[+-]?\d+(\.\d+)?$/.test(bare)) return { value: bare, absolute: false };
+  return { value: clean, absolute: true };
+}
+
+/** 面板 → 查询参数。返回 ``{href}`` 或 ``{error}``（错误一定是"下一步做什么"）。 */
+function exportURL(cfg, plan) {
+  const params = new URLSearchParams();
+  const preset = exportPreset(cfg);
+  if (preset && preset.error) return { error: preset.error };
+  const axis = preset ? preset.axis : cfg.axis;
+  params.set("axis", axis);
+  if (cfg.range === "all") {
+    // 整场：不带 from/to，由服务端按场次长度补齐
+  } else if (preset) {
+    params.set("from", String(preset.from));
+    params.set("to", String(preset.to));
+  } else {
+    if (!cfg.from || !cfg.to) {
+      return { error: cfg.range === "distance"
+        ? "距离段要把起点和终点都填上，例如 1200 到 1850（米）。"
+        : "时间段要把起点和终点都填上，例如 12.5 到 18（秒）。" };
+    }
+    const from = exportMoment(cfg.from);
+    const to = exportMoment(cfg.to);
+    if (axis === "distance" && (from.absolute || to.absolute)) {
+      return { error: "距离段按米填，不能填日期时间，例如 1200 到 1850。" };
+    }
+    if (from.absolute || to.absolute) params.set("absolute", "1");
+    params.set("from", from.value);
+    params.set("to", to.value);
+  }
+  if (cfg.channels === "selected") {
+    const names = selectedChannels();
+    if (!names.length) {
+      return { error: "侧边栏一条通道都没勾：先在左边「通道」里勾几条，或者把通道换成「全部通道」。" };
+    }
+    params.set("channels", "selected");
+    params.set("names", names.join(","));
+  } else {
+    params.set("channels", "all");
+  }
+  params.set("maths", cfg.maths ? "1" : "0");
+  params.set("rate", cfg.rate === "custom" ? (cfg.custom || "auto") : cfg.rate);
+  params.set("resample", cfg.resample);
+  params.set("format", cfg.format);
+  params.set("layout", cfg.format === "xlsx" ? "wide" : cfg.layout);
+  params.set("metadata", cfg.meta ? "1" : "0");
+  // CSV 的元数据只能另给一个文件，所以勾了就打包成 zip；Excel 的元数据是一张 sheet。
+  params.set("bundle", cfg.meta && cfg.format === "csv" ? "1" : "0");
+  // 预估不产生文件：契约里这个开关叫 estimate（见 out/_pending/export-contract.md §5）
+  if (plan) params.set("estimate", "1");
+  return { href: apiUrl("/export", Object.fromEntries(params.entries())) };
+}
+
+function formatBytes(count) {
+  const value = Number(count) || 0;
+  if (value >= 1024 * 1024 * 1024) return (value / 1073741824).toFixed(2) + " GB";
+  if (value >= 1024 * 1024) return (value / 1048576).toFixed(1) + " MB";
+  if (value >= 1024) return (value / 1024).toFixed(0) + " KB";
+  return value + " B";
+}
+
+/** ``kind`` 是 ""（正常）/ "warn"（有警告）/ "error"（失败）——面板边框跟着变。 */
+function setExportPlan(html, kind) {
+  const el = $("exportPlan");
+  el.innerHTML = html;
+  el.className = "plan" + (kind ? " " + kind : "");
+}
+
+function setExportGo(enabled) {
+  $("exportGo").disabled = !enabled || !DATA.api;
+}
+
+/** 服务端算的预估（``plan=1``）落到面板上；下载也照它给的名字存。 */
+function applyExportPlan(body) {
+  exportFilenameFrom = String((body && body.filename) || "");
+  const range = body.range && body.range.label ? esc(body.range.label) : "";
+  let text = "";
+  if (range) text += "范围 " + range + "<br>";
+  text += "<b>" + Number(body.rows).toLocaleString() + "</b> 行 × <b>" + body.columns + "</b> 列"
+    + " · 约 " + formatBytes(body.bytes);
+  if (body.sheets > 1) text += " · 分 " + body.sheets + " 张表";
+  (body.warnings || []).forEach((line) => { text += "<br><span class='warn'>" + esc(line) + "</span>"; });
+  setExportPlan(text, (body.warnings || []).length ? "warn" : "");
+}
+
+async function refreshExportPlan() {
+  const cfg = exportConfig();
+  exportRemember(cfg);
+  if (!DATA.api) {
+    setExportPlan("快照是离线文件，没有服务端可以取数。用「启动.bat」打开 serve 模式再导出。", "error");
+    setExportGo(false);
+    return;
+  }
+  const target = exportURL(cfg, true);
+  if (target.error) {
+    setExportPlan(esc(target.error), "error");
+    setExportGo(false);
+    return;
+  }
+  const seq = ++exportPlanSeq;
+  setExportPlan("正在估算…", "");
+  try {
+    const res = await fetch(target.href);
+    const body = await res.json().catch(() => ({}));
+    if (seq !== exportPlanSeq) return;
+    if (!res.ok || body.error) {
+      setExportPlan(esc(body.error || ("HTTP " + res.status)), "error");
+      setExportGo(false);
+      return;
+    }
+    applyExportPlan(body);
+    setExportGo(true);
+  } catch (err) {
+    if (seq !== exportPlanSeq) return;
+    setExportPlan("估算失败：" + esc(err.message) + "。检查本地服务还在不在（启动.bat）。", "error");
+    setExportGo(true);
+  }
+}
+
+function scheduleExportPlan() {
+  clearTimeout(exportPlanTimer);
+  exportPlanTimer = setTimeout(refreshExportPlan, 250);
+}
+
+function exportProgress(ratio, got) {
+  const bar = $("exportBar");
+  const fill = $("exportFill");
+  if (bar) bar.hidden = false;
+  if (fill && ratio > 0) fill.style.width = Math.round(ratio * 100) + "%";
+  setExportPlan("下载中… " + formatBytes(got) + (ratio > 0 ? "（" + Math.round(ratio * 100) + "%）" : ""), "");
+}
+
+/** ``Content-Disposition`` → 文件名（中文名走 ``filename*=UTF-8''``）。 */
+function exportFilename(header) {
+  const text = String(header || "");
+  const star = /filename\*=UTF-8''([^;]+)/i.exec(text);
+  if (star) {
+    try { return decodeURIComponent(star[1]); } catch (err) { /* 落到下面 */ }
+  }
+  const plain = /filename="?([^";]+)"?/i.exec(text);
+  return plain ? plain[1] : (exportFilenameFrom || "i3pro-export.csv");
+}
+
+/** 导出：一次 ``fetch``，边收边报进度；再点一次就是取消。 */
+async function runExport() {
+  if (exportBusy) {
+    if (exportAbort) exportAbort.abort();
+    return;
+  }
+  const cfg = exportConfig();
+  const target = exportURL(cfg, false);
+  if (target.error) { setExportPlan(esc(target.error), "error"); return; }
+  if (!DATA.api) { setExportPlan("快照是离线文件，导出要用 serve 模式。", "error"); return; }
+  exportRemember(cfg);
+  exportBusy = true;
+  // 无头驱动里没有 AbortController；有就一定能取消，没有也照常下载。
+  exportAbort = typeof AbortController === "function" ? new AbortController() : null;
+  $("exportGo").textContent = "取消";
+  exportProgress(0, 0);
+  try {
+    const res = await fetch(target.href, exportAbort ? { signal: exportAbort.signal } : undefined);
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || ("HTTP " + res.status));
+    }
+    const total = Number(res.headers.get("Content-Length") || 0);
+    let blob = null;
+    let got = 0;
+    if (res.body && typeof res.body.getReader === "function") {
+      const reader = res.body.getReader();
+      const chunks = [];
+      for (;;) {
+        const step = await reader.read();
+        if (step.done) break;
+        chunks.push(step.value);
+        got += step.value.length;
+        exportProgress(total ? got / total : 0, got);
+      }
+      blob = new Blob(chunks, { type: res.headers.get("Content-Type") || "application/octet-stream" });
+    } else {
+      blob = await res.blob();
+      got = blob.size;
+    }
+    const name = exportFilename(res.headers.get("Content-Disposition"));
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = name;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 4000);
+    setExportPlan("已导出 <b>" + esc(name) + "</b>（" + formatBytes(got) + "）", "");
+  } catch (err) {
+    if (err && err.name === "AbortError") {
+      setExportPlan("已取消；服务端不会留下半个文件。", "");
+    } else {
+      setExportPlan("导出失败：" + esc(err.message) + "。缩小范围或减少通道再试，"
+        + "大文件也可以用命令行 i3pro export。", "error");
+    }
+  } finally {
+    exportBusy = false;
+    exportAbort = null;
+    $("exportGo").textContent = "导出";
+    $("exportBar").hidden = true;
+  }
+}
+
+function openExportDialog() {
+  applyExportConfig(exportSaved());
+  $("exportDlg").hidden = false;
+  refreshExportPlan();
+}
+
+function closeExportDialog() {
+  if (exportAbort) exportAbort.abort();
+  $("exportDlg").hidden = true;
+}
+
 function shareURL() {
   const params = new URLSearchParams();
   params.set("channels", selectedChannels().join(","));
@@ -6218,6 +6662,20 @@ function init() {
   $("pngBtn").addEventListener("click", exportPNG);
   $("shareBtn").addEventListener("click", shareURL);
 
+  // 导出数据面板：采样率下拉按 export.py 认的档位建，选项文字与命令行一致
+  $("exportRate").innerHTML = '<option value="auto">Auto / 原始采样</option>'
+    + EXPORT_RATES.map((hz) => '<option value="' + hz + '">' + hz + " Hz</option>").join("")
+    + '<option value="custom">自定义…</option>';
+  $("dataBtn").addEventListener("click", openExportDialog);
+  $("exportCancel").addEventListener("click", closeExportDialog);
+  $("exportGo").addEventListener("click", runExport);
+  EXPORT_FIELDS.forEach((id) => {
+    const el = $(id);
+    if (!el || !el.addEventListener) return;
+    el.addEventListener("change", () => { syncExportFields(); refreshExportPlan(); });
+    el.addEventListener("input", scheduleExportPlan);
+  });
+
   renderAll();
   refreshWindowTraces(true).then(() => { refreshAllComponentData().then(renderAll); });
 }
@@ -6255,6 +6713,12 @@ window.i3pro = {
   drawNotes: drawNotes, noteAt: noteAt,
   gpsState: gpsState, gpsNoteText: gpsNoteText, renderGps: renderGps, saveGps: saveGps,
   applyGps: applyGps, loadGps: loadGps, renderTrackComponent: renderTrackComponent,
+  exportConfig: exportConfig, exportURL: exportURL, exportPreset: exportPreset,
+  applyExportPlan: applyExportPlan, applyExportConfig: applyExportConfig,
+  openExportDialog: openExportDialog, closeExportDialog: closeExportDialog,
+  refreshExportPlan: refreshExportPlan, runExport: runExport,
+  exportFilename: exportFilename, exportMoment: exportMoment,
+  exportDefaults: exportDefaults, exportSaved: exportSaved,
   renderMathsList: renderMathsList, openMathsEditor: openMathsEditor,
   closeMathsEditor: closeMathsEditor, mathsDraft: mathsDraft,
   mathsSaveList: mathsSaveList, applyMathsResponse: applyMathsResponse,

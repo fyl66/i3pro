@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import math as _math
+import difflib
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,6 +40,7 @@ __all__ = [
     "MATH_SUFFIX",
     "compile_expr",
     "evaluate",
+    "known_names",
     "resolve_all",
     "resolve_available",
     "apply_to_session",
@@ -98,8 +100,39 @@ _MULTI_OPS = ("<=", ">=", "==", "!=", "&&", "||")
 _SINGLE_OPS = set("+-*/%^<>=!~&|")
 
 
-def _tokenize(text: str) -> list[tuple[str, str, object]]:
-    """切成 ``(kind, text, value)`` 序列。``kind`` ∈ num/chan/func/op/lparen/rparen/comma。"""
+def _longest_name_at(text: str, i: int, known: Iterable[str] | None) -> str | None:
+    """``text[i:]`` 开头处最长的那个**真实通道名**，没有就给 ``None``。
+
+    通道名里有空格、括号、短横线（``Vx KF``、``Distance (2)``、``FSD-Distance1``），
+    其中一多半**打不出来**：``Vx KF`` 看起来像两个运算数挨在一起，``FSD-Distance1``
+    看起来像减法。调用方把"本场次有哪些通道"告诉编译器，就能在词法阶段认出最长
+    的那个名字，用户按自然写法打出来即可，不必知道要加单引号。
+
+    边界要卡死：名字后面紧跟字母数字或下划线就不算命中（``FSD13 Distance1`` 不能
+    匹配掉 ``FSD13 Distance12`` 的前缀）。
+    """
+    if not known:
+        return None
+    best: str | None = None
+    for name in known:
+        if not name or not text.startswith(name, i):
+            continue
+        end = i + len(name)
+        if end < len(text) and (text[end].isalnum() or text[end] == "_"):
+            continue
+        if best is None or len(name) > len(best):
+            best = name
+    return best
+
+
+def _tokenize(
+    text: str, known: Iterable[str] | None = None
+) -> list[tuple[str, str, object]]:
+    """切成 ``(kind, text, value)`` 序列。``kind`` ∈ num/chan/func/op/lparen/rparen/comma。
+
+    ``known`` 是**已知通道名**（本场次的通道 + 已定义的数学通道）。给了它，
+    含空格／括号／短横线的名字可以不写单引号直接打。
+    """
     tokens: list[tuple[str, str, object]] = []
     units: list[str] = []
     i = 0
@@ -146,8 +179,19 @@ def _tokenize(text: str) -> list[tuple[str, str, object]]:
             while j < n and text[j].isspace():
                 j += 1
             if j < n and text[j] == "(":
+                longer = _longest_name_at(text, i, known)
+                if longer is not None and longer != word and longer.endswith((")", "]")):
+                    # `Distance (2)` 这种带括号的通道名，别被当成函数调用
+                    tokens.append(("chan", longer, longer))
+                    i += len(longer)
+                    continue
                 tokens.append(("func", word, word))
             else:
+                longer = _longest_name_at(text, i, known)
+                if longer is not None and longer != word:
+                    tokens.append(("chan", longer, longer))
+                    i += len(longer)
+                    continue
                 tokens.append(("ident", word, word))
             i = ident.end()
             continue
@@ -233,11 +277,16 @@ class Plan:
         }
 
 
-def compile_expr(text: str) -> Plan:
-    """把表达式文本编译成 :class:`Plan`；出错时抛 :class:`MathError`。"""
+def compile_expr(text: str, known: Iterable[str] | None = None) -> Plan:
+    """把表达式文本编译成 :class:`Plan`；出错时抛 :class:`MathError`。
+
+    ``known`` 是已知通道名（本场次的通道 + 已定义的数学通道）。给了它，``Vx KF``、
+    ``Distance (2)``、``FSD-Distance1`` 这些名字就能直接打，不必套单引号；
+    没给也能编译，只是这些名字得写成 ``'Vx KF'``。
+    """
     if not isinstance(text, str) or not text.strip():
         raise MathError("表达式是空的。至少写一个通道名或数字。")
-    tokens, units = _tokenize(text)
+    tokens, units = _tokenize(text, known)
     rpn: list[tuple[str, str, object]] = []
     # 栈项：["op", 文本, 运算符] / ["func", 名字, 已数到的逗号数] /
     #       ["lparen", 文本, 文本, 进入时的 rpn 长度]
@@ -279,6 +328,13 @@ def compile_expr(text: str) -> Plan:
             if name not in FUNCTIONS:
                 if name in UNSUPPORTED:
                     raise MathError(f"函数 `{name}` 没有提供。{UNSUPPORTED[name]}")
+                lookalike = _looks_like_a_channel(name, known)
+                if lookalike is not None:
+                    raise MathError(
+                        f"`{name}` 不是函数，但本场次有一个通道叫 `{lookalike}`。"
+                        f"把它用单引号括起来写成 `'{lookalike}'`，"
+                        f"或者从编辑器里的「插入通道」直接选。"
+                    )
                 raise MathError(
                     f"未知函数 `{name}`。"
                     f"最接近的是 {_suggest(name, FUNCTIONS)}；函数全表见界面上的「函数」按钮。"
@@ -355,6 +411,59 @@ def _similarity(a: str, b: str) -> float:
         return 0.0
     common = sum(1 for ch in set(a) if ch in b)
     return common / max(len(set(a)), len(set(b)))
+
+
+def _looks_like_a_channel(name: str, known: Iterable[str] | None) -> str | None:
+    """``name(...)`` 里的 ``name`` 其实是某个通道名的开头时，交出那个通道名。
+
+    ``Distance (2)`` 会被词法当成"调用函数 Distance"，而它只是一个带括号的通道名。
+    """
+    if not known:
+        return None
+    hits = [candidate for candidate in known
+            if candidate != name and candidate.startswith(name)]
+    return min(hits, key=len) if hits else None
+
+
+def _closest_channel(name: str, known: Iterable[str] | None) -> str | None:
+    """拼错的通道名最像哪一条（不像就返回 ``None``）。
+
+    空格、短横线、下划线和大小写的差别要先抹平再比：用户打 ``FSD13Distance1``、
+    实际那条叫 ``FSD13 Distance1``，这两个串按原样比是比不上"长相"的。
+    相似度用 :class:`difflib.SequenceMatcher`（标准库）而不是"共用字符比例"——
+    后者会把 ``notachannel`` 这种完全无关的串也认成 ``Aceinna Roll``，比不给建议更糟。
+    """
+    if not known:
+        return None
+
+    def squash(text: str) -> str:
+        return (text.replace(" ", "").replace("-", "").replace("_", "")).lower()
+
+    best, best_score = None, 0.0
+    matcher = difflib.SequenceMatcher()
+
+    def ratio(a: str, b: str) -> float:
+        matcher.set_seqs(a, b)
+        return matcher.ratio()
+
+    for candidate in known:
+        score = max(ratio(name.lower(), candidate.lower()),
+                    ratio(squash(name), squash(candidate)))
+        # "像"要有下限：开头就对不上、整体也不太像的，不给建议反而更诚实
+        # （`notachannel` 与 `Channel 9` 只因为都含 channel 就会被算成"最接近"）。
+        if _prefix_len(squash(name), squash(candidate)) < 2 and score < 0.85:
+            continue
+        if score > best_score:
+            best, best_score = candidate, score
+    return best if best is not None and best_score >= 0.7 else None
+
+
+def _prefix_len(a: str, b: str) -> int:
+    """两个串从头开始相同的字符数。"""
+    for index, (left, right) in enumerate(zip(a, b)):
+        if left != right:
+            return index
+    return min(len(a), len(b))
 
 
 # ------------------------------------------------------------------- 求值
@@ -943,13 +1052,21 @@ class DerivedCache:
         return (str(path), stat.st_mtime_ns, stat.st_size)
 
     @staticmethod
-    def key(session_path: str | Path, definition: Definition, sources: tuple[str, ...]) -> tuple:
+    def key(
+        session_path: str | Path,
+        definition: Definition,
+        sources: tuple[str, ...],
+        dependencies: tuple[tuple[str, str], ...] = (),
+    ) -> tuple:
         return (
             DerivedCache.file_fingerprint(session_path),
             definition.name,
             definition.expr,
             definition.unit,
             sources,
+            # 被引用定义的内容（名字 + 表达式，传递闭包）：光有名字的话，
+            # `乙 = 甲 + 1` 在甲改掉之后会一直命中旧列。
+            dependencies,
         )
 
     def get(self, key: tuple) -> np.ndarray | None:
@@ -978,12 +1095,42 @@ class DerivedCache:
         return len(self._items)
 
 
+def _session_names(session) -> tuple[str, ...]:
+    """本场次有哪些通道名（.ld 与 CSV 两种会话都有 ``channels``）。"""
+    try:
+        channels = session.channels
+    except AttributeError:              # 只实现了 has/values 的精简会话对象
+        return ()
+    if not channels:
+        return ()
+    return tuple(channel.name for channel in channels)
+
+
+def known_names(session, definitions: Iterable = ()) -> tuple[str, ...]:
+    """编译一条表达式时"算得上通道名"的全部名字（定义也可以是纯名字串）。"""
+    extra = []
+    for item in definitions:
+        try:
+            extra.append(item.name)
+        except AttributeError:
+            extra.append(item)
+    return (*_session_names(session), *extra)
+
+
 def _session_series(session, name: str, size: int) -> np.ndarray:
     """取一个源通道在主时间基上的序列。"""
     if not session.has(name):
+        known = _session_names(session)
+        guess = _closest_channel(name, known)
+        hint = (
+            f"最接近的是 `{guess}`；含空格／括号／短横线的名字要用单引号写成 "
+            f"`'{guess}'`，或者从编辑器里的「插入通道」直接选。"
+            if guess else
+            "检查拼写（区分大小写），含空格／括号／短横线的名字要用单引号括起来"
+            "（`'Vx KF'`），或者从编辑器里的「插入通道」直接选。"
+        )
         raise MathError(
-            f"表达式里用到通道 `{name}`，本场次没有这个通道。"
-            f"检查拼写（区分大小写），或者换一个存在的通道。"
+            f"表达式里用到通道 `{name}`，本场次没有这个通道。{hint}"
         )
     values = derive.hold_to_master(session, name)
     if values.size >= size:
@@ -1020,14 +1167,32 @@ def resolve_all(
     done: dict[str, np.ndarray] = {}
     plans: dict[str, Plan] = {}
     visiting: list[str] = []
+    names = known_names(session, definitions)
 
     def build(name: str) -> Plan:
         if name in plans:
             return plans[name]
         definition = pending[name]
-        plan = compile_expr(definition.expr)
+        plan = compile_expr(definition.expr, known=names)
         plans[name] = plan
         return plan
+
+    def dependency_fingerprint(sources: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
+        """被引用定义的内容指纹（传递闭包）。
+
+        缓存键里只放源通道的**名字**是不够的：``乙 = 甲 + 1`` 的键在 ``甲`` 的表达式
+        被改掉之后必须跟着变，否则乙会一直用旧列算。所以把每一条被引用到的定义
+        （连同它引用的那些）的名字 + 表达式一起放进键里。
+        """
+        seen: dict[str, str] = {}
+        stack = [name for name in sources if name in pending]
+        while stack:
+            name = stack.pop()
+            if name in seen:
+                continue
+            seen[name] = pending[name].expr
+            stack.extend(channel for channel in build(name).channels if channel in pending)
+        return tuple(sorted(seen.items()))
 
     def value_of(name: str, sources: tuple[str, ...]) -> np.ndarray:
         if name in pending:
@@ -1050,7 +1215,10 @@ def resolve_all(
             raise MathError(f"未知数学通道 `{name}`。")
         plan = build(name)
         sources = tuple(sorted(plan.channels))
-        key = DerivedCache.key(path, definition, sources) if cache is not None else None
+        key = (
+            DerivedCache.key(path, definition, sources, dependency_fingerprint(sources))
+            if cache is not None else None
+        )
         if cache is not None and key is not None:
             hit = cache.get(key)
             if hit is not None and hit.size == time.size:
@@ -1155,7 +1323,7 @@ def evaluate(
     """在 ``session`` 上直接算一条式子（不求值依赖的定义）。调试与预览用。"""
     time, rate = _master_axis(session)
     ctx = Context(time=time, rate=rate)
-    plan = compile_expr(text)
+    plan = compile_expr(text, known=known_names(session, tuple(extra or {})))
     extra = extra or {}
 
     def resolve(name: str) -> np.ndarray:

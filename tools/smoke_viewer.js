@@ -933,6 +933,41 @@ if (api) {
     api.applyMathsResponse({ definitions: [], shadowed: [], errors: [], functions: [] });
     check(mathsHost._html.indexOf("还没有数学通道") >= 0,
       "an empty definition list does not explain how to add one");
+
+    // The expression box must not require typing a name that cannot be typed:
+    // `Vx KF` looks like two operands, `Distance (2)` looks like a call and
+    // `FSD-Distance1` looks like a subtraction. The picker inserts the quoted
+    // name for any channel, so no one has to know the rule.
+    const pick = registry.get("mathsPickChannel");
+    check(!!pick, "the maths editor has no insert-channel picker");
+    if (pick) {
+      check(String(pick._html).indexOf("插入通道") >= 0,
+        "the insert-channel picker has no placeholder option");
+      const spaced = (api.data.channels || []).filter((c) => String(c.name).indexOf(" ") >= 0);
+      check(spaced.length > 0, "this snapshot has no channel name with a space to test with");
+      if (spaced.length) {
+        const wanted = String(spaced[0].name);
+        check(String(pick._html).indexOf(wanted) >= 0,
+          "the picker does not offer the channel " + wanted);
+        api.openMathsEditor(null);
+        registry.get("mathsExpr").value = "";
+        pick.value = wanted;
+        pick.dispatch("change", { target: pick });
+        check(registry.get("mathsExpr").value === "'" + wanted + "'",
+          "picking " + wanted + " did not insert the quoted name (got "
+          + registry.get("mathsExpr").value + ")");
+        check(pick.value === "",
+          "the picker should fall back to its placeholder after inserting");
+        // ...and it appends to what is already there instead of replacing it
+        registry.get("mathsExpr").value = "1 + ";
+        pick.value = wanted;
+        pick.dispatch("change", { target: pick });
+        check(registry.get("mathsExpr").value === "1 + '" + wanted + "'",
+          "inserting into a non-empty expression lost what was already typed (got "
+          + registry.get("mathsExpr").value + ")");
+        api.closeMathsEditor();
+      }
+    }
     api.data.api = apiBase;
   }
 

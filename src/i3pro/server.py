@@ -571,9 +571,10 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
             except maths.MathError as exc:
                 return self._error(400, str(exc))
             # 语法在这一步就挡掉：坏式子不进侧车，省得下次打开场次才发现
+            known = maths.known_names(log, incoming.definitions)
             for definition in incoming.definitions:
                 try:
-                    maths.compile_expr(definition.expr)
+                    maths.compile_expr(definition.expr, known=known)
                 except maths.MathError as exc:
                     return self._error(
                         400, f"数学通道 `{definition.name}` 的表达式有问题：{exc}"
@@ -612,7 +613,7 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
             if not expr:
                 return self._error(400, "需要 {\"expr\": \"...\"} 这样的请求体")
             try:
-                plan = maths.compile_expr(expr)
+                plan = maths.compile_expr(expr, known=maths.known_names(log))
             except maths.MathError as exc:
                 return self._error(400, str(exc))
             try:

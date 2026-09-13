@@ -223,6 +223,9 @@
       <div class="medit" id="mathsEdit" hidden>
         <input type="text" id="mathsName" placeholder="名字，例如 滑移率">
         <input type="text" id="mathsExpr" placeholder="表达式，例如 ('车轮速度' - '车速') / max('车速', 1)">
+        <select id="mathsPickChannel" title="把通道名插到表达式的光标处（含空格 / 括号 / 短横线的名字会自动加单引号）">
+          <option value="">插入通道…</option>
+        </select>
         <input type="text" id="mathsUnit" placeholder="单位（可留空）">
         <select id="mathsScope">
           <option value="local">本地 —— 只在本场次生效</option>
@@ -2535,6 +2538,7 @@ function mathsErrorFor(name) {
  * 还是会影响以后每一场"。算不出来的定义带红框和原因，而不是悄悄消失。
  */
 function renderMathsList() {
+  renderMathsChannelPicker();
   const box = $("mathsList");
   if (!box) return;
   const info = mathsState();
@@ -2578,6 +2582,47 @@ function renderMathsList() {
       mathsDelete(Number(link.dataset.mathsDel));
     });
   });
+}
+
+/**
+ * 「插入通道」下拉：把通道名（含空格 / 括号 / 短横线的）塞进表达式光标处。
+ *
+ * 编辑器里能打出来的写法只有一部分：`Vx KF` 看起来像两个运算数挨在一起、
+ * `Distance (2)` 看起来像函数调用、`FSD-Distance1` 看起来像减法。让用户
+ * **不靠打字**就能引用任意通道，比要求他记住"什么时候要加单引号"更靠谱。
+ * 一律写成 `'名字'`——单引号对简单名字同样合法，也省得前后端两套规则。
+ */
+function renderMathsChannelPicker() {
+  const pick = $("mathsPickChannel");
+  if (!pick) return;
+  const keep = pick.value;
+  const names = CHANNELS ? Array.from(CHANNELS.keys()) : [];
+  pick.innerHTML = '<option value="">插入通道…</option>'
+    + names.map((n) => '<option value="' + esc(n) + '">' + esc(n) + "</option>").join("");
+  pick.value = names.indexOf(keep) >= 0 ? keep : "";
+}
+
+function insertMathsChannel(name) {
+  const expr = $("mathsExpr");
+  if (!expr || !name) return;
+  const quoted = "'" + String(name).replace(/'/g, "") + "'";
+  const start = typeof expr.selectionStart === "number" ? expr.selectionStart : expr.value.length;
+  const end = typeof expr.selectionEnd === "number" ? expr.selectionEnd : expr.value.length;
+  const before = expr.value.slice(0, start);
+  const after = expr.value.slice(end);
+  const lead = before && !/\s$/.test(before) && !/[(+\-*/,]$/.test(before) ? " " : "";
+  expr.value = before + lead + quoted + after;
+  if (typeof expr.setSelectionRange === "function") {
+    const caret = (before + lead + quoted).length;
+    expr.setSelectionRange(caret, caret);
+  }
+  pick_value_reset();
+  if (typeof expr.focus === "function") expr.focus();
+}
+
+function pick_value_reset() {
+  const pick = $("mathsPickChannel");
+  if (pick) pick.value = "";
 }
 
 /** 函数表：试算失败时用户最需要的就是"这里到底有哪些函数、怎么写"。 */
@@ -3521,6 +3566,9 @@ function init() {
   $("mathsCancel").addEventListener("click", closeMathsEditor);
   $("mathsTest").addEventListener("click", mathsTest);
   $("mathsCommit").addEventListener("click", mathsCommit);
+  $("mathsPickChannel").addEventListener("change", (event) => {
+    insertMathsChannel(event.target.value);
+  });
   $("mathsFuncs").addEventListener("click", () => {
     const box = $("mathsFuncList");
     box.hidden = !box.hidden;
@@ -3597,6 +3645,7 @@ window.i3pro = {
   mathsCommit: mathsCommit, mathsTest: mathsTest, loadMaths: loadMaths,
   reindexChannels: reindexChannels, selectChannel: selectChannel,
   mathsState: mathsState, escapeText: escapeText,
+  insertMathsChannel: insertMathsChannel, renderMathsChannelPicker: renderMathsChannelPicker,
 };
 </script>
 </body>

@@ -644,6 +644,37 @@ i2 Pro 的 **Missed Beacons**：车确实穿过了起终点，但没被检出，
 （`'车轮速度'[km/h]`）接受但**忽略**，并在试算结果里原样告诉用户"不做单位换算"；
 二维查表与 `Setup Sheets` 不做（`AGENTS.md` 规则 9）。
 
+**第三轮（用户反馈 + Spec 轴评审后补做的三件）**
+
+1. **通道名要能直接打出来。** 用户反馈"输入通道不太好识别，比如 `FSD-Distance1` 做不了运算"。
+   实测三条路都走不通：`Vx KF * 2` 报"两个运算数挨在一起了（`KF`）"、`Distance (2) * 2` 报
+   "未知函数 `Distance`"、`FSD-Distance1 * 2` 被当成 `FSD` 减 `Distance1`。现在把**已知通道名**
+   交给编译器（`maths.known_names(session, definitions)`，含已定义的数学通道名），词法阶段按
+   最长匹配认出整名，并在名字后紧跟字母数字／下划线时拒绝命中：
+
+   | 写法 | 现在 |
+   | --- | --- |
+   | `Vx KF * 2` / `Distance (2) * 2` / `FSD-Distance1 * 2` | 直接算（旧写法 `'Vx KF' * 2` 一如既往地能用） |
+   | `FSD13Distance1 * 2`（漏了空格） | 400/报错里给出 `最接近的是 'FSD13 Distance1'`，并说明要加单引号 |
+   | `VxKF * 2` | 同上，指向 `Vx KF` |
+   | `notachannel * 2` | **不硬凑**建议（只用共有字符比相似度时它会被认成 `Channel 9`，比不给更糟；现在用 `difflib` 且要求开头能对上） |
+
+   界面同时加了「插入通道」下拉：**不用打字**，选中即把 `'名字'` 插到表达式光标处，
+   完全绕开"什么时候要加单引号"这条规则。
+
+2. **缓存键含"被引用定义的内容"。** 评审（P2-1）实测：`甲 = 'Vx KF' * 2`、`乙 = 甲 + 1`，
+   把甲改成 `'Vx KF' * 4` 之后，乙仍然命中旧列（最大偏差 **175.780**）。原因是键里只有被引用
+   通道的**名字**。现在键里带上被引用定义的**传递闭包**（名字 + 表达式），
+   `TestMaths::test_a_changed_dependency_invalidates_the_cache` 盯着它；同一份定义仍然命中
+   （`assertIs` 同一个数组对象），没有退化成"永远重算"。
+
+3. **文档口径纠正**（评审 P3-1）：原文写"派生通道能参与切圈 / 比圈 / **报表** —— 满足"，
+   而"报表"这一条当时没有任何证据——**仓库里还没有报表**（它是 ticket #11）。切圈（46 段）与
+   比圈（`build_overlay` 用派生通道出 164 点曲线）是实测过的；报表留到 #11 走同一套访问器继承。
+
+**这一轮的实测数字**：单测 **107 项** OK（`TestMaths` 37 项、`TestMathsOverHttp` 2 项）；
+`verify_ld_vs_csv` PASS；两份金标准快照 smoke 均 PASS；无头断言点 **151** 个。
+
 ---
 
 ## A29 · 撤销上一步信标编辑（ticket #6）
@@ -845,5 +876,5 @@ python -m unittest discover -s tests -v
 | `TestIndependentParsers` | 第二套实现交叉验证、213 通道 CSV 全量对照 |
 | `TestBeaconUndo` | 撤销的纯函数层：什么是"同一版"、什么时候没有可撤销的一步、交回去的是上一版本身 |
 | `TestBeaconUndoOverHttp` | 撤销走真实 `PUT`：改名 / 插入 / 删除各自一步回到原样、`trusted` 迁移、落盘、一次无改动的保存不吃掉上一步、没有可撤销的一步时 400 并说明下一步、页面注入的 `laps_can_undo` 三态 |
-| `TestViewerScript` | 无头驱动前端：脚本里 **144 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
+| `TestViewerScript` | 无头驱动前端：脚本里 **151 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
 | `TestLaunchers` | 一键启动：快照批量导出 + 索引页、缺数据目录的报错、端口占用自动换端口 |

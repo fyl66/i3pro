@@ -1972,6 +1972,87 @@ class TestMaths(unittest.TestCase):
             self.assertIn(expected, names, f"函数表里缺 {expected}")
         self.assertEqual(len(names), 53)
 
+    # -------------------------------------------- 通道名怎么打得出来（用户反馈）
+    def test_a_channel_name_with_spaces_can_be_typed_without_quotes(self):
+        """`Vx KF * 2` 以前报"两个运算数挨在一起"，用户根本猜不到要加单引号。"""
+        session = _MathSession({"Vx KF": np.full(11, 30.0), "车速": np.full(11, 20.0)})
+        known = mathsmod.known_names(session)
+        bare = mathsmod.evaluate("Vx KF * 2", session)
+        quoted = mathsmod.evaluate("'Vx KF' * 2", session)
+        self.assertTrue(np.array_equal(bare, quoted))
+        self.assertAlmostEqual(float(bare[0]), 60.0)
+        self.assertEqual(mathsmod.compile_expr("Vx KF * 2", known=known).channels, ("Vx KF",))
+        # 没给名字表时仍然要加引号——旧写法不能因为这条改动而失效
+        self.assertEqual(mathsmod.compile_expr("'Vx KF' * 2").channels, ("Vx KF",))
+
+    def test_a_channel_name_with_brackets_is_not_mistaken_for_a_function(self):
+        """`Distance (2)` 以前被当成"调用函数 Distance"。"""
+        session = _MathSession({"Distance (2)": np.full(11, 7.0)})
+        values = mathsmod.evaluate("Distance (2) + 1", session)
+        self.assertAlmostEqual(float(values[0]), 8.0)
+        self.assertEqual(
+            mathsmod.compile_expr("Distance (2) + 1",
+                                  known=mathsmod.known_names(session)).channels,
+            ("Distance (2)",),
+        )
+        # 真的不存在这个通道时，报的仍然是"未知函数"，不能乱猜
+        with self.assertRaises(mathsmod.MathError) as caught:
+            mathsmod.compile_expr("Distance (2) + 1", known=("别的通道",))
+        self.assertIn("未知函数", str(caught.exception))
+
+    def test_a_channel_name_with_a_hyphen_is_not_mistaken_for_a_subtraction(self):
+        """`FSD-Distance1` 以前被当成 `FSD` 减 `Distance1`。"""
+        session = _MathSession({"FSD-Distance1": np.full(11, 12.0)})
+        values = mathsmod.evaluate("FSD-Distance1 * 2", session)
+        self.assertAlmostEqual(float(values[0]), 24.0)
+
+    def test_a_typo_gets_the_right_name_back(self):
+        """用户把 `FSD13 Distance1` 打成 `FSD13Distance1` 时要说人话。"""
+        session = _MathSession({"FSD13 Distance1": np.full(11, 1.0),
+                                "Aceinna Roll": np.full(11, 2.0)})
+        with self.assertRaises(mathsmod.MathError) as caught:
+            mathsmod.evaluate("FSD13Distance1 * 2", session)
+        message = str(caught.exception)
+        self.assertIn("FSD13 Distance1", message)
+        self.assertIn("单引号", message)
+        # 完全不像的名字不要硬凑一个"最接近的"出来
+        with self.assertRaises(mathsmod.MathError) as caught:
+            mathsmod.evaluate("notachannel * 2", session)
+        self.assertNotIn("最接近的是", str(caught.exception))
+
+    def test_definition_names_are_known_too(self):
+        """一条定义引用另一条时，名字同样可以不写引号。"""
+        session = _MathSession({"Vx KF": np.full(11, 3.0)})
+        definitions = [
+            mathsmod.Definition("我的 通道", "Vx KF * 2"),
+            mathsmod.Definition("下一个", "我的 通道 + 1"),
+        ]
+        got = mathsmod.resolve_all(session, definitions)
+        self.assertAlmostEqual(float(got["下一个"][0]), 7.0)
+
+    def test_a_changed_dependency_invalidates_the_cache(self):
+        """`乙 = 甲 + 1`：甲改了，乙必须跟着重算（缓存键不能只放名字）。
+
+        回归用例——键里原来只有被引用通道的**名字**，所以甲换了表达式之后，
+        乙会一直命中旧列，偏差可以很大。
+        """
+        session = _MathSession({"车速": np.full(11, 3.0)})
+        cache = mathsmod.DerivedCache()
+        first = mathsmod.resolve_all(
+            session, [mathsmod.Definition("甲", "车速 * 2"),
+                      mathsmod.Definition("乙", "甲 + 1")], cache=cache)
+        second = mathsmod.resolve_all(
+            session, [mathsmod.Definition("甲", "车速 * 4"),
+                      mathsmod.Definition("乙", "甲 + 1")], cache=cache)
+        self.assertAlmostEqual(float(first["乙"][0]), 7.0)
+        self.assertAlmostEqual(float(second["乙"][0]), 13.0,
+                               msg="甲 改了之后 乙 仍然命中旧列")
+        # 没变的定义还是要能命中（缓存不能退化成"永远重算"）
+        again = mathsmod.resolve_all(
+            session, [mathsmod.Definition("甲", "车速 * 4"),
+                      mathsmod.Definition("乙", "甲 + 1")], cache=cache)
+        self.assertIs(again["乙"], second["乙"])
+
 
 class TestMathsOverHttp(unittest.TestCase):
     """#3 走到界面之前的那一段：PUT/GET/POST + 侧车文件 + 作用域。"""
@@ -2120,6 +2201,78 @@ class TestMathsOverHttp(unittest.TestCase):
                 status, catalogue = request("/api/maths/functions")
                 self.assertEqual(status, 200)
                 self.assertEqual(len(catalogue), 53)
+            finally:
+                httpd.shutdown()
+                library.close()
+
+    @_needs(HILL)
+    def test_a_bare_channel_name_with_a_space_saves_and_computes(self):
+        """用户反馈的那条路：编辑器里直接打 `Vx KF * 2`，不该要求他加引号。"""
+        import tempfile
+        from http.server import ThreadingHTTPServer
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            copy = root / HILL.name
+            copy.write_bytes(HILL.read_bytes())
+            library = server.SessionLibrary([root], cache_size=1, maths_root=root)
+            httpd = ThreadingHTTPServer(
+                ("127.0.0.1", 0), server.make_handler(library, buckets=100)
+            )
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            base = f"http://127.0.0.1:{httpd.server_address[1]}"
+            quoted = urllib.parse.quote(copy.stem)
+
+            def request(path, method="GET", payload=None):
+                body = None if payload is None else json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(base + path, data=body, method=method)
+                if body is not None:
+                    req.add_header("Content-Type", "application/json")
+                try:
+                    with urllib.request.urlopen(req, timeout=60) as response:
+                        return response.status, json.loads(response.read().decode("utf-8"))
+                except urllib.error.HTTPError as exc:
+                    return exc.code, json.loads(exc.read().decode("utf-8"))
+
+            try:
+                status, state = request(
+                    f"/api/session/{quoted}/maths", "PUT",
+                    {"definitions": [{"name": "两倍车速", "expr": "Vx KF * 2",
+                                      "unit": "km/h"}]},
+                )
+                self.assertEqual(status, 200, state)
+                self.assertEqual(state["errors"], [])
+                derived = [d for d in state["definitions"] if d["name"] == "两倍车速"]
+                self.assertTrue(derived, "定义没进定义表")
+                self.assertEqual(derived[0]["expr"], "Vx KF * 2")
+
+                status, trace = request(
+                    f"/api/session/{quoted}/trace?channels="
+                    + urllib.parse.quote("两倍车速") + "&buckets=50"
+                )
+                self.assertEqual(status, 200, trace)
+                self.assertIn("两倍车速", trace)
+                values = [v for v in trace["两倍车速"]["value"] if v is not None]
+                self.assertTrue(values, "派生列没有样本")
+                self.assertLessEqual(max(values), 2 * 200.0)
+
+                # 拼错的名字：保存能过（语法合法），但**报错要说清怎么办**
+                status, body = request(
+                    f"/api/session/{quoted}/maths", "PUT",
+                    {"definitions": [{"name": "打错的", "expr": "VxKF * 2"}]},
+                )
+                self.assertEqual(status, 200, body)
+                errors = {e["name"]: e["error"] for e in body["errors"]}
+                self.assertIn("打错的", errors)
+                self.assertIn("Vx KF", errors["打错的"])
+                self.assertIn("单引号", errors["打错的"])
+
+                # 试算走的是同一条编译路径，也要给出这句建议
+                status, trial = request(f"/api/session/{quoted}/maths/test", "POST",
+                                        {"expr": "VxKF * 2"})
+                self.assertEqual(status, 200, trial)
+                self.assertFalse(trial["ok"])
+                self.assertIn("Vx KF", trial["error"])
             finally:
                 httpd.shutdown()
                 library.close()

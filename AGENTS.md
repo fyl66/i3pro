@@ -83,3 +83,25 @@ tests/              单测；依赖 i2pro_data/ 的用例在缺数据时自动 s
 docs/               PLAN.md 规划 · ACCEPTANCE.md 验收清单 · ld-format.md 格式逆向记录
 out/                生成物（快照 HTML / Parquet），已 gitignore
 ```
+
+## Agent skills
+
+这一段是给工程技能（`to-tickets` / `triage` / `to-spec` / `wayfinder` / `domain-modeling` 等）读的仓库级约定。
+
+### Issue tracker
+
+Issue 与规格走**本仓库的 GitHub Issues**（`fyl66/i3pro`，用 `gh` CLI）；PR 不作为 triage 入口。
+见 `docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+沿用五个默认 triage 标签：`needs-triage` / `needs-info` / `ready-for-agent` /
+`ready-for-human` / `wontfix`（标签字符串与角色同名）。
+见 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+**单上下文（single-context）**：根目录 `CONTEXT.md` + `docs/adr/`。
+两个都还不存在，这是正常的——`/domain-modeling` 会在真正需要钉死术语或决策时才创建；
+探索代码时找不到就静默跳过，不提示、不预先创建。
+见 `docs/agents/domain.md`。

@@ -1009,6 +1009,10 @@ node tools\smoke_viewer.js "out\20260524-耐久正赛.html"       # 26 圈 / 23 
    **把修复拆掉就红**（`out/_nofix_dirty.html` 实测：
    `after Esc the same name box must still save (got 左环A)`）。
 
+工具自己也有两个问题，顺手修掉：Windows 控制台默认 GBK，界面里的 `↶` / `⤢` 会让它在
+打印断言结果时 `UnicodeEncodeError` 崩在半途（现在强制 UTF-8）；`⤢` 那条断言有界重试三次
+（面板刚渲染完就点会命中旁边的输入框——竞态要报成"不稳定"，既不能报成 PASS，也不能当成 bug 修）。
+
 **通过判据**（`python tools\verify_clicks.py`，28 项）：
 
 | 断言 | 实测 |
@@ -1268,7 +1272,7 @@ python -m unittest tests.test_i3pro.TestChannelGroups -v
 
 ---
 
-## A33 · 真浏览器、真鼠标的第四道回归（以及它抓到的三个 bug）
+## A36 · 第四道回归的补充说明（与 A33 是同一件事，重复待合并）
 
 前三道回归里，`tools/smoke_viewer.js` 跑在**假 DOM** 上：它能证明"代码调用了它该调用的
 函数"，证明不了**点得到**——假 DOM 里元素没有面积、没有遮挡、没有 `pointer-events`，
@@ -1301,7 +1305,7 @@ python tools\verify_clicks.py --session "20260524-耐久正赛" --port 8790
 
 **当时那一轮的回归**：`Ran 150 tests` + `OK`；`verify_ld_vs_csv` PASS（0 channel(s) outside
 tolerance）；两份金标准快照 `smoke_viewer.js` 均 PASS；无头断言点 **260** 个。
-（今天这三条是 161 / 281 / 28 项，见 A34 与文末「全量回归」。）
+（今天这四条是 174 项单测 / 308 个无头断言点 / 28 项真点击，见 A34、A35 与文末「全量回归」。）
 
 ---
 
@@ -1360,9 +1364,20 @@ python -c "import sys,numpy as np;sys.path.insert(0,'src');from i3pro import ld,
 | 门槛 `Brake Signal > 10`（写错了：这条是 0/1 信号） | 0 | — | — | 46400 个全被排除，`notice` 让你放宽条件；统计量给 `None` 不给 0 |
 | 窗口 `[200, 200)`（空窗口） | 0 | — | — | `bins` 为空 + "时间轴的起止是不是选反了？" |
 
+**这一轮顺带修掉的一个真 bug（#9 把它逼出来的）：组件 id 撞车。**
+`SHEET` 是拿 `comp.id` 当键的，而恢复自 `localStorage` 的布局带着**上一次会话的 id**，
+`compSeq` 每次开页却从 0 重新数——于是"恢复回来的 `histogram-3`"和"新加的第 3 个组件"
+撞成同一个 id，两份组件共用一个 bundle。真 Edge 里的表现是直方图**无限重新请求**
+（真点一次"改格数"之后 `/histogram` 刷了 **229 次**，页面卡到 CDP 调用超时，画布空白）。
+这在直方图之前就存在（任何拿 bundle 存缓存键的组件都会中招），只是没有服务端请求时看不出来。
+修法：`makeComponent` 兜底（id 已存在就换号）+ `restoreWorksheet` 之后调
+`adoptComponentIds`（新号接在已有最大号之后，并顺手修掉旧布局里已经重复的 id）。
+`tools/smoke_viewer.js` 第 27.0 组钉住三件事：id 不重复、`SHEET` 的 bundle 数 = 组件数、
+恢复一份带重复 id 的旧布局能被修好。
+
 **这一轮的回归**：`Ran 161 tests` + `OK`；`verify_ld_vs_csv` PASS（`0 channel(s) outside tolerance`）；
 两份金标准快照 `smoke_viewer.js` 均 PASS（7 圈 / 26 圈）；无头断言点 **260 → 281**；
-`tools\verify_clicks.py` **28 项：28 通过，0 失败**。
+`tools\verify_clicks.py` **28 项：28 通过，0 失败**。（#10 之后是 174 项单测、308 个断言点，见 A35。）
 
 **第四道回归自己抓到的第一个 bug，是它自己写错了**（照实记下来，因为它说明这道回归值得留）：
 清空门槛那几步少了"重新点一次输入框"——前一步的 `Tab` 已经把焦点交给下一个控件，
@@ -1370,6 +1385,75 @@ python -c "import sys,numpy as np;sys.path.insert(0,'src');from i3pro import ld,
 断言因此看到的是**上一条错误的表头**，报成"着色坏了"。真浏览器里点一遍才发现是脚本的
 问题（用重新量的坐标点一下，门槛清掉、表头立刻回到统计量）。顺带把这条断言的证据从
 "打印 URL"改成"打印 URL **和表头**"——只打印 URL，看的人没法判断是请求错了还是渲染错了。
+
+---
+
+## A35 · 频谱组件（ticket #10）
+
+i2 Pro 的 FFT / Spectrum =「一条通道的频域成分」，车上的用处主要是看悬架与振动的频率。
+这里做成第 9 个组件类型：Welch 平均周期图，点数 128–8192（**就近吸附到 2 的幂**）、
+五种窗（hann / hamming / blackman / rectangular / flattop）、段间重叠 0 / 50 % / 75 %、
+纵轴功率谱密度或有效值、频域平滑、可叠一条对比通道；窗口跟当前缩放（双击区段就是那一段）
+或整场走。
+
+**四条硬口径**，为的都是"别把一条画得很好看但其实错的谱交给车手"：
+
+| 口径 | 为什么 |
+| --- | --- |
+| **按通道自己的采样率算** | 主时间基是 100 Hz，可悬架位移常常是 20 Hz 采的。拿主基去算，Nyquist 会写成 50 Hz，图上多出一整片**根本不存在**的高频。频率轴、分辨率、Nyquist 全部由该通道自己的采样率定 |
+| **Nyquist 写在界面里** | 能分析到的最高频率就是 `采样率/2`，这句话必须出现在表头（默认分辨率 `采样率/点数` 也写出来），否则用户会以为 40 Hz 的峰是"看到了 40 Hz 的振动" |
+| **点数吸收与补零都要说出来** | 点数不是 2 的幂就吸附（`clamp_points` 带 `notice`）；数据比点数短就补零，补零**不增加真实分辨率**，只让曲线好看——`notice` 里明说 |
+| **NaN 先补再算，并且报出来** | FFT 遇到 NaN 会整段变 NaN。`fill_gaps` 用前值补齐并报出补了几个点，用户才知道这条谱里有插值 |
+
+**算法在 Python 里、是不依赖框架的纯函数**：`spectrum.py` 只吃数组
+（`welch()` / `window_values()` / `fill_gaps()` / `clamp_points()` / `_smooth()`），
+取数在 `render.spectrum()`；界面不重算一遍。
+
+```powershell
+# 一次性复现（不起界面）：
+python -c "import sys;sys.path.insert(0,'src');from i3pro import ld,render;log=ld.LogFile.read(r'i2pro_data\20260524-耐久正赛.ld');s=render.spectrum(log,'G Force Vert');print(s['sample_rate'],s['points'],round(s['resolution'],4),s['segments'],round(s['peak_frequency'],3),round(s['peak_value'],4))"
+
+# 界面上：起服务 -> 「＋ 添加组件」选「频谱」-> 通道 / 对比 / 点数 / 窗 / 重叠 / 纵轴 / 窗口
+.\i3pro.cmd serve --data i2pro_data --open
+```
+
+**通过判据**（`python -m unittest tests.test_i3pro.TestSpectrum -v`、`TestSpectrumOverHttp`，共 13 项）：
+
+| 断言 | 位置 |
+| --- | --- |
+| 一条已知频率的正弦落进**正确的那一格**（频率轴不是"看着像"） | `TestSpectrum::test_a_sine_lands_in_the_right_bin` |
+| Parseval：谱的总功率 = 时域方差（量纲与归一化都对） | `TestSpectrum::test_parseval_power_matches_the_variance` |
+| hann / blackman 窗把泄漏压住：非整格频率的正弦，主瓣附近那 7 格的能量占比明显高于矩形窗（`hann > rectangular + 0.01`，blackman 更高） | `TestSpectrum::test_hann_window_holds_the_leakage_down` |
+| 点数吸附到 2 的幂并**说明**；短数据补零并**说明** | `test_points_snap_to_a_power_of_two_and_say_so` / `test_short_data_is_zero_padded_and_said_out_loud` |
+| 50 % 重叠真的多切了段：10000 样本 / 1024 点，10 段 → **19 段** | `TestSpectrum::test_overlapping_segments_average` |
+| `amplitude` 纵轴 = 该频带的有效值（RMS），不是随手乘的系数 | `TestSpectrum::test_amplitude_scale_is_the_rms_of_the_band` |
+| 频域平滑把峰压低但**总功率守恒** | `TestSpectrum::test_smoothing_lowers_the_peak_but_keeps_the_power` |
+| NaN 补齐并报出补了几个点 | `TestSpectrum::test_nan_is_filled_and_reported` |
+| 报错写下一步（通道不存在 / 窗不认识 / 点数不认识 / 重叠越界） | `TestSpectrum::test_bad_input_says_what_to_do_next` |
+| 金标准场次按**通道自己的采样率**算（100 Hz 与 20 Hz 两条各验一遍） | `TestSpectrum::test_golden_sessions_use_the_channel_own_sample_rate` |
+| 快照只内嵌勾选的那几条通道 | `TestSpectrum::test_snapshot_spectra_only_embed_what_was_selected` |
+| HTTP：`/spectrum` 的参数、单位、400 的下一步 | `TestSpectrumOverHttp::test_spectrum_endpoint` |
+| 界面：快照离线可用（一次 `/spectrum` 都不发）、点数/窗在快照里灰掉并说明、没有内嵌的通道**换一条带了的并写明画的是谁** | `tools/smoke_viewer.js` 第 28 组 |
+
+**这一轮的实测数字**（两份金标准，都是这条命令跑出来的；默认 1024 点、hann 窗、50 % 重叠）：
+
+| 场次 | 通道 | 采样率 | 分辨率 | 段数 | 主频 | 主频处 PSD |
+| --- | --- | --- | --- | --- | --- | --- |
+| `20260908-cjh 高避5圈` | `G Force Vert` | 100 Hz | 0.0977 Hz | 90 | 3.027 Hz | 0.0029 |
+| `20260908-cjh 高避5圈` | `Vx KF` | 100 Hz | 0.0977 Hz | 90 | 0.098 Hz | 257.10 |
+| `20260524-耐久正赛` | `G Force Vert` | 100 Hz | 0.0977 Hz | 379 | 4.883 Hz | 0.0010 |
+| `20260524-耐久正赛` | `Vx KF` | 100 Hz | 0.0977 Hz | 379 | 0.098 Hz | 227.62 |
+
+读法：车身垂向的主频在 3–5 Hz（正是悬架该关注的频段），而车速那条的能量压在最低那一格
+（0.098 Hz = 分辨率本身，也就是"整场几乎没有周期性起伏"）——这两个数对得上，才说明频率轴
+不是摆设。
+
+**已知缺口**：快照里只内嵌**整场 + 默认参数**那一份（换点数、换窗、按区段都要 serve 模式，
+表头会写明这一点）；点数上限 8192；不做倍频程 / 1/3 倍频程谱。
+
+**这一轮的回归**：`Ran 174 tests` + `OK`；`verify_ld_vs_csv` PASS（`0 channel(s) outside
+tolerance`）；两份金标准快照 `smoke_viewer.js` 均 PASS（7 圈 / 26 圈）；无头断言点 **308**；
+`tools\verify_clicks.py` **28 项：28 通过，0 失败**。
 
 ---
 
@@ -1382,7 +1466,7 @@ node tools\smoke_viewer.js out\<场次>.html   # 3. 无头驱动前端：PASS
 python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘：全过（没有 Edge 的机器打印 SKIP，不算通过）
 ```
 
-**通过判据**：`Ran 161 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）；
+**通过判据**：`Ran 174 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）；
 `PASS - 0 channel(s) outside tolerance`；`PASS - workbench ran headless ... interactions verified`；
 `28 项检查：28 通过，0 失败`。**四条全绿才算改完**（AGENTS.md 规则 7）。
 
@@ -1406,6 +1490,8 @@ python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘�
 | `TestSections` | 赛道区段（19 项）：切分覆盖整圈不重不漏、弯切在该在的位置、灵敏度单调、测度整条平线时不造弯、最短段长决定"尖峰算不算弯"、手工编辑的排序/夹紧/补齐、名字去重、同一份不算改过、侧车往返与坏文件、真数据的份数与里程、每条圈的边界时刻（含"换了参考圈要提醒"）、**落在哪一段**（边界归后一段、空档不算、最后一段含终点、坏输入不猜）与**一段的时间窗口**（零宽度不给窗口） |
 | `TestHistogram` | 直方图（10 项）：计数与格边界、门槛三种模式、着色取箱内均值、常量通道的区间撑开、NaN 分开报、格数夹取并说明、门槛可以是通道名或数学表达式、四种坏输入的下一步、金标准窗口统计 |
 | `TestHistogramOverHttp` | `/histogram` 端点（1 项）：缺 `channel=` 400、通道不存在 400、半开区间、格数夹过带 `notice` |
+| `TestSpectrum` | 频谱（12 项）：正弦落格、Parseval 与方差对上、hann/blackman 压泄漏、点数吸附到 2 的幂并说明、短数据补零并说明、50 % 重叠段数 10 → 19、`amplitude` 就是有效值、平滑压低峰但功率守恒、NaN 补齐并报数、坏输入的下一步、金标准按**通道自己的采样率**、快照只内嵌勾选的那些 |
+| `TestSpectrumOverHttp` | `/spectrum` 端点（1 项）：参数一个不少、单位与采样率、400 带下一步 |
 | `TestSectionsOverHttp` | 赛道区段走到 HTTP：GET 不落盘、重切落盘、手工改名字与边界、`edited` 立起来、被挡住的重切 400 + `needs_force` 且侧车不动、带 `force` 才覆盖、坏请求的下一步、`.ld` 字节不变 |
 | `TestMathsOverHttp` | 数学通道走到 HTTP：存本地 / 全局、侧车落盘、坏表达式 400 且不动已存侧车、同名拦截、`shadowed`、试算接口、函数表 |
 | `TestRender` | 静态/服务两种 payload、自包含性 |
@@ -1413,5 +1499,5 @@ python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘�
 | `TestIndependentParsers` | 第二套实现交叉验证、213 通道 CSV 全量对照 |
 | `TestBeaconUndo` | 撤销的纯函数层：什么是"同一版"、什么时候没有可撤销的一步、交回去的是上一版本身 |
 | `TestBeaconUndoOverHttp` | 撤销走真实 `PUT`：改名 / 插入 / 删除各自一步回到原样、`trusted` 迁移、落盘、一次无改动的保存不吃掉上一步、没有可撤销的一步时 400 并说明下一步、页面注入的 `laps_can_undo` 三态 |
-| `TestViewerScript` | 无头驱动前端：脚本里 **281 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
+| `TestViewerScript` | 无头驱动前端：脚本里 **308 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
 | `TestLaunchers` | 一键启动：快照批量导出 + 索引页、缺数据目录的报错、端口占用自动换端口 |

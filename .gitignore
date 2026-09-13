@@ -4,6 +4,14 @@ out/
 .pytest_cache/
 *.parquet
 *.delta.json
+# 侧车文件：用户在场次上做的编辑（信标 / 数学通道 / 区段 / 注释 / GPS 校正）。
+# 它们跟着 `.ld` 走，而 `.ld` 不进仓库，所以这些也不进——`git add -A` 时别把
+# 某个人的手工编辑带上来。`maths/global.json` 是**跨场次复用**的全局定义，不在此列。
+*.laps.json
+*.maths.json
+*.sections.json
+*.notes.json
+*.gps.json
 .tmp_deps/
 .venv/
 venv/

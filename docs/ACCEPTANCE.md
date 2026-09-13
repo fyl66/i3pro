@@ -953,11 +953,12 @@ i2 Pro 的 `To Zoom to a Range: double-click on the range band`：双击一条�
 | 一段的时间窗口：正常给出 `(起, 止)`；**零宽度的一段不给窗口**（界面要说"没有能用的时间范围"，而不是把视图缩成一个点）；下标越界也返回 `None` | `TestSections::test_the_window_of_one_section_row` |
 | 真数据钉子：金标准里**每条圈、每一段**的起点拿去问，都要问回它自己（≥10 段） | `TestSections::test_double_clicking_every_band_finds_that_same_band` |
 | 缩过去之后横轴真的变成那一段，光标跟着进去，并且**说出缩到了哪一段** | `tools/smoke_viewer.js` 第 23 组 |
-| 双击左边表里的一行 = 同一件事；**双击边界输入框不跳视图**（那是"选词"） | 同上 |
+| 左边表里**点得到**的入口 = 同一件事：行尾的 `⤢`；**双击行中间的名字不跳视图**（那是"选词"） | 同上 + `tools/verify_clicks.py` |
 | 距离轴上双击区段：先切回时间轴再缩，并且提示里写出"切回时间轴"——不许静默换轴 | 同上 |
 | **只有顶端色条算"双击区段"**：同一列落在绘图区里的双击仍然是原地放大 2 倍 | 同上（这一条就是耐久快照抓出来的那个回归） |
 | 每段两笔填充（淡色背景 + 色条）、一笔描边；`strip=false` 时只剩一笔填充 | 同上 |
-| 无头断言点 **201 → 223** | `rg -o "check\(" tools/smoke_viewer.js \| Measure-Object` |
+| 缩到一段之后按"全出"要能回到**整场**，不是卡在刚加载的那一段 | `tools/verify_clicks.py`（A33） |
+| 无头断言点 **223 → 260**（#11 加到 255，本轮修三个缺陷 +5） | `rg -o "check\(" tools/smoke_viewer.js \| Measure-Object` |
 
 ```powershell
 node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"   # 7 圈
@@ -975,8 +976,76 @@ node tools\smoke_viewer.js "out\20260524-耐久正赛.html"       # 26 圈 / 23 
 * 距离轴模式下不画带子（各圈走线长度不同，见 A30），所以那儿的双击是切回时间轴再缩，
   不是"在距离轴上缩到某一段"。
 
-**当前结果**：`TestSections` 19 项、全套 **132 项单测 OK**；`verify_ld_vs_csv` PASS；
-两份金标准快照 smoke 均 PASS。
+**当前结果**：`TestSections` 19 项、全套 **150 项单测 OK**；`verify_ld_vs_csv` PASS；
+两份金标准快照 smoke 均 PASS（无头断言点 260）；同一批交互在**真浏览器真鼠标**下
+也过（A33 的 21 项，含"全出要回到全场"）。
+
+---
+
+## A33 · 真浏览器 / 真鼠标验收（`tools/verify_clicks.py`）
+
+无头驱动（`tools/smoke_viewer.js`）跑在假 DOM 上：元素没有面积、没有遮挡、没有
+`pointer-events`，disabled 的控件照样派发 `click`。它能证明"代码调用了它该调用的
+函数"，**证明不了用户点得到**。这一条用 Edge 自己的 DevTools 协议发真正的
+`Input.dispatchMouseEvent` / `dispatchKeyEvent`（真命中测试、真焦点、真键盘），
+跑在 `i2pro_data` 的**副本**上（`out\_verify_data_<端口>`，侧车写副本里）。
+
+一上来就抓到三件事，**假 DOM 全都放过了**：
+
+1. **"双击区段表里的一行"在真实命中测试下点不到。** 行的中间是名字输入框
+   （`.sname{flex:1}`），双击它落在 `INPUT` 上，按规则那是"选词"、不跳视图；
+   真正有效的只有行尾那一小段长度文字。现在行尾多了一个 `⤢`（`data-section-zoom`），
+   点了就缩到那一段，提示文字也照实写。
+2. **serve 模式下"全出"回不到全场。** `fullRange()` 原先按"当前已加载的 traces"
+   算，而 serve 模式里那只有当前这一段：缩到一段之后按"全出"，横轴只剩刚加载的
+   那一段（实测 `lane = [119.58, 119.63]`，整场 463.99 s）。现在整场范围改问
+   **全程概览**（整场的 900 桶），实测"全出"回到 `[0.00, 463.48]`。
+   顺带修掉色条双击的 **1 个采样**误差：段窗口 `[119.55, 119.66]` 之前被夹成
+   `[119.55, 119.65]`，现在 `[119.550, 119.660]` 精确相等。
+3. **信标改名：按过一次 Esc（或成功保存过一次）之后，同一个输入框就再也存不进去。**
+   `dirty` 只在渲染时置 `true`，Esc 与 commit 把它置 `false` 之后没有任何地方
+   再置回来，于是"重新打字 + 回车"静默不存——界面看着像改了，侧车里还是旧名字。
+   现在补上 `input` 监听。`tools/smoke_viewer.js` 第 21 组为此加了两条断言，
+   **把修复拆掉就红**（`out/_nofix_dirty.html` 实测：
+   `after Esc the same name box must still save (got 左环A)`）。
+
+**通过判据**（`python tools\verify_clicks.py`，21 项）：
+
+| 断言 | 实测 |
+| --- | --- |
+| 真 Edge 里 serve 模式加载出数据 | 真场次，445 通道 |
+| #8 真双击顶端色条 → 横轴正好是那一段 | `view=[119.550, 119.660]`（与段窗口逐位相等） |
+| #8 真双击绘图区（同列、非色条）→ 照旧原地放大 2 倍 | `0.110 s → 0.055 s`，点击处落在视图里 |
+| #8 真点区段表行尾的 `⤢` → 缩到那一段 | `view=[316.870, 324.830]` = 参考圈第 2 段 |
+| #8 真双击行中间的名字 → 不跳视图（那是选词） | 视图不变 |
+| #8 缩到一段后"全出" → 回到整场 | `lane=[0.00, 463.48]`（整场 463.99 s） |
+| #5 没设光标按「＋穿越」→ 说清"先把鼠标移到图上"，且不加信标 | toast 原文命中，信标数不变 |
+| #5 真点图设光标 → 按「＋穿越」→ 侧车多一次穿越，时刻就是光标处 | `t=231.74` = 光标 `231.740 s` |
+| #5 手工穿越画成虚线药丸、真的落进侧车 | `pill manual`；侧车读得回来 |
+| #4 真点信标名 → 输入框拿到焦点；真键盘输入进得去 | `activeElement.className = bname` |
+| #4 Esc → 输入框弹回原名，**侧车一个字节没动** | 盘上仍是原名 |
+| #4 回车 → 侧车真的改名，**`trusted` 标记跟着迁走** | `{"改名之后 1": false}` |
+| #6 真点 ↶ 撤销 → 名字退回上一步 | `['改名之后','手工穿越 2'] → ['手工穿越','手工穿越 2']` |
+| 整场没有页面级报错 | 无 `Runtime.exceptionThrown` |
+
+```powershell
+python tools\verify_clicks.py                                              # 高避5圈 21/21
+python tools\verify_clicks.py --session "20260524-耐久正赛" --port 8752    # 耐久正赛 21/21
+```
+
+两份金标准各 **21/21 通过**。逐帧截图落在 `out/shots/verify-*.png`（`out/` 已 gitignore），
+想用眼睛复核时看它们。
+
+**边界（说清代价）**：
+
+* 这条要 **Microsoft Edge**（系统自带那份即可，不装任何东西）：脚本自己起无头 Edge、
+  发真事件；出问题时 Edge 的日志落在 `out/_edge_stderr.log`。没有 Edge 的机器打印
+  SKIP 退出——和缺数据一样，**SKIP 不算通过**。
+* 一人一份数据目录与浏览器配置（按端口命名），两个人同时跑不会互相删数据。
+* 它替代不了人眼：拖拽手感、输入法、字号这类还得自己看一眼；中文输入走的是
+  `dispatchKeyEvent` 的 `text`，与真 IME 仍有差别。
+* 以后凡是"点了才出现"的状态都往这里加断言；`tools/smoke_viewer.js` 继续负责
+  "逻辑对不对"（它更快、不需要浏览器）。
 
 ---
 
@@ -1199,6 +1268,41 @@ python -m unittest tests.test_i3pro.TestChannelGroups -v
 
 ---
 
+## A33 · 真浏览器、真鼠标的第四道回归（以及它抓到的三个 bug）
+
+前三道回归里，`tools/smoke_viewer.js` 跑在**假 DOM** 上：它能证明"代码调用了它该调用的
+函数"，证明不了**点得到**——假 DOM 里元素没有面积、没有遮挡、没有 `pointer-events`，
+disabled 的控件照样派发 `click`。所以多了第四道回归：`tools/verify_clicks.py` 用 Edge
+自己的 DevTools 协议发真正的 `Input.dispatchMouseEvent` / `dispatchKeyEvent`，
+**真命中测试、真焦点、真键盘**，跑在金标准场次的**副本**上（随便点都不会碰到车队数据）。
+只用标准库，Edge 走系统自带那一份；没有 Edge 或没有数据时自动跳过（退出码 0）。
+
+```powershell
+python tools\verify_clicks.py                       # 21 项，全过退出 0
+python tools\verify_clicks.py --session "20260524-耐久正赛" --port 8790
+```
+
+**它抓到的三个 bug（都是"假 DOM 里看不出来"的）**：
+
+| # | 现象 | 根因 | 修法 |
+| --- | --- | --- | --- |
+| 1 | 缩到某一段之后按「全出」，视图**回不到全场** | `fullRange()` 问的是 `state.traces`，而 serve 模式下那是"当前这一段"，上限一路缩水 | 改问**全程概览**（整场的 900 桶）：时间轴用 `overview.time`，距离轴用 `overview.distance` |
+| 2 | 信标改名按过一次 `Esc` 之后再改、回车**静默不存** | `dirty` 被 `Esc` 关掉后再也没有地方重新置真（`input` 事件没接） | 输入框接 `input` 事件重新置脏；无头断言补"Esc 之后同一个框还能存" |
+| 3 | 区段表里"双击一行"在真命中测试下**几乎点不到** | 行中间是名字输入框（`flex:1`），双击它等于**选词** | 行尾加一个点得到的 `⤢`（与双击顶端色条同一件事），面板说明里写明"双击名字是选词" |
+
+**实测**：`python tools\verify_clicks.py` → **21 项检查：21 通过，0 失败**（含上面三条各自的正向与反向断言：
+点 `⤢` 缩到那一段 / 双击输入框不跳视图 / 缩完「全出」回到 `[0.00, 463.48]`（整场 463.99 s）；
+真键盘改名后读边车确认那条信标真的叫新名字；`↶` 撤销真的退回上一步）。
+
+顺带修掉工具自己的两个问题：Windows 控制台默认 GBK，界面里的 `↶` / `⤢` 会让它在打印
+断言结果时 `UnicodeEncodeError` 崩在半途（现在强制 UTF-8）；`⤢` 那条断言有界重试三次
+（面板刚渲染完就点会命中旁边的输入框——竞态要报成"不稳定"，不能报成 PASS，也不能当成 bug 修）。
+
+**这一轮的回归**：`Ran 150 tests` + `OK`；`verify_ld_vs_csv` PASS（0 channel(s) outside tolerance）；
+两份金标准快照 `smoke_viewer.js` 均 PASS；无头断言点 **260** 个。
+
+---
+
 ## 全量回归
 
 ```powershell
@@ -1232,5 +1336,5 @@ python -m unittest discover -s tests -v
 | `TestIndependentParsers` | 第二套实现交叉验证、213 通道 CSV 全量对照 |
 | `TestBeaconUndo` | 撤销的纯函数层：什么是"同一版"、什么时候没有可撤销的一步、交回去的是上一版本身 |
 | `TestBeaconUndoOverHttp` | 撤销走真实 `PUT`：改名 / 插入 / 删除各自一步回到原样、`trusted` 迁移、落盘、一次无改动的保存不吃掉上一步、没有可撤销的一步时 400 并说明下一步、页面注入的 `laps_can_undo` 三态 |
-| `TestViewerScript` | 无头驱动前端：脚本里 **255 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
+| `TestViewerScript` | 无头驱动前端：脚本里 **260 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
 | `TestLaunchers` | 一键启动：快照批量导出 + 索引页、缺数据目录的报错、端口占用自动换端口 |

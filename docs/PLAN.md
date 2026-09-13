@@ -166,6 +166,14 @@ i2 Pro 的结构是 `Project → Workbook → Worksheet → Component`。我们�
 单测（真实数据回归 + HTTP 端到端 + 无头 JS 冒烟）从当时的 21 项起一路加上来，现在 **150 项**
 （`python -m unittest discover -s tests`）、零第三方运行期依赖、git 仓库。
 
+**验收从"三条"变"四条"**：无头冒烟（`tools/smoke_viewer.js`，260 个断言点）跑在
+假 DOM 上——元素没有面积、没有遮挡，disabled 的控件照样派发 `click`。它能证明"代码
+调用了它该调用的函数"，证明不了**用户点得到**。所以补了第四条
+`tools/verify_clicks.py`：用 Edge 的 DevTools 协议发**真鼠标 / 真键盘**，跑在
+`i2pro_data` 的副本上。上线第一次就抓到三件假 DOM 全放过的真错——"双击区段表一行"
+其实点不到（行中间是输入框）、serve 模式缩放后"全出"回不到全场、信标改名框在 Esc
+之后静默不存。详见 `docs/ACCEPTANCE.md` 的 A33。
+
 ---
 
 ## 5. 验收标准

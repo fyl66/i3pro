@@ -55,9 +55,16 @@
 python -m unittest discover -s tests -v      # 全部通过
 python tools\verify_ld_vs_csv.py             # PASS，0 channel(s) outside tolerance
 node tools\smoke_viewer.js out\<场次>.html   # 交互断言全过
+python tools\verify_clicks.py                # 真浏览器真鼠标：21 项全过（需要 Edge）
 ```
 
-三条全绿才算改完。缺数据的机器上相关用例会自动 skip，这不算通过——要在有数据的机器上跑。
+四条全绿才算改完。缺数据的机器上相关用例会自动 skip，这不算通过——要在有数据的机器上跑。
+
+第四条是给"点了才出现"的界面状态准备的：无头驱动跑在假 DOM 上，元素没有面积、没有
+遮挡、没有 `pointer-events`，disabled 的控件照样派发 click——它能证明"代码调用了它该
+调用的函数"，证明不了**用户点得到**。这条用 Edge 的 DevTools 协议发真正的鼠标与键盘
+事件，跑在 `i2pro_data` 的副本上（`out\_verify_data_<端口>`），所以随便点都不碰车队数据。
+没有 Edge 的机器会打印 SKIP 退出，那不算通过。
 
 ## 8. 不能碰的东西
 
@@ -78,7 +85,8 @@ Setup Sheets（依赖 Excel）、Matlab 导出、Mixture Map、Drag 直线加速
 ```
 src/i3pro/          Python 包（ld 解析 / derive 派生量 / laps 切圈 / store 存储 / render 载荷 / server 服务 / importer 导入）
 src/i3pro/web/      前端模板（viewer.html；它是模板，数据由 render 注入）
-tools/              开发工具（解析对照、无头前端驱动、exe 打包）
+tools/              开发工具（解析对照 verify_ld_vs_csv.py、无头前端驱动 smoke_viewer.js、
+                    真浏览器真鼠标验收 verify_clicks.py、exe 打包）
 tests/              单测；依赖 i2pro_data/ 的用例在缺数据时自动 skip
 docs/               PLAN.md 规划 · ACCEPTANCE.md 验收清单 · ld-format.md 格式逆向记录
 maths/              全局数学通道定义（global.json，跨场次复用，可以进 git）

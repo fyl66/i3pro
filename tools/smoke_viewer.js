@@ -771,6 +771,22 @@ if (api) {
     // saved one, because a successful save re-renders the list.
     check(renameBox.value !== "别改我", "Esc must put the name back in the box");
 
+    // Esc 之后再改一次名字，回车必须还能存：dirty 一旦被 Esc 关掉就再也回不来，
+    // 用户看到的是"名字改不动了"（真浏览器里点得出来，见 A33）。
+    const retryBox = beaconHost.querySelectorAll("input[data-beacon-name]")[0];
+    const beforeRetry = httpCalls.length;
+    retryBox.value = "左环B";
+    retryBox.dispatch("input", {});
+    retryBox.dispatch("keydown", { key: "Enter", preventDefault() {} });
+    check(state.lapsConfig.beacons[0].name === "左环B",
+      "after Esc the same name box must still save (got "
+      + state.lapsConfig.beacons[0].name + ")");
+    check(httpCalls.slice(beforeRetry).filter(
+      (call) => call.method === "PUT" && call.url.indexOf("/laps") >= 0).length === 1,
+      "the retry after Esc must save through exactly one PUT");
+    state.lapsConfig.beacons[0].name = "左环A";     // 后面的断言按这个名字算
+    api.renderLapControls();
+
     api.renameBeacon(0, "   ");
     check(state.lapsConfig.beacons[0].name === "左环A",
       "an empty name must not rename a beacon");
@@ -1280,6 +1296,46 @@ if (api) {
       inputEl.dataset.sectionEdge = "1";
       check(api.sectionRowIndexOf(inputEl) === null,
         "double-clicking a boundary input must not zoom the view");
+
+      // 行中间是名字输入框（flex:1），所以"双击一行"在真实命中测试下几乎点不到。
+      // 行尾那个 ⤢ 才是点得到的入口——它必须画出来，而且点了要缩到这一段。
+      const sectionsHtml = String(registry.get("sectionsList")._html);
+      check(sectionsHtml.indexOf('data-section-zoom="1"') >= 0,
+        "the section rows have no clickable zoom entry: " + sectionsHtml.slice(0, 160));
+      api.state.view = null;
+      const zoomEl = new Element("a");
+      zoomEl.dataset.sectionZoom = "1";
+      registry.get("sectionsList").dispatch("click", {
+        target: zoomEl, preventDefault() {},
+      });
+      check(api.state.view && Math.abs(api.state.view[0] - win.start) < 1e-6
+            && Math.abs(api.state.view[1] - win.end) < 1e-6,
+        "clicking the section zoom entry did not zoom to it: "
+        + JSON.stringify(api.state.view));
+
+      // "全出"必须真的回到全场：serve 模式里 state.traces 只有当前这一段，
+      // 若按它算横轴上限，缩过之后按"全出"就卡在刚加载的那一段（A33 实测抓到）。
+      const fullBefore = api.fullRange();
+      const savedTraces = api.state.traces;
+      const windowed = {};
+      Object.keys(savedTraces).forEach((name) => {
+        const trace = savedTraces[name];
+        const xs = trace && (trace.time || trace.distance);
+        if (!xs || !xs.length) { windowed[name] = trace; return; }
+        const mid = Math.floor(xs.length / 2);
+        const copy = Object.assign({}, trace);
+        if (trace.time) copy.time = trace.time.slice(mid, mid + 5);
+        if (trace.distance) copy.distance = trace.distance.slice(mid, mid + 5);
+        if (trace.value) copy.value = trace.value.slice(mid, mid + 5);
+        windowed[name] = copy;
+      });
+      api.state.traces = windowed;
+      const shrunk = api.fullRange();
+      check(Math.abs(shrunk[0] - fullBefore[0]) < 1e-6
+            && Math.abs(shrunk[1] - fullBefore[1]) < 1e-6,
+        "fullRange must not shrink to whatever window is loaded: "
+        + JSON.stringify(shrunk) + " vs " + JSON.stringify(fullBefore));
+      api.state.traces = savedTraces;
 
       // 距离轴上带子不画，所以先切回时间轴再缩——但必须把"切了轴"说出来
       api.state.mode = "distance";

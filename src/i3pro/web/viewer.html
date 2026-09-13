@@ -189,6 +189,8 @@
   .srow .sname { flex:1; min-width:0; }
   .srow .sedge { width:62px; }
   .srow .slen { color:var(--muted); white-space:nowrap; }
+  .srow .szoom { color:var(--muted); text-decoration:none; padding:0 3px; }
+  .srow .szoom:hover { color:var(--accent); }
   .srow.dim { opacity:.55; }
 </style>
 </head>
@@ -860,6 +862,19 @@ function fullRange() {
   if (state.mode === "overlay" && state.overlay) {
     const d = state.overlay.distance;
     return [0, d[d.length - 1] || 1];
+  }
+  // 整场有多长，要先问**全程概览**（它是整场的 900 桶），不能问 state.traces：
+  // serve 模式里 traces 只有"当前这一段"，缩放之后按它算，横轴上限会一路缩水，
+  // 再按"全出"就回不到全场了（tools/verify_clicks.py 实测抓到，见 A33）。
+  const ref = state.overview;
+  if (ref && ref.time && ref.time.length > 1) {
+    if (state.mode === "distance") {
+      if (ref.distance && ref.distance.length > 1) {
+        return [ref.distance[0], ref.distance[ref.distance.length - 1]];
+      }
+    } else {
+      return [ref.time[0], ref.time[ref.time.length - 1] || 1];
+    }
   }
   let lo = Infinity, hi = -Infinity;
   let names = allGraphChannels();
@@ -2847,6 +2862,10 @@ function renderLapControls() {
       const index = Number(box.dataset.beaconName);
       const original = box.value;
       let dirty = true;
+      // 改一次字就要重新"脏"起来。少了这一行，按过一次 Esc（或回车保存过）
+      // 之后 dirty 永远是 false，再打字按回车就**静默不存**——用户只会看到
+      // 名字没变（tools/verify_clicks.py 实测抓到，见 A33）。
+      box.addEventListener("input", () => { dirty = true; });
       const commit = () => {
         if (!dirty) return;
         dirty = false;
@@ -3616,7 +3635,11 @@ function renderSections() {
       + '" value="' + row.start_distance + '"' + (first ? " disabled" : "")
       + ' title="' + (first ? "第 1 段的起点永远是 0 米" : "这一段的起点距离（米，沿参考圈量）")
       + '">'
-      + '<span class="slen">' + fmt(row.length_m, 1) + " m</span></div>";
+      + '<span class="slen">' + fmt(row.length_m, 1) + " m</span>"
+      // 行的中间是名字输入框（flex:1），所以"双击一行"在真实命中测试下几乎点不到
+      // ——双击名字是"选词"。给一个点得到的入口，见 A33。
+      + '<a class="szoom" href="#" data-section-zoom="' + row.index
+      + '" title="放大到这一段（和时间轴顶端那条色条双击是同一件事）">⤢</a></div>';
   }).join("");
   const count = $("sectionsCount");
   if (count) count.textContent = rows.length ? String(rows.length) : "";
@@ -3635,7 +3658,8 @@ function renderSections() {
       if ((info.config || {}).edited) parts.push("边界被手工改过");
     }
     if (info.notice) parts.push(info.notice);
-    if (rows.length) parts.push("双击一行、或时间轴顶上那条色条，放大到该区段");
+    if (rows.length) parts.push("点行尾的 ⤢、或双击时间轴顶上那条色条，放大到该区段"
+      + "（双击行中间的名字是选词，不跳视图）");
     if (!DATA || !DATA.api) parts.push("快照模式：区段能看，改不了（这是快照，改了也带不走）");
     note.textContent = parts.join(" · ");
   }
@@ -4566,7 +4590,12 @@ function init() {
     sectionsList.addEventListener("click", (event) => {
       const target = event && event.target ? event.target : {};
       const kindIndex = target.dataset ? target.dataset.sectionKind : undefined;
-      if (kindIndex !== undefined) toggleSectionKind(Number(kindIndex));
+      const zoomIndex = target.dataset ? target.dataset.sectionZoom : undefined;
+      if (zoomIndex !== undefined) {
+        // 行尾那个 ⤢：这一行是"点得到的双击一行"（行中间是输入框，双击它是选词）
+        if (event && event.preventDefault) event.preventDefault();
+        zoomToSection(sectionWindow(Number(zoomIndex), null));
+      } else if (kindIndex !== undefined) toggleSectionKind(Number(kindIndex));
     });
     // 双击一行 = 放大到那一段（和双击时间轴上的带子是同一件事）
     sectionsList.addEventListener("dblclick", onSectionRowDoubleClick);

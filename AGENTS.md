@@ -74,7 +74,7 @@ python tools\verify_clicks.py                # 真浏览器真鼠标：28 项全
 
 ## 9. 明确不做（第一轮已确认）
 
-视频组件、Alarms 告警（第二轮已改为待办，见 PLAN）、外部数学插件（VB.NET）、
+视频组件、Alarms 告警（2026-09-13 确认不做）、Gauges 动画播放（同上）、外部数学插件（VB.NET）、
 Setup Sheets（依赖 Excel）、Matlab 导出、Mixture Map、Drag 直线加速项目模式、
 多 Workbook 工程体系。要翻案请先改 `docs/PLAN.md`。
 

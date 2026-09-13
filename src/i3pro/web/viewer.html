@@ -1116,6 +1116,64 @@ function axisPad() { return { l: 64, r: 18, t: 6, b: 18 }; }
 // 也是画成一条单独的色条，不是铺满背景。
 const SECTION_STRIP_PX = 9;
 
+/**
+ * 横轴刻度：按**当前可见区间**挑"整齐"的步长（1 / 2 / 5 × 10ⁿ）。
+ *
+ * 原先横轴永远是"四等分"：看整场时标签是 115.9 / 231.9，放大到 0.5 秒也还是
+ * 四等分，标签就成了 231.75 / 231.88——用户要的是 i2 Pro 那种"缩放到哪一档、
+ * 刻度就跟着换档"，标签永远落在 1 / 0.5 / 0.1 这种整数上。
+ *
+ * `target` 是想要的刻度条数（按画布宽度算），实际条数会在这个数上下浮动，
+ * 因为步长只能取 1/2/5×10ⁿ 这几档——宁可少两条，也不要 0.3333 这种刻度。
+ */
+//: 时间轴专用档位。为什么要单独一张表：通用 1/2/5×10ⁿ 会给出 50 s 这种步长，
+//: 标签就成了 0:50 / 1:40 / 2:30——能读，但不是人读秒表的习惯（i2 Pro 给的是
+//: 0:30 / 1:00 / 1:30）。时间轴上"整齐"的意思是整分整秒，不是整十整百。
+const TIME_STEPS = [
+  0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5,
+  1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600,
+];
+
+function niceTicks(lo, hi, target, onTimeAxis) {
+  const span = hi - lo;
+  if (!Number.isFinite(span) || span <= 0) return { step: 0, values: [lo], digits: 3 };
+  const raw = span / Math.max(2, target);
+  let step;
+  if (onTimeAxis) {
+    step = TIME_STEPS.find((candidate) => candidate >= raw - 1e-12);
+    if (step === undefined) {                  // 比一小时还长：回到通用档位
+      const magnitude = Math.pow(10, Math.floor(Math.log10(raw)));
+      step = Math.ceil(raw / magnitude) * magnitude;
+    }
+  } else {
+    const magnitude = Math.pow(10, Math.floor(Math.log10(raw)));
+    const normalised = raw / magnitude;
+    const multiplier = normalised <= 1 ? 1 : normalised <= 2 ? 2 : normalised <= 5 ? 5 : 10;
+    step = multiplier * magnitude;
+  }
+  const first = Math.ceil(lo / step - 1e-9) * step;
+  const values = [];
+  for (let value = first; value <= hi + step * 1e-9 && values.length < 80; value += step) {
+    values.push(Math.abs(value) < step * 1e-9 ? 0 : value);
+  }
+  const digits = Math.max(0, Math.min(6, -Math.floor(Math.log10(step) + 1e-9)));
+  return { step, values, digits };
+}
+
+/** 刻度文字：时间轴步长 ≥ 1 s 用 mm:ss（整场才读得出来），否则用秒；距离轴用米。 */
+function axisTickLabel(value, step, digits, onTimeAxis) {
+  if (!onTimeAxis) return value.toFixed(digits);
+  if (step >= 1) {
+    const total = Math.round(value);
+    const sign = total < 0 ? "-" : "";
+    const rest = Math.abs(total);
+    const minutes = Math.floor(rest / 60);
+    const seconds = rest % 60;
+    return sign + minutes + ":" + String(seconds).padStart(2, "0");
+  }
+  return value.toFixed(Math.max(2, digits));
+}
+
 function drawGrid(ctx, pad, plotW, plotH, y0, y1, x0, x1, xLabel, ticks) {
   ctx.strokeStyle = GRID;
   ctx.lineWidth = 1;
@@ -1133,8 +1191,22 @@ function drawGrid(ctx, pad, plotW, plotH, y0, y1, x0, x1, xLabel, ticks) {
     ctx.fillText(fmt(y1 - ((y1 - y0) * i) / 4), pad.l - 5, pad.t + (plotH * i) / 4 + 4);
   }
   ctx.textAlign = "center";
-  for (let i = 0; i <= 4; i++) {
-    ctx.fillText(fmt(x0 + ((x1 - x0) * i) / 4, 1), pad.l + (plotW * i) / 4, pad.t + plotH + 12);
+  // 横轴随缩放换档：刻度条数按画布宽度定，步长取 1/2/5×10ⁿ 里最合适的那一档
+  const onTimeAxis = !xLabel || xLabel.indexOf("s") >= 0;
+  const ladder = niceTicks(x0, x1, Math.max(3, Math.min(12, Math.round(plotW / 110))),
+                           onTimeAxis);
+  ctx.strokeStyle = GRID;
+  ctx.beginPath();
+  for (const value of ladder.values) {
+    const px = pad.l + ((value - x0) / (x1 - x0 || 1)) * plotW;
+    ctx.moveTo(px, pad.t);
+    ctx.lineTo(px, pad.t + plotH);
+  }
+  ctx.stroke();
+  ctx.fillStyle = "#8b94a7";
+  for (const value of ladder.values) {
+    const px = pad.l + ((value - x0) / (x1 - x0 || 1)) * plotW;
+    ctx.fillText(axisTickLabel(value, ladder.step, ladder.digits, onTimeAxis), px, pad.t + plotH + 12);
   }
   if (xLabel) {
     ctx.textAlign = "left";
@@ -5576,6 +5648,7 @@ window.i3pro = {
   mathsState: mathsState, escapeText: escapeText,
   insertMathsChannel: insertMathsChannel, renderMathsChannelPicker: renderMathsChannelPicker,
   insertMathsFunction: insertMathsFunction,
+  niceTicks: niceTicks, axisTickLabel: axisTickLabel,
   insertMathsOperator: insertMathsOperator, mathsBackspace: mathsBackspace,
   mathsClearExpr: mathsClearExpr,
   sectionsState: sectionsState, renderSections: renderSections,

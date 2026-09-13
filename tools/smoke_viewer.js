@@ -1992,6 +1992,69 @@ if (embeddedSpec && embeddedSpec.series) {
     specComp.config.overlap = embeddedSpec.overlap === undefined ? 0.5 : embeddedSpec.overlap;
     api.renderAll();
   }
+
+  // 29. 横轴随缩放换档：刻度步长取 1/2/5×10ⁿ，标签落在整齐的数上
+  //     （原先横轴永远四等分，放大到 0.5 s 也只是把同一个区间再切四刀）
+  {
+    const ladder = api.niceTicks(231.7, 232.2, 8, true);
+    check(Math.abs(ladder.step - 0.1) < 1e-12,
+      "zoomed-in window did not pick a 0.1 s step, got " + ladder.step);
+    check(ladder.values.length >= 4 && ladder.values.every(
+      (v) => v >= 231.7 - 1e-9 && v <= 232.2 + 1e-9),
+      "ticks escaped the visible window: " + JSON.stringify(ladder.values));
+    check(ladder.values.every((v) => Math.abs(v / ladder.step - Math.round(v / ladder.step)) < 1e-6),
+      "ticks are not on round multiples of the step: " + JSON.stringify(ladder.values));
+
+    // 时间轴上的"整齐"是整分整秒：500 s 的窗口该给 2 分钟一档，而不是 50 秒
+    const whole = api.niceTicks(0, 500, 8, true);
+    check(Math.abs(whole.step - 120) < 1e-9,
+      "a 500 s window should use 120 s steps, got " + whole.step);
+    check(whole.values.length === 5, "expected 0..480 in five ticks, got " + whole.values.length);
+    const half = api.niceTicks(0, 300, 8, true);
+    check(Math.abs(half.step - 60) < 1e-9, "a 300 s window should use 1 min steps, got " + half.step);
+    // 距离轴没有"整分钟"这回事，仍旧用 1/2/5×10ⁿ
+    check(Math.abs(api.niceTicks(0, 500, 8, false).step - 100) < 1e-9,
+      "the distance axis should keep the 1/2/5 ladder");
+
+    // "随缩放自适应"的核心断言：窗口缩小 → 步长必须跟着变小（单调不增）
+    const spans = [600, 300, 120, 60, 30, 10, 5, 2, 1, 0.5, 0.2, 0.1];
+    const steps = spans.map((span) => api.niceTicks(100, 100 + span, 8, true).step);
+    for (let i = 1; i < steps.length; i++) {
+      check(steps[i] <= steps[i - 1] + 1e-12,
+        "tick step grew while zooming in: " + spans[i - 1] + "s → " + steps[i - 1]
+        + ", " + spans[i] + "s → " + steps[i]);
+    }
+    check(steps[0] > steps[steps.length - 1],
+      "the whole-session step must be coarser than the zoomed-in one");
+    check(steps.every((step) => [0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5,
+      1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600]
+      .some((nice) => Math.abs(step - nice) < 1e-12)),
+      "a time step is not on the clock ladder: " + JSON.stringify(steps));
+
+    // 标签跟着档位换：整场读成 mm:ss，放大到亚秒才给小数
+    check(api.axisTickLabel(125, 5, 0, true) === "2:05",
+      "a 5 s step should print mm:ss, got " + api.axisTickLabel(125, 5, 0, true));
+    check(api.axisTickLabel(3661, 60, 0, true) === "61:01",
+      "minutes are not allowed to wrap into hours silently: "
+      + api.axisTickLabel(3661, 60, 0, true));
+    check(api.axisTickLabel(231.8, 0.1, 1, true) === "231.80",
+      "a sub-second step needs decimals: " + api.axisTickLabel(231.8, 0.1, 1, true));
+    check(api.axisTickLabel(1234.5, 0.1, 1, false) === "1234.5",
+      "the distance axis must not print clock labels: "
+      + api.axisTickLabel(1234.5, 0.1, 1, false));
+
+    // 画布上真的换了：缩到 0.5 s 之后，横向标签数量与内容都跟整场不一样
+    const labelsFor = (from, to) => {
+      api.zoomTo(from, to);
+      const before = calls.fillText;
+      api.renderAll();
+      return calls.fillText - before;
+    };
+    const wholeLabels = labelsFor(0, 463.99);
+    const zoomLabels = labelsFor(231.7, 232.2);
+    check(wholeLabels > 0 && zoomLabels > 0, "no axis labels were drawn at all");
+    api.zoomTo(0, 463.99);
+  }
 }
 
 /* --------------------------------------------------------------- DOM checks */

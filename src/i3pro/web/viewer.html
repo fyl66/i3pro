@@ -401,18 +401,100 @@ const GROUPS = ((DATA && DATA.groups) || []).concat(
 // grid units, which is what makes components line up cleanly.
 const GRID_COLS = 12;
 const ROW_PX = 24;
+
+/* --------------------------------------------------- 组件类型注册表（#17）
+ * 每种「显示形式」在这里**只声明一次**自己：叫什么、多大、默认配置是什么、
+ * 要哪些通道、怎么取数、怎么画、怎么进分享链接。工作表、添加下拉、分享链接
+ * 与布局恢复都从这张表读——所以"再加一种显示形式"的成本是"在这里加一条 +
+ * 写它的 render"，而不是追着 `type === "..."` 改七个地方。
+ *
+ * 迁移是分批的（ticket #17 骨架 → #19 图表类 → #20 表格与仪表类）：还没迁完的
+ * 类型暂时只有 label / cols / rows，其余交给代码里保留的过渡分支。声明里认得
+ * 的字段就是下面这些；没写的字段表示这个类型不需要那件事。
+ *   label / cols / rows    标题、默认宽度（网格列）与高度（行）
+ *   tabular: true          DOM 表格，不是 canvas（表格类没有 canvas / head）
+ *   defaults(o)            默认 config
+ *   title(comp)            标题栏那行字；缺省用 label
+ *   needs(comp, add)       这个组件要用到哪些通道（一次取数喂整张表）
+ *   controls(comp, b, body) 控件条
+ *   hooks(comp, b)         canvas 上的事件；建完 canvas 才调用
+ *   refreshWindow(comp)    缩放窗口变了要不要重新取数：返回 Promise 或 null
+ *   render(comp, b)        画
+ *   encode(comp) / decode(comp, payload)  分享链接里的紧凑载荷
+ */
 const COMPONENT_TYPES = {
   graph:   { label: "时间/距离图", cols: 12, rows: 8 },
   scatter: { label: "散点图",      cols: 4,  rows: 13 },
   histogram: { label: "直方图",    cols: 6,  rows: 13 },
   spectrum: { label: "频谱",      cols: 6,  rows: 13 },
-  track:   { label: "赛道轨迹",    cols: 4,  rows: 13 },
+  track: {
+    label: "赛道轨迹", cols: 4, rows: 13,
+    // window：all = 整场轨迹，zoom = 只看当前缩放出来的那一段（去问服务端要）
+    defaults: () => ({ channel: null, window: "all" }),
+    controls: trackControls,
+    hooks: (comp, b) => b.canvas.addEventListener("click", (e) => onTrackClick(e, comp, b)),
+    // 只有"看当前时间段"才需要重新取数；整场轨迹用页面注入的那一份。
+    refreshWindow: (comp) => ((comp.config.window || "all") === "zoom" ? refreshTrackFor(comp) : null),
+    // 载荷 = 通道名 | 窗口。老链接里只有一个通道名（没有 "|"），照旧解成整场。
+    encode: (comp) => [comp.config.channel || "", comp.config.window || "all"].join("|"),
+    decode: (comp, payload) => {
+      const parts = String(payload || "").split("|");
+      comp.config.channel = parts[0] || null;
+      comp.config.window = parts[1] === "zoom" ? "zoom" : "all";
+    },
+    render: renderTrackComponent,
+  },
   gauge:   { label: "仪表",        cols: 4,  rows: 13 },
-  delta:   { label: "时间差 Δ",    cols: 12, rows: 8 },
-  status:  { label: "状态与故障",  cols: 12, rows: 4 },
-  report:  { label: "时间报告",    cols: 12, rows: 10 },
-  chreport:{ label: "通道报告",    cols: 12, rows: 12 },
+  delta: {
+    label: "时间差 Δ", cols: 12, rows: 8,
+    render: renderDeltaComponent,
+  },
+  status: {
+    label: "状态与故障", cols: 12, rows: 4,
+    hotkey: "e",        // E 加/去这个组件（i2 Pro 里是按 E 看状态通道）
+    needs: (comp, add) => (DATA.status || []).forEach(add),
+    render: renderStatusComponent,
+  },
+  report:  { label: "时间报告",    cols: 12, rows: 10, tabular: true },
+  chreport:{ label: "通道报告",    cols: 12, rows: 12, tabular: true },
 };
+
+/** 组件的声明；没声明过的类型给 null（别拿它当分支条件猜）。 */
+function specOf(comp) { return (comp && COMPONENT_TYPES[comp.type]) || null; }
+
+/** 哪个显示形式占用了这个快捷键（声明里的 hotkey）。没占用给 null。 */
+function componentTypeWithHotkey(letter) {
+  const want = String(letter || "").toLowerCase();
+  for (const type of Object.keys(COMPONENT_TYPES)) {
+    const spec = COMPONENT_TYPES[type];
+    if (spec && spec.hotkey && String(spec.hotkey).toLowerCase() === want) return type;
+  }
+  return null;
+}
+
+/* 只给验收用的「只有标题」形式（ticket #17）：**一条声明**就够被工作表认出来——
+ * 添加下拉、标题、默认尺寸、分享链接、布局恢复全走上面那条通用路径。浏览器里
+ * 永远不会注册它（没人设这个标记）；无头驱动 tools/smoke_viewer.js 会设，用来
+ * 证明"加一种显示形式"的杠杆真的只有一条声明。 */
+if (typeof window !== "undefined" && window.__I3PRO_SELFTEST__) {
+  COMPONENT_TYPES.caption = {
+    label: "只有标题（自检）", cols: 6, rows: 3,
+    defaults: () => ({ text: "自检" }),
+    title: (comp) => "只有标题（自检）" + (comp.config.text ? " · " + comp.config.text : ""),
+    encode: (comp) => comp.config.text || "",
+    decode: (comp, payload) => { comp.config.text = payload || "自检"; },
+    render: (comp, b) => {
+      const c = sizeCanvas(b.canvas, b.canvas.clientWidth || 320, Math.max(44, comp.h * ROW_PX - 24));
+      const ctx = c.ctx;
+      ctx.clearRect(0, 0, c.w, c.h);
+      ctx.fillStyle = "#8b94a7";
+      ctx.font = "12px Segoe UI";
+      ctx.textAlign = "left";
+      ctx.fillText(comp.config.text || "自检", 12, 24);
+      b.head.textContent = "";
+    },
+  };
+}
 
 //: 一张表里最多报告几条通道。再多就不是表了，是一份要滚半天的清单。
 const MAX_REPORT_CHANNELS = 8;
@@ -522,8 +604,6 @@ function makeComponent(type, overrides) {
     comp.config.axis = "log";        // 纵轴 log（dB）| linear
     comp.config.span = "zoom";       // zoom | all
   }
-  if (type === "track") comp.config.channel = null;
-  if (type === "track") comp.config.window = "all";     // all | zoom
   if (type === "gauge") {
     comp.config.subtype = o.subtype || "numeric";
     comp.config.channels = [];
@@ -535,7 +615,9 @@ function makeComponent(type, overrides) {
     comp.config.lap = null;              // 按区段分组时看哪条圈（null = 参考圈）
     comp.config.filter = "all";
   }
-  comp.config = Object.assign({}, comp.config, o.config || {});
+  // 默认配置：注册表说了算（已迁移的类型），上面那些过渡分支留给还没迁完的。
+  comp.config = Object.assign({}, spec.defaults ? spec.defaults(o) : {},
+                              comp.config, o.config || {});
   return comp;
 }
 
@@ -623,11 +705,14 @@ function defaultComponents() {
   return copyComponents(presetDefinitions()["分析"]);
 }
 
-// Compact wire form so a worksheet can travel in a URL.
-function encodeLayout(components) {
-  const compact = components.map((c) => [
-    c.type, c.x, c.y, c.w, c.h,
-    c.type === "graph" ? c.config.channels.join("|") + "#" + (c.config.mode || "tiled")
+/** A component's config in the compact wire form a share link carries.
+ *
+ * 注册表接管的类型自己声明怎么编（`encode`）；下面那串过渡分支留给还没迁完的
+ * 类型——#19 / #20 迁完之后它就该整段消失。 */
+function encodeComponentConfig(c) {
+  const spec = specOf(c);
+  if (spec && spec.encode) return spec.encode(c);
+  return c.type === "graph" ? c.config.channels.join("|") + "#" + (c.config.mode || "tiled")
       : c.type === "scatter" ? [c.config.x, (c.config.y || [])[0], c.config.colour, c.config.style].join("|")
       : c.type === "histogram" ? [
           c.config.channel || "", c.config.bins || 40, c.config.style || "bars",
@@ -639,13 +724,18 @@ function encodeLayout(components) {
           c.config.smooth || 1, c.config.scale || "psd", c.config.axis || "log",
           c.config.span || "zoom",
         ].join("|")
-      : c.type === "track" ? (c.config.channel || "")
       : c.type === "gauge" ? [c.config.subtype, (c.config.channels || []).join("~")].join("|")
       : c.type === "report" ? (c.config.filter || "all")
       : c.type === "chreport" ? [
           c.config.by || "lap", c.config.lap || "", c.config.filter || "all",
         ].join("|") + "#" + (c.config.channels || []).slice(0, MAX_REPORT_CHANNELS).join("~")
-      : "",
+      : "";
+}
+
+// Compact wire form so a worksheet can travel in a URL.
+function encodeLayout(components) {
+  const compact = components.map((c) => [
+    c.type, c.x, c.y, c.w, c.h, encodeComponentConfig(c),
   ]);
   try {
     return btoa(unescape(encodeURIComponent(JSON.stringify(compact))));
@@ -660,9 +750,12 @@ function decodeLayout(text) {
     if (!Array.isArray(compact)) return null;
     return compact.map((row) => {
       const type = row[0];
-      if (!COMPONENT_TYPES[type]) return null;
+      const spec = COMPONENT_TYPES[type];
+      if (!spec) return null;
       const comp = makeComponent(type, { x: row[1], y: row[2], w: row[3], h: row[4] });
       const payload = String(row[5] || "");
+      // 注册表接管的类型自己解析自己的载荷；下面的过渡分支留给还没迁完的。
+      if (spec.decode) { spec.decode(comp, payload); return comp; }
       if (type === "graph") {
         const parts = payload.split("#");
         comp.config.channels = parts[0] ? parts[0].split("|") : [];
@@ -674,7 +767,7 @@ function decodeLayout(text) {
         comp.config.y = parts[1] ? [parts[1]] : [];
         comp.config.colour = parts[2] || null;
         comp.config.style = parts[3] === "trend" ? "trend" : "points";
-      } else if (type === "track") comp.config.channel = payload || null;
+      }
       else if (type === "histogram") {
         const parts = payload.split("#");
         const head = parts[0].split("|");
@@ -920,9 +1013,9 @@ function neededChannels() {
       add(comp.config.x);
       (comp.config.y || []).forEach(add);
       add(comp.config.colour);
-    } else if (comp.type === "status") {
-      (DATA.status || []).forEach(add);
     }
+    const spec = specOf(comp);
+    if (spec && spec.needs) spec.needs(comp, add);
   }
   return out;
 }
@@ -1109,9 +1202,11 @@ function scheduleRefresh() {
     refreshWindowTraces();
     refreshPoints().then(renderAll);
     for (const comp of state.components) {
-      if (comp.type === "track" && comp.config.window === "zoom") {
-        refreshTrackFor(comp).then(renderAll);
-      }
+      // "缩放之后要不要重新取数"由组件自己声明（注册表 #17）：不看窗口的组件
+      // 返回 null，看窗口的返回一个 Promise。scheduleRefresh 不再认类型。
+      const spec = specOf(comp);
+      const pending = spec && spec.refreshWindow ? spec.refreshWindow(comp) : null;
+      if (pending) pending.then(renderAll);
     }
   }, 150);
 }
@@ -1468,11 +1563,13 @@ function buildWorksheet() {
   SHEET.clear();
   let maxRow = 0;
   for (const comp of state.components) {
+    // 组件的形状（表格还是 canvas）来自它自己的声明，不再由工作表挨个类型判断。
+    const spec = specOf(comp);
     const el = makeEl("div", "comp" + (comp.id === state.focusId ? " focus" : ""), null);
     el.dataset.id = comp.id;
     el.dataset.type = comp.type;
     // 报表是 DOM 表格，别的组件是 canvas
-    const tabular = comp.type === "report" || comp.type === "chreport";
+    const tabular = !!(spec && spec.tabular);
     const bar = makeEl("div", "compbar", el);
     const titleSpan = makeEl("span", "ctitle", bar);
     titleSpan.textContent = componentTitle(comp);
@@ -1667,22 +1764,8 @@ function buildWorksheet() {
         .forEach((el) => el.addEventListener("change", changed));
       selSmooth.addEventListener("change", changed);
     }
-    if (comp.type === "track") {
-      const cfgBar = makeEl("div", "scattercfg", body);
-      const sel = makeEl("select", "", cfgBar);
-      sel.innerHTML = '<option value="all">全程轨迹</option>'
-        + '<option value="zoom">只看当前时间段</option>';
-      sel.value = comp.config.window || "all";
-      bundle.selWindow = sel;
-      sel.addEventListener("change", () => {
-        comp.config.window = sel.value;
-        bundle.cacheKey = "";
-        bundle.trackData = null;
-        refreshTrackFor(comp).then(renderAll);
-        renderAll();
-      });
-      if (state.track) bundle.trackData = state.track;
-    }
+    // 控件条由组件自己声明（注册表 #17）。位置与迁移前一致：在 canvas 之前。
+    if (spec && spec.controls) spec.controls(comp, bundle, body);
     if (tabular) {
       const cfgBar = makeEl("div", "scattercfg", body);
       makeEl("span", "", cfgBar).textContent = "区段";
@@ -1734,9 +1817,7 @@ function buildWorksheet() {
         renderAll();
       });
     }
-    if (comp.type === "track") {
-      bundle.canvas.addEventListener("click", (event) => onTrackClick(event, comp, bundle));
-    }
+    if (spec && spec.hooks) spec.hooks(comp, bundle);
     if (!tabular) {
       const head = makeEl("div", "graphhead", body);
       if (comp.type !== "graph") head.className = "graphhead caption";
@@ -1925,7 +2006,9 @@ function beginResize(event, comp, el, axis) {
 }
 
 function componentTitle(comp) {
-  const spec = COMPONENT_TYPES[comp.type];
+  const spec = specOf(comp) || { label: comp.type };
+  // 标题也归组件自己声明：写了 title() 就用它，没写就用 label（#17）。
+  if (spec.title) return spec.title(comp);
   if (comp.type === "graph") {
     const n = comp.config.channels.length;
     const mode = comp.config.mode === "overlapped" ? "重叠" : "分栏";
@@ -1999,7 +2082,8 @@ function renderComponents() {
   for (const comp of state.components) {
     const bundle = SHEET.get(comp.id);
     if (!bundle) continue;
-    if (comp.type === "report" || comp.type === "chreport") {
+    const spec = specOf(comp);
+    if (spec && spec.tabular) {
       // 表还没到就先挂个占位，然后去要数据——这样任何入口（预设、分享链接、
       // 改区段、改数学通道）加进来都不用额外接线。
       if (!bundle.report || bundle.reportKey !== reportFetchKey(comp)) {
@@ -2024,11 +2108,10 @@ function renderComponents() {
       renderSpectrumComponent(comp, bundle);
       continue;
     }
-    if (comp.type === "graph") renderGraphComponent(comp, bundle);
+    // 注册表接管的类型自己画；其余仍是过渡分支（#19 / #20 会把它们也迁走）。
+    if (spec && spec.render) spec.render(comp, bundle);
+    else if (comp.type === "graph") renderGraphComponent(comp, bundle);
     else if (comp.type === "scatter") renderScatterComponent(comp, bundle);
-    else if (comp.type === "delta") renderDeltaComponent(comp, bundle);
-    else if (comp.type === "status") renderStatusComponent(comp, bundle);
-    else if (comp.type === "track") renderTrackComponent(comp, bundle);
     else if (comp.type === "gauge") renderGaugeComponent(comp, bundle);
   }
 }
@@ -3352,6 +3435,25 @@ function renderGaugeComponent(comp, b) {
     b.head.textContent = "方向盘角度（±540°）";
     return;
   }
+}
+
+/** 赛道轨迹的控件条：整场轨迹 / 只看当前缩放出来的那一段。
+ *  （注册表 #17：控件条由组件自己声明，工作表不再认类型。） */
+function trackControls(comp, bundle, body) {
+  const cfgBar = makeEl("div", "scattercfg", body);
+  const sel = makeEl("select", "", cfgBar);
+  sel.innerHTML = '<option value="all">全程轨迹</option>'
+    + '<option value="zoom">只看当前时间段</option>';
+  sel.value = comp.config.window || "all";
+  bundle.selWindow = sel;
+  sel.addEventListener("change", () => {
+    comp.config.window = sel.value;
+    bundle.cacheKey = "";
+    bundle.trackData = null;
+    refreshTrackFor(comp).then(renderAll);
+    renderAll();
+  });
+  if (state.track) bundle.trackData = state.track;
 }
 
 function renderTrackComponent(comp, b) {
@@ -5554,10 +5656,12 @@ function onKeyDown(event) {
     case "m": case "M": state.show.measure = !state.show.measure; renderAll(); stop(); return;
     case "l": case "L": state.show.legend = !state.show.legend; renderAll(); stop(); return;
     case "e": case "E": {
-      const existing = state.components.find((c) => c.type === "status");
+      // 哪个显示形式归这个键管，也是它自己在注册表里声明的（status 声明了 "e"）。
+      const type = componentTypeWithHotkey("e");
+      const existing = type ? state.components.find((c) => c.type === type) : null;
       if (existing) componentAction(existing, "close");
-      else {
-        state.components.push(makeComponent("status"));
+      else if (type) {
+        state.components.push(makeComponent(type));
         saveLayout();
         buildWorksheet();
         syncScatterSelectors();
@@ -6048,6 +6152,9 @@ window.i3pro = {
   addComponentOfType: addComponentOfType, applyPreset: applyPreset,
   componentAction: componentAction, refreshWindowTraces: refreshWindowTraces,
   encodeLayout: encodeLayout, decodeLayout: decodeLayout, saveLayout: saveLayout,
+  componentTypes: COMPONENT_TYPES, componentSpec: specOf,
+  componentTypeWithHotkey: componentTypeWithHotkey,
+  encodeComponentConfig: encodeComponentConfig,
   buildWorksheet: buildWorksheet, syncScatterSelectors: syncScatterSelectors,
   histogramKey: histogramKey, refreshHistogramFor: refreshHistogramFor,
   mergeCounts: mergeCounts, snapshotHistogramFor: snapshotHistogramFor,

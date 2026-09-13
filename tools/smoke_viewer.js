@@ -249,6 +249,10 @@ function run(hash) {
   const { registry, document } = buildDom(html.split("<script>")[0]);
   const window = {
     devicePixelRatio: 1,
+    // ticket #17：注册表里那条"只有标题"的自检形式只在无头驱动里注册——
+    // 浏览器里没人设这个标记，所以队员永远看不到它。设在这里是为了让
+    // "加一种显示形式只要一条声明"这句话每次回归都被真的走一遍。
+    __I3PRO_SELFTEST__: true,
     _handlers: {},
     addEventListener(type, fn) { (this._handlers[type] = this._handlers[type] || []).push(fn); },
     removeEventListener(type, fn) {
@@ -2259,6 +2263,90 @@ if (embeddedSpec && embeddedSpec.series) {
     api.renderGps();
   }
 }
+
+  // 32. 组件类型注册表（#17）：每种显示形式只在一处声明自己，工作表不再认类型。
+  //     这一组要证明两件事：三类已迁移的形式**靠声明**就能被认出来；以及
+  //     "加一种显示形式"真的只要一条声明——`caption` 只存在于注册表里。
+  check(!!(api.componentTypes && api.decodeLayout && api.componentSpec),
+    "调试句柄没有导出组件注册表（#17）");
+  if (api.componentTypes && api.decodeLayout) {
+    const state = api.state;
+    const worksheet = registry.get("worksheet");
+    const types = api.componentTypes;
+    check(!!(types.delta && types.delta.render && types.delta.label),
+      "Δ 的声明不完整（至少要 label 与 render）");
+    check(!!(types.status && types.status.render && types.status.needs && types.status.hotkey),
+      "状态与故障的声明不完整（render / needs / hotkey）");
+    check(!!(types.track && types.track.defaults && types.track.controls && types.track.hooks
+      && types.track.refreshWindow && types.track.encode && types.track.decode
+      && types.track.render),
+      "赛道轨迹的声明不完整（默认配置 / 控件 / 事件 / 缩放重取 / 分享链接 / 画）");
+    check(api.componentSpec({ type: "没这个类型" }) === null,
+      "没声明过的类型该给 null，而不是猜一个");
+    check(api.componentTypeWithHotkey("e") === "status",
+      "E 键该由注册表里声明了 hotkey 的那个形式接管");
+
+    // 三类形式的配置要经得起分享链接往返（#17 验收条目之一）。
+    const probes = [
+      { id: "probe1", type: "track", x: 0, y: 1, w: 4, h: 13,
+        config: { channel: "GPS Speed", window: "zoom" } },
+      { id: "probe2", type: "status", x: 4, y: 1, w: 12, h: 4, config: {} },
+      { id: "probe3", type: "delta", x: 0, y: 5, w: 12, h: 8, config: {} },
+    ];
+    const back = api.decodeLayout(api.encodeLayout(probes));
+    check(!!back && back.length === 3, "三类形式的分享链接往返丢了组件");
+    if (back && back.length === 3) {
+      check(back.map((c) => c.type).join(",") === "track,status,delta",
+        "三类形式的分享链接往返换了类型或次序");
+      check(back[0].config.channel === "GPS Speed" && back[0].config.window === "zoom",
+        "轨迹的分享链接往返没保住 config（通道 " + back[0].config.channel
+        + " / 窗口 " + back[0].config.window + "）");
+      check(back[0].x === 0 && back[0].y === 1 && back[0].w === 4 && back[0].h === 13,
+        "三类形式的分享链接往返没保住位置与尺寸");
+    }
+    // 老链接里的轨迹载荷只有一个通道名（没有 "|窗口"），得按"整场"解出来。
+    const legacyLink = Buffer.from(JSON.stringify([["track", 0, 0, 4, 13, "Vx KF"]]))
+      .toString("base64");
+    const legacy = api.decodeLayout(legacyLink);
+    check(!!legacy && legacy.length === 1 && legacy[0].config.channel === "Vx KF"
+      && (legacy[0].config.window || "all") === "all",
+      "老分享链接（轨迹载荷里没有窗口）该照旧解成整场轨迹");
+
+    // 一条声明就够：把"只有标题"形式声明进注册表之后，添加下拉、标题、默认配置、
+    // 通用渲染、分享链接全都认识它——工作表里没有一处为它写过分支。
+    const addSel = registry.get("addType");
+    check(addSel && String(addSel._html).indexOf('value="caption"') >= 0,
+      "注册表里的显示形式没有出现在「＋ 添加组件」的下拉里");
+    const beforeAdd = state.components.length;
+    const focusBefore = state.focusId;
+    api.addComponentOfType("caption");
+    const caption = state.components[state.components.length - 1];
+    check(state.components.length === beforeAdd + 1 && caption && caption.type === "caption",
+      "加一个只声明过的显示形式失败了");
+    check(caption && caption.config.text === "自检",
+      "新形式的默认配置没有从声明里来");
+    check(caption && api.componentTitle(caption).indexOf("只有标题（自检）") === 0,
+      "新形式的标题没有从声明里来");
+    check(!!(caption && SHEETEl(worksheet, caption.id)),
+      "新形式没有被工作表画出来");
+    const captionBack = api.decodeLayout(api.encodeLayout([caption]));
+    check(!!captionBack && captionBack.length === 1 && captionBack[0].config.text === "自检",
+      "只声明过的显示形式进不了分享链接");
+    // 收尾：把它拿掉并重建工作表，后面的断言看到的工作表与加它之前一样。
+    if (caption) state.components.splice(state.components.indexOf(caption), 1);
+    state.focusId = focusBefore;
+    api.buildWorksheet();
+    api.renderAll();
+
+    // 旧布局（localStorage 里存着上个版本的类型清单）不能把 restore 弄崩：
+    // 没声明过的类型在解码时被丢掉，剩下的照旧进来。
+    const mixed = Buffer.from(JSON.stringify([
+      ["没这个类型", 0, 0, 4, 13, ""], ["delta", 0, 0, 12, 8, ""],
+    ])).toString("base64");
+    const kept = api.decodeLayout(mixed);
+    check(!!kept && kept.length === 1 && kept[0].type === "delta",
+      "分享链接里没声明过的类型该被丢掉，而不是整条链接解不出来");
+  }
 
 /* --------------------------------------------------------------- DOM checks */
 const header = registry.get("fileInfo");

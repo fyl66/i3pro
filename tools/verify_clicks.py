@@ -515,16 +515,38 @@ class Checker:
         return disk
 
     def rename(self, sidecar):
-        """#4 / #6：就地改名（回车存、Esc 撤）+ 撤销。"""
-        def pill_box():
-            raw = self.js(
-                "(function(){var b=document.querySelectorAll('#beaconList .bname')[0];"
-                "return b?JSON.stringify(__center(b)):'null';})()"
-            )
-            return json.loads(raw) if raw and raw != "null" else None
+        """#4 / #6：就地改名（回车存、Esc 撤）+ 撤销。
 
-        def retype(text):
-            box = pill_box()
+        改的是**种进侧车的那条**信标（名字就是"手工穿越"），不是列表里的第一条。
+        ＋穿越 插进来的那条与它重名，会被加上后缀（实测是"手工穿越 2"），而 trusted
+        标记——``手工穿越 1``——是打在种下的那条上的。挑第一条输入框就会挑到插进来的
+        那条：它本来就没有标记，改完名自然也没有标记可以迁移，于是这条断言在**行为
+        正确的时候**失败。所以按名字定位，找不到就明说。
+        """
+        seeded = "手工穿越"
+
+        def boxes():
+            raw = self.js(
+                "(function(){var bs=document.querySelectorAll('#beaconList .bname');"
+                "var out=[];for(var i=0;i<bs.length;i++){var c=__center(bs[i]);"
+                "out.push({name:bs[i].value,x:c.x,y:c.y});}return JSON.stringify(out);})()"
+            )
+            return json.loads(raw) if raw and raw != "null" else []
+
+        def pill_box(name):
+            for box in boxes():
+                if box["name"] == name:
+                    return box
+            print("        列表里没有叫 %r 的输入框：%s" % (name, [b["name"] for b in boxes()]))
+            return None
+
+        def dom_has_name(name):
+            return any(box["name"] == name for box in boxes())
+
+        def retype(text, name=seeded):
+            box = pill_box(name)
+            if box is None:
+                return "", None
             self.browser.click(box["x"], box["y"], self.session)
             focused = self.js("document.activeElement && document.activeElement.className") or ""
             if "bname" not in focused:
@@ -537,6 +559,7 @@ class Checker:
             self.browser.key(text, self.session)
             return focused, self.js("document.activeElement && document.activeElement.value")
 
+        before = open(sidecar, "rb").read()
         focused, typed = retype("改名之后")
         self.check("#4 真点信标名 -> 输入框拿到焦点", "bname" in focused, focused)
         self.check("#4 真键盘输入进得去", typed == "改名之后", repr(typed))
@@ -545,10 +568,10 @@ class Checker:
         time.sleep(0.4)
         disk = json.load(open(sidecar, encoding="utf-8"))
         self.check("#4 Esc 取消 -> 输入框弹回原名，侧车一个字节没动",
-                   disk["beacons"][0]["name"] != "改名之后"
-                   and self.js("document.querySelectorAll('#beaconList .bname')[0].value")
-                   == disk["beacons"][0]["name"],
-                   disk["beacons"][0]["name"])
+                   open(sidecar, "rb").read() == before
+                   and any(b["name"] == seeded for b in disk["beacons"])
+                   and dom_has_name(seeded),
+                   [b["name"] for b in disk["beacons"]])
 
         retype("改名之后")
         self.browser.key_named("Enter", "Enter", 13, self.session)
@@ -564,7 +587,7 @@ class Checker:
             print("        toast：%r" % self.toast())
             print("        保存请求：%s" % self.js("JSON.stringify(window.__fetchLog.slice(-4))"))
         self.check("#4 改名同时把 trusted 标记迁走（不然用户打的不可信分数会丢）",
-                   all(not k.startswith("手工穿越 ") for k in (disk.get("trusted") or {})),
+                   disk.get("trusted") == {"改名之后 1": False},
                    json.dumps(disk.get("trusted"), ensure_ascii=False))
         undo = json.loads(self.js("JSON.stringify(__rectOf('undoLaps'))"))
         self.check("#6 改过一次后 ↶ 撤销 变成可点", not undo["disabled"])

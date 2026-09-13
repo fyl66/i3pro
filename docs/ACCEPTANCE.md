@@ -1938,8 +1938,229 @@ python tools\verify_clicks.py                            # -> 51 项检查：51 
 | 实现了"路径 + 读 + 写"的模块 | 6 个 | **1 个**（`sidecar.py`） |
 | 失败策略 | 4 种（信标/注释/CSV 映射沉默，区段/GPS/数学通道报错） | **1 种** |
 | 六个模块里的 `read_text` / `write_text` / `json.load` / `json.dump` | 各若干 | **0 处** |
-| 登记一种新侧车要动的文件 | 1 个模块（+ `.gitignore`） | **`sidecar.KINDS` 一条** |
-| 单测 | 225 | **232** |
+
+---
+
+## A45 · 数据导出：范围 / 通道 / 采样 / CSV / Excel（ticket #23 / #24 / #27）
+
+需求原话是"把**全部日志 / 当前视图 / 指定时间段或距离段**的数据，按**原始采样率或指定
+采样率**导出成 CSV/Excel，以便在 Excel、Python、MATLAB 中继续分析或分享"。取数与落盘
+**只有一处实现**：`src/i3pro/export.py`（`.xlsx` 的 OOXML 由 `src/i3pro/xlsx.py` 用标准库
+`zipfile` 写出，**没有**新增运行期依赖）。界面上的「导出数据」面板、命令行 `i3pro export`、
+HTTP `GET /api/session/<场次>/export` 三条路都调它，所以三处给的数必然是同一个答案。
+
+| 范围 | 面板怎么填 | 发出去的参数 |
+| --- | --- | --- |
+| 全部日志 | 不填起止 | 不带 `from`/`to` |
+| 当前视图 | 取当前时间/距离窗口（`lane()`） | `axis=time|distance&from&to` |
+| 当前选中圈 | 取圈速表那一行的 `start_time`/`end_time` | 同上 |
+| 光标 A–B | `min/max(state.datum, state.cursor)`；没放基准光标就提示"先按 D、再按空格" | 同上 |
+| 指定时间段 | `12.5s`、`2026-09-14 12:34:56.789`，或**裸时钟** `12:35:10.123`（日期沿用场次那天） | `absolute=1` 时按场次头的 `log_date`+`log_time` 换算成相对秒 |
+| 指定距离段 | `1200m`（填日期时间直接报错，不猜） | `axis=distance&from=1200&to=1850` |
+
+通道：`channels=all` / `channels=selected&names=…`（侧边栏勾选，组头「全选」按组选），
+数学通道由 `maths=0/1` 单独开关。采样：`rate=auto`（各通道保留自己的原始采样点，宽表以
+时间并集为索引、缺失留空）或 `rate=1|5|10|20|50|100|200|500|<自定义>`（此时重采样方法
+`linear` / `hold` / `nearest` / `mean` 四选一；**`mean` 只对降采样有意义，升采样时与
+`linear` 等价**——文档、界面、实现三处写的是同一句）。主索引：`time_s`（相对秒）/
+`timestamp`（绝对时间戳，见下）/ `distance_m`（米）。
+
+**两份金标准实跑**（本机实测，`out/` 是 gitignore 的临时目录）：
+
+| 场次 | 请求 | 结果 |
+| --- | --- | --- |
+| 高避5圈 | `--rate 10` 全部通道 CSV 宽表 | **4,641 行 × 438 列，6,820,857 B，1.9 s** |
+| 高避5圈 | `--rate 10` 全部通道 Excel | **7,715,725 B，4.1 s**，1 张数据表 + 1 张元数据表 |
+| 高避5圈 | `--rate 10` 全部通道 CSV 长表 | **2,027,573 行 × 4 列，54,076,769 B，5.3 s** |
+| 高避5圈 | `--rate auto`（原始采样）全部通道 CSV 宽表 | **46,400 行 × 438 列，51,026,500 B**（169 条慢通道大半是空格） |
+| 耐久正赛 | `--rate 10` 全部通道 CSV 宽表 | **19,431 行 × 343 列，23.0 MB，6.5 s** |
+
+> 命令行与界面默认**含数学通道**（`maths/global.json` 里那 4 条：`总G` / `纵向加速度g` /
+> `速度kmh` / `平滑纵向G`），所以 `i3pro export` 的预估值是 **442 列**（高避）与 **347 列**
+> （耐久）；上面表里是 `--no-maths` 的 438 / 343 列。差的就是那 4 条——用
+> `--estimate` 与 `--estimate --no-maths` 各跑一次就能复现这两个数。
+
+**元数据**（`bundle=1` 时 CSV 会与 `metadata.json` 打成一个 zip；Excel 里是「元数据」
+sheet，同一份内容）：日志文件名、场次、导出范围（人话 + 起止数字 + `bounds: 左闭右闭`）、
+主索引与列名、采样率、重采样方法、行 × 列、通道来源、**每条通道的名字 / 单位 / 采样率 /
+是不是数学通道**、`exported_at`（ISO 8601 带时区偏移），以及源头 `.ld` 的元数据。
+
+**"预计行数 / 文件大小"对得上真文件**（需求 §5；预估常数就是按这张表标定的）：
+
+| 出口 | 预估 | 实际 | 预估 ÷ 实际 |
+| --- | --- | --- | --- |
+| CSV 宽表（10 Hz） | 8,140,314 B | 6,820,857 B | **1.19** |
+| Excel 宽表（10 Hz） | 8,140,314 B | 7,715,725 B | **1.06** |
+| CSV 长表（10 Hz） | 56,772,044 B | 54,076,769 B | **1.05** |
+| CSV 宽表（原始采样） | 81,375,400 B | 51,026,500 B | **1.59** |
+
+分块写的代价（`TestExportPerformance` 自带的实测输出）：
+`耐久正赛 200 s 窗口 × 40 通道 × rate=100` → **3.8–4.0 s（两次跑）、2.9 MB 文件、峰值分配 16 MB**
+（不随"整场 × 全通道"线性涨，这是 `_CHUNK_CELLS` 分块的意义）。
+
+**可复制命令与通过判据**：
+
+```powershell
+# 1. 范围 / 采样 / 输出形状 / 报错 / 预估：单测（含 CSV 与 Excel 两条出口）
+python -m unittest tests.test_i3pro.TestExportRanges tests.test_i3pro.TestExportSampling tests.test_i3pro.TestExportFiles tests.test_i3pro.TestExportErrors tests.test_i3pro.TestExportEstimate tests.test_i3pro.TestExportTimestampIndex -v
+# -> Ran 24 tests / OK
+
+# 2. 界面拼出来的参数就是服务端认的那几个（第 29 组）
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"    # -> PASS
+
+# 3. 真浏览器真鼠标：点开面板 -> 预估 -> 真下载一个文件（第 4 道回归的导出那几条）
+python tools\verify_clicks.py                                 # -> 62 项检查：62 通过，0 失败
+
+# 4. 两份金标准各真导一次（把 out 换成你自己的临时目录）
+python -m i3pro export "i2pro_data\20260908-cjh 高避5圈.ld" --rate 10 --out out\hill.csv
+python -m i3pro export "i2pro_data\20260524-耐久正赛.ld"    --rate 10 --out out\endu.csv
+# -> 已导出 … 4641 行 × 438 列 / 19431 行 × 343 列
+```
+
+**这批断言钉住的是**：`rate=auto` 保留各通道原始采样点且**左闭右闭**（12.50 s 与 18.00 s
+两个样本都在，逐点对上通道原始值）；绝对时间与相对秒导出**逐字节相同**；距离轴第一列是米、
+不倒退、夹在范围内；统一采样率下 1 Hz 的 `Gear` 被拉到 10 Hz 后不留空格；`linear` / `hold`
+在同一时刻给不同的数、`mean` 只对降采样有意义（升采样与 `linear` 逐点相同）；`plan` 的预计
+行数 = 真导出的行数（宽表与长表各一遍）；CSV 是 UTF-8 带 BOM、pandas 读回来列名就是
+`time_s` / `Vx KF [km/h]`；`bundle=1` 的 zip 里有 `<场次>.csv` 与 `metadata.json`；长表只
+写有值的格子；`.xlsx` 用 **openpyxl** 读回来逐格比对（元数据 sheet + 数据 sheet、表头、
+首行）；五类坏输入各自报出"下一步改什么"。
+
+> **规则 1 的第 ② 条曾经漏过**：导出那 20 条单测最初只躺在 `out/_pending/test_23_pending.py`
+> 里，而 `out/` 是 gitignore 的——"功能做完了"这句话当时**没有仓库内的证据**。现在它们进了
+> `tests/test_i3pro.py`（`TestExport*`），`TestXlsxWriter` 也补上了（`xlsx.py` 的 docstring
+> 早就写着"验证它的是 openpyxl 的 TestXlsxWriter"，而那个类当时并不存在）。
+
+**这一票修掉的两个"静默导错"**（都不是崩溃，是给出另一段数据）：
+
+1. **距离段被当成秒**：面板选「指定距离段」而主索引还停在「时间」时，`1200–1850` 会按
+   `axis=time` 发出去——导出的是 **1200–1850 秒**那一段，一声不响。现在范围自己决定轴
+   （`exportAxisOf`：距离段=米、时间段=秒），并且把主索引下拉锁到对应档位。无头第 29 组两条
+   断言（距离段 → `axis=distance`、时间段 → `axis=time`）钉住这件事。
+2. **统一采样率的右端不闭合**：10 Hz 导出 0–463.99 s 的场次，末行原来只到 **463.9**
+   （`floor(span×rate)` 那个格点）。现在"左闭右闭"在格点之外补上终点本身，实测末行
+   **463.99**（高避）/ **1942.99**（耐久）；代价是最后一段可能短一格，元数据里的
+   `range.bounds` 写着「左闭右闭」。
+
+**ticket #27：绝对时间主索引**（需求 §3「主索引：时间：相对秒 `time_s` 或绝对时间」）。
+`index=timestamp` 是**同一根时间轴**的另一种写法：场次起点（`.ld` 头里的日期时间）+
+相对秒，格式 `2026-09-08 15:48:32.000`。它只配时间轴——`axis=distance&index=timestamp`
+是 400 并说"想写时间戳就写 axis=time&index=timestamp"，不是悄悄退回米。
+
+```powershell
+python -m unittest tests.test_i3pro.TestExportTimestampIndex -v     # -> Ran 7 tests / OK
+python -m i3pro export "i2pro_data\20260908-cjh 高避5圈.ld" --names "Vx KF" --from 10 --to 10.2 --rate 10 --index timestamp --layout long --out out\stamp.csv
+# -> 首行 timestamp,channel,value,unit；第二行 2026-09-08 15:48:32.000,Vx KF,-0.04,km/h
+```
+
+Excel 那条出口由 **openpyxl 当独立裁判**逐格验（`TestExportTimestampIndex` 里
+`A1=timestamp`、`A2=2026-09-08 15:48:32.000` **是文本**、`B2` 是数字）；分表那段把
+`xlsx.MAX_ROWS` 临时调到 100 跑真代码路径（300 行 → `数据1/数据2/数据3/数据4`，
+99+99+99+3 一行不丢）。
+
+**边界（说清代价，也写清没做什么）**：
+
+* **绝对时间戳的起点精度是秒**：MoTeC 在头里只写 `dd/mm/yyyy hh:mm:ss`。所以这一列是
+  "起点精确到秒 + 相对部分精确到毫秒"，不能当微秒级同步时钟用；这句话同时写进导出元数据的
+  `timestamp.source_precision`，别让下一个人以为它比原始数据更准。
+* **CSV 是 UTF-8 带 BOM**（`utf-8-sig`），不是纯 UTF-8：通道名是中文，Excel 双击打开靠 BOM
+  才不乱码。用 `pandas.read_csv(..., encoding="utf-8-sig")` 或 `encoding="utf-8-sig"` 读回来。
+* **Excel 一律宽表**（长表在表格里没法看），超 1,048,576 行自动分成 `数据1/数据2/…`，
+  每张都带表头；列数超 Excel 上限时报错并说"改用 CSV"。
+* **快照（离线 HTML）里导出是禁用的**：没有服务端可取数，按钮灰掉并写明"用「启动.bat」
+  打开 serve 模式"。
+* **取消不留垃圾**：下载走"先落临时文件、再按 `Content-Length` 流式回传"，成功 / 出错 /
+  连接中断三种情况都由 `server.send` 或 `act_export` 清理（真浏览器那几条断言跑完
+  `%TEMP%\i3pro-export-*` 为空）。
+
+---
+
+## A46 · 服务端：769 行的请求闭包拆成三层（ticket #26）
+
+`make_handler` 原来是一个 **767 行、25 个内嵌函数**的请求闭包："HTTP 怎么回"和"这个动作
+算什么"写在一起；16 个动作里有 13 处用例各自起一个 `ThreadingHTTPServer`、各自抄一遍
+`urlopen` + `json.loads`。
+
+| 住在哪 | 管什么 | 行数 |
+| --- | --- | --- |
+| `src/i3pro/server.py`（改动前 1,274） | HTTP 管道：解析 URL、**按需**读请求体、发 `Response`；两张 HTML 页面 | **401** |
+| `src/i3pro/api.py`（新） | `Response` / `Body` / `Api` / `_Call`；`_Call.ACTIONS` 是"动作名 → 方法名"的**一张表**，加一个动作 = 加一行 | **940** |
+| `src/i3pro/library.py`（新） | 场次库：找文件、LRU 缓存、数学通道挂载、一级撤销槽 | **220** |
+
+`make_handler` **767 → 136 行、25 → 0 个内嵌函数**（里面只剩 `class Handler` 的 12 个方法，
+`ast` 数出来的 12 个是它们）；`SessionLibrary` / `bind` / `serve` 的名字与签名没变，
+`cli.py`、`tests`、`tools` 里的调用方一行都没改。`library.py` 不 import `api` / `server`（无环）。
+
+**测试侧也收成一处**：九组 `*OverHttp` 用例 + `TestServer` + `TestSidecar` 现在共用
+`with http_session(场次) as http:` 一个夹具（`_Http` 上有 `get_json` / `put_json` /
+`get_text` / `get_bytes` / `json` / `raw` / `page_payload`）。实测
+`ThreadingHTTPServer(` 的**构造 13 处 → 1 处**（夹具里那一句）、
+`urllib.request.urlopen` **20 处 → 7 处**（5 处在 `_Http` 上，另外 2 处是 `TestServer` 故意用
+`assertRaises(HTTPError)` 判 400/404）。
+
+另外钉住的：路由表里每个动作都有实现；动作清单就是那 16 个；`Api.handle` 对
+`["sessions"]` / `["nope"]` / `["session","nope","info"]` 都**返回 `Response` 而不是 `None`**
+（拆的过程中真的漏过两次 `return`）；未知动作的报错里带上"认得的动作"；不碰请求体的动作
+**一次都没有读** `Body`（上传 100 MB 不会因为看一眼列表就先进内存）；`server.py` 少于 420 行、
+没有 `if action == "`、没有 `def act_`、读 socket 只有 `_read_body` 一处。
+
+**可复制命令与通过判据**：
+
+```powershell
+# 1. 动作表里每个动作都有实现、Api.handle 永远回 Response、没请求体的动作一次都不读 Body
+python -m unittest tests.test_i3pro.TestApiLayerWithoutASocket tests.test_i3pro.TestStructureOfTheSplit -v
+# -> Ran 16 tests / OK
+
+# 3. 行为零变化：原先那些 HTTP 断言一条不减（九组 OverHttp 用例 + TestServer + TestSidecar）
+python -m unittest tests.test_i3pro.TestServer tests.test_i3pro.TestBeaconEditingOverHttp tests.test_i3pro.TestBeaconUndoOverHttp tests.test_i3pro.TestSectionsOverHttp tests.test_i3pro.TestReportOverHttp tests.test_i3pro.TestNotesOverHttp tests.test_i3pro.TestGpsFixOverHttp tests.test_i3pro.TestHistogramOverHttp tests.test_i3pro.TestSpectrumOverHttp tests.test_i3pro.TestMathsOverHttp tests.test_i3pro.TestSidecar
+# -> Ran 19 tests / OK
+
+# 2. 结构本身（这两个数字是上面命令背后的事实）
+rg -c "^def make_handler" src\i3pro\server.py      # -> 1
+python -c "import re,pathlib; print(len(re.findall(r'\"act_[a-z_]+\"', pathlib.Path('src/i3pro/api.py').read_text(encoding='utf-8'))))"
+# -> 16（动作数；与 api._Call.ACTIONS 的 16 条一一对应）
+```
+
+**实测数字**（改动前那份 `server.py` 从 `git show c7c72b8^:src/i3pro/server.py` 取出来数）：
+
+| 事项 | 改动前 | 改动后 |
+| --- | --- | --- |
+| `server.py` 行数 | 1,274 | **401** |
+| `make_handler` 行数 / 内嵌函数 | 767 / 25 | **136 / 12** |
+| 动作分派 | `if action == "…"` 长链 | `api._Call.ACTIONS` 一张表（**16** 个动作） |
+| 不碰请求体的动作 | 也会读一次 `Body` | **一次都不读**（单测钉住） |
+| 场次库 | 在 `server.py` 里 | `library.py`（**220** 行，不 import `api`/`server`） |
+
+---
+
+## A47 · `laps.py`：一个模块背四个概念 → 三个模块（ticket #25）
+
+`laps.py` 原来 **1,140 行**，同时住着切圈算法、信标配置与编辑规则、距离轴换算与圈差、
+圈表。四件事的改动理由完全不同（改切圈算法不该翻到信标改名那段），所以按概念拆开：
+
+| 概念 | 现在住在哪 | 行数 |
+| --- | --- | --- |
+| 切圈（`detect_laps` / `gps_laps` / `winding_laps` / `figure8_laps` / `run_laps` / `lap_table`） | `laps.py` | **741**（改动前 1,140） |
+| 信标与配置（`Beacon` / `LapConfig` / 改名与插入规则 / `undo_config` / 侧车读写） | `beacons.py`（新） | **379** |
+| 距离轴换算与圈差（`time_at_distance` / `distance_on_master` / `overlay` / `time_delta`） | `axes.py`（新） | **133** |
+
+老名字仍然可用，而且是**同一个对象**（`laps.LapConfig is beacons.LapConfig`、
+`laps.Beacon is beacons.Beacon`、`laps.overlay is axes.overlay`、
+`laps.time_at_distance is axes.time_at_distance`、`laps.load_config is beacons.load_config`），
+`render.py` / `cli.py` / `server.py` / `tests` 一行都不用改——这是这一票"行为零变化"的判据之一。
+
+**可复制命令与通过判据**：
+
+```powershell
+python -m unittest tests.test_i3pro.TestStructureOfTheSplit -v      # -> Ran 11 tests / OK
+# 断言的是：beacons.py 里有 Beacon/LapConfig/reconcile_edits/check_new_crossings/undo_config/
+# load_config/save_config/unique_name/merge_crossings；axes.py 里有 overlay/time_delta/
+# time_at_distance/distance_on_master；laps.py 里这些定义**一个都没有**（只有 import）且少于
+# 800 行；beacons.py / axes.py 运行时不 import laps（类型标注走 TYPE_CHECKING，不成环）。
+```
+
+行为不变由既有的功能用例保证：切圈 7 圈 / 26 段、圈速表、双圈叠加、圈差全部不变
+（两份金标准快照的无头统计与拆分前逐字相同）。
 
 ---
 
@@ -1952,9 +2173,17 @@ node tools\smoke_viewer.js out\<场次>.html   # 3. 无头驱动前端：PASS
 python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘：全过（没有 Edge 的机器打印 SKIP，不算通过）
 ```
 
-**通过判据**：`Ran 232 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）；
+**通过判据**：`Ran 285 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）；
 `PASS - 0 channel(s) outside tolerance`；`PASS - workbench ran headless ... interactions verified`；
-`51 项检查：51 通过，0 失败`。**四条全绿才算改完**（AGENTS.md 规则 7）。
+`62 项检查：62 通过，0 失败`。**四条全绿才算改完**（AGENTS.md 规则 7）。
+
+上面各条验收里出现的"当时的结果"（`Ran 232 tests` / `51 项检查` 之类）是**那一轮**的
+实测记录，不是当前的数字；当前的数字只认这一节。每加一条验收条目就把这一节改一次。
+
+**别并行跑两个测试进程**：`out/_test_data/` 是固定的，两边同时写同一份副本时
+`shutil.copy2` 会撞上 `WinError 1224`（目标文件正被映射着）。实测过：两条
+`python -m unittest` 同时起，第二条在导入阶段就报这个错；串行跑两次都是
+`Ran 285 tests / OK`。这不是用例的错，是"副本目录只有一份"的代价。
 
 **金标准场次先复制再读**：`tests/test_i3pro.py` 在导入时把两份金标准场次复制到
 `out/_test_data/`（实测各 1 份、共 148.2 MB，复制 0.08 s；该目录每轮先清空），
@@ -1994,7 +2223,14 @@ python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘�
 | `TestIndependentParsers` | 第二套实现交叉验证、213 通道 CSV 全量对照 |
 | `TestBeaconUndo` | 撤销的纯函数层：什么是"同一版"、什么时候没有可撤销的一步、交回去的是上一版本身 |
 | `TestBeaconUndoOverHttp` | 撤销走真实 `PUT`：改名 / 插入 / 删除各自一步回到原样、`trusted` 迁移、落盘、一次无改动的保存不吃掉上一步、没有可撤销的一步时 400 并说明下一步、页面注入的 `laps_can_undo` 三态 |
-| `TestViewerScript` | 无头驱动前端：脚本里 **402 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
+| `TestViewerScript` | 无头驱动前端：脚本里 **442 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
+| `TestExportRangeResolution` | 导出的范围解析（#23，4 项）：裸时钟沿用场次那天、范围左闭右闭、颠倒/越界各自说下一步、距离段填的是米而 `t_start` 才是秒 |
+| `TestExportRanges` / `TestExportSampling` / `TestExportFiles` / `TestExportErrors` / `TestExportPerformance` | 导出的数据面（#23，17 项）：auto 保留原始采样点且含起止点、绝对时间与相对秒逐字节相同、距离轴不倒退、统一采样率不留空格、`linear`/`hold`/`mean` 各给各的数、`plan` 行数 = 实际行数、CSV 带 BOM、zip 里的 `metadata.json`、长表只写有值的格子、xlsx 的 openpyxl 往返、五类坏输入的下一步、分块写的峰值内存守门 |
+| `TestExportEstimate` | 预估对得上真文件（#23，1 项）：真写一次 CSV，把"预估 ÷ 实际"锁在 0.5×–2×，并断言预估行数 = 实际行数（标定常数被改坏就红） |
+| `TestExportTimestampIndex` | 绝对时间主索引（#27，7 项）：时间戳列 = 场次起点 + 相对秒（与 `epoch_of` 对拍）、长表首列逐字是 `timestamp`、元数据写明"起点精确到秒"且不选它时不出现、距离轴配时间戳是 400、时间轴配 `distance_m` 是 400、没有日期时间的场次说下一步、Excel 里是文本时间戳而不是数字 |
+| `TestXlsxWriter` | 标准库写的 `.xlsx`（#23，5 项）：列名、单元格往返（空值 / NaN / 尖括号与和号）、`MAX_ROWS` 调小后真分表（99+99+99+3，不丢不重）、关掉分表要大声报错、超列数说改用 CSV |
+| `TestApiLayerWithoutASocket` | API 层（#26，5 项）：不起 socket 直接调一个动作、路由表每行都有实现、动作清单就是那 16 个、每个请求都拿得到回复、请求体按需读 |
+| `TestStructureOfTheSplit` | 结构性重构的守卫（#23 / #24 / #25 / #26，11 项）：`server.py` 只剩 HTTP 管道、动作分派只有一张表、库不反向依赖服务、老名字仍可用、信标住 `beacons.py`、距离轴住 `axes.py`、`laps.py` 只剩切圈、三模块共用同一份对象、**HTTP 用例共用一个夹具**（全场只有一处起服务） |
 | `TestComponentRegistry` | 组件类型注册表（#17 / #19 / #20 / #21，6 项）：每种显示形式都在表里、分派只剩"哪个是图"与"哪一列是文字列"（实测 10 处）、每种形式都声明了怎么画与怎么取数、取数只有一条路（六个端点不许自己 fetch）、自检形式只挂在无头驱动的标记上 |
 | `TestChannelSeam` | 通道接缝（#18，10 项）：那条规则只准写在一个模块里（扫源码）、会话必须显式声明三样、原生通道保留自己的采样率与单位、同名覆盖时保持因子/采样率/单位、Parquet 写出的是派生列本身、挂载与卸载走声明、金标准 437 条通道逐条与旧公式一致（无数学通道时逐点不变） |
 | `TestNotes` / `TestNotesOverHttp` | 注释（#15，15 项）：文字折行与截断、时刻校验的下一步、增删改不改原表、距离在主采样上插值、轨迹取最近抽稀点、越界不猜位置、侧车往返与坏文件、**注释不动圈速表**、HTTP 的 PUT 落盘 / 400 说明下一步 / `.ld` 字节不变 |

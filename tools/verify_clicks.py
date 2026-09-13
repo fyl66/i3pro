@@ -1295,6 +1295,36 @@ class Checker:
         self.check("把范围改成 10–12 s、10 Hz 之后预估变成 21 行", small,
                    self.js("document.getElementById('exportPlan').textContent"))
 
+        # #27：主索引换成绝对时间戳（同一根时间轴换一种写法），要能拿到服务端的预估，
+        # 而且真导出来的首行必须就是 `timestamp,`——这条只有真服务 + 真数据才算数。
+        self.js(
+            "i3pro.applyExportConfig({range:'time',from:'10',to:'12',channels:'all',"
+            "maths:true,rate:'10',custom:'',resample:'linear',meta:false,axis:'timestamp',"
+            "format:'csv',layout:'wide'}); i3pro.refreshExportPlan(); true"
+        )
+        stamped = self.browser.wait_for(
+            "document.getElementById('exportPlan').textContent.indexOf('timestamp') >= 0",
+            self.session, timeout=30,
+        )
+        self.check("主索引选绝对时间戳后，预估里写明 timestamp（#27）", stamped,
+                   self.js("document.getElementById('exportPlan').textContent"))
+        probe = self.js(
+            "(async()=>{const u=i3pro.exportURL({range:'time',from:'10',to:'12',"
+            "channels:'all',maths:true,rate:'10',custom:'',resample:'linear',meta:false,"
+            "axis:'timestamp',format:'csv',layout:'wide'},false).href;"
+            "const r=await fetch(u);const t=await r.text();"
+            "return r.status+'|'+t.slice(0,40);})()"
+        )
+        self.check("绝对时间戳导出的首行就是 timestamp,（真服务 + 真数据）",
+                   str(probe).startswith("200|") and "timestamp," in str(probe),
+                   str(probe)[:120])
+        # 换回相对秒：下面要**真下载**一个文件，那几条断言认的表头是 time_s
+        self.js(
+            "i3pro.applyExportConfig({range:'time',from:'10',to:'12',channels:'all',"
+            "maths:true,rate:'10',custom:'',resample:'linear',meta:false,axis:'time',"
+            "format:'csv',layout:'wide'}); true"
+        )
+
         go = json.loads(self.js(
             "(function(){var b=document.getElementById('exportGo');"
             "var r=b.getBoundingClientRect();"

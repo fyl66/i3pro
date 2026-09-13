@@ -13,18 +13,22 @@ Run:  python -m unittest discover -s tests -v
 from __future__ import annotations
 
 import json
+import contextlib
 import dataclasses
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from dataclasses import replace
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +40,7 @@ from i3pro import (  # noqa: E402
     channels, csvlog, derive, gpsfix, laps as lapsmod, ld, maths as mathsmod, motec_csv,
     notes as notesmod, render, report as reportmod, sections as sectionsmod,
     server, sidecar, store, timebase,
+    export as exportmod, xlsx as xlsxmod,
 )
 
 DATA = ROOT / "i2pro_data"
@@ -63,6 +68,14 @@ def _return_sidecar(sidecar: Path, kept: bytes | None) -> None:
         sidecar.unlink(missing_ok=True)
     else:
         sidecar.write_bytes(kept)
+
+
+def _class_body(text: str, name: str) -> str:
+    """抠出一个测试类的正文（到下一个顶层 ``class`` 为止）——给扫源码的守卫用。"""
+    start = text.index(f"class {name}(")
+    rest = text[start:]
+    end = rest.find("\nclass ", 1)
+    return rest[:end] if end > 0 else rest
 
 
 #: 测试只碰这份副本，不碰 ``i2pro_data`` 里的金标准场次本身。
@@ -101,6 +114,159 @@ LIBRARY_ROOTS = [STAGE, DATA]
 
 def _needs(path: Path):
     return unittest.skipUnless(path.exists(), f"sample log not present: {path.name}")
+
+
+class _Http:
+    """一个正在跑的工作台服务，``http_session`` 交给用例的那个句柄。
+
+    四种取数形状不是随手加的，它们对应仓库里真实存在的四种用法：
+
+    * ``get_json`` / ``put_json`` / ``get_text``——**非 2xx 直接抛 HTTPError**。
+      信标编辑那几组靠 ``assertRaises(urllib.error.HTTPError)`` 判 400。
+    * ``json`` / ``raw``——**返回 ``(状态码, 内容)``**，成功与失败都要看内容
+      （区段 / 注释 / GPS / 直方图 / 频谱 / 数学通道那几组逐条判错）。
+
+    之前这九组用例各自抄一遍 ``ThreadingHTTPServer`` + ``urlopen`` + 这四个小
+    函数，抄到后来同一个 400 在不同用例里被解码成了不同形状。加一个动作不该
+    顺手把 HTTP 客户端也再写一遍（ticket #26）。
+    """
+
+    def __init__(self, base, quoted, session, copy, root, before, library, httpd):
+        self.base = base
+        self.quoted = quoted
+        self.session = session
+        self.copy = copy
+        self.root = root
+        #: 服务起来**之前** `.ld` 的字节。用例靠它判"跑一趟 HTTP 有没有动原文件"。
+        self.before = before
+        self.library = library
+        self.httpd = httpd
+        self._closed = False
+
+    def close(self):
+        """关服务与场次缓存。**幂等**：用例自己关过，夹具再兜一次底也不出错。
+
+        用例显式写 ``finally: http.close()`` 是为了让"服务什么时候停"在测试里
+        看得见；夹具的 ``finally`` 是给"还没进 try 就抛了"那种情况兜底的。
+        """
+        if self._closed:
+            return
+        self._closed = True
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.library.close()
+
+    def url(self, path: str) -> str:
+        return self.base + path
+
+    def get_json(self, path: str, timeout: float = 30):
+        with urllib.request.urlopen(self.base + path, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def get_text(self, path: str, timeout: float = 30) -> str:
+        with urllib.request.urlopen(self.base + path, timeout=timeout) as response:
+            return response.read().decode("utf-8")
+
+    def get_bytes(self, path: str, timeout: float = 120):
+        """``(状态码, 原始字节)``，**非 2xx 抛 HTTPError**（报表那条靠它判 400）。"""
+        with urllib.request.urlopen(self.base + path, timeout=timeout) as response:
+            return response.status, response.read()
+
+    def put_json(self, path: str, payload, timeout: float = 30):
+        request = urllib.request.Request(
+            self.base + path, data=json.dumps(payload).encode("utf-8"), method="PUT",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def get(self, path: str, timeout: float = 120):
+        """``(状态码, 解码后的 JSON)``；400 也照样解码返回，不抛。"""
+        return self.json(path, timeout=timeout)
+
+    def request(self, path: str, method: str = "GET", payload=None, timeout: float = 120):
+        return self.json(path, method, payload, timeout)
+
+    def raw(self, path: str, method: str = "GET", payload=None, timeout: float = 120):
+        data = None if payload is None else json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(self.base + path, data=data, method=method)
+        if data is not None:
+            request.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return response.status, response.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read()
+
+    def json(self, path: str, method: str = "GET", payload=None, timeout: float = 120):
+        status, raw = self.raw(path, method, payload, timeout)
+        return status, json.loads(raw.decode("utf-8"))
+
+    def page_payload(self):
+        """工作台页面里注入的那份 ``const DATA = {...}``。"""
+        html = self.get_text(f"/session/{self.quoted}", timeout=60)
+        start = html.index("const DATA = ") + len("const DATA = ")
+        payload, _end = json.JSONDecoder().raw_decode(html[start:])
+        return payload
+
+
+@contextlib.contextmanager
+def http_session(session: Path, *, buckets: int = 200, roots=None, root=None,
+                 maths_root=None, cache_size: int = 1):
+    """起一个真服务（后台线程 + 随机端口），退出时关干净。
+
+    ``session`` 是要用的场次（传 ``HILL`` / ``ENDURANCE`` 这样的 Path）。三种形态：
+
+    * 什么都不给：把场次**复制**进一个新的临时目录，`roots` 只有它、
+      `maths_root` 也是它。侧车落在临时目录里，`.ld` 一个字节不动——这是默认，
+      也是大多数用例该用的那个。
+    * ``roots=``：用现成的根目录（``LIBRARY_ROOTS``：副本在前、真数据在后）。
+      ``root`` 缺省取 ``roots[0]``，所以 ``handle.copy`` 仍然指得到那份 `.ld`。
+    * ``root=``：用你**自己准备好**的目录（里面已经有同名场次、甚至已经写好侧车）。
+      这个目录不归夹具所有，退出时不删——`TestSidecar` 那条要靠它先把侧车摆好。
+
+    每个 `with` 用完就关服务、关场次缓存；临时目录也一起删。
+    """
+    owned = None
+    handle = None
+    try:
+        if root is None:
+            if roots is not None:
+                root = Path(roots[0])
+            else:
+                owned = tempfile.TemporaryDirectory(
+                    prefix="i3pro-http-", ignore_cleanup_errors=True
+                )
+                root = Path(owned.name)
+                (root / session.name).write_bytes(session.read_bytes())
+                roots = [root]
+                if maths_root is None:
+                    maths_root = root
+        root = Path(root)
+        if roots is None:
+            roots = [root]
+        library = server.SessionLibrary(roots, cache_size=cache_size, maths_root=maths_root)
+        httpd = ThreadingHTTPServer(
+            ("127.0.0.1", 0), server.make_handler(library, buckets=buckets)
+        )
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        copy = root / session.name
+        handle = _Http(
+            base=f"http://127.0.0.1:{httpd.server_address[1]}",
+            quoted=urllib.parse.quote(session.stem),
+            session=session.stem,
+            copy=copy,
+            root=root,
+            before=copy.read_bytes() if copy.exists() else b"",
+            library=library,
+            httpd=httpd,
+        )
+        yield handle
+    finally:
+        if handle is not None:
+            handle.close()
+        if owned is not None:
+            owned.cleanup()
 
 
 class TestHeader(unittest.TestCase):
@@ -343,25 +509,10 @@ class TestRender(unittest.TestCase):
 class TestServer(unittest.TestCase):
     @_needs(HILL)
     def test_http_api_end_to_end(self):
-        from http.server import ThreadingHTTPServer
+        with http_session(HILL, roots=LIBRARY_ROOTS, buckets=250) as http:
+            base = http.base
+            get_json, get_text = http.get_json, http.get_text
 
-        library = server.SessionLibrary(LIBRARY_ROOTS, cache_size=1)
-        httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(library, buckets=250))
-        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-        thread.start()
-        base = f"http://127.0.0.1:{httpd.server_address[1]}"
-
-        def get_json(path):
-            with urllib.request.urlopen(base + path, timeout=30) as response:
-                self.assertEqual(response.status, 200)
-                return json.loads(response.read().decode("utf-8"))
-
-        def get_text(path):
-            with urllib.request.urlopen(base + path, timeout=30) as response:
-                self.assertEqual(response.status, 200)
-                return response.read().decode("utf-8")
-
-        try:
             sessions = get_json("/api/sessions")
             self.assertTrue(any(s["name"] == HILL.stem for s in sessions))
             quoted = urllib.parse.quote(HILL.stem)
@@ -463,10 +614,6 @@ class TestServer(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError) as caught:
                 urllib.request.urlopen(base + "/api/session/nope/trace", timeout=15)
             self.assertEqual(caught.exception.code, 404)
-        finally:
-            httpd.shutdown()
-            httpd.server_close()
-            library.close()
 
 
 class TestLapModes(unittest.TestCase):
@@ -813,29 +960,12 @@ class TestBeaconEditingOverHttp(unittest.TestCase):
 
     @_needs(HILL)
     def test_insert_rename_and_the_range_guard(self):
-        from http.server import ThreadingHTTPServer
-
-        library = server.SessionLibrary(LIBRARY_ROOTS, cache_size=1)
-        httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(library, buckets=200))
-        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-        thread.start()
-        base = f"http://127.0.0.1:{httpd.server_address[1]}"
-        quoted = urllib.parse.quote(HILL.stem)
         sidecar, kept_sidecar = _borrow_sidecar(HILL)
+        self.addCleanup(_return_sidecar, sidecar, kept_sidecar)
+        with http_session(HILL, roots=LIBRARY_ROOTS, buckets=200) as http:
+            base, quoted = http.base, http.quoted
+            get_json, put_json = http.get_json, http.put_json
 
-        def get_json(path):
-            with urllib.request.urlopen(base + path, timeout=30) as response:
-                return json.loads(response.read().decode("utf-8"))
-
-        def put_json(path, payload):
-            request = urllib.request.Request(
-                base + path, data=json.dumps(payload).encode("utf-8"), method="PUT",
-                headers={"Content-Type": "application/json"},
-            )
-            with urllib.request.urlopen(request, timeout=30) as response:
-                return json.loads(response.read().decode("utf-8"))
-
-        try:
             # ---- #5: an inserted crossing becomes a boundary of the automatic series
             before = get_json(f"/api/session/{quoted}/laps")
             auto = [row for row in before["laps"] if row["complete"]]
@@ -908,37 +1038,16 @@ class TestBeaconEditingOverHttp(unittest.TestCase):
             self.assertEqual([b["name"] for b in get_json(
                 f"/api/session/{quoted}/laps")["config"]["beacons"]],
                 ["左环A", "左环A 2"])
-        finally:
-            _return_sidecar(sidecar, kept_sidecar)
-            httpd.shutdown()
-            httpd.server_close()
-            library.close()
 
     @_needs(HILL)
     def test_the_distance_lookup_and_a_do_nothing_insert_over_http(self):
         """#5 needs metres -> seconds over HTTP, and a notice when nothing split."""
-        from http.server import ThreadingHTTPServer
-
-        library = server.SessionLibrary(LIBRARY_ROOTS, cache_size=1)
-        httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(library, buckets=200))
-        threading.Thread(target=httpd.serve_forever, daemon=True).start()
-        base = f"http://127.0.0.1:{httpd.server_address[1]}"
-        quoted = urllib.parse.quote(HILL.stem)
         sidecar, kept_sidecar = _borrow_sidecar(HILL)
+        self.addCleanup(_return_sidecar, sidecar, kept_sidecar)
+        with http_session(HILL, roots=LIBRARY_ROOTS, buckets=200) as http:
+            base, quoted = http.base, http.quoted
+            get_json, put_json = http.get_json, http.put_json
 
-        def get_json(path):
-            with urllib.request.urlopen(base + path, timeout=30) as response:
-                return json.loads(response.read().decode("utf-8"))
-
-        def put_json(path, payload):
-            request = urllib.request.Request(
-                base + path, data=json.dumps(payload).encode("utf-8"), method="PUT",
-                headers={"Content-Type": "application/json"},
-            )
-            with urllib.request.urlopen(request, timeout=30) as response:
-                return json.loads(response.read().decode("utf-8"))
-
-        try:
             with ld.LogFile.read(HILL) as log:
                 exact = lapsmod.time_at_distance(log, 1500.0)
             self.assertIsNotNone(exact)
@@ -959,11 +1068,6 @@ class TestBeaconEditingOverHttp(unittest.TestCase):
                              "a crossing on an existing boundary changed the lap set")
             self.assertIn("没有切出新圈", same["notice"] or "",
                           "the UI was given nothing to tell the user with")
-        finally:
-            _return_sidecar(sidecar, kept_sidecar)
-            httpd.shutdown()
-            httpd.server_close()
-            library.close()
 
 
 class TestBeaconUndo(unittest.TestCase):
@@ -1029,39 +1133,16 @@ class TestBeaconUndoOverHttp(unittest.TestCase):
 
     @_needs(HILL)
     def test_rename_insert_and_delete_are_each_one_step_back(self):
-        from http.server import ThreadingHTTPServer
-
-        library = server.SessionLibrary(LIBRARY_ROOTS, cache_size=1)
-        httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(library, buckets=200))
-        threading.Thread(target=httpd.serve_forever, daemon=True).start()
-        base = f"http://127.0.0.1:{httpd.server_address[1]}"
-        quoted = urllib.parse.quote(HILL.stem)
         sidecar, kept_sidecar = _borrow_sidecar(HILL)
+        self.addCleanup(_return_sidecar, sidecar, kept_sidecar)
+        with http_session(HILL, roots=LIBRARY_ROOTS, buckets=200) as http:
+            base, quoted = http.base, http.quoted
+            get_json, put_json = http.get_json, http.put_json
+            page_payload = http.page_payload
 
-        def get_json(path):
-            with urllib.request.urlopen(base + path, timeout=30) as response:
-                return json.loads(response.read().decode("utf-8"))
+            def on_disk():
+                return json.loads(sidecar.read_text(encoding="utf-8"))
 
-        def put_json(path, payload):
-            request = urllib.request.Request(
-                base + path, data=json.dumps(payload).encode("utf-8"), method="PUT",
-                headers={"Content-Type": "application/json"},
-            )
-            with urllib.request.urlopen(request, timeout=30) as response:
-                return json.loads(response.read().decode("utf-8"))
-
-        def page_payload():
-            """页面注入的那份 payload：刷新之后界面就是靠它知道按钮该不该亮。"""
-            with urllib.request.urlopen(base + "/session/" + quoted, timeout=60) as response:
-                html = response.read().decode("utf-8")
-            start = html.index("const DATA = ") + len("const DATA = ")
-            payload, _end = json.JSONDecoder().raw_decode(html[start:])
-            return payload
-
-        def on_disk():
-            return json.loads(sidecar.read_text(encoding="utf-8"))
-
-        try:
             start = get_json(f"/api/session/{quoted}/laps")
             self.assertFalse(start["can_undo"],
                              "一个刚起的服务不该声称有可撤销的一步")
@@ -1142,11 +1223,6 @@ class TestBeaconUndoOverHttp(unittest.TestCase):
             self.assertIn("改一次信标", message, "报错没有告诉用户下一步做什么")
             self.assertEqual([b["name"] for b in on_disk()["beacons"]], ["左环"],
                              "被拒绝的撤销动了边车")
-        finally:
-            _return_sidecar(sidecar, kept_sidecar)
-            httpd.shutdown()
-            httpd.server_close()
-            library.close()
 
 
 class TestDistanceAxisLookup(unittest.TestCase):
@@ -1863,9 +1939,10 @@ class TestSidecar(unittest.TestCase):
     def test_三条路径读到的侧车逐字节一致(self):
         """快照（`render.build_payload`）/ serve（HTTP）/ 命令行读的是同一份。"""
         import tempfile
-        from http.server import ThreadingHTTPServer
 
-        # 服务端的会话缓存把 `.ld` 映射在内存里，删临时目录前它得先放掉；
+        # 侧车要在服务起来**之前**摆好，所以这个目录由用例自己建、自己管
+        # （`root=` 那种形态：夹具不拥有它，也不删它）。
+        # 服务端的会话缓存把 `.ld` 映射在内存里，夹具会先关缓存再删目录；
         # `ignore_cleanup_errors` 让这个平台差异不至于把测试判红。
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             root = Path(tmp)
@@ -1887,20 +1964,8 @@ class TestSidecar(unittest.TestCase):
             snapshot_view = payload["laps_config"]
 
             # ③ serve 那条：HTTP 拿到的
-            library = server.SessionLibrary([root], cache_size=1)
-            httpd = ThreadingHTTPServer(
-                ("127.0.0.1", 0), server.make_handler(library, buckets=200))
-            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-            thread.start()
-            base = f"http://127.0.0.1:{httpd.server_address[1]}"
-            try:
-                quoted = urllib.parse.quote(copy.stem)
-                with urllib.request.urlopen(
-                        f"{base}/api/session/{quoted}/laps", timeout=30) as response:
-                    serve_view = json.loads(response.read().decode("utf-8"))["config"]
-            finally:
-                httpd.shutdown()
-                httpd.server_close()
+            with http_session(HILL, root=root, buckets=200) as http:
+                serve_view = http.get_json(f"/api/session/{http.quoted}/laps")["config"]
 
             same = json.dumps(cli_view, sort_keys=True, ensure_ascii=False)
             self.assertEqual(same, json.dumps(snapshot_view, sort_keys=True, ensure_ascii=False))
@@ -3071,32 +3136,11 @@ class TestSectionsOverHttp(unittest.TestCase):
 
     @_needs(HILL)
     def test_sections_are_served_saved_and_protected(self):
-        import tempfile
-        from http.server import ThreadingHTTPServer
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            copy = root / HILL.name
-            copy.write_bytes(HILL.read_bytes())
-            before = copy.read_bytes()
-            library = server.SessionLibrary([root], cache_size=1, maths_root=root)
-            httpd = ThreadingHTTPServer(
-                ("127.0.0.1", 0), server.make_handler(library, buckets=200)
-            )
-            threading.Thread(target=httpd.serve_forever, daemon=True).start()
-            base = f"http://127.0.0.1:{httpd.server_address[1]}"
-            quoted = urllib.parse.quote(copy.stem)
-
-            def request(path, method="GET", payload=None):
-                body = None if payload is None else json.dumps(payload).encode("utf-8")
-                req = urllib.request.Request(base + path, data=body, method=method)
-                if body is not None:
-                    req.add_header("Content-Type", "application/json")
-                try:
-                    with urllib.request.urlopen(req, timeout=120) as response:
-                        return response.status, json.loads(response.read().decode("utf-8"))
-                except urllib.error.HTTPError as exc:
-                    return exc.code, json.loads(exc.read().decode("utf-8"))
+        with http_session(HILL, buckets=200) as http:
+            root, copy, quoted = http.root, http.copy, http.quoted
+            library = http.library
+            before = http.before
+            request = http.json
 
             try:
                 # 没存过侧车：GET 也要给出"按缺省参数切好的一份"（不落盘）
@@ -3191,8 +3235,7 @@ class TestSectionsOverHttp(unittest.TestCase):
                             library.get(copy.stem))))[-1]), 1))
                 self.assertIn("整理", state["notice"] or "")
             finally:
-                httpd.shutdown()
-                library.close()
+                http.close()
 
 
 class _TableChannel:
@@ -3527,24 +3570,9 @@ class TestReportOverHttp(unittest.TestCase):
 
     @_needs(HILL)
     def test_report_endpoint_serves_both_tables_and_csv(self):
-        import tempfile
-        from http.server import ThreadingHTTPServer
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            copy = root / HILL.name
-            copy.write_bytes(HILL.read_bytes())
-            library = server.SessionLibrary([root], cache_size=1, maths_root=root)
-            httpd = ThreadingHTTPServer(
-                ("127.0.0.1", 0), server.make_handler(library, buckets=200)
-            )
-            threading.Thread(target=httpd.serve_forever, daemon=True).start()
-            base = f"http://127.0.0.1:{httpd.server_address[1]}"
-            quoted = urllib.parse.quote(copy.stem)
-
-            def get(path):
-                with urllib.request.urlopen(base + path, timeout=120) as response:
-                    return response.status, response.read()
+        with http_session(HILL, buckets=200) as http:
+            quoted = http.quoted
+            get = http.get_bytes
 
             try:
                 status, raw = get(f"/api/session/{quoted}/report")
@@ -3579,8 +3607,7 @@ class TestReportOverHttp(unittest.TestCase):
                 message = json.loads(caught.exception.read().decode("utf-8"))["error"]
                 self.assertIn("filter 只认", message)
             finally:
-                httpd.shutdown()
-                library.close()
+                http.close()
 
 
 class TestNotes(unittest.TestCase):
@@ -3734,32 +3761,10 @@ class TestNotesOverHttp(unittest.TestCase):
 
     @_needs(HILL)
     def test_notes_endpoint(self):
-        import tempfile
-        from http.server import ThreadingHTTPServer
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            copy = root / HILL.name
-            copy.write_bytes(HILL.read_bytes())
-            original = copy.read_bytes()
-            library = server.SessionLibrary([root], cache_size=1, maths_root=root)
-            httpd = ThreadingHTTPServer(
-                ("127.0.0.1", 0), server.make_handler(library, buckets=50)
-            )
-            threading.Thread(target=httpd.serve_forever, daemon=True).start()
-            base = f"http://127.0.0.1:{httpd.server_address[1]}"
-            quoted = urllib.parse.quote(copy.stem)
-
-            def request(path, method="GET", payload=None):
-                data = None if payload is None else json.dumps(payload).encode("utf-8")
-                req = urllib.request.Request(base + path, data=data, method=method)
-                if data is not None:
-                    req.add_header("Content-Type", "application/json")
-                try:
-                    with urllib.request.urlopen(req, timeout=120) as response:
-                        return response.status, json.loads(response.read().decode("utf-8"))
-                except urllib.error.HTTPError as exc:
-                    return exc.code, json.loads(exc.read().decode("utf-8"))
+        with http_session(HILL, buckets=50) as http:
+            root, copy, quoted = http.root, http.copy, http.quoted
+            original = http.before
+            request = http.json
 
             try:
                 status, body = request(f"/api/session/{quoted}/notes")
@@ -3813,8 +3818,7 @@ class TestNotesOverHttp(unittest.TestCase):
                 self.assertEqual(status, 200, body)
                 self.assertEqual(body["notes"], [])
             finally:
-                httpd.shutdown()
-                library.close()
+                http.close()
 
 
 class TestApiLayerWithoutASocket(unittest.TestCase):
@@ -3959,6 +3963,36 @@ class TestStructureOfTheSplit(unittest.TestCase):
         self.assertEqual(response.headers[0][0], "Content-Disposition")
         self.assertFalse(response.close)
 
+    # ------------------------------------------------------------- #26 HTTP 缝
+    def test_HTTP_用例共用一个夹具(self):
+        """加一个动作不该顺手再抄一遍服务端脚手架（ticket #26）。
+
+        改造前这份文件里有 **13 处** ``ThreadingHTTPServer(...)``、**20 处**
+        ``urllib.request.urlopen``：同一个 400 在不同用例里被解成了不同形状，
+        而"这条动作怎么回"的判据散在九组用例里各写一遍。现在只有
+        ``http_session`` 里那一处。
+        """
+        tests = (ROOT / "tests" / "test_i3pro.py").read_text(encoding="utf-8")
+        # 针尖掰成两半：整串写在源码里的话，这条断言会把自己那份字面量也数进去
+        # （`_code` 那个辅助函数注释里写过同一个坑）。
+        needle = "= ThreadingHTTP" + "Server("
+        self.assertEqual(
+            tests.count(needle), 1,
+            "又有人自己起服务了：HTTP 用例请写 `with http_session(场次) as http:`",
+        )
+        self.assertIn("def http_session(", tests)
+        for name in ("TestBeaconEditingOverHttp", "TestBeaconUndoOverHttp",
+                     "TestSectionsOverHttp", "TestReportOverHttp",
+                     "TestNotesOverHttp", "TestGpsFixOverHttp",
+                     "TestHistogramOverHttp", "TestSpectrumOverHttp",
+                     "TestMathsOverHttp"):
+            body = _class_body(tests, name)
+            self.assertIn("http_session(", body, f"{name} 没有走共享夹具")
+            self.assertNotIn(
+                "urllib.request.urlopen", body,
+                f"{name} 又在自己拼 urllib 了：请求形状应当只在 `_Http` 上有一处。",
+            )
+
     # ------------------------------------------------------------- #24 切圈
     def test_信标配置住在_beacons(self):
         beacons = self._text("beacons.py")
@@ -4004,6 +4038,558 @@ class TestStructureOfTheSplit(unittest.TestCase):
             )
 
 
+class _ExportBase(unittest.TestCase):
+    """导出用例的公共底座：金标准场次的**副本** + 一个用完就删的临时目录。
+
+    读副本而不是 ``i2pro_data`` 按仓库约定来（侧车是用户资产，队员给金标准场次
+    存一次编辑不该把测试弄红）。导出这条路只读 ``.ld``，但约定一视同仁。
+
+    ``export.write`` 一次可能写几百 MB，所以临时目录用 ``TemporaryDirectory``
+    而不是 ``mkdtemp``——用例失败时也不会把垃圾留在 ``out/`` 里。
+    """
+
+    SESSION = HILL
+
+    @classmethod
+    def setUpClass(cls):
+        if not cls.SESSION.exists():
+            raise unittest.SkipTest(f"缺金标准数据 {cls.SESSION.name}")
+        cls.log = ld.LogFile.read(cls.SESSION)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.log.close()
+
+    def request(self, **params):
+        base = {"channels": "selected", "names": "Vx KF"}
+        base.update(params)
+        return exportmod.parse_request(self.log, base)
+
+    def tmp(self):
+        directory = tempfile.TemporaryDirectory(prefix="i3pro-exp-")
+        self.addCleanup(directory.cleanup)
+        return Path(directory.name)
+
+
+class TestExportRangeResolution(_ExportBase):
+    """范围解析：需求里点名的那几种写法都要能落到同一段数据上（ticket #23）。
+
+    "12:34:56.789 到 12:35:10.123" 是需求原文里的例子——第二个端点是**裸时钟**，
+    日期沿用场次那一天。这条一开始漏了（只认完整日期时间），所以钉在这里。
+    """
+
+    def _request(self, **params):
+        return exportmod.parse_request(self.log, params)
+
+    def test_裸时钟沿用场次那一天的日期(self):
+        exact = self._request(axis="time", absolute="1",
+                              **{"from": "2026-09-08 15:48:32.5"}, to="2026-09-08 15:48:35.0")
+        bare = self._request(axis="time", absolute="1",
+                             **{"from": "15:48:32.5"}, to="15:48:35.0")
+        self.assertAlmostEqual(exact.start, 10.5, places=3)
+        self.assertAlmostEqual(bare.start, exact.start, places=6)
+        self.assertAlmostEqual(bare.end, exact.end, places=6)
+        self.assertAlmostEqual(bare.end - bare.start, 2.5, places=3)
+
+    def test_范围左闭右闭(self):
+        """起止点都算在里头：0–2 s、10 Hz 是 21 行（0.0 … 2.0），不是 20 行。"""
+        request = self._request(axis="time", **{"from": "0"}, to="2", rate="10",
+                                channels="selected", names="Vx KF")
+        self.assertEqual(exportmod.plan(self.log, request)["rows"], 21)
+
+    def test_时间范围颠倒或者越界要说下一步(self):
+        with self.assertRaises(exportmod.ExportError) as caught:
+            self._request(axis="time", **{"from": "20"}, to="10")
+        self.assertIn("from", str(caught.exception))
+        with self.assertRaises(exportmod.ExportError) as caught:
+            self._request(axis="time", **{"from": "0"}, to="99999")
+        self.assertIn("超出场次长度", str(caught.exception))
+
+    def test_距离段按米换算成时刻(self):
+        request = self._request(axis="distance", **{"from": "1200"}, to="1250")
+        # 距离轴上 ``start`` / ``end`` 仍是**米**（范围是人填的那两个数），
+        # 换算成时刻的是 ``t_start`` / ``t_end``——这一条把两个坐标都钉住，
+        # 免得哪天有人把米当秒写进窗口还不报错。
+        self.assertAlmostEqual(request.start, 1200.0, places=6)
+        self.assertAlmostEqual(request.end, 1250.0, places=6)
+        expected = lapsmod.time_at_distance(self.log, 1200.0)
+        self.assertIsNotNone(expected)
+        self.assertAlmostEqual(request.t_start, expected, places=6)
+        self.assertGreater(request.t_end, request.t_start)
+        self.assertTrue(exportmod.plan(self.log, request)["rows"] > 0)
+
+
+class TestExportRanges(_ExportBase):
+    """范围 → 数据：闭区间、绝对时间、距离轴（ticket #23）。"""
+
+    def test_auto_wide_keeps_raw_samples_and_is_inclusive(self):
+        """``rate=auto`` 不重采样：12.50 s 与 18.00 s 那两个样本都要在结果里。"""
+        request = self.request(**{"from": "12.5", "to": "18.0"})
+        path = self.tmp() / "a.csv"
+        stats = exportmod.write(self.log, request, path)
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+        header, rows = lines[0], lines[1:]
+        self.assertEqual(header, "time_s,Vx KF [km/h]")
+        self.assertEqual(stats["rows"], len(rows))
+        values = self.log.values(self.log.channel("Vx KF"))
+        expected = values[1250:1801]  # 左闭右闭：12.50 与 18.00 都在里面
+        self.assertEqual(len(rows), expected.size)
+        self.assertAlmostEqual(float(rows[0].split(",")[0]), 12.5, places=9)
+        self.assertAlmostEqual(float(rows[-1].split(",")[0]), 18.0, places=9)
+        for row, want in zip(rows, expected):
+            self.assertAlmostEqual(float(row.split(",")[1]), float(want), places=6)
+
+    def test_absolute_time_equals_relative_seconds(self):
+        """绝对时间与相对秒指的是同一段：两份文件应当一个字节不差。"""
+        from datetime import datetime, timedelta
+
+        epoch = exportmod.epoch_of(self.log)
+        self.assertIsNotNone(epoch, "这个场次的头里应该有日期时间")
+        start = datetime.fromtimestamp(epoch) + timedelta(seconds=12.5)
+        end = datetime.fromtimestamp(epoch) + timedelta(seconds=18.0)
+        relative = self.request(**{"from": "12.5", "to": "18.0"})
+        absolute = self.request(
+            absolute="1",
+            **{"from": start.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+               "to": end.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]},
+        )
+        self.assertAlmostEqual(absolute.start, relative.start, places=3)
+        self.assertAlmostEqual(absolute.end, relative.end, places=3)
+        one, two = self.tmp() / "r.csv", self.tmp() / "a.csv"
+        exportmod.write(self.log, relative, one)
+        exportmod.write(self.log, absolute, two)
+        self.assertEqual(one.read_bytes(), two.read_bytes())
+
+    def test_distance_axis_uses_metres(self):
+        """距离轴：第一列是米、不倒退、范围夹在 1200–1250 之间。"""
+        request = self.request(axis="distance", **{"from": "1200", "to": "1250"})
+        path = self.tmp() / "d.csv"
+        stats = exportmod.write(self.log, request, path)
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+        self.assertTrue(lines[0].startswith("distance_m,"))
+        distances = [float(row.split(",")[0]) for row in lines[1:]]
+        self.assertEqual(len(distances), stats["rows"])
+        self.assertGreaterEqual(min(distances), 1200.0 - 1e-6)
+        self.assertLessEqual(max(distances), 1250.0 + 1e-6)
+        self.assertTrue(all(b >= a for a, b in zip(distances, distances[1:])),
+                        "距离轴不能倒退")
+
+
+class TestExportSampling(_ExportBase):
+    """采样与对齐：统一采样率、三种重采样、预计行数 = 实际行数（ticket #23）。"""
+
+    def test_uniform_rate_gives_equal_length_columns(self):
+        request = self.request(rate="10", **{"from": "0", "to": "10",
+                                             "names": "Vx KF,Gear"})
+        path = self.tmp() / "u.csv"
+        stats = exportmod.write(self.log, request, path)
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+        self.assertEqual(stats["rows"], 101)  # 0.0 … 10.0 每 0.1 秒一个点
+        self.assertEqual(len(lines) - 1, 101)
+        # 1 Hz 的 Gear 被拉到 10 Hz：每一格都有值，没有空的
+        for row in lines[1:]:
+            self.assertNotIn(",,", row)
+            self.assertFalse(row.endswith(","))
+
+    def test_resample_methods_differ_on_slow_channel(self):
+        """``Gear`` 只有 1 Hz：线性插值与前值保持必须在同一时刻给不同的数。"""
+        times = np.arange(0.0, 2.0, 0.1)
+        linear = self.request(rate="10", **{"from": "0.2", "to": "1.2", "names": "Gear",
+                                            "resample": "linear"})
+        hold = self.request(rate="10", **{"from": "0.2", "to": "1.2", "names": "Gear",
+                                          "resample": "hold"})
+        one = exportmod._resampled(self.log, linear, "Gear", times)
+        two = exportmod._resampled(self.log, hold, "Gear", times)
+        values = self.log.values(self.log.channel("Gear"))
+        self.assertAlmostEqual(float(one[0]), float(values[2]), places=6)  # 0.2 s 线性
+        self.assertAlmostEqual(float(two[0]), float(values[0]), places=6)  # 0.2 s 前值
+
+    def test_mean_only_changes_downsampling(self):
+        """``mean`` 只对降采样有意义；升采样时与 ``linear`` 等价（契约原话）。"""
+        times = np.arange(0.0, 1.0, 0.5)
+        request = self.request(rate="2", names="Vx KF", resample="mean")
+        mean = exportmod._resampled(self.log, request, "Vx KF", times)
+        values = self.log.values(self.log.channel("Vx KF"))
+        self.assertAlmostEqual(float(mean[1]), float(values[25:75].mean()), places=4)
+        up = self.request(rate="200", names="Vx KF", resample="mean")
+        grid = np.arange(0.0, 0.1, 0.005)
+        mean_up = exportmod._resampled(self.log, up, "Vx KF", grid)
+        linear_up = exportmod._resampled(
+            self.log,
+            self.request(rate="200", names="Vx KF", resample="linear"),
+            "Vx KF",
+            grid,
+        )
+        np.testing.assert_allclose(mean_up, linear_up, equal_nan=True)
+
+    def test_plan_rows_match_actual_rows(self):
+        """面板上的"预计行数"必须与真导出的行数一致（两种版式各验一遍）。"""
+        for layout in ("wide", "long"):
+            request = self.request(rate="20", layout=layout, **{"from": "5", "to": "15"})
+            planned = exportmod.plan(self.log, request)
+            path = self.tmp() / f"{layout}.csv"
+            stats = exportmod.write(self.log, request, path)
+            self.assertEqual(planned["rows"], stats["rows"],
+                             f"{layout} 的预计行数对不上")
+
+
+class TestExportFiles(_ExportBase):
+    """落盘形状：BOM、zip 里的 metadata.json、长表、Excel（ticket #23）。"""
+
+    def test_csv_is_utf8_with_bom_and_reads_back(self):
+        import pandas as pd
+
+        request = self.request(**{"from": "0", "to": "1"})
+        path = self.tmp() / "bom.csv"
+        exportmod.write(self.log, request, path)
+        raw = path.read_bytes()
+        self.assertTrue(raw.startswith(b"\xef\xbb\xbf"), "CSV 要带 BOM，Excel 才不乱码")
+        frame = pd.read_csv(path)
+        self.assertEqual(list(frame.columns), ["time_s", "Vx KF [km/h]"])
+        self.assertEqual(len(frame), 101)
+
+    def test_bundle_carries_metadata_json(self):
+        request = self.request(bundle="1", **{"from": "0", "to": "1"})
+        path = self.tmp() / "b.zip"
+        exportmod.write(self.log, request, path)
+        with zipfile.ZipFile(path) as archive:
+            names = archive.namelist()
+            self.assertTrue(any(n.endswith(".csv") for n in names), names)
+            self.assertIn("metadata.json", names)
+            meta = json.loads(archive.read("metadata.json").decode("utf-8"))
+        for key in ("file", "range", "rate", "resample", "channels", "exported_at", "rows"):
+            self.assertIn(key, meta)
+        self.assertEqual(meta["file"], self.SESSION.name)
+        self.assertEqual(len(meta["channels"]), 1)
+        self.assertEqual(meta["range"]["bounds"], "左闭右闭")
+
+    def test_long_layout_only_writes_values(self):
+        request = self.request(layout="long", **{"from": "0", "to": "5",
+                                                 "names": "Vx KF,Gear"})
+        path = self.tmp() / "l.csv"
+        stats = exportmod.write(self.log, request, path)
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+        self.assertEqual(lines[0], "time_s,channel,value,unit")
+        self.assertEqual(len(lines) - 1, stats["rows"])
+        gear = [row for row in lines[1:] if row.split(",")[1] == "Gear"]
+        self.assertEqual(len(gear), 6)  # 0…5 秒，1 Hz
+        self.assertFalse(any(row.split(",")[2] == "" for row in lines[1:]))
+
+    def test_xlsx_round_trip(self):
+        """Excel 的独立裁判是 openpyxl：把文件读回来逐格比对（不是自己读自己）。"""
+        openpyxl = _openpyxl()
+        request = self.request(format="xlsx", rate="50",
+                               **{"from": "0", "to": "2", "names": "Vx KF,Gear"})
+        path = self.tmp() / "x.xlsx"
+        stats = exportmod.write(self.log, request, path)
+        book = openpyxl.load_workbook(path)
+        self.assertIn("元数据", book.sheetnames)
+        self.assertIn("数据1", book.sheetnames)
+        sheet = book["数据1"]
+        self.assertEqual([cell.value for cell in sheet[1]],
+                         ["time_s", "Vx KF [km/h]", "Gear"])
+        self.assertAlmostEqual(sheet["A2"].value, 0.0, places=9)
+        self.assertEqual(stats["rows"], sheet.max_row - 1)
+        keys = [row[0].value for row in book["元数据"].iter_rows(min_row=2)]
+        self.assertIn("日志文件", keys)
+        self.assertIn("通道来源", keys)
+
+
+class TestExportErrors(_ExportBase):
+    """坏输入说人话：每条报错都要带上"下一步改什么"（ticket #23）。"""
+
+    def test_reversed_range_says_what_to_do(self):
+        with self.assertRaises(exportmod.ExportError) as caught:
+            self.request(**{"from": "18", "to": "12.5"})
+        self.assertIn("from", str(caught.exception))
+
+    def test_out_of_range_says_the_session_length(self):
+        with self.assertRaises(exportmod.ExportError) as caught:
+            self.request(**{"from": "0", "to": "99999"})
+        self.assertIn("463", str(caught.exception))
+
+    def test_empty_range_says_no_data(self):
+        request = self.request(**{"from": "12.501", "to": "12.502", "rate": "auto"})
+        with self.assertRaises(exportmod.ExportError) as caught:
+            exportmod.plan(self.log, request)
+        self.assertIn("无数据", str(caught.exception))
+
+    def test_unknown_channel_names_the_first_one(self):
+        with self.assertRaises(exportmod.ExportError) as caught:
+            exportmod.parse_request(
+                self.log, {"channels": "selected", "names": "No Such Channel"}
+            )
+        self.assertIn("No Such Channel", str(caught.exception))
+        self.assertIn("info", str(caught.exception))
+
+    def test_bad_enum_values_are_named(self):
+        for params, needle in (
+            ({"axis": "furlongs"}, "axis"),
+            ({"format": "pdf"}, "format"),
+            ({"layout": "tall"}, "layout"),
+            ({"resample": "cubic"}, "resample"),
+            ({"rate": "-5"}, "rate"),
+        ):
+            with self.assertRaises(exportmod.ExportError) as caught:
+                self.request(**params)
+            self.assertIn(needle, str(caught.exception))
+
+
+class TestExportEstimate(_ExportBase):
+    """「预计行数和文件大小」要对得上真文件（需求 §5）。
+
+    标定过的常数在 ``export._EST_BYTES_PER_CELL`` / ``_EST_BYTES_PER_LONG_ROW``
+    （它们的出处是 ACCEPTANCE A45 里那张实测表）。这里真写一次文件，把
+    「预估 ÷ 实际」锁在 0.5×–2× 之间——常数哪天被改坏，这条会红。
+    """
+
+    def test_预估与真文件在一个量级内(self):
+        request = exportmod.parse_request(self.log, {
+            "channels": "selected", "names": "Vx KF,G Force Lat,G Force Long",
+            "from": "0", "to": "20", "rate": "10", "format": "csv", "layout": "wide",
+        })
+        planned = exportmod.plan(self.log, request)
+        out = self.tmp() / "estimate.csv"
+        stats = exportmod.write(self.log, request, out)
+        self.assertEqual(planned["rows"], stats["rows"], "预估行数必须与真导出一致")
+        ratio = planned["bytes"] / max(1, stats["bytes"])
+        self.assertTrue(
+            0.5 <= ratio <= 2.0,
+            f"体积预估偏了 {ratio:.2f}×：预估 {planned['bytes']} B，实际 {stats['bytes']} B",
+        )
+
+
+class TestExportTimestampIndex(_ExportBase):
+    """主索引可以写成**绝对时间戳**（``index=timestamp``，ticket #27）。
+
+    它是同一根时间轴的另一种写法：场次起点（``.ld`` 头里的日期时间，MoTeC 只写到秒）
+    + 相对秒。三条边界钉在这里：只配时间轴、起点缺失时要说下一步、CSV 与 Excel
+    两条出口写出来的必须是同一个字符串。
+    """
+
+    def stamp(self, **params):
+        base = {
+            "channels": "selected", "names": "Vx KF", "axis": "time",
+            "index": "timestamp", "from": "10", "to": "10.2", "rate": "10",
+        }
+        base.update(params)
+        return exportmod.parse_request(self.log, base)
+
+    def test_时间戳列等于场次起点加相对秒(self):
+        import datetime as _datetime
+
+        request = self.stamp()
+        out = self.tmp() / "stamp.csv"
+        stats = exportmod.write(self.log, request, out)
+        lines = out.read_text(encoding="utf-8-sig").splitlines()
+        self.assertEqual(lines[0].split(",")[:2], ["timestamp", "Vx KF [km/h]"])
+        epoch = exportmod.epoch_of(self.log)
+        self.assertIsNotNone(epoch, "金标准场次的头里应该有日期时间")
+        want = _datetime.datetime.fromtimestamp(epoch + 10.0).strftime("%Y-%m-%d %H:%M:%S.000")
+        self.assertEqual(lines[1].split(",")[0], want)
+        # 左闭右闭：10.0 / 10.1 / 10.2 三行，而且 plan 的行数与写出来的行数一致
+        self.assertEqual(stats["rows"], 3)
+        self.assertEqual(len(lines) - 1, stats["rows"])
+        self.assertEqual(exportmod.plan(self.log, request)["rows"], stats["rows"])
+        self.assertEqual(exportmod.plan(self.log, request)["index"], "timestamp")
+
+    def test_长表首列就叫_timestamp(self):
+        """需求里写的就是 ``timestamp, channel, value, unit``——长表的列名要照写。"""
+        request = self.stamp(layout="long")
+        out = self.tmp() / "stamp_long.csv"
+        stats = exportmod.write(self.log, request, out)
+        lines = out.read_text(encoding="utf-8-sig").splitlines()
+        self.assertEqual(lines[0], "timestamp,channel,value,unit")
+        self.assertEqual(stats["rows"], 3)
+        self.assertEqual(len(lines) - 1, stats["rows"])
+        self.assertTrue(lines[1].startswith("2026-09-08 15:48:32."), lines[1])
+
+    def test_元数据写明时间戳的精度(self):
+        """起点只有秒精度，这条必须写在元数据里，别让队友当成微秒级时钟。"""
+        meta = exportmod.metadata(self.log, self.stamp(), 3, 2)
+        self.assertEqual(meta["index"], "timestamp")
+        self.assertIn("起点精确到秒", meta["timestamp"]["source_precision"])
+        self.assertIsNotNone(meta["timestamp"]["epoch"])
+        keys = [str(row[0]) for row in exportmod._metadata_rows(meta)]
+        self.assertIn("时间戳列", keys)
+        # 不选时间戳时不该出现这一段（免得元数据里写着不存在的东西）
+        plain = exportmod.metadata(self.log, self.stamp(index="time_s"), 3, 2)
+        self.assertNotIn("timestamp", plain)
+
+    def test_距离轴配时间戳是参数错不是回退(self):
+        with self.assertRaises(exportmod.ExportError) as caught:
+            exportmod.parse_request(
+                self.log, {"channels": "all", "axis": "distance", "index": "timestamp"}
+            )
+        message = str(caught.exception)
+        self.assertIn("distance_m", message)
+        self.assertIn("axis=time", message)
+
+    def test_时间轴的主索引不许写_distance_m(self):
+        with self.assertRaises(exportmod.ExportError) as caught:
+            self.stamp(index="distance_m")
+        self.assertIn("axis=distance", str(caught.exception))
+
+    def test_没有日期时间的场次写不出时间戳(self):
+        import types
+
+        fake = types.SimpleNamespace(log_date="", log_time="")
+        with self.assertRaises(exportmod.ExportError) as caught:
+            exportmod._stamp_texts(fake, None, np.array([0.0]))
+        message = str(caught.exception)
+        self.assertIn("日期时间", message)
+        self.assertIn("time_s", message)
+
+    def test_excel_里也是文本时间戳而不是数字(self):
+        """Excel 出口走的是另一条写行代码（``_wide_row_lists``），单独钉一次。"""
+        openpyxl = _openpyxl()
+        request = self.stamp(format="xlsx")
+        out = self.tmp() / "stamp.xlsx"
+        stats = exportmod.write(self.log, request, out)
+        # 数据那张表带分表开关，所以名字是 数据1（元数据那张不带，才叫「元数据」）
+        sheet = openpyxl.load_workbook(out)[stats["names"][-1]]
+        self.assertEqual(sheet["A1"].value, "timestamp")
+        self.assertEqual(sheet["A2"].value, "2026-09-08 15:48:32.000")
+        self.assertIsInstance(sheet["B2"].value, (int, float))
+
+
+def _openpyxl():
+    """Excel 的**独立裁判**。开发机上没有它就跳过（规则 4 只豁免测试工具）。"""
+    try:
+        import openpyxl
+    except ImportError:  # pragma: no cover - 开发机上有
+        raise unittest.SkipTest("openpyxl 不在，xlsx 需要它当独立裁判") from None
+    return openpyxl
+
+
+class TestXlsxWriter(unittest.TestCase):
+    """``src/i3pro/xlsx.py``：标准库写的 OOXML，由一个**独立**读入器逐格验。
+
+    它自己的 docstring 说"验证它的是 openpyxl"，这个类就是那句话的出处。
+    分表那一段把 ``MAX_ROWS`` 临时调到 100 来跑真代码路径——不造假数据等
+    104 万行，那条路一样会走到。
+    """
+
+    def _book(self, path):
+        return _openpyxl().load_workbook(path)
+
+    def test_column_name_is_zero_based(self):
+        self.assertEqual(
+            [xlsxmod.column_name(i) for i in (0, 25, 26, 27, 701, 702)],
+            ["A", "Z", "AA", "AB", "ZZ", "AAA"],
+        )
+
+    def test_round_trip_cells(self):
+        directory = tempfile.TemporaryDirectory(prefix="i3pro-xlsx-")
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "one.xlsx"
+        rows = [[0, 1.5, "文本", None], [10, np.nan, "带 <尖括号> & 和号", 2]]
+        stats = xlsxmod.write_workbook(
+            path, [{"name": "数据", "header": ["数字", "小数", "文字", "空"],
+                    "rows": iter(rows), "split": False}]
+        )
+        self.assertEqual(stats, {"sheets": 1, "rows": 2, "names": ["数据"]})
+        sheet = self._book(path)["数据"]
+        self.assertEqual([cell.value for cell in sheet[1]],
+                         ["数字", "小数", "文字", "空"])
+        self.assertEqual(sheet["A2"].value, 0)
+        self.assertEqual(sheet["B2"].value, 1.5)
+        self.assertEqual(sheet["C2"].value, "文本")
+        self.assertIsNone(sheet["D2"].value)          # None -> 空格
+        self.assertEqual(sheet["C3"].value, "带 <尖括号> & 和号")
+        self.assertIsNone(sheet["B3"].value)          # NaN -> 空格
+
+    def test_splits_when_over_the_excel_row_limit(self):
+        """真分表：99 行一张，300 行 → 数据1/2/3/4，一行都不丢。"""
+        directory = tempfile.TemporaryDirectory(prefix="i3pro-xlsx-")
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "split.xlsx"
+        rows = [[i, i * 2] for i in range(300)]
+        original = xlsxmod.MAX_ROWS
+        xlsxmod.MAX_ROWS = 100  # 每张表装 99 行数据 + 1 行表头
+        self.addCleanup(setattr, xlsxmod, "MAX_ROWS", original)
+        stats = xlsxmod.write_workbook(
+            path, [{"name": "数据", "header": ["i", "两倍"], "rows": iter(rows),
+                    "split": True}]
+        )
+        self.assertEqual(stats["sheets"], 4)
+        self.assertEqual(stats["names"], ["数据1", "数据2", "数据3", "数据4"])
+        self.assertEqual(stats["rows"], 300)
+        book = self._book(path)
+        seen = []
+        for name, expected_rows in zip(stats["names"], (99, 99, 99, 3)):
+            sheet = book[name]
+            self.assertEqual(sheet.max_row, expected_rows + 1, f"{name} 少了表头或行")
+            self.assertEqual(sheet["A1"].value, "i", f"{name} 的表头没了")
+            seen.extend(sheet.cell(row=r, column=1).value
+                        for r in range(2, sheet.max_row + 1))
+        self.assertEqual(seen, list(range(300)), "分表之间丢了行或者重了行")
+
+    def test_split_off_is_a_loud_error(self):
+        """调用方关掉分表又超行：报错要说出"用 split=True"，而不是写个坏文件。"""
+        directory = tempfile.TemporaryDirectory(prefix="i3pro-xlsx-")
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "bad.xlsx"
+        original = xlsxmod.MAX_ROWS
+        xlsxmod.MAX_ROWS = 10
+        self.addCleanup(setattr, xlsxmod, "MAX_ROWS", original)
+        with self.assertRaises(ValueError) as caught:
+            xlsxmod.write_workbook(
+                path, [{"name": "数据", "header": ["i"],
+                        "rows": iter([[i] for i in range(50)]), "split": False}]
+            )
+        self.assertIn("split=True", str(caught.exception))
+
+    def test_too_many_columns_says_use_csv(self):
+        directory = tempfile.TemporaryDirectory(prefix="i3pro-xlsx-")
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "wide.xlsx"
+        header = [f"c{i}" for i in range(xlsxmod.MAX_COLS + 1)]
+        with self.assertRaises(ValueError) as caught:
+            xlsxmod.write_workbook(
+                path, [{"name": "数据", "header": header, "rows": iter([]),
+                        "split": False}]
+            )
+        self.assertIn("CSV", str(caught.exception))
+
+
+class TestExportPerformance(unittest.TestCase):
+    """分块写是不是真的生效：窗口拉大、列数变多，峰值内存不许跟着线性涨。
+
+    整场 343 列的实测数字写在 ``docs/ACCEPTANCE.md`` A45 里（那条命令是
+    ``i3pro export``，可复制复现）；这里留一条几秒钟能跑完的守门用例，免得每次
+    回归都要多等一分钟。
+    """
+
+    @_needs(ENDURANCE)
+    def test_chunked_write_keeps_memory_bounded(self):
+        import time
+        import tracemalloc
+
+        with ld.LogFile.read(ENDURANCE) as log:
+            names = ",".join(ch.name for ch in log.channels[:40])
+            request = exportmod.parse_request(
+                log, {"channels": "selected", "names": names, "rate": "100",
+                      "from": "600", "to": "800"}
+            )
+            planned = exportmod.plan(log, request)
+            self.assertEqual(planned["rows"], 20001)
+            with tempfile.TemporaryDirectory(prefix="i3pro-exp-") as tmp:
+                tracemalloc.start()
+                start = time.time()
+                stats = exportmod.write(log, request, Path(tmp) / "all.csv")
+                peak = tracemalloc.get_traced_memory()[1]
+                tracemalloc.stop()
+                spent = time.time() - start
+            self.assertEqual(stats["rows"], planned["rows"])
+            print(
+                f"\n[#23 实测] 耐久正赛 200 s 窗口 × 40 通道 × rate=100："
+                f"{spent:.1f} s，峰值分配 {peak / 1e6:.0f} MB，"
+                f"{stats['bytes'] / 1e6:.1f} MB"
+            )
+            self.assertLess(peak, 300e6, "峰值内存超过 300 MB：分块写没生效")
+
+
 class TestExportPanelSendsTheRightRequest(unittest.TestCase):
     """导出面板拼出来的参数，必须就是 ``export.parse_request`` 认得的那几个。
 
@@ -4025,7 +4611,6 @@ class TestExportPanelSendsTheRightRequest(unittest.TestCase):
 
     def test_采样率档位两边一致(self):
         """界面那个下拉不是手写的：它由 JS 里那张表建出来，必须和 Python 那张一样。"""
-        from i3pro import export as exportmod
         viewer = self.VIEWER.read_text(encoding="utf-8")
         match = re.search(r"const EXPORT_RATES = \[(.*?)\];", viewer)
         self.assertIsNotNone(match, "面板里没有 EXPORT_RATES 这张表")
@@ -4034,17 +4619,12 @@ class TestExportPanelSendsTheRightRequest(unittest.TestCase):
                          "面板的采样率档位与 export.RATES 不一致：两边说的是同一件事")
 
     def test_面板选项与导出模块对齐(self):
-        from i3pro import export as exportmod
         viewer = self.VIEWER.read_text(encoding="utf-8")
         for method in exportmod.RESAMPLE_METHODS:
             self.assertIn(f'value="{method}"', viewer,
                           f"面板少了重采样方法 {method!r}（export.RESAMPLE_METHODS 里有）")
         for value in (*exportmod.FORMATS, *exportmod.LAYOUTS, *exportmod.AXES):
             self.assertIn(f'value="{value}"', viewer, f"面板少了 {value!r} 这个选项")
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
 
 
 def _gps_session(path="fake.ld", rate: float = 10.0, gps_rate: float | None = None,
@@ -4294,32 +4874,10 @@ class TestGpsFixOverHttp(unittest.TestCase):
 
     @_needs(HILL)
     def test_gps_endpoint(self):
-        import tempfile
-        from http.server import ThreadingHTTPServer
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            copy = root / HILL.name
-            copy.write_bytes(HILL.read_bytes())
-            original = copy.read_bytes()
-            library = server.SessionLibrary([root], cache_size=1, maths_root=root)
-            httpd = ThreadingHTTPServer(
-                ("127.0.0.1", 0), server.make_handler(library, buckets=50)
-            )
-            threading.Thread(target=httpd.serve_forever, daemon=True).start()
-            base = f"http://127.0.0.1:{httpd.server_address[1]}"
-            quoted = urllib.parse.quote(copy.stem)
-
-            def request(path, method="GET", payload=None):
-                data = None if payload is None else json.dumps(payload).encode("utf-8")
-                req = urllib.request.Request(base + path, data=data, method=method)
-                if data is not None:
-                    req.add_header("Content-Type", "application/json")
-                try:
-                    with urllib.request.urlopen(req, timeout=180) as response:
-                        return response.status, json.loads(response.read().decode("utf-8"))
-                except urllib.error.HTTPError as exc:
-                    return exc.code, json.loads(exc.read().decode("utf-8"))
+        with http_session(HILL, buckets=50) as http:
+            root, copy, quoted = http.root, http.copy, http.quoted
+            original = http.before
+            request = http.json
 
             try:
                 status, body = request(f"/api/session/{quoted}/gps")
@@ -4388,8 +4946,7 @@ class TestGpsFixOverHttp(unittest.TestCase):
                 self.assertEqual(track["time"], before["time"])
                 self.assertEqual(track["x"], before["x"])
             finally:
-                httpd.shutdown()
-                library.close()
+                http.close()
 
 
 class TestHistogram(unittest.TestCase):
@@ -4552,27 +5109,9 @@ class TestHistogramOverHttp(unittest.TestCase):
 
     @_needs(HILL)
     def test_histogram_endpoint(self):
-        import tempfile
-        from http.server import ThreadingHTTPServer
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            copy = root / HILL.name
-            copy.write_bytes(HILL.read_bytes())
-            library = server.SessionLibrary([root], cache_size=1, maths_root=root)
-            httpd = ThreadingHTTPServer(
-                ("127.0.0.1", 0), server.make_handler(library, buckets=50)
-            )
-            threading.Thread(target=httpd.serve_forever, daemon=True).start()
-            base = f"http://127.0.0.1:{httpd.server_address[1]}"
-            quoted = urllib.parse.quote(copy.stem)
-
-            def get(path):
-                try:
-                    with urllib.request.urlopen(base + path, timeout=120) as response:
-                        return response.status, json.loads(response.read().decode("utf-8"))
-                except urllib.error.HTTPError as exc:
-                    return exc.code, json.loads(exc.read().decode("utf-8"))
+        with http_session(HILL, buckets=50) as http:
+            quoted = http.quoted
+            get = http.get
 
             try:
                 status, body = get(f"/api/session/{quoted}/histogram"
@@ -4600,8 +5139,7 @@ class TestHistogramOverHttp(unittest.TestCase):
                 self.assertEqual(status, 400)
                 self.assertIn("先", body["error"])
             finally:
-                httpd.shutdown()
-                library.close()
+                http.close()
 
 
 class TestSpectrum(unittest.TestCase):
@@ -4771,27 +5309,9 @@ class TestSpectrumOverHttp(unittest.TestCase):
 
     @_needs(HILL)
     def test_spectrum_endpoint(self):
-        import tempfile
-        from http.server import ThreadingHTTPServer
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            copy = root / HILL.name
-            copy.write_bytes(HILL.read_bytes())
-            library = server.SessionLibrary([root], cache_size=1, maths_root=root)
-            httpd = ThreadingHTTPServer(
-                ("127.0.0.1", 0), server.make_handler(library, buckets=50)
-            )
-            threading.Thread(target=httpd.serve_forever, daemon=True).start()
-            base = f"http://127.0.0.1:{httpd.server_address[1]}"
-            quoted = urllib.parse.quote(copy.stem)
-
-            def get(path):
-                try:
-                    with urllib.request.urlopen(base + path, timeout=120) as response:
-                        return response.status, json.loads(response.read().decode("utf-8"))
-                except urllib.error.HTTPError as exc:
-                    return exc.code, json.loads(exc.read().decode("utf-8"))
+        with http_session(HILL, buckets=50) as http:
+            quoted = http.quoted
+            get = http.get
 
             try:
                 status, body = get(f"/api/session/{quoted}/spectrum"
@@ -4823,8 +5343,7 @@ class TestSpectrumOverHttp(unittest.TestCase):
                 self.assertEqual(status, 400)
                 self.assertIn("hann", body["error"])
             finally:
-                httpd.shutdown()
-                library.close()
+                http.close()
 
 
 class TestMathsOverHttp(unittest.TestCase):
@@ -4832,31 +5351,9 @@ class TestMathsOverHttp(unittest.TestCase):
 
     @_needs(HILL)
     def test_saving_a_definition_reaches_the_viewer(self):
-        import tempfile
-        from http.server import ThreadingHTTPServer
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            copy = root / HILL.name
-            copy.write_bytes(HILL.read_bytes())
-            library = server.SessionLibrary([root], cache_size=1, maths_root=root)
-            httpd = ThreadingHTTPServer(
-                ("127.0.0.1", 0), server.make_handler(library, buckets=100)
-            )
-            threading.Thread(target=httpd.serve_forever, daemon=True).start()
-            base = f"http://127.0.0.1:{httpd.server_address[1]}"
-            quoted = urllib.parse.quote(copy.stem)
-
-            def request(path, method="GET", payload=None):
-                body = None if payload is None else json.dumps(payload).encode("utf-8")
-                req = urllib.request.Request(base + path, data=body, method=method)
-                if body is not None:
-                    req.add_header("Content-Type", "application/json")
-                try:
-                    with urllib.request.urlopen(req, timeout=60) as response:
-                        return response.status, json.loads(response.read().decode("utf-8"))
-                except urllib.error.HTTPError as exc:
-                    return exc.code, json.loads(exc.read().decode("utf-8"))
+        with http_session(HILL, buckets=100) as http:
+            root, copy, quoted = http.root, http.copy, http.quoted
+            request = http.json
 
             try:
                 # 空状态：没有定义，也没有报错
@@ -4975,37 +5472,14 @@ class TestMathsOverHttp(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(len(catalogue), 53)
             finally:
-                httpd.shutdown()
-                library.close()
+                http.close()
 
     @_needs(HILL)
     def test_a_bare_channel_name_with_a_space_saves_and_computes(self):
         """用户反馈的那条路：编辑器里直接打 `Vx KF * 2`，不该要求他加引号。"""
-        import tempfile
-        from http.server import ThreadingHTTPServer
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            copy = root / HILL.name
-            copy.write_bytes(HILL.read_bytes())
-            library = server.SessionLibrary([root], cache_size=1, maths_root=root)
-            httpd = ThreadingHTTPServer(
-                ("127.0.0.1", 0), server.make_handler(library, buckets=100)
-            )
-            threading.Thread(target=httpd.serve_forever, daemon=True).start()
-            base = f"http://127.0.0.1:{httpd.server_address[1]}"
-            quoted = urllib.parse.quote(copy.stem)
-
-            def request(path, method="GET", payload=None):
-                body = None if payload is None else json.dumps(payload).encode("utf-8")
-                req = urllib.request.Request(base + path, data=body, method=method)
-                if body is not None:
-                    req.add_header("Content-Type", "application/json")
-                try:
-                    with urllib.request.urlopen(req, timeout=60) as response:
-                        return response.status, json.loads(response.read().decode("utf-8"))
-                except urllib.error.HTTPError as exc:
-                    return exc.code, json.loads(exc.read().decode("utf-8"))
+        with http_session(HILL, buckets=100) as http:
+            root, copy, quoted = http.root, http.copy, http.quoted
+            request = http.json
 
             try:
                 status, state = request(
@@ -5070,8 +5544,7 @@ class TestMathsOverHttp(unittest.TestCase):
                 self.assertIn("别场才有的", errors)
                 self.assertIn("本场次没有这个通道", errors["别场才有的"])
             finally:
-                httpd.shutdown()
-                library.close()
+                http.close()
 
 
 if __name__ == "__main__":

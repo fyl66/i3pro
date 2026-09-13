@@ -2626,6 +2626,42 @@ if (api && exportDlg) {
   check(customUrl.indexOf("layout=long") >= 0 && customUrl.indexOf("bundle=1") < 0,
     "长表 / 不要元数据的参数不对: " + customUrl);
 
+  // 范围自己决定轴：距离段 + 主索引还停在「时间」时，仍然必须按**米**导出——
+  // 否则 1200–1850 会被当成 1200–1850 **秒**一声不响地导出去（另一段数据）。
+  fields({ range: "distance", from: "1200m", to: "1850m", channels: "all", maths: true,
+           rate: "auto", custom: "", resample: "linear", meta: false, axis: "time",
+           format: "csv", layout: "wide" });
+  const distanceUrl = api.exportURL(api.exportConfig(), false).href;
+  check(distanceUrl.indexOf("axis=distance") >= 0 && distanceUrl.indexOf("index=timestamp") < 0,
+    "距离段没有把主索引钉在米上: " + distanceUrl);
+  check(registry.get("exportAxis").value === "distance"
+    && registry.get("exportAxis").disabled === true,
+    "「指定距离段」时主索引下拉没有锁到距离");
+
+  // 镜像的那一半：时间段 + 主索引停在「距离」上，也必须按秒走
+  fields({ range: "time", from: "1200", to: "1250", channels: "all", maths: true,
+           rate: "auto", custom: "", resample: "linear", meta: false, axis: "distance",
+           format: "csv", layout: "wide" });
+  const timeAgain = api.exportURL(api.exportConfig(), false).href;
+  check(timeAgain.indexOf("axis=time") >= 0 && timeAgain.indexOf("index=timestamp") < 0,
+    "「指定时间段」没有按秒导出: " + timeAgain);
+
+  // 绝对时间戳（ticket #27）：同一根时间轴，换一种写法（axis=time + index=timestamp）。
+  // 静态 markup 在假 DOM 里没有 innerHTML，所以档位按页面源查。
+  check(html.indexOf('<option value="time">') >= 0
+    && html.indexOf('<option value="timestamp">') >= 0
+    && html.indexOf('<option value="distance">') >= 0,
+    "主索引下拉少了档位");
+  fields({ range: "all", from: "", to: "", channels: "all", maths: true, rate: "auto",
+           custom: "", resample: "linear", meta: false, axis: "timestamp",
+           format: "csv", layout: "long" });
+  const stampUrl = api.exportURL(api.exportConfig(), false).href;
+  check(stampUrl.indexOf("axis=time") >= 0 && stampUrl.indexOf("index=timestamp") >= 0,
+    "绝对时间戳没有拼成 axis=time&index=timestamp: " + stampUrl);
+  api.applyExportPlan({ rows: 10, columns: 4, bytes: 900, sheets: 0, index: "timestamp" });
+  check(String(registry.get("exportPlan").innerHTML).indexOf("timestamp") >= 0,
+    "预估里没写主索引列: " + registry.get("exportPlan").innerHTML);
+
   // 勾选的通道：走 selected + names
   fields({ range: "all", from: "", to: "", channels: "selected", maths: false,
            rate: "auto", custom: "", resample: "linear", meta: false, axis: "time",

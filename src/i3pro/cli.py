@@ -280,6 +280,7 @@ def cmd_export(args: argparse.Namespace) -> int:
             "names": names or "",
             "maths": "1" if args.maths else "0",
             "axis": args.axis,
+            "index": args.index or "",
             "rate": args.rate,
             "resample": args.resample,
             "layout": args.layout,
@@ -698,6 +699,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="--from/--to 是绝对时间（2026-09-14 12:34:56.789）")
     p.add_argument("--axis", default="time", choices=["time", "distance"],
                    help="主索引：time=相对秒（默认），distance=米")
+    p.add_argument("--index", default=None, choices=["time_s", "timestamp", "distance_m"],
+                   help="主索引列：time_s 相对秒（默认）/ timestamp 绝对时间戳"
+                        "（场次起点 + 相对秒，起点精度到秒）/ distance_m")
     p.add_argument("--rate", default="auto",
                    help="auto（默认，原始采样）或统一采样率，如 10 / 100 / 200")
     p.add_argument("--resample", default="linear",

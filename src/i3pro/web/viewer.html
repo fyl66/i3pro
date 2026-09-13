@@ -446,6 +446,7 @@
       <label>主索引</label>
       <select id="exportAxis">
         <option value="time">时间 time_s</option>
+        <option value="timestamp">时间（绝对时间戳）</option>
         <option value="distance">距离 distance_m</option>
       </select>
     </div>
@@ -6033,6 +6034,19 @@ function syncExportFields() {
   const excel = cfg.format === "xlsx";
   $("exportLayout").disabled = excel;      // Excel 一律宽表：长表在表格里没法看
   if (excel) $("exportLayout").value = "wide";
+  // 范围决定轴：距离段把主索引钉在米上，时间段不给选距离（选错了会静默导错数据）。
+  const axisSelect = $("exportAxis");
+  const options = axisSelect.options ? Array.prototype.slice.call(axisSelect.options) : [];
+  options.forEach((option) => { option.disabled = cfg.range === "time" && option.value === "distance"; });
+  if (cfg.range === "distance") {
+    axisSelect.value = "distance";
+    axisSelect.disabled = true;
+    axisSelect.title = "「指定距离段」按米导出，主索引自动是 distance_m。";
+  } else {
+    axisSelect.disabled = false;
+    axisSelect.title = cfg.range === "time" ? "「指定时间段」按秒导出，主索引不能是距离。" : "";
+    if (axisSelect.value === "distance" && cfg.range === "time") axisSelect.value = "time";
+  }
 }
 
 /** 界面状态里现成的三个范围：当前视图 / 选中圈 / 光标 A–B。取不到就说下一步。 */
@@ -6074,13 +6088,33 @@ function exportMoment(text) {
   return { value: clean, absolute: true };
 }
 
+/** 面板 → ``(axis, index)``。**范围自己决定轴**：距离段就是米、时间段就是秒。
+ *
+ * 这条不能省：范围选「指定距离段」而主索引还停在「时间」时，1200–1850 会被
+ * 当成 1200–1850 **秒**导出去——一段完全不相干的数据，而且一声不响。
+ * ``timestamp`` 只是同一根时间轴的另一种写法，不是第三种轴。
+ */
+function exportAxisOf(cfg, preset) {
+  const stamp = cfg.axis === "timestamp";
+  if (preset) {
+    return preset.axis === "distance"
+      ? { axis: "distance", index: "distance_m" }
+      : { axis: "time", index: stamp ? "timestamp" : "time_s" };
+  }
+  if (cfg.range === "distance") return { axis: "distance", index: "distance_m" };
+  if (cfg.axis === "distance") return { axis: "distance", index: "distance_m" };
+  return { axis: "time", index: stamp ? "timestamp" : "time_s" };
+}
+
 /** 面板 → 查询参数。返回 ``{href}`` 或 ``{error}``（错误一定是"下一步做什么"）。 */
 function exportURL(cfg, plan) {
   const params = new URLSearchParams();
   const preset = exportPreset(cfg);
   if (preset && preset.error) return { error: preset.error };
-  const axis = preset ? preset.axis : cfg.axis;
+  const pick = exportAxisOf(cfg, preset);
+  const axis = pick.axis;
   params.set("axis", axis);
+  if (pick.index === "timestamp") params.set("index", "timestamp");
   if (cfg.range === "all") {
     // 整场：不带 from/to，由服务端按场次长度补齐
   } else if (preset) {
@@ -6152,6 +6186,10 @@ function applyExportPlan(body) {
   text += "<b>" + Number(body.rows).toLocaleString() + "</b> 行 × <b>" + body.columns + "</b> 列"
     + " · 约 " + formatBytes(body.bytes);
   if (body.sheets > 1) text += " · 分 " + body.sheets + " 张表";
+  if (body.index) {
+    text += "<br>主索引 <b>" + esc(body.index) + "</b>"
+      + (body.index === "timestamp" ? "（场次起点 + 相对秒，起点精确到秒）" : "");
+  }
   (body.warnings || []).forEach((line) => { text += "<br><span class='warn'>" + esc(line) + "</span>"; });
   setExportPlan(text, (body.warnings || []).length ? "warn" : "");
 }

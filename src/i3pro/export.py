@@ -55,6 +55,8 @@ RESAMPLE_METHODS = ("linear", "hold", "nearest", "mean")
 LAYOUTS = ("wide", "long")
 FORMATS = ("csv", "xlsx")
 AXES = ("time", "distance")
+#: 主索引列：相对秒 / 绝对时间戳 / 米。``timestamp`` 只配时间轴（见 ``parse_request``）。
+INDEXES = ("time_s", "timestamp", "distance_m")
 
 #: 宽表每块装多少个格子：19.4 万行 × 445 列整份端进内存是 690 MB，
 #: 分块之后峰值只跟"一块 × 通道数"有关（约 32 MB）。
@@ -67,6 +69,12 @@ _GRID_TOL = 1e-6
 #: 但比 ``repr`` 的 17 位少三成体积、也快一些；精确到位的原始值请用 Parquet
 #: （``i3pro convert``）或者把这一行改成 ``%.17g``。
 FLOAT_FORMAT = "%.10g"
+#: 预估体积：每个格子 / 长表每行占多少字节。**实测标定**，不是拍的——
+#: 高避5圈 4641×438 的宽表实测 CSV 3.36 B/格、xlsx 3.80 B/格、原始采样
+#: （慢通道大半是空格）2.51 B/格；长表 26.67 B/行。取整数略偏保守，
+#: 这样"预计文件大小"与真文件一般在一个量级内（数字见 ACCEPTANCE A45）。
+_EST_BYTES_PER_CELL = 4
+_EST_BYTES_PER_LONG_ROW = 28
 
 
 class ExportError(ValueError):
@@ -90,6 +98,8 @@ class Request:
     range_label: str
     channel_source: str
     maths: bool
+    #: 主索引列名，也是它的写法：``time_s`` / ``timestamp`` / ``distance_m``。
+    index: str = "time_s"
     #: 内部用的**时间**窗口（秒）：距离轴上它就是"这段距离对应的那段时刻"，
     #: 由 ``_time_window`` 从距离序列上定位（取首次到达，和 ``/at`` 一个语义）。
     t_start: float = 0.0
@@ -102,7 +112,7 @@ class Request:
         return "s" if self.axis == "time" else "m"
 
     def index_name(self) -> str:
-        return "time_s" if self.axis == "time" else "distance_m"
+        return self.index
 
 
 # ------------------------------------------------------------------ 参数解析
@@ -156,7 +166,13 @@ def epoch_of(log: ldmod.LogFile) -> float | None:
 
 
 def _moment(text: str, epoch: float | None, label: str) -> float:
-    """把 ``12.5`` 或 ``2026-09-14 12:34:56.789`` 变成相对秒。"""
+    """把 ``12.5`` / ``2026-09-14 12:34:56.789`` / 裸时钟 ``12:35:10.123`` 变成相对秒。
+
+    裸时钟（只有时分秒）的**日期沿用场次那一天**——需求里"从 12:34:56.789 导到
+    12:35:10.123"就是这么写的：第二个端点几乎不可能跨天，重打一遍日期没有意义。
+    日期直接从 ``epoch`` 还原（它就是 ``log_date + log_time`` 的本地时刻），所以
+    这条分支不需要额外的参数。
+    """
     stripped = text.strip()
     try:
         return float(stripped)
@@ -168,14 +184,23 @@ def _moment(text: str, epoch: float | None, label: str) -> float:
             f"改用相对秒，例如 {label}=12.5。"
         )
     candidate = stripped.replace("T", " ").strip()
-    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+    full = ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M")
+    for fmt in full:
         try:
             return datetime.strptime(candidate, fmt).timestamp() - epoch
         except ValueError:
             continue
+    # 裸时钟：有冒号、没有日期分隔符。
+    if ":" in candidate and not any(sep in candidate for sep in ("-", "/")):
+        day = datetime.fromtimestamp(epoch).strftime("%d/%m/%Y")
+        for fmt in ("%d/%m/%Y %H:%M:%S.%f", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M"):
+            try:
+                return datetime.strptime(f"{day} {candidate}", fmt).timestamp() - epoch
+            except ValueError:
+                continue
     raise ExportError(
-        f"{label} 认不出这个时间：{text!r}。写成 2026-09-14 12:34:56.789（本机时间），"
-        f"或者直接用相对秒 12.5。"
+        f"{label} 认不出这个时间：{text!r}。写成 2026-09-14 12:34:56.789、只写时分秒的"
+        f"12:35:10.123（日期沿用本场次那天），或者直接用相对秒 12.5。"
     )
 
 
@@ -184,6 +209,31 @@ def parse_request(log: ldmod.LogFile, params: dict) -> Request:
     axis = (_text(params, "axis") or "time").lower()
     if axis not in AXES:
         raise ExportError(f"axis 只能是 time（相对秒）或 distance（米），收到 {axis!r}。")
+
+    # 主索引列：默认跟着 axis 走；``timestamp`` 是"同一段时间轴、换一种写法"。
+    index = (_text(params, "index") or "").lower()
+    if not index:
+        index = "distance_m" if axis == "distance" else "time_s"
+    if index not in INDEXES:
+        raise ExportError(
+            f"index 只能是 {' / '.join(INDEXES)}，收到 {index!r}。"
+            f"（time_s 相对秒 / timestamp 绝对时间戳 / distance_m 米）"
+        )
+    if axis == "distance" and index != "distance_m":
+        raise ExportError(
+            f"距离轴的主索引只能是 distance_m，收到 {index!r}。"
+            f"想把时间列写成绝对时间戳就写 axis=time&index=timestamp。"
+        )
+    if axis == "time" and index == "distance_m":
+        raise ExportError(
+            "时间轴的主索引写 time_s（相对秒）或 timestamp（绝对时间戳）；"
+            "要米就去写 axis=distance。"
+        )
+    if index == "timestamp" and epoch_of(log) is None:
+        raise ExportError(
+            "这个场次没有记录日期时间（.ld 头里没有），写不出绝对时间戳。"
+            "把主索引换成 time_s（相对秒），或者改用距离轴导出。"
+        )
 
     fmt = (_text(params, "format") or _text(params, "fmt") or "csv").lower()
     if fmt not in FORMATS:
@@ -269,6 +319,7 @@ def parse_request(log: ldmod.LogFile, params: dict) -> Request:
         range_label=label,
         channel_source=channel_source,
         maths=maths,
+        index=index,
     )
     t_start, t_end = _time_window(log, request)
     return dataclasses_replace(request, t_start=t_start, t_end=t_end)
@@ -397,7 +448,15 @@ def _index_times(log: ldmod.LogFile, req: Request) -> np.ndarray:
         return inside
     span = end - start
     count = int(math.floor(span * req.rate + _GRID_TOL)) + 1
-    return start + np.arange(count, dtype=np.float64) / float(req.rate)
+    times = start + np.arange(count, dtype=np.float64) / float(req.rate)
+    # **左闭右闭**：终点不落在格点上时要补上终点本身。整场上 10 Hz 导出 463.99 s
+    # 的场次，格点是 0.0 … 463.9——只到 463.9 的话"包含起止点"就只做到了左边。
+    # 代价是最后一段短一格（0.09 s 而不是 0.1 s），这一点写在元数据的 range 里。
+    if times.size == 0 or times[-1] < end - _GRID_TOL:
+        times = np.append(times, float(end))
+    else:
+        times = np.minimum(times, float(end))
+    return times
 
 
 def _resampled(log: ldmod.LogFile, req: Request, name: str, times: np.ndarray) -> np.ndarray:
@@ -454,6 +513,28 @@ def _index_values(log: ldmod.LogFile, req: Request, times: np.ndarray) -> np.nda
     return np.interp(times, base[:size], distance[:size])
 
 
+def _stamp_text(epoch: float, seconds: float) -> str:
+    """一个时刻的绝对时间戳文本（毫秒三位）。"""
+    moment = datetime.fromtimestamp(epoch + float(seconds))
+    return f"{moment:%Y-%m-%d %H:%M:%S}.{moment.microsecond // 1000:03d}"
+
+
+def _stamp_texts(log: ldmod.LogFile, req: Request, seconds) -> list[str]:
+    """``index=timestamp`` 那一列：**场次起点 + 相对秒**。
+
+    起点来自 ``.ld`` 头里的日期时间，MoTeC 只写到秒，所以这一列的绝对精度是
+    "起点精确到秒、相对部分精确到毫秒"——别把它当成微秒级同步时钟。这条同时写进
+    导出的元数据（``timestamp.source_precision``）。
+    """
+    epoch = epoch_of(log)
+    if epoch is None:
+        raise ExportError(
+            "这个场次没有记录日期时间（.ld 头里没有），写不出绝对时间戳。"
+            "把 index 换成 time_s（相对秒），或者改用 axis=distance 导出距离。"
+        )
+    return [_stamp_text(epoch, value) for value in np.asarray(seconds, dtype=np.float64)]
+
+
 def _chunk_size(channel_count: int) -> int:
     return max(1, min(20_000, _CHUNK_CELLS // max(1, channel_count)))
 
@@ -478,6 +559,11 @@ def _wide_chunks(log: ldmod.LogFile, req: Request, index: np.ndarray):
 def _wide_row_lists(log: ldmod.LogFile, req: Request, index: np.ndarray):
     """一行 = 一个索引点；缺失值是 ``nan``，由写文件的那一端变成空。"""
     for matrix in _wide_chunks(log, req, index):
+        if req.index == "timestamp":
+            texts = _stamp_texts(log, req, matrix[:, 0])
+            for text, row in zip(texts, matrix[:, 1:].tolist()):
+                yield [text] + row
+            continue
         # ``tolist()`` 在 C 层做，比逐格取 Python 对象快得多——
         # 343 列 × 19.4 万行是 6700 万格，逐格转换要几分钟。
         yield from matrix.tolist()
@@ -489,6 +575,7 @@ def _long_rows(log: ldmod.LogFile, req: Request, index: np.ndarray):
     同一条通道内按时间递增（通道极多、采样率各不相同时用它）。
     """
     lead = _index_values(log, req, index)
+    texts = _stamp_texts(log, req, index) if req.index == "timestamp" else None
     for name in req.channels:
         column = _resampled(log, req, name, index)
         unit = channelsmod.unit(log, log.channel(name))
@@ -496,7 +583,7 @@ def _long_rows(log: ldmod.LogFile, req: Request, index: np.ndarray):
             value = column[i]
             if not np.isfinite(value):
                 continue
-            yield [lead[i], name, float(value), unit]
+            yield [texts[i] if texts is not None else lead[i], name, float(value), unit]
 
 
 def _rows(log: ldmod.LogFile, req: Request, index: np.ndarray):
@@ -517,9 +604,12 @@ def _long_frames(log: ldmod.LogFile, req: Request, index: np.ndarray):
         if not keep.any():
             continue
         unit = channelsmod.unit(log, log.channel(name))
+        first_column = (
+            _stamp_texts(log, req, index[keep]) if req.index == "timestamp" else lead[keep]
+        )
         yield pd.DataFrame(
             {
-                name_column: lead[keep],
+                name_column: first_column,
                 "channel": name,
                 "value": column[keep],
                 "unit": unit,
@@ -570,9 +660,9 @@ def plan(log: ldmod.LogFile, req: Request) -> dict:
         )
     columns = len(_header(log, req))
     if req.layout == "long":
-        bytes_est = int(rows * 38)
+        bytes_est = int(rows * _EST_BYTES_PER_LONG_ROW)
     else:
-        bytes_est = int(rows * columns * 9 + rows * 4)
+        bytes_est = int(rows * (columns * _EST_BYTES_PER_CELL + 2))
     sheets = 0
     if req.fmt == "xlsx":
         sheets = max(1, math.ceil((rows + 1) / xlsx.MAX_ROWS))
@@ -595,13 +685,15 @@ def plan(log: ldmod.LogFile, req: Request) -> dict:
         "columns": int(columns),
         "bytes": int(bytes_est),
         "sheets": int(sheets),
+        "axis": req.axis,
+        "index": req.index,
         "warnings": warnings,
     }
 
 
 def metadata(log: ldmod.LogFile, req: Request, rows: int, columns: int) -> dict:
     """CSV 的 ``metadata.json`` 与 Excel 的「元数据」sheet 用的是同一份内容。"""
-    return {
+    info = {
         "file": log.path.name,
         "session": log.path.stem,
         "range": {
@@ -612,6 +704,7 @@ def metadata(log: ldmod.LogFile, req: Request, rows: int, columns: int) -> dict:
             "bounds": "左闭右闭",
         },
         "axis": req.axis,
+        "index": req.index,
         "rate": "auto" if req.rate is None else req.rate,
         "resample": req.resample,
         "layout": req.layout,
@@ -632,6 +725,17 @@ def metadata(log: ldmod.LogFile, req: Request, rows: int, columns: int) -> dict:
         "source_meta": log.metadata(),
         "exported_at": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
+    if req.index == "timestamp":
+        # 这一列的精度必须写清楚：起点是 .ld 头里的本地时间、只到秒，
+        # 相对部分是采样时刻，到毫秒。别让队友以为它是微秒级同步时钟。
+        info["timestamp"] = {
+            "column": "timestamp",
+            "format": "%Y-%m-%d %H:%M:%S.SSS",
+            "timezone": "本机时区（.ld 头里存的就是本地时间）",
+            "epoch": epoch_of(log),
+            "source_precision": "起点精确到秒，相对部分精确到毫秒",
+        }
+    return info
 
 
 def _metadata_rows(meta: dict):
@@ -640,7 +744,9 @@ def _metadata_rows(meta: dict):
     yield ["日志文件", meta["file"]]
     yield ["场次", meta["session"]]
     yield ["导出范围", meta["range"]["label"] + f"（{meta['range']['bounds']}）"]
-    yield ["主索引", meta["axis"]]
+    yield ["主索引", meta["axis"] + " · " + meta.get("index", "")]
+    if meta.get("timestamp"):
+        yield ["时间戳列", "场次起点 + 相对秒（" + meta["timestamp"]["source_precision"] + "）"]
     yield ["采样率", meta["rate"]]
     yield ["重采样", meta["resample"]]
     yield ["形状", f"{meta['rows']} 行 × {meta['columns']} 列（{meta['layout']}）"]
@@ -656,7 +762,8 @@ def _metadata_rows(meta: dict):
 def filename(log: ldmod.LogFile, req: Request) -> str:
     """下载时那个文件名（中文保留，路径分隔符与冒号换成安全字符）。"""
     label = req.range_label.replace(":", "：").replace("/", "-").replace("\\", "-")
-    name = f"{log.path.stem}-{label}-{req.rate_label()}-{req.layout}.{req.fmt}"
+    mark = "-绝对时间" if req.index == "timestamp" else ""
+    name = f"{log.path.stem}-{label}-{req.rate_label()}{mark}-{req.layout}.{req.fmt}"
     if req.bundle and req.fmt == "csv":
         name += ".zip"
     return name
@@ -685,6 +792,8 @@ def _write_csv(log: ldmod.LogFile, req: Request, path: Path, progress) -> dict:
         if req.layout == "wide":
             for matrix in _wide_chunks(log, req, index):
                 frame = pd.DataFrame(matrix, columns=header)
+                if req.index == "timestamp":
+                    frame[header[0]] = _stamp_texts(log, req, matrix[:, 0])
                 frame.to_csv(
                     fh, header=first, index=False, na_rep="", float_format=FLOAT_FORMAT
                 )

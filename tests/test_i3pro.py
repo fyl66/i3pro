@@ -2945,6 +2945,219 @@ class TestReportOverHttp(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 
+
+class TestHistogram(unittest.TestCase):
+    """#9 直方图：数的是原始样本，被排除的样本要有个说法。"""
+
+    def test_counts_add_up_and_edges_are_strictly_increasing(self):
+        from i3pro import histogram as hist
+
+        values = np.array([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])
+        out = hist.histogram(values, count=4)
+        self.assertEqual(len(out["bins"]), 4)
+        self.assertEqual(sum(box["count"] for box in out["bins"]), 8)
+        self.assertEqual(out["count"], 8)
+        self.assertEqual(out["range"], [0.0, 7.0])
+        edges = [out["bins"][0]["lo"]] + [box["hi"] for box in out["bins"]]
+        self.assertTrue(all(b > a for a, b in zip(edges, edges[1:])),
+                        f"分箱边界必须严格递增: {edges}")
+        # 每格必须首尾相接：中间留缝会让柱子看起来少了一截
+        for first, second in zip(out["bins"], out["bins"][1:]):
+            self.assertEqual(first["hi"], second["lo"])
+
+    def test_gate_nonzero_drops_the_zeros(self):
+        from i3pro import histogram as hist
+
+        values = np.array([1.0, 2.0, 3.0, 4.0])
+        gate = np.array([0.0, 1.0, 0.0, 5.0])
+        out = hist.histogram(values, count=2, gate=gate)
+        self.assertEqual(out["count"], 2)
+        self.assertEqual(out["excluded"], 2)
+        self.assertIn("排除 2 个样本", out["notice"])
+        # 非有限数不算通过：NaN 不能当成"非零"溜进来
+        out = hist.histogram(values, count=2, gate=np.array([np.nan, 1.0, 1.0, 1.0]))
+        self.assertEqual(out["excluded"], 1)
+
+    def test_gate_range_and_outside_modes(self):
+        from i3pro import histogram as hist
+
+        values = np.arange(6.0)
+        gate = np.array([0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+        inside = hist.histogram(values, count=3, gate=gate, gate_mode="range",
+                                gate_lo=1.0, gate_hi=3.0)
+        self.assertEqual(inside["count"], 3)
+        outside = hist.histogram(values, count=3, gate=gate, gate_mode="outside",
+                                 gate_lo=1.0, gate_hi=3.0)
+        self.assertEqual(outside["count"], 3)
+        with self.assertRaises(ValueError) as caught:
+            hist.histogram(values, count=3, gate=gate, gate_mode="range")
+        self.assertIn("gate_min", str(caught.exception))
+        with self.assertRaises(ValueError) as caught:
+            hist.gate_keeps(gate, "差不多就行")
+        self.assertIn("门槛模式只认", str(caught.exception))
+
+    def test_colour_is_the_mean_of_that_box(self):
+        from i3pro import histogram as hist
+
+        values = np.array([0.0, 0.0, 10.0, 10.0])
+        colour = np.array([1.0, 3.0, 10.0, 20.0])
+        bins = hist.histogram(values, count=4, colour=colour)["bins"]
+        self.assertEqual(bins[0]["colour_mean"], 2.0)
+        self.assertEqual(bins[3]["colour_mean"], 15.0)
+        self.assertEqual(bins[0]["colour_min"], 1.0)
+        self.assertEqual(bins[3]["colour_max"], 20.0)
+        self.assertEqual(bins[0]["colour_count"], 2)
+        # 空箱必须给 None，而不是 0——0 会被画成一个真实的颜色
+        self.assertIsNone(bins[1]["colour_mean"])
+        # 没有色值的样本不进那一格的颜色统计（NaN 在 colour_stats 里被丢掉）
+        lonely = hist.histogram(np.array([5.0, 5.0]), count=4,
+                                colour=np.array([1.0, np.nan]))["bins"]
+        self.assertEqual(sum(box["count"] for box in lonely), 2)
+        self.assertEqual(sum(box["colour_count"] for box in lonely), 1)
+
+    def test_a_constant_channel_still_gets_a_real_range(self):
+        """整段同一个值：柱子必须落在那个值上，不能塌到 0 附近。"""
+        from i3pro import histogram as hist
+
+        out = hist.histogram(np.full(100, 1000.0), count=4)
+        self.assertEqual(out["count"], 100)
+        self.assertLess(out["range"][0], 1000.0)
+        self.assertGreater(out["range"][1], 1000.0)
+        self.assertLess(abs(out["range"][0] - 1000.0), 10.0,
+                        f"撑开的范围不能离真实值太远: {out['range']}")
+        self.assertEqual(out["stats"]["min"], out["stats"]["max"])
+
+    def test_nan_samples_are_reported_not_counted(self):
+        from i3pro import histogram as hist
+
+        out = hist.histogram(np.array([1.0, np.nan, 2.0]), count=4)
+        self.assertEqual(out["count"], 2)
+        self.assertEqual(out["skipped"], 1)
+        self.assertIn("NaN", out["notice"])
+
+    def test_bins_are_clamped_and_said_out_loud(self):
+        from i3pro import histogram as hist
+
+        low = hist.histogram(np.arange(10.0), count=0)
+        self.assertEqual(len(low["bins"]), hist.MIN_BINS)
+        self.assertIn(str(hist.MIN_BINS), low["notice"])
+        high = hist.histogram(np.arange(10.0), count=100000)
+        self.assertEqual(len(high["bins"]), hist.MAX_BINS)
+        self.assertIn(str(hist.MAX_BINS), high["notice"])
+
+    @_needs(HILL)
+    def test_golden_session_window_stats(self):
+        from i3pro import histogram as hist
+
+        with ld.LogFile.read(HILL) as log:
+            time = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
+            out = render.histogram(log, "Vx KF", time, bins=10, start=100.0, end=200.0,
+                                   colour="G Force Lat")
+            self.assertEqual(out["unit"], "km/h")
+            self.assertEqual(out["count"], 10000)          # 100 Hz × 100 s
+            self.assertEqual(out["excluded"], 0)
+            self.assertEqual(out["window"], [100.0, 199.99])
+            self.assertAlmostEqual(out["stats"]["max"], 87.41, places=2)
+            self.assertEqual(sum(box["count"] for box in out["bins"]), out["count"])
+            self.assertEqual(out["colour_channel"], "G Force Lat")
+            self.assertTrue(all(box["colour_mean"] is not None for box in out["bins"]
+                                if box["count"]), "有色值的格子必须给出均值")
+
+    @_needs(HILL)
+    def test_gate_accepts_a_channel_or_a_maths_expression(self):
+        from i3pro import histogram as hist
+
+        with ld.LogFile.read(HILL) as log:
+            time = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
+            by_channel = render.histogram(log, "Brake Signal", time, bins=8, gate="Vx KF")
+            self.assertGreater(by_channel["excluded"], 0)
+            self.assertLessEqual(by_channel["count"] + by_channel["excluded"], time.size)
+            # 表达式门槛走的是数学通道那套：这里用"车速大于 40"筛
+            by_expr = render.histogram(log, "Brake Signal", time, bins=8,
+                                       gate="'Vx KF' > 40")
+            manual = derive.hold_to_master(log, "Vx KF")[: time.size] > 40
+            brake = derive.hold_to_master(log, "Brake Signal")[: time.size]
+            self.assertEqual(by_expr["count"], int(np.sum(manual & np.isfinite(brake))))
+
+    @_needs(HILL)
+    def test_bad_input_says_what_to_do_next(self):
+        from i3pro import histogram as hist
+
+        with ld.LogFile.read(HILL) as toolong:
+            time = np.arange(int(round(toolong.duration * toolong.sample_rate)) + 1) \
+                / toolong.sample_rate
+            with self.assertRaises(ValueError) as caught:
+                render.histogram(toolong, "根本没有这条通道", time, bins=8)
+            self.assertIn("先", str(caught.exception))
+            with self.assertRaises(ValueError) as caught:
+                render.histogram(toolong, "Vx KF", time, bins=8, gate="nosuchfunc(1)")
+            self.assertIn("数学通道", str(caught.exception))
+            with self.assertRaises(ValueError) as caught:
+                render.histogram(toolong, "Vx KF", time, bins=8, colour="不存在的色通道")
+            self.assertIn("色", str(caught.exception))
+            # 空窗口不是"分布是零"，要提示换一段
+            empty = render.histogram(toolong, "Vx KF", time, bins=8, start=50.0, end=50.0)
+            self.assertEqual(empty["count"], 0)
+            self.assertIn("区间", empty["notice"])
+            self.assertEqual(len(hist.summarize([])), 7)
+
+
+class TestHistogramOverHttp(unittest.TestCase):
+    """#9 走到界面之前的那一段：/histogram 的参数、单位与报错。"""
+
+    @_needs(HILL)
+    def test_histogram_endpoint(self):
+        import tempfile
+        from http.server import ThreadingHTTPServer
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            copy = root / HILL.name
+            copy.write_bytes(HILL.read_bytes())
+            library = server.SessionLibrary([root], cache_size=1, maths_root=root)
+            httpd = ThreadingHTTPServer(
+                ("127.0.0.1", 0), server.make_handler(library, buckets=50)
+            )
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            base = f"http://127.0.0.1:{httpd.server_address[1]}"
+            quoted = urllib.parse.quote(copy.stem)
+
+            def get(path):
+                try:
+                    with urllib.request.urlopen(base + path, timeout=120) as response:
+                        return response.status, json.loads(response.read().decode("utf-8"))
+                except urllib.error.HTTPError as exc:
+                    return exc.code, json.loads(exc.read().decode("utf-8"))
+
+            try:
+                status, body = get(f"/api/session/{quoted}/histogram"
+                                   f"?channel={urllib.parse.quote('Vx KF')}&bins=8"
+                                   f"&from=100&to=200&colour={urllib.parse.quote('G Force Lat')}")
+                self.assertEqual(status, 200, body)
+                self.assertEqual(len(body["bins"]), 8)
+                self.assertEqual(body["count"], 10000)
+                self.assertEqual(body["unit"], "km/h")
+                self.assertEqual(body["colour_channel"], "G Force Lat")
+                self.assertIsNotNone(body["bins"][0]["colour_mean"])
+
+                status, body = get(f"/api/session/{quoted}/histogram"
+                                   f"?channel={urllib.parse.quote('Brake Signal')}"
+                                   f"&gate={urllib.parse.quote('Vx KF > 40')}")
+                self.assertEqual(status, 200, body)
+                self.assertGreater(body["excluded"], 0)
+
+                status, body = get(f"/api/session/{quoted}/histogram")
+                self.assertEqual(status, 400)
+                self.assertIn("channel=", body["error"])
+
+                status, body = get(f"/api/session/{quoted}/histogram"
+                                   f"?channel={urllib.parse.quote('没有这条')}")
+                self.assertEqual(status, 400)
+                self.assertIn("先", body["error"])
+            finally:
+                httpd.shutdown()
+                library.close()
+
 class TestMathsOverHttp(unittest.TestCase):
     """#3 走到界面之前的那一段：PUT/GET/POST + 侧车文件 + 作用域。"""
 

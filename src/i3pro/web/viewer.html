@@ -353,6 +353,7 @@ const ROW_PX = 24;
 const COMPONENT_TYPES = {
   graph:   { label: "时间/距离图", cols: 12, rows: 8 },
   scatter: { label: "散点图",      cols: 4,  rows: 13 },
+  histogram: { label: "直方图",    cols: 6,  rows: 13 },
   track:   { label: "赛道轨迹",    cols: 4,  rows: 13 },
   gauge:   { label: "仪表",        cols: 4,  rows: 13 },
   delta:   { label: "时间差 Δ",    cols: 12, rows: 8 },
@@ -443,6 +444,14 @@ function makeComponent(type, overrides) {
     comp.config.colour = null;
     comp.config.style = "points";
   }
+  if (type === "histogram") {
+    comp.config.channel = null;      // 统计哪条通道
+    comp.config.bins = 40;           // 格数
+    comp.config.style = "bars";      // bars | line | text
+    comp.config.colour = null;       // 按第三通道着色（每格取均值）
+    comp.config.gate = "";           // 门槛：通道名或数学通道表达式
+    comp.config.window = "zoom";     // zoom | all（快照里是整场 / 某条完整圈）
+  }
   if (type === "track") comp.config.channel = null;
   if (type === "track") comp.config.window = "all";     // all | zoom
   if (type === "gauge") {
@@ -473,6 +482,10 @@ function presetDefinitions() {
       placed(makeComponent("track"), 0, 9, 4, 13),
       placed(makeComponent("scatter"), 4, 9, 4, 13),
       placed(makeComponent("gauge", { subtype: "numeric" }), 8, 9, 4, 13),
+      placed(makeComponent("histogram", {
+        config: { channel: pick("分析", 1)[0] || null, colour: pick("分析", 5)[4] || null },
+      }), 0, 22, 6, 13),
+      placed(makeComponent("gauge", { subtype: "list" }), 6, 22, 6, 13),
     ],
     对比: [
       placed(makeComponent("delta"), 0, 0, 12, 8),
@@ -487,6 +500,12 @@ function presetDefinitions() {
       placed(makeComponent("gauge", { subtype: "dial" }), 0, 14, 4, 13),
       placed(makeComponent("gauge", { subtype: "bar" }), 4, 14, 4, 13),
       placed(makeComponent("gauge", { subtype: "numeric" }), 8, 14, 4, 13),
+      placed(makeComponent("histogram", {
+        config: { channel: pick("动力", 2)[1] || null, colour: pick("动力", 3)[2] || null },
+      }), 0, 27, 6, 13),
+      placed(makeComponent("histogram", {
+        config: { channel: pick("动力", 4)[3] || null, style: "line" },
+      }), 6, 27, 6, 13),
     ],
     底盘: [
       placed(makeComponent("graph", { config: { channels: pick("底盘", 10) } }), 0, 0, 12, 10),
@@ -533,6 +552,10 @@ function encodeLayout(components) {
     c.type, c.x, c.y, c.w, c.h,
     c.type === "graph" ? c.config.channels.join("|") + "#" + (c.config.mode || "tiled")
       : c.type === "scatter" ? [c.config.x, (c.config.y || [])[0], c.config.colour, c.config.style].join("|")
+      : c.type === "histogram" ? [
+          c.config.channel || "", c.config.bins || 40, c.config.style || "bars",
+          c.config.colour || "", c.config.window || "zoom",
+        ].join("|") + "#" + (c.config.gate || "")
       : c.type === "track" ? (c.config.channel || "")
       : c.type === "gauge" ? [c.config.subtype, (c.config.channels || []).join("~")].join("|")
       : c.type === "report" ? (c.config.filter || "all")
@@ -569,6 +592,17 @@ function decodeLayout(text) {
         comp.config.colour = parts[2] || null;
         comp.config.style = parts[3] === "trend" ? "trend" : "points";
       } else if (type === "track") comp.config.channel = payload || null;
+      else if (type === "histogram") {
+        const parts = payload.split("#");
+        const head = parts[0].split("|");
+        comp.config.channel = head[0] || null;
+        comp.config.bins = Math.max(1, parseInt(head[1], 10) || 40);
+        comp.config.style = HISTOGRAM_STYLES.some((pair) => pair[0] === head[2])
+          ? head[2] : "bars";
+        comp.config.colour = head[3] || null;
+        comp.config.window = head[4] || "zoom";
+        comp.config.gate = parts[1] || "";
+      }
       else if (type === "gauge") {
         const parts = payload.split("|");
         comp.config.subtype = GAUGE_SUBTYPES[parts[0]] ? parts[0] : "numeric";
@@ -1248,6 +1282,7 @@ function componentKey(comp, b, w, h) {
 }
 
 function buildWorksheet() {
+  if (window.__i3proDebug) window.__bwCount = (window.__bwCount || 0) + 1;
   const host = $("worksheet");
   host.innerHTML = "";
   SHEET.clear();
@@ -1319,6 +1354,69 @@ function buildWorksheet() {
         bundle.cacheKey = "";
         renderAll();
       });
+    }
+    if (comp.type === "histogram") {
+      // 一条通道的取值分布。控件全部打进 bundle，syncHistogramSelectors 负责填。
+      const cfgBar = makeEl("div", "scattercfg", body);
+      const selChannel = makeEl("select", "", cfgBar);
+      selChannel.dataset.hist = "channel";
+      selChannel.title = "统计哪一条通道（按单位分组）";
+      makeEl("span", "", cfgBar).textContent = "格";
+      const selBins = makeEl("input", "", cfgBar);
+      selBins.type = "number";
+      selBins.min = "4";
+      selBins.max = "500";
+      selBins.step = "1";
+      selBins.style.width = "52px";
+      selBins.dataset.hist = "bins";
+      selBins.title = "分几格（4–500）；快照里只能往粗里并";
+      const selStyle = makeEl("select", "", cfgBar);
+      selStyle.dataset.hist = "style";
+      selStyle.innerHTML = HISTOGRAM_STYLES.map(
+        (pair) => '<option value="' + pair[0] + '">' + pair[1] + "</option>"
+      ).join("");
+      makeEl("span", "", cfgBar).textContent = "色";
+      const selColour = makeEl("select", "", cfgBar);
+      selColour.dataset.hist = "colour";
+      selColour.title = "按第三通道着色：每格取该通道的均值（色标上写着范围）";
+      makeEl("span", "", cfgBar).textContent = "门槛";
+      const gateInput = makeEl("input", "", cfgBar);
+      gateInput.type = "text";
+      gateInput.placeholder = "通道名或表达式（可留空）";
+      gateInput.dataset.hist = "gate";
+      gateInput.title = "条件为假（0）的样本不算进分布；写法和「数学通道」一样";
+      makeEl("span", "", cfgBar).textContent = "窗口";
+      const selWindow = makeEl("select", "", cfgBar);
+      selWindow.dataset.hist = "window";
+      bundle.selChannel = selChannel;
+      bundle.selBins = selBins;
+      bundle.selStyle = selStyle;
+      bundle.selColour = selColour;
+      bundle.selWindow = selWindow;
+      bundle.gateInput = gateInput;
+      const changed = () => {
+        comp.config.channel = selChannel.value || null;
+        comp.config.colour = selColour.value || null;
+        const want = Math.round(Number(selBins.value) || 40);
+        if (!DATA.api && DATA.histograms && want > DATA.histograms.bins) {
+          // 快照里只带了 bins 格，再细分就是编出来的——夹回去并说清楚。
+          selBins.value = String(DATA.histograms.bins);
+          toast("快照里只带了 " + DATA.histograms.bins + " 格的分布：改格数只能往粗里并，"
+            + "要更细请用 serve 模式打开");
+        }
+        comp.config.bins = Math.max(1, Math.round(Number(selBins.value) || 40));
+        comp.config.style = selStyle.value;
+        comp.config.window = selWindow.value;
+        comp.config.gate = gateInput.value.trim();
+        bundle.cacheKey = "";
+        refreshComponentTitle(comp);
+        saveLayout();
+        renderAll();
+      };
+      [selChannel, selBins, selStyle, selColour, selWindow].forEach(
+        (el) => el.addEventListener("change", changed)
+      );
+      gateInput.addEventListener("change", changed);
     }
     if (comp.type === "track") {
       const cfgBar = makeEl("div", "scattercfg", body);
@@ -1587,6 +1685,15 @@ function componentTitle(comp) {
   if (comp.type === "gauge") {
     return spec.label + " · " + (GAUGE_SUBTYPES[comp.config.subtype] || comp.config.subtype);
   }
+  if (comp.type === "histogram") {
+    const name = comp.config.channel || "还没选通道";
+    const style = (HISTOGRAM_STYLES.find((pair) => pair[0] === (comp.config.style || "bars"))
+      || HISTOGRAM_STYLES[0])[1];
+    const bits = [spec.label + " · " + name + " · " + (comp.config.bins || 40) + " 格 · " + style];
+    if (comp.config.colour) bits.push("色=" + comp.config.colour);
+    if (comp.config.gate) bits.push("门槛=" + comp.config.gate);
+    return bits.join(" · ");
+  }
   if (comp.type === "report") {
     const filter = SECTION_FILTERS.find((pair) => pair[0] === comp.config.filter);
     return spec.label + " · " + ((filter && filter[1]) || "全部区段");
@@ -1647,6 +1754,13 @@ function renderComponents() {
       continue;
     }
     if (!bundle.canvas) continue;
+    if (comp.type === "histogram") {
+      // 分布只在服务端算（数的是原始样本）。这一屏要问的问题变了就重新问一次。
+      const key = histogramKey(comp);
+      if (bundle.histKey !== key) refreshHistogramFor(comp);
+      renderHistogramComponent(comp, bundle);
+      continue;
+    }
     if (comp.type === "graph") renderGraphComponent(comp, bundle);
     else if (comp.type === "scatter") renderScatterComponent(comp, bundle);
     else if (comp.type === "delta") renderDeltaComponent(comp, bundle);
@@ -2066,6 +2180,289 @@ function renderScatterComponent(comp, b) {
   }
   b.head.textContent = (state.points.time.length || 0) + " 点 · "
     + (cfg.style === "points" ? "散点" : "散点+趋势线") + " · 只显示当前缩放区间";
+}
+
+/* ------------------------------------------------------------ 直方图（#9） */
+// 数据只有两个来源，别处不许再算一遍：
+//   serve 模式：按当前窗口现问 /histogram，数的是**原始样本**（不是画图那份抽稀，
+//               Min/Max 抽稀每一格都塞进一个极值，分布会长出一截假尾巴）；
+//   快照：用导出时算好的那几份（整场 + 每条完整圈），改格数只能**往粗里并**——
+//         并格是精确的，再细分就是编出来的。
+const HISTOGRAM_STYLES = [["bars", "柱状"], ["line", "折线"], ["text", "文字"]];
+
+/** 把等宽格子的计数并成 `want` 格（只并、不细分；计数之和不变）。 */
+function mergeCounts(counts, want) {
+  const have = counts.length;
+  const step = Math.max(1, Math.floor(have / Math.max(1, Math.round(want))));
+  if (step <= 1) return counts.slice();
+  const out = [];
+  for (let i = 0; i < have; i += step) {
+    let sum = 0;
+    for (let j = i; j < Math.min(have, i + step); j++) sum += counts[j];
+    out.push(sum);
+  }
+  return out;
+}
+
+/** 快照里那一份：整场或某条完整圈，来自导出时算好的 DATA.histograms。 */
+function snapshotHistogramFor(comp) {
+  const all = DATA.histograms;
+  const entry = all && all.series ? all.series[comp.config.channel] : null;
+  if (!entry) return null;
+  const key = comp.config.window && comp.config.window !== "zoom"
+    ? comp.config.window : "all";
+  const win = entry.windows ? entry.windows[key] : null;
+  if (!win || !win.counts || !win.range) return null;
+  const counts = mergeCounts(win.counts, comp.config.bins || all.bins);
+  const span = (win.range[1] - win.range[0]) / Math.max(1, counts.length);
+  const bins = counts.map((count, i) => ({
+    lo: win.range[0] + span * i,
+    hi: win.range[0] + span * (i + 1),
+    count: count,
+    colour_count: 0, colour_mean: null, colour_min: null, colour_max: null,
+  }));
+  const meta = (all.windows || []).find((w) => w.key === key) || {};
+  return {
+    channel: comp.config.channel, unit: entry.unit, bins: bins, count: win.count,
+    excluded: 0, skipped: 0, range: win.range, stats: win.stats, colour: null,
+    window: [meta.start, meta.end], window_label: meta.label || "整场",
+    embedded: true, embedded_bins: all.bins,
+    notice: win.notice || null,
+  };
+}
+
+/** 这一屏的分布对应的"问题"：换一个就得重新问一次服务。 */
+function histogramKey(comp) {
+  const cfg = comp.config;
+  const w = windowRange();
+  const span = (cfg.window || "zoom") === "all" || !DATA.api
+    ? (cfg.window || "all")
+    : (Math.round(w.from * 1000) + "-" + Math.round(w.to * 1000));
+  return [cfg.channel || "", cfg.bins, cfg.colour || "", cfg.gate || "",
+          DATA.api ? "serve" : "snap", span].join("|");
+}
+
+async function refreshHistogramFor(comp) {
+  const b = SHEET.get(comp.id);
+  if (!b) return;
+  const cfg = comp.config;
+  b.histKey = histogramKey(comp);
+  b.histError = null;
+  if (!cfg.channel) { b.hist = null; return; }
+  if (!DATA.api) { b.hist = snapshotHistogramFor(comp); return; }
+  const w = windowRange();
+  let url = DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/histogram"
+    + "?channel=" + encodeURIComponent(cfg.channel)
+    + "&bins=" + Math.round(cfg.bins || 40);
+  if ((cfg.window || "zoom") !== "all") url += "&from=" + w.from + "&to=" + w.to;
+  if (cfg.gate) url += "&gate=" + encodeURIComponent(cfg.gate);
+  if (cfg.colour) url += "&colour=" + encodeURIComponent(cfg.colour);
+  state.pending += 1;
+  setStatus();
+  try {
+    const res = await fetch(url);
+    const body = await res.json();
+    if (!res.ok) {
+      b.hist = null;
+      b.histError = body.error || ("HTTP " + res.status);
+    } else {
+      b.hist = body;
+    }
+  } catch (err) {
+    b.hist = null;
+    b.histError = "取不到分布：" + err.message;
+  } finally {
+    state.pending -= 1;
+    renderAll();
+  }
+}
+
+/** 快照模式能看的窗口：整场 + 每条完整圈（导出时算好的）。 */
+function histogramWindowChoices() {
+  if (DATA.api) {
+    return [["zoom", "当前窗口"], ["all", "整场"]];
+  }
+  const all = DATA.histograms;
+  if (all && all.windows && all.windows.length) {
+    return all.windows.map((w) => [w.key, w.label]);
+  }
+  return [["all", "整场"]];
+}
+
+/** 通道下拉：按单位分组，和数学通道那个选单一个口径（445 条平铺没法找）。 */
+function fillChannelSelectGrouped(select, value, allowNone) {
+  const byUnit = new Map();
+  for (const name of (CHANNELS ? CHANNELS.keys() : [])) {
+    const unit = (CHANNELS.get(name) || {}).unit || "";
+    if (!byUnit.has(unit)) byUnit.set(unit, []);
+    byUnit.get(unit).push(name);
+  }
+  let html = allowNone ? '<option value="">无</option>' : "";
+  for (const unit of Array.from(byUnit.keys()).sort()) {
+    html += '<optgroup label="' + esc(unit || "无单位") + '">'
+      + byUnit.get(unit).slice().sort().map((name) =>
+        '<option value="' + esc(name) + '">' + esc(name)
+        + (unit ? " · " + esc(unit) : "") + "</option>").join("")
+      + "</optgroup>";
+  }
+  select.innerHTML = html;
+  select.value = value || (allowNone ? "" : "");
+}
+
+function syncHistogramSelectors() {
+  for (const comp of state.components) {
+    if (comp.type !== "histogram") continue;
+    const b = SHEET.get(comp.id);
+    if (!b || !b.selChannel) continue;
+    const names = CHANNELS ? Array.from(CHANNELS.keys()) : [];
+    if (comp.config.channel && names.indexOf(comp.config.channel) < 0) {
+      comp.config.channel = null;
+    }
+    fillChannelSelectGrouped(b.selChannel, comp.config.channel, false);
+    fillChannelSelectGrouped(b.selColour, comp.config.colour, true);
+    if (!comp.config.channel && names.length) {
+      comp.config.channel = names.find((n) => /Vx KF/i.test(n)) || names[0];
+      b.selChannel.value = comp.config.channel;
+    }
+    b.selBins.value = String(comp.config.bins || 40);
+    b.selStyle.value = comp.config.style || "bars";
+    b.selColour.value = comp.config.colour || "";
+    b.gateInput.value = comp.config.gate || "";
+    const choices = histogramWindowChoices();
+    const wanted = comp.config.window || (DATA.api ? "zoom" : "all");
+    b.selWindow.innerHTML = choices.map(
+      (pair) => '<option value="' + esc(pair[0]) + '">' + esc(pair[1]) + "</option>"
+    ).join("");
+    comp.config.window = choices.some((pair) => pair[0] === wanted)
+      ? wanted : choices[0][0];
+    b.selWindow.value = comp.config.window;
+  }
+}
+
+function renderHistogramComponent(comp, b) {
+  const cfg = comp.config;
+  const c = sizeCanvas(b.canvas, b.canvas.clientWidth || 420, Math.max(150, comp.h * ROW_PX - 26));
+  const ctx = c.ctx;
+  ctx.clearRect(0, 0, c.w, c.h);
+  const hint = (text) => {
+    ctx.fillStyle = "#8b94a7";
+    ctx.font = "12px Segoe UI";
+    ctx.textAlign = "left";
+    ctx.fillText(text, 12, 24);
+  };
+  if (!cfg.channel) { hint("选一条要看分布的通道"); b.head.textContent = ""; return; }
+  if (!b.hist || !b.hist.bins || !b.hist.bins.length) {
+    // 这句话既画在画布上，也写进表头——表头是 DOM，断言与读屏都拿得到。
+    const message = b.histError || (DATA.api ? "载入分布…"
+      : "快照里没带这条通道的分布（导出时它没被勾选）——换一条，或用 serve 模式打开");
+    b.head.textContent = message;
+    hint(message);
+    return;
+  }
+  const hist = b.hist;
+  const bins = hist.bins;
+  const painted = cfg.colour && bins.some((box) => Number.isFinite(box.colour_mean));
+  const pad = { l: 44, r: painted ? 72 : 14, t: 8, b: 20 };
+  const plotW = Math.max(10, c.w - pad.l - pad.r);
+  const plotH = Math.max(10, c.h - pad.t - pad.b);
+  const top = Math.max(1, bins.reduce((m, box) => Math.max(m, box.count), 0));
+  const x0 = hist.range[0], x1 = hist.range[1];
+  const px = (v) => pad.l + ((v - x0) / (x1 - x0 || 1)) * plotW;
+  const py = (v) => pad.t + plotH - (v / top) * plotH;
+  ctx.strokeStyle = GRID;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(pad.l, pad.t);
+  ctx.lineTo(pad.l, pad.t + plotH);
+  ctx.lineTo(pad.l + plotW, pad.t + plotH);
+  ctx.stroke();
+  ctx.fillStyle = "#8b94a7";
+  ctx.font = "10px Segoe UI";
+  ctx.textAlign = "right";
+  for (let i = 0; i <= 2; i++) {
+    ctx.fillText(String(Math.round(top - (top * i) / 2)),
+                 pad.l - 4, pad.t + (plotH * i) / 2 + 3);
+  }
+  ctx.textAlign = "center";
+  for (let i = 0; i <= 4; i++) {
+    ctx.fillText(fmt(x0 + ((x1 - x0) * i) / 4), pad.l + (plotW * i) / 4, pad.t + plotH + 13);
+  }
+  // 上色范围：按每格均值归一化；色标与柱子同一个口径，不然颜色说了假话。
+  let cLo = Infinity, cHi = -Infinity;
+  if (painted) {
+    for (const box of bins) {
+      const v = box.colour_mean;
+      if (!Number.isFinite(v)) continue;
+      if (v < cLo) cLo = v;
+      if (v > cHi) cHi = v;
+    }
+  }
+  const ramp = (f) => "hsl(" + (210 - 210 * clamp(f, 0, 1)) + ",85%,60%)";
+  const accent = channelColor(cfg.channel, null);
+  if ((cfg.style || "bars") === "line") {
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    bins.forEach((box, i) => {
+      const x = px((box.lo + box.hi) / 2);
+      const y = py(box.count);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  } else if ((cfg.style || "bars") === "text") {
+    const rows = bins.filter((box) => box.count > 0).slice(0, 12);
+    ctx.textAlign = "left";
+    ctx.font = "11px Segoe UI";
+    rows.forEach((box, i) => {
+      ctx.fillStyle = "#c9d1e2";
+      ctx.fillText(fmt(box.lo, 2) + " – " + fmt(box.hi, 2) + "   " + box.count,
+                   10, 16 + i * 13);
+    });
+    if (bins.filter((box) => box.count > 0).length > rows.length) {
+      ctx.fillStyle = "#8b94a7";
+      ctx.fillText("……共 " + bins.length + " 格", 10, 16 + rows.length * 13);
+    }
+  } else {
+    const width = plotW / bins.length;
+    bins.forEach((box) => {
+      if (!box.count) return;
+      const value = Number.isFinite(box.colour_mean) && cHi > cLo
+        ? (box.colour_mean - cLo) / (cHi - cLo) : null;
+      ctx.fillStyle = value === null ? accent : ramp(value);
+      ctx.fillRect(px(box.lo) + 0.5, py(box.count), Math.max(1, width - 1),
+                   pad.t + plotH - py(box.count));
+    });
+  }
+  if (painted && cHi > cLo) {
+    // 色标：上红下蓝，和柱子同一套映射；两端写上真实数值。
+    const barX = c.w - pad.r + 26, barW = 10;
+    for (let i = 0; i < 24; i++) {
+      ctx.fillStyle = ramp(1 - i / 23);
+      ctx.fillRect(barX, pad.t + (plotH * i) / 24, barW, plotH / 24 + 1);
+    }
+    ctx.fillStyle = "#8b94a7";
+    ctx.font = "9px Segoe UI";
+    ctx.textAlign = "left";
+    ctx.fillText(fmt(cHi, 1), barX + barW + 2, pad.t + 7);
+    ctx.fillText(fmt(cLo, 1), barX + barW + 2, pad.t + plotH);
+  }
+  const stats = hist.stats || {};
+  const unit = hist.unit ? " [" + hist.unit + "]" : "";
+  const windowLabel = hist.window_label
+    || ((cfg.window || "zoom") === "all" ? "整场" : "当前窗口");
+  const bits = [cfg.channel + unit, windowLabel + " · " + (hist.count || 0) + " 点"];
+  if (Number.isFinite(stats.median)) bits.push("中位 " + fmt(stats.median, 2));
+  if (Number.isFinite(stats.min)) bits.push("最低 " + fmt(stats.min, 2));
+  if (Number.isFinite(stats.max)) bits.push("最高 " + fmt(stats.max, 2));
+  if (painted) {
+    bits.push("色=" + cfg.colour + (hist.colour_unit ? " [" + hist.colour_unit + "]" : ""));
+  } else if (cfg.colour) {
+    // 选了色却没有色值：说明白为什么，不然用户以为这个功能坏了。
+    bits.push("色=" + cfg.colour + "（这份数据里没有色值，serve 模式才有）");
+  }
+  if (hist.embedded) bits.push("快照内嵌 " + hist.embedded_bins + " 格");
+  b.head.textContent = bits.join(" · ");
+  if (hist.notice) b.head.textContent += " · " + hist.notice;
 }
 
 function renderDeltaComponent(comp, b) {
@@ -3884,7 +4281,10 @@ function toggleChannel(name, on) {
   renderAll();
 }
 
-/** Fill each scatter component's X / Y / colour pickers from the sheet's channels. */
+/** Fill each scatter component's X / Y / colour pickers from the sheet's channels.
+ *
+ * 直方图的四个下拉也在这里填（同一个时机：工作表刚建好、勾选的通道变了）——
+ * 分开两个入口的话，总有一个调用点会漏掉，表现就是"新加的组件下拉是空的"。 */
 function syncScatterSelectors() {
   const names = allGraphChannels();
   for (const comp of state.components) {
@@ -3921,6 +4321,7 @@ function syncScatterSelectors() {
     b.selY.value = comp.config.y[0] || "";
     b.selC.value = comp.config.colour || "";
   }
+  syncHistogramSelectors();
 }
 
 function fillSelect(select, names, value, allowNone) {
@@ -4670,6 +5071,9 @@ window.i3pro = {
   componentAction: componentAction, refreshWindowTraces: refreshWindowTraces,
   encodeLayout: encodeLayout, decodeLayout: decodeLayout, saveLayout: saveLayout,
   buildWorksheet: buildWorksheet, syncScatterSelectors: syncScatterSelectors,
+  histogramKey: histogramKey, refreshHistogramFor: refreshHistogramFor,
+  mergeCounts: mergeCounts, snapshotHistogramFor: snapshotHistogramFor,
+  syncHistogramSelectors: syncHistogramSelectors, componentTitle: componentTitle,
   selectLap: selectLap, zoomToLap: zoomToLap,
   renderLapControls: renderLapControls, renameBeacon: renameBeacon,
   insertCrossing: insertCrossing, cursorTime: cursorTime,

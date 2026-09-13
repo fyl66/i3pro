@@ -20,7 +20,8 @@ from pathlib import Path
 
 import numpy as np
 
-from . import derive, laps as lapsmod, report as reportmod, sections as sectionsmod
+from . import derive, histogram as histogrammod, laps as lapsmod
+from . import report as reportmod, sections as sectionsmod
 from . import ld as ldmod
 
 __all__ = [
@@ -32,12 +33,14 @@ __all__ = [
     "channel_index",
     "trace",
     "points",
+    "histogram",
     "groups",
     "pick_channels",
     "track_payload",
     "sections_payload",
     "report_payload",
     "snapshot_report",
+    "snapshot_histograms",
 ]
 
 TEMPLATE = Path(__file__).with_name("web") / "viewer.html"
@@ -191,6 +194,159 @@ def points(
         out["values"][name] = np.round(_finite(values)[index], 5).tolist()
         out.setdefault("units", {})[name] = log.channel(name).unit
     return out
+
+
+def histogram(
+    log: ldmod.LogFile,
+    name: str,
+    time: np.ndarray,
+    bins: int = histogrammod.DEFAULT_BINS,
+    start: float | None = None,
+    end: float | None = None,
+    gate: str | None = None,
+    gate_mode: str = "nonzero",
+    gate_lo: float | None = None,
+    gate_hi: float | None = None,
+    colour: str | None = None,
+) -> dict:
+    """一条通道在一个窗口里的取值分布（ticket #9）。
+
+    窗口是**半开区间** ``[start, end)``，和切圈、报表一个口径。算的是原始样本，
+    不是降采样后的包络——Min/Max 抽稀会把每一格塞进两个极值，分布会变成假的。
+    所以这个入口只在 serve 模式按需调用（快照里内嵌的是导出时算好的几份，
+    见 :func:`snapshot_histograms`）。
+    """
+    if not log.has(name):
+        raise ValueError(
+            f"本场次没有通道 {name!r}。先在左侧「通道」里搜一下名字——"
+            f"名字里含空格 / 括号 / 短横线的，在表达式里要用单引号括起来。"
+        )
+    size = int(time.size)
+    values = derive.hold_to_master(log, name)[:size]
+    lo = 0 if start is None else max(0, int(np.searchsorted(time, float(start))))
+    hi = size if end is None else min(size, int(np.searchsorted(time, float(end))))
+    if hi <= lo:
+        # 空窗口不是"分布是零"：给一句能照做的提示，别让图上出现一条平线。
+        return {
+            "channel": name,
+            "unit": log.channel(name).unit,
+            "colour_channel": colour,
+            "colour_unit": log.channel(colour).unit if colour and log.has(colour) else "",
+            "bins": [], "count": 0, "excluded": 0, "range": None,
+            "stats": histogrammod.summarize([]),
+            "window": [start, end],
+            "notice": "这个区间里没有样本——时间轴的起止是不是选反了？",
+        }
+
+    # 门槛可以先是一条通道名，也可以是一条数学通道表达式——两种都在
+    # histogram.gate_values 里解析，别在界面里再写一套 if。
+    gate_series = None
+    if gate:
+        gate_series = histogrammod.gate_values(log, gate, size)[lo:hi]
+    colour_values = None
+    if colour:
+        if not log.has(colour):
+            raise ValueError(
+                f"着色通道 {colour!r} 不在本场次里。要么换一条，要么把「色」选成「无」。"
+            )
+        colour_values = derive.hold_to_master(log, colour)[:size][lo:hi]
+
+    payload = histogrammod.histogram(
+        values[lo:hi],
+        count=bins,
+        gate=gate_series,
+        colour=colour_values,
+        gate_mode=gate_mode,
+        gate_lo=gate_lo,
+        gate_hi=gate_hi,
+    )
+    payload["channel"] = name
+    payload["unit"] = log.channel(name).unit
+    payload["colour_channel"] = colour
+    payload["colour_unit"] = log.channel(colour).unit if colour else ""
+    payload["window"] = [
+        round(float(time[lo]), 4),
+        round(float(time[max(lo, hi - 1)]), 4),
+    ]
+    payload["notice"] = _histogram_notice(payload, bins)
+    return payload
+
+
+def _histogram_notice(payload: dict, bins: int) -> str | None:
+    """窗口里发生的、用户必须知道才不会被误导的那几件事。"""
+    if not payload.get("count"):
+        if payload.get("excluded"):
+            return (f"门槛把这一段 {payload['excluded']} 个样本全排除了——"
+                    f"放宽条件或者换个窗口再看")
+        return "这条通道在这个窗口里没有有效样本（NaN 不算样本）"
+    if payload.get("excluded"):
+        return (f"已按门槛排除 {payload['excluded']} 个样本，"
+                f"剩下 {payload['count']} 个参与统计")
+    if payload.get("range") and payload["stats"]["min"] == payload["stats"]["max"]:
+        return (f"这条通道在窗口内一直是 {payload['stats']['min']}，没有变化"
+                f"（区间已撑开，只为能画出来）")
+    return None
+
+
+def snapshot_histograms(
+    log: ldmod.LogFile,
+    laps,
+    channels: list[str],
+    bins: int = histogrammod.DEFAULT_BINS,
+) -> dict:
+    """快照里内嵌的那几份分布：整场 + 每条完整圈，每条通道各一份。
+
+    快照背后没有服务可以再问一次，所以窗口只能先算好——但**算法还是上面那一个**，
+    内嵌只是把 ``counts`` 存成数组（区间等宽，``range`` 加格数就能还原每格的边界）。
+    界面上改分箱数只能**往粗里并格**（并格是精确的，再细分就是编的），所以这里统一
+    按 ``bins`` 格算好，前端报出它实际用的格数。
+
+    不内嵌区段窗口：区段是"每条圈 × 每个区段"，26 条圈的场次会变成几百份，
+    快照会大到发不出去。要看某个区段的分布，缩放之后在 serve 模式下看。
+    """
+    time = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
+    windows: list[dict] = [{
+        "key": "all", "label": "整场", "start": 0.0,
+        "end": round(float(log.duration), 4),
+    }]
+    for lap in laps:
+        if not getattr(lap, "complete", False):
+            continue        # 进场/出场那半圈会把分布拖出一截假的长尾
+        windows.append({
+            "key": str(lap.label), "label": str(lap.label),
+            "start": round(float(lap.start_time), 4),
+            "end": round(float(lap.end_time), 4),
+        })
+
+    series: dict[str, dict] = {}
+    for name in channels:
+        if not name or not log.has(name):
+            continue
+        entries: dict[str, dict] = {}
+        for window in windows:
+            try:
+                payload = histogram(
+                    log, name, time, bins=bins,
+                    start=window["start"], end=window["end"],
+                )
+            except ValueError:
+                continue
+            entries[window["key"]] = {
+                "range": payload["range"],
+                "count": payload["count"],
+                "stats": payload["stats"],
+                "counts": [b["count"] for b in payload["bins"]],
+                "notice": payload["notice"],
+            }
+        series[name] = {"unit": log.channel(name).unit, "windows": entries}
+
+    return {
+        "bins": int(bins),
+        "colour": False,        # 快照不内嵌按第三通道着色：色值是"每条通道 × 每个窗口"
+        "windows": windows,     # 一份，索引用；数据在 series 里按窗口 key 存
+        "series": series,
+        "notice": None if series else "本场没有可统计的通道",
+    }
 
 
 def downsample(
@@ -531,6 +687,7 @@ def build_payload(
     with_track: bool = True,
     overview_buckets: int = 900,
     with_report: bool = False,
+    with_histograms: bool = False,
 ) -> dict:
     """Everything the workbench needs. Traces are only embedded in static mode."""
     time = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
@@ -589,6 +746,11 @@ def build_payload(
         "report": (
             _snapshot_report_or_error(log, recognized, selected) if with_report else None
         ),
+        # 快照里内嵌的几份分布（整场 + 每条完整圈）。serve 模式不内嵌——那边是
+        # 按当前缩放区间现算的，见 /api/session/<名>/histogram。
+        "histograms": (
+            snapshot_histograms(log, recognized, selected) if with_histograms else None
+        ),
         "api": api_base,
         "buckets": buckets,
         "session": log.path.stem,
@@ -620,6 +782,7 @@ def render_html(
     buckets: int = DEFAULT_BUCKETS,
     with_track: bool = True,
     with_report: bool = True,
+    with_histograms: bool = True,
 ) -> Path:
     """Write a self-contained workbench snapshot and return its path."""
     payload = build_payload(
@@ -630,6 +793,7 @@ def render_html(
         buckets=buckets,
         with_track=with_track,
         with_report=with_report,
+        with_histograms=with_histograms,
     )
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)

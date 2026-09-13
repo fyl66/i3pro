@@ -238,6 +238,15 @@ class Browser:
             self.call("Input.dispatchKeyEvent", {"type": "keyUp"}, session=session)
         time.sleep(0.2)
 
+    def insert_text(self, text, session):
+        """中文没法用 keyDown 的 ``text`` 塞进去（要走 IME），用 Input.insertText。
+
+        输入的是**真文本**，和"直接改 value + 派发 change"不是一回事：中间那些
+        输入法 / 编辑框的行为仍然是真的。
+        """
+        self.call("Input.insertText", {"text": text}, session=session)
+        time.sleep(0.2)
+
     def key_named(self, key, code, windows_code, session, modifiers=0):
         for kind in ("keyDown", "keyUp"):
             self.call("Input.dispatchKeyEvent", {
@@ -514,6 +523,202 @@ class Checker:
                    any(b.get("time") is not None for b in disk["beacons"]))
         return disk
 
+    def histogram(self):
+        """#9：直方图——加得出来、画得出来、缩放会重问、门槛报错能照做。
+
+        这里验的是假 DOM 证明不了的那几件：新加的组件在真浏览器里**真的画出了柱子**
+        （读回画布像素），改格数、缩放之后**真的重新问了服务**（看 __fetchLog），
+        门槛写错时表头**真的写出了下一步**。
+        """
+        def rect(element_id):
+            raw = self.js("JSON.stringify(__rectOf('%s'))" % element_id)
+            return json.loads(raw) if raw and raw != "null" else None
+
+        def comp_json():
+            raw = self.js(
+                "(function(){var a=i3pro.state.components.filter(function(c){"
+                "return c.type==='histogram';});var c=a[a.length-1];"
+                "return c?JSON.stringify({id:c.id,channel:c.config.channel,"
+                "bins:c.config.bins}):'null';})()"
+            )
+            return json.loads(raw) if raw and raw != "null" else None
+
+        def hist_calls():
+            raw = self.js("JSON.stringify(window.__fetchLog.filter(function(e){"
+                          "return e.url.indexOf('/histogram')>=0;}))")
+            return json.loads(raw) if raw else []
+
+        def wait_for_hist(seen, needle, timeout=5.0):
+            """等到第 seen 条之后出现一条含 needle 的 /histogram 请求。
+
+            有界轮询而不是 sleep 固定秒数：真浏览器里"打字 -> change -> fetch ->
+            渲染"是四段异步，睡多久都是猜；这里最多等 5 秒，等不到就是真没发。
+            """
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                calls = hist_calls()
+                for call in calls[seen:]:
+                    if needle in call["url"]:
+                        return calls
+                time.sleep(0.2)
+            return hist_calls()
+
+        before = self.js("i3pro.state.components.length")
+        self.js("(function(){document.getElementById('addType').value='histogram';"
+                "return true;})()")
+        add = rect("addBtn")
+        self.browser.click(add["x"], add["y"], self.session)
+        self.browser.wait_for("i3pro.state.components.length === %d" % (before + 1),
+                              self.session, timeout=10)
+        time.sleep(1.0)
+        comp = comp_json()
+        self.check("#9 真点「＋ 组件」-> 工作表里多了一个直方图，并且自己挑好了一条通道",
+                   bool(comp) and bool(comp["channel"]),
+                   json.dumps(comp, ensure_ascii=False) if comp else "没有直方图组件")
+        if not comp:
+            return
+
+        painted = self.js(
+            "(function(){var cv=document.querySelector('.comp[data-id=\"%s\"] canvas');"
+            "if(!cv)return -1;var d=cv.getContext('2d').getImageData(0,0,cv.width,cv.height).data;"
+            "var n=0;for(var i=3;i<d.length;i+=4){if(d[i]>0)n++;}return n;})()" % comp["id"]
+        )
+        self.check("#9 直方图画布上真的有东西（不是一张白纸）",
+                   isinstance(painted, (int, float)) and painted > 500,
+                   "%s 个像素" % painted)
+        self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-histogram.png"),
+                          self.session)
+
+        # 改格数：真点输入框、真 Ctrl+A、真打字、真回车
+        bins_box = self.js(
+            "(function(){var el=document.querySelector('.comp[data-id=\"%s\"] input[data-hist=\"bins\"]');"
+            "return el?JSON.stringify(__center(el)):'null';})()" % comp["id"]
+        )
+        if bins_box and bins_box != "null":
+            point = json.loads(bins_box)
+            seen = len(hist_calls())
+            self.browser.click(point["x"], point["y"], self.session)
+            self.browser.key_named("a", "KeyA", 65, self.session, modifiers=2)
+            self.browser.key("7", self.session)
+            self.browser.key_named("Enter", "Enter", 13, self.session)
+            # 数字输入框在 Chromium 里要**失去焦点**才发 change：回车不算，
+            # 按一下 Tab 才算。少了这一下，界面上看着改了、请求却还是旧格数。
+            self.browser.key_named("Tab", "Tab", 9, self.session)
+            calls = wait_for_hist(seen, "bins=7")
+            self.check("#9 真键盘改格数 -> 拿新格数重新问了服务端",
+                       len(calls) > seen and any("bins=7" in c["url"] for c in calls[seen:]),
+                       calls[-1]["url"].split("?")[-1] if calls else "(没有请求)")
+        else:
+            self.check("#9 真键盘改格数 -> 拿新格数重新问了服务端", False, "没有格数输入框")
+
+        # 缩放：真双击图（不是直方图自己）-> 直方图必须跟着重问一次
+        seen = len(hist_calls())
+        x = self.js("__px((i3pro.lane()[0]+i3pro.lane()[1])/2)")
+        y = self.js("__py(60)")
+        before_view = self.view()
+        self.browser.double_click(x, y, self.session)
+        time.sleep(1.0)
+        calls = hist_calls()
+        view = self.view()
+        self.check("#9 真双击放大 -> 直方图跟着换了窗口（重新问了一次）",
+                   len(calls) > seen and (view[1] - view[0]) < (before_view[1] - before_view[0]),
+                   "view %.1f-%.1f -> %.1f-%.1f，请求 %d 次"
+                   % (before_view[0], before_view[1], view[0], view[1], len(calls) - seen))
+
+        # 门槛写一条不存在的通道：表头要写出下一步，而不是装没看见
+        gate_box = self.js(
+            "(function(){var el=document.querySelector('.comp[data-id=\"%s\"] input[data-hist=\"gate\"]');"
+            "return el?JSON.stringify(__center(el)):'null';})()" % comp["id"]
+        )
+        if gate_box and gate_box != "null":
+            point = json.loads(gate_box)
+            self.browser.click(point["x"], point["y"], self.session)
+            self.browser.key_named("a", "KeyA", 65, self.session, modifiers=2)
+            self.browser.insert_text("查无此通道", self.session)
+            self.browser.key_named("Enter", "Enter", 13, self.session)
+            self.browser.key_named("Tab", "Tab", 9, self.session)
+            deadline = time.time() + 6.0
+            head = ""
+            while time.time() < deadline:
+                head = self.js(
+                    "(function(){var el=document.querySelector('.comp[data-id=\"%s\"] .graphhead');"
+                    "return el?String(el.textContent):'';})()" % comp["id"]
+                )
+                if "门槛" in head:
+                    break
+                time.sleep(0.25)
+            self.check("#9 门槛写错 -> 表头写出「哪错了 + 下一步」，不装没看见",
+                       "门槛" in head and any(word in head for word in ("检查拼写", "先", "换", "换一条")),
+                       head)
+            # 清掉门槛，免得影响后面的着色断言（同样要 Tab 才提交）。
+            #
+            # **必须先重新点一次输入框**：上面那一下 Tab 已经把焦点交给了下一个
+            # 控件，此时再按 Ctrl+A / Backspace 是打在别的控件上的——门槛原封不动，
+            # 后面的请求继续带着这个坏门槛报错，看起来像"着色坏了"。这条曾经就是
+            # 这么挂的（真浏览器验收跑出来的）。
+            point = json.loads(self.js(
+                "(function(){var el=document.querySelector('.comp[data-id=\"%s\"]"
+                " input[data-hist=\"gate\"]');"
+                "return el?JSON.stringify(__center(el)):'null';})()" % comp["id"]
+            ))
+            self.browser.click(point["x"], point["y"], self.session)
+            self.browser.key_named("a", "KeyA", 65, self.session, modifiers=2)
+            self.browser.key_named("Backspace", "Backspace", 8, self.session)
+            self.browser.key_named("Enter", "Enter", 13, self.session)
+            self.browser.key_named("Tab", "Tab", 9, self.session)
+            deadline = time.time() + 6.0
+            while time.time() < deadline:
+                calls = hist_calls()
+                if calls and "gate=" not in calls[-1]["url"]:
+                    break
+                time.sleep(0.25)
+            # 清掉之后必须真的恢复：请求不再带 gate=，表头也从报错变回统计量。
+            # 只验"清干净了"不够——用户关心的是"把写错的条件删掉，图能回来"。
+            recovered = ""
+            deadline = time.time() + 6.0
+            while time.time() < deadline:
+                recovered = self.js(
+                    "(function(){var el=document.querySelector('.comp[data-id=\"%s\"] .graphhead');"
+                    "return el?String(el.textContent):'';})()" % comp["id"]
+                )
+                if "中位" in recovered or "点" in recovered:
+                    break
+                time.sleep(0.25)
+            self.check("#9 删掉写错的门槛 -> 不再报错，表头回到统计量（图能回来）",
+                       bool(calls) and "gate=" not in calls[-1]["url"] and "门槛" not in recovered,
+                       "请求=%s；表头=%s" % (
+                           calls[-1]["url"].split("?")[-1] if calls else "(没有请求)",
+                           recovered[:60]))
+        else:
+            self.check("#9 门槛写错 -> 表头写出「哪错了 + 下一步」，不装没看见",
+                       False, "没有门槛输入框")
+
+        # 着色：真键盘挑一条（下拉是原生控件，键盘上的 ArrowDown 就是真交互）
+        colour_box = self.js(
+            "(function(){var el=document.querySelector('.comp[data-id=\"%s\"] select[data-hist=\"colour\"]');"
+            "if(!el)return 'null';el.focus();return JSON.stringify(__center(el));})()" % comp["id"]
+        )
+        if colour_box and colour_box != "null":
+            seen = len(hist_calls())
+            self.browser.key_named("ArrowDown", "ArrowDown", 40, self.session)
+            self.browser.key_named("ArrowDown", "ArrowDown", 40, self.session)
+            time.sleep(1.0)
+            calls = hist_calls()
+            head = self.js(
+                "(function(){var el=document.querySelector('.comp[data-id=\"%s\"] .graphhead');"
+                "return el?String(el.textContent):'';})()" % comp["id"]
+            )
+            self.check("#9 选一条着色通道 -> 请求带上 colour=，表头写明色是什么",
+                       len(calls) > seen and "colour=" in calls[-1]["url"] and "色=" in head,
+                       "请求=%s；表头=%s" % (
+                           calls[-1]["url"].split("?")[-1] if calls else "(没有请求)",
+                           head[:80]))
+        else:
+            self.check("#9 选一条着色通道 -> 请求带上 colour=，表头写明色是什么",
+                       False, "没有着色下拉框")
+        self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-histogram-colour.png"),
+                          self.session)
+
     def rename(self, sidecar):
         """#4 / #6：就地改名（回车存、Esc 撤）+ 撤销。
 
@@ -657,6 +862,7 @@ def main(argv=None):
             checker.sections()
             checker.crossings(sidecar)
             checker.rename(sidecar)
+            checker.histogram()
             errors = browser.page_errors()
             checker.check("整场没有页面级报错", not errors, errors[:3])
         bad = [name for name, ok in checker.results if not ok]

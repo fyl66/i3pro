@@ -30,6 +30,7 @@ import numpy as np
 from . import (
     csvlog,
     derive,
+    histogram as histogrammod,
     importer,
     laps as lapsmod,
     maths,
@@ -428,6 +429,42 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                         max_points=_int_arg(query, "max", 30000),
                     )
                 )
+
+            if action == "histogram":
+                # 一条通道在当前窗口里的分布（ticket #9）。窗口默认由界面传当前
+                # 缩放区间；不传就是整场。
+                channel = (query.get("channel") or [None])[0]
+                if not channel:
+                    return self._error(
+                        400, "histogram 需要 ?channel= 参数（要统计哪条通道）"
+                    )
+                if not log.has(channel):
+                    return self._error(
+                        400,
+                        f"本场次没有 {channel!r} 这条通道。先在左侧「通道」里搜一下名字，"
+                        f"或者把 ?channel= 换成 /api/session/<名>/info 里列出的通道名。",
+                    )
+                time = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
+                gate = (query.get("gate") or [None])[0] or None
+                colour = (query.get("colour") or [None])[0] or None
+                try:
+                    return self._json(
+                        render.histogram(
+                            log,
+                            channel,
+                            time,
+                            bins=_int_arg(query, "bins", histogrammod.DEFAULT_BINS),
+                            start=_float_arg(query, "from"),
+                            end=_float_arg(query, "to"),
+                            gate=gate,
+                            gate_mode=(query.get("gate_mode") or ["nonzero"])[0],
+                            gate_lo=_float_arg(query, "gate_min"),
+                            gate_hi=_float_arg(query, "gate_max"),
+                            colour=colour,
+                        )
+                    )
+                except ValueError as exc:
+                    return self._error(400, str(exc))
 
             if action == "overview":
                 name = (query.get("channel") or [None])[0] or (

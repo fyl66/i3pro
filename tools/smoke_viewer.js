@@ -1628,6 +1628,164 @@ if (api) {
   }
 }
 
+/* 27. 直方图（#9）：分布 / 格数 / 窗口 / 门槛 / 着色 / 分享链接
+ *
+ * 数分布是服务端的事（数的是原始样本），快照里只有导出时算好的那几份。所以这里
+ * 分两半验：快照模式必须**离线可用**（一次 /histogram 都不许发），serve 模式必须
+ * 把通道、格数、窗口、门槛、着色参数**一个不少**地带上。
+ */
+const embeddedHist = api.data.histograms;
+// 这一段在报表那一段的块作用域之外，自己取一次句柄（同一个 state 对象）。
+const state = api.state;
+const worksheet = registry.get("worksheet");
+// 这一段里**只有**进入 serve 分支之后才允许发 /histogram；前面报表那一段会临时
+// 把 DATA.api 打开，那时发出去的请求不算快照的账。
+const histCallsAtStart = httpCalls.length;
+check(!!embeddedHist && !!embeddedHist.series
+  && Object.keys(embeddedHist.series).length > 0,
+  "快照载荷里没有直方图：导出快照时要带上 histograms（整场 + 每条完整圈）");
+if (embeddedHist && embeddedHist.series) {
+  api.applyPreset("分析");
+  const histComp = state.components.find((c) => c.type === "histogram");
+  check(!!histComp,
+    "「分析」预设里没有直方图组件：" + state.components.map((c) => c.type).join(","));
+  if (histComp) {
+    api.syncHistogramSelectors();
+    api.renderAll();
+    check(!!histComp.config.channel,
+      "直方图没有默认通道（加进工作表时应该从勾选的通道里挑一条）");
+    const histEl = SHEETEl(worksheet, histComp.id);
+    const histSelects = insideOf(histEl, "scattercfg")[0]._children
+      .filter((child) => child.tagName === "SELECT");
+    check(histSelects.length === 4,
+      "直方图的配置栏应该有 4 个下拉（通道 / 画法 / 色 / 窗口），实际 "
+      + histSelects.length);
+    check(histSelects.length > 0 && String(histSelects[0]._html).indexOf("<optgroup") >= 0,
+      "通道下拉没有按单位分组：一场 400 多条通道平铺没法找");
+
+    // 快照：整场那份能画出来，表头把通道、点数、中位写出来
+    const snap = api.snapshotHistogramFor(histComp);
+    check(!!snap && snap.bins.length > 0,
+      "快照里取不到这条通道的分布（导出时应该把勾选的通道都算一份）");
+    if (snap) {
+      const sum = snap.bins.reduce((total, box) => total + box.count, 0);
+      check(sum === snap.count,
+        "直方图的柱子加起来不等于样本数：" + sum + " vs " + snap.count);
+      const head = String(insideOf(histEl, "graphhead")[0].textContent);
+      check(head.indexOf(histComp.config.channel) >= 0 && head.indexOf("点") >= 0
+        && head.indexOf("中位") >= 0,
+        "直方图表头没写清它在统计什么: " + head);
+      check(!httpCalls.slice(histCallsAtStart)
+        .some((call) => call.url.indexOf("/histogram") >= 0),
+        "快照模式下去请求了 /histogram：快照必须离线可用");
+
+      // 格数：快照里只能往粗里并，但并出来的计数必须分毫不差
+      const have = snap.bins.length;
+      const merged = api.mergeCounts(snap.bins.map((box) => box.count),
+                                    Math.max(1, Math.floor(have / 2)));
+      check(merged.length < have
+        && merged.reduce((a, b) => a + b, 0) === snap.count,
+        "并格之后计数变了：" + merged.reduce((a, b) => a + b, 0) + " vs " + snap.count);
+      histComp.config.bins = Math.max(4, Math.floor(have / 2));
+      api.renderAll();
+      const fewer = api.snapshotHistogramFor(histComp);
+      check(fewer && fewer.bins.length <= Math.max(4, Math.floor(have / 2)),
+        "改成更少的格数之后还是原来那么多格子");
+
+      // 窗口：快照带的是整场 + 每条完整圈，切换要能换出另一份计数
+      const lapKey = (embeddedHist.windows || []).find((w) => w.key !== "all");
+      check(!!lapKey, "快照里的直方图没有按圈算过的窗口（应该带上每条完整圈）");
+      if (lapKey) {
+        histComp.config.window = lapKey.key;
+        api.renderAll();
+        const lapSnap = api.snapshotHistogramFor(histComp);
+        check(!!lapSnap && lapSnap.count < snap.count,
+          "切到某一条圈之后，样本数没有变成那一条圈的样本数");
+      }
+      histComp.config.window = "all";
+      histComp.config.bins = 40;
+      api.renderAll();
+
+      // 快照里没带色值：要说清楚"色只能 serve 模式看"，而不是默默不画
+      const colourName = (api.data.channels || []).map((ch) => ch.name)
+        .find((name) => name !== histComp.config.channel);
+      histComp.config.colour = colourName || null;
+      api.renderAll();
+      const colourHead = String(insideOf(histEl, "graphhead")[0].textContent);
+      if (histComp.config.colour) {
+        check(colourHead.indexOf("色=") >= 0 && colourHead.indexOf("serve") >= 0,
+          "选了着色通道却没告诉用户快照里看不到: " + colourHead);
+      }
+      histComp.config.colour = null;
+
+      // 换一条快照没带的通道：要给一句能照做的话，而不是一片空白
+      const missing = (api.data.channels || []).map((ch) => ch.name)
+        .find((name) => !embeddedHist.series[name]);
+      if (missing) {
+        histComp.config.channel = missing;
+        api.renderAll();
+        check(api.snapshotHistogramFor(histComp) === null,
+          "换到没内嵌的通道时快照还编出了一份分布");
+        const hintText = String(insideOf(histEl, "graphhead")[0].textContent);
+        check(hintText.indexOf("serve") >= 0 && hintText.indexOf("换一条") >= 0,
+          "缺数据时没给出能照做的提示: " + JSON.stringify(hintText));
+      }
+      histComp.config.channel = snap.channel;
+      api.renderAll();
+    }
+
+    // serve 模式：参数一个都不能少，而且缩放变了要重新问
+    const savedHistApi = api.data.api;
+    api.data.api = "/api";
+    histComp.config.gate = "Vx KF";
+    histComp.config.colour = "G Force Lat";
+    histComp.config.window = "zoom";
+    api.bundleOf(histComp).histKey = "";
+    const beforeHist = httpCalls.length;
+    api.refreshHistogramFor(histComp).then(() => {}, () => {});
+    const histCalls = httpCalls.slice(beforeHist)
+      .filter((call) => call.url.indexOf("/histogram") >= 0);
+    check(histCalls.length === 1,
+      "serve 模式下没有向 /histogram 要分布（拿到 " + histCalls.length + " 个请求）");
+    if (histCalls.length === 1) {
+      const url = decodeURIComponent(histCalls[0].url);
+      check(url.indexOf("channel=") >= 0 && url.indexOf("bins=") >= 0
+        && url.indexOf("from=") >= 0 && url.indexOf("to=") >= 0,
+        "直方图请求少了 channel / bins / from / to: " + url);
+      check(url.indexOf("gate=Vx KF") >= 0 && url.indexOf("colour=G Force Lat") >= 0,
+        "直方图请求没带门槛 / 着色通道: " + url);
+    }
+    // 缩放之后是另一个问题，必须重新问一次（不能拿旧窗口的分布糊弄）
+    const histKeyBefore = api.histogramKey(histComp);
+    const savedView = state.view;
+    state.view = [10, 20];
+    check(api.histogramKey(histComp) !== histKeyBefore,
+      "缩放之后直方图的刷新键没变：会拿旧窗口的分布糊弄");
+    state.view = savedView;
+    api.data.api = savedHistApi;
+    histComp.config.gate = "";
+    histComp.config.colour = null;
+
+    // 布局要靠 URL 带走：通道 / 格数 / 画法 / 色 / 门槛 / 窗口一个不落
+    histComp.config.channel = histComp.config.channel || "Vx KF";
+    histComp.config.style = "line";
+    histComp.config.gate = "Vx KF";
+    histComp.config.colour = "G Force Lat";
+    const histEncoded = api.encodeLayout(state.components);
+    const histDecoded = api.decodeLayout(histEncoded);
+    const back = histDecoded.find((comp) => comp.type === "histogram");
+    check(!!back && back.config.channel === histComp.config.channel
+      && back.config.style === "line" && back.config.gate === "Vx KF"
+      && back.config.colour === "G Force Lat"
+      && back.config.bins === histComp.config.bins,
+      "分享链接丢了直方图的配置: " + JSON.stringify(back && back.config));
+    histComp.config.style = "bars";
+    histComp.config.gate = "";
+    histComp.config.colour = null;
+    api.renderAll();
+  }
+}
+
 /* --------------------------------------------------------------- DOM checks */
 const header = registry.get("fileInfo");
 check(header && header.innerHTML.indexOf(".ld") >= 0, "header was not populated");

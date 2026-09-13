@@ -1009,7 +1009,7 @@ node tools\smoke_viewer.js "out\20260524-耐久正赛.html"       # 26 圈 / 23 
    **把修复拆掉就红**（`out/_nofix_dirty.html` 实测：
    `after Esc the same name box must still save (got 左环A)`）。
 
-**通过判据**（`python tools\verify_clicks.py`，21 项）：
+**通过判据**（`python tools\verify_clicks.py`，28 项）：
 
 | 断言 | 实测 |
 | --- | --- |
@@ -1030,7 +1030,7 @@ node tools\smoke_viewer.js "out\20260524-耐久正赛.html"       # 26 圈 / 23 
 
 ```powershell
 python tools\verify_clicks.py                                              # 高避5圈 21/21
-python tools\verify_clicks.py --session "20260524-耐久正赛" --port 8752    # 耐久正赛 21/21
+python tools\verify_clicks.py --session "20260524-耐久正赛" --port 8752    # 耐久正赛 28/28
 ```
 
 两份金标准各 **21/21 通过**。逐帧截图落在 `out/shots/verify-*.png`（`out/` 已 gitignore），
@@ -1278,7 +1278,7 @@ disabled 的控件照样派发 `click`。所以多了第四道回归：`tools/ve
 只用标准库，Edge 走系统自带那一份；没有 Edge 或没有数据时自动跳过（退出码 0）。
 
 ```powershell
-python tools\verify_clicks.py                       # 21 项，全过退出 0
+python tools\verify_clicks.py                       # 28 项，全过退出 0
 python tools\verify_clicks.py --session "20260524-耐久正赛" --port 8790
 ```
 
@@ -1290,7 +1290,8 @@ python tools\verify_clicks.py --session "20260524-耐久正赛" --port 8790
 | 2 | 信标改名按过一次 `Esc` 之后再改、回车**静默不存** | `dirty` 被 `Esc` 关掉后再也没有地方重新置真（`input` 事件没接） | 输入框接 `input` 事件重新置脏；无头断言补"Esc 之后同一个框还能存" |
 | 3 | 区段表里"双击一行"在真命中测试下**几乎点不到** | 行中间是名字输入框（`flex:1`），双击它等于**选词** | 行尾加一个点得到的 `⤢`（与双击顶端色条同一件事），面板说明里写明"双击名字是选词" |
 
-**实测**：`python tools\verify_clicks.py` → **21 项检查：21 通过，0 失败**（含上面三条各自的正向与反向断言：
+**实测**：`python tools\verify_clicks.py` → **28 项检查：28 通过，0 失败**（21 项来自这一轮，
+后面 #9 的直方图又加了 7 项，见 A34；含上面三条各自的正向与反向断言：
 点 `⤢` 缩到那一段 / 双击输入框不跳视图 / 缩完「全出」回到 `[0.00, 463.48]`（整场 463.99 s）；
 真键盘改名后读边车确认那条信标真的叫新名字；`↶` 撤销真的退回上一步）。
 
@@ -1298,18 +1299,92 @@ python tools\verify_clicks.py --session "20260524-耐久正赛" --port 8790
 断言结果时 `UnicodeEncodeError` 崩在半途（现在强制 UTF-8）；`⤢` 那条断言有界重试三次
 （面板刚渲染完就点会命中旁边的输入框——竞态要报成"不稳定"，不能报成 PASS，也不能当成 bug 修）。
 
-**这一轮的回归**：`Ran 150 tests` + `OK`；`verify_ld_vs_csv` PASS（0 channel(s) outside tolerance）；
-两份金标准快照 `smoke_viewer.js` 均 PASS；无头断言点 **260** 个。
+**当时那一轮的回归**：`Ran 150 tests` + `OK`；`verify_ld_vs_csv` PASS（0 channel(s) outside
+tolerance）；两份金标准快照 `smoke_viewer.js` 均 PASS；无头断言点 **260** 个。
+（今天这三条是 161 / 281 / 28 项，见 A34 与文末「全量回归」。）
+
+---
+
+## A34 · 直方图组件（ticket #9）
+
+i2 Pro 的 Histogram（以及车用的 Suspension Histogram）=「一条通道在一段区间里取值的分布」。
+这里做成第 8 个组件类型：`bars` / `line` / `text` 三种画法、4–500 格、按第三通道着色、
+门槛（gating）、窗口跟当前缩放走。**四条硬口径**，为的都是一件事：别画出"看着像分布、
+其实不是分布"的东西。
+
+| 口径 | 为什么 |
+| --- | --- |
+| **数原始样本，不数画图那份抽稀结果** | 时间曲线走的是 Min/Max 抽稀，每一格塞进一个极小值和一个极大值；拿那份数据做直方图会长出一截**假长尾**。所以分布在 serve 模式下按当前窗口现问 `/api/session/<名>/histogram`；快照里内嵌导出时算好的几份（整场 + 每条完整圈，`render.snapshot_histograms`） |
+| **没进去的样本要报出来** | 被门槛排除的（`excluded`）与 NaN **分开**计数。混进"样本数"里，用户会以为通道真有那么多样本 |
+| **门槛只有一套语法** | `gate=` 可以直接写通道名（非零为真），也可以写数学通道表达式；解析只在 `histogram.gate_values` 里做一次，报错复用数学通道那一套（会念出认到的通道名 + 下一步）。**不另造第二套条件语法** |
+| **快照里改格数只能往粗里并** | 快照只带了固定格数的计数，再细分就是编出来的；并格是精确的（计数之和不变），所以并格放行、细分拦下来并说明。要更细就用 serve 模式 |
+
+**算法在 Python 里、是不依赖框架的纯函数**：`histogram.py` 只吃数组
+（`histogram()` / `gate_keeps()` / `summarize()` / `clamp_bins()`），取数在 `render.histogram()`。
+界面不重算一遍——"这一箱里有多少个样本"必须能在命令行复现。
+
+```powershell
+# 一次性复现（不起界面）：
+python -c "import sys,numpy as np;sys.path.insert(0,'src');from i3pro import ld,render;log=ld.LogFile.read(r'i2pro_data\20260908-cjh 高避5圈.ld');t=np.arange(int(round(log.duration*log.sample_rate))+1)/log.sample_rate;p=render.histogram(log,'Vx KF',t,bins=40);print(p['count'],p['range'],p['stats'])"
+
+# 界面上：起服务 -> 「＋ 添加组件」选「直方图」-> 通道 / 格 / 画法 / 色 / 门槛 / 窗口
+.\i3pro.cmd serve --data i2pro_data --open
+```
+
+**通过判据**（`python -m unittest tests.test_i3pro.TestHistogram -v`、`TestHistogramOverHttp`）：
+
+| 断言 | 位置 |
+| --- | --- |
+| 计数之和 = 参与统计的样本数；格边界**严格递增**（`np.histogram` 的等宽边界不重复） | `TestHistogram::test_counts_add_up_and_edges_are_strictly_increasing` |
+| 门槛「非零为真」把 0 的那些样本剔掉，剔掉的条数**报出来** | `TestHistogram::test_gate_nonzero_drops_the_zeros` |
+| 门槛 `range` / `outside` 两种模式：区间内 / 区间外在内，缺上下限时**报错并说清要补什么** | `TestHistogram::test_gate_range_and_outside_modes` |
+| 按第三通道着色时，每箱给的是该箱的**均值**（同时给极值，只看均值会把"一会儿 0 一会儿 100"画成一片中间色） | `TestHistogram::test_colour_is_the_mean_of_that_box` |
+| 整段是同一个值（一直没踩的刹车）时，区间**显式撑开**并说明，不然画不出来 | `TestHistogram::test_a_constant_channel_still_gets_a_real_range` |
+| NaN 分开报，**不算样本**；全是 NaN 时统计量给 `None` 而不是 0 | `TestHistogram::test_nan_samples_are_reported_not_counted` |
+| 格数夹在 4–500，夹过了**带一句话**出来（`0` 会让 `np.histogram` 抛异常，`100000` 会画出一万根一像素的柱子） | `TestHistogram::test_bins_are_clamped_and_said_out_loud` |
+| 门槛可以是**通道名**，也可以是**数学通道表达式**（两者走同一个出口） | `TestHistogram::test_gate_accepts_a_channel_or_a_maths_expression` |
+| 报错要写下一步：通道不存在 / 门槛写错 / 着色通道不存在 / 窗口选反了，各有各的句子 | `TestHistogram::test_bad_input_says_what_to_do_next` |
+| 真数据钉子：金标准场次的窗口统计与手算一致 | `TestHistogram::test_golden_session_window_stats` |
+| HTTP：`/histogram` 要 `?channel=`、通道不存在给 400、格数被夹过要带 `notice`、`from/to` 是半开区间 | `TestHistogramOverHttp::test_histogram_endpoint` |
+| 界面：加得出来（默认自己挑一条通道）、画布上真的有柱子（不是白纸）、改格数/缩放会**重新问服务端**、门槛报错写到表头、删掉写错的门槛**图能回来**、选着色通道后表头写明色是什么 | `tools/verify_clicks.py`（真浏览器真鼠标，A33 的第四道回归） |
+| 界面：快照模式不许去请求 `/histogram`；内嵌格数之外只能并格；没带分布的通道要说明"导出快照时没选中" | `tools/smoke_viewer.js` 第 27 组 |
+
+**这一轮的实测数字**（两份金标准，都是这条命令跑出来的）：
+
+| 场次 / 通道 | 样本数 | 区间 | 中位 | 说明 |
+| --- | --- | --- | --- | --- |
+| `20260908-cjh 高避5圈` · `Vx KF`，整场 40 格 | 46400 | −0.14 – 87.89 km/h | 52.46 | 与 463.99 s × 100 Hz 对得上 |
+| `20260524-耐久正赛` · `Vx KF`，整场 40 格 | 194300 | −1.65 – 80.78 km/h | 45.15 | 1943 s × 100 Hz |
+| 同上 + 门槛 `Brake Signal`（非零为真） | 2187 | −0.07 – 85.79 km/h | 38.24 | 排除 44213 个样本，`notice` 里报出来 |
+| `G Force Lat` + 门槛 `Vx KF > 60` | 17473 | −2.14 – 2.11 g | −0.15 | 排除 28927；标准差 1.131 g，无门槛时 0.846 g |
+| 门槛 `Brake Signal > 10`（写错了：这条是 0/1 信号） | 0 | — | — | 46400 个全被排除，`notice` 让你放宽条件；统计量给 `None` 不给 0 |
+| 窗口 `[200, 200)`（空窗口） | 0 | — | — | `bins` 为空 + "时间轴的起止是不是选反了？" |
+
+**这一轮的回归**：`Ran 161 tests` + `OK`；`verify_ld_vs_csv` PASS（`0 channel(s) outside tolerance`）；
+两份金标准快照 `smoke_viewer.js` 均 PASS（7 圈 / 26 圈）；无头断言点 **260 → 281**；
+`tools\verify_clicks.py` **28 项：28 通过，0 失败**。
+
+**第四道回归自己抓到的第一个 bug，是它自己写错了**（照实记下来，因为它说明这道回归值得留）：
+清空门槛那几步少了"重新点一次输入框"——前一步的 `Tab` 已经把焦点交给下一个控件，
+再按 `Ctrl+A` / `Backspace` 是打在别的控件上的，门槛原封不动留在请求里，后面的着色
+断言因此看到的是**上一条错误的表头**，报成"着色坏了"。真浏览器里点一遍才发现是脚本的
+问题（用重新量的坐标点一下，门槛清掉、表头立刻回到统计量）。顺带把这条断言的证据从
+"打印 URL"改成"打印 URL **和表头**"——只打印 URL，看的人没法判断是请求错了还是渲染错了。
 
 ---
 
 ## 全量回归
 
 ```powershell
-python -m unittest discover -s tests -v
+python -m unittest discover -s tests -v      # 1. 单测：全部通过
+python tools\verify_ld_vs_csv.py             # 2. 解析对照：0 channel(s) outside tolerance
+node tools\smoke_viewer.js out\<场次>.html   # 3. 无头驱动前端：PASS
+python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘：全过（没有 Edge 的机器打印 SKIP，不算通过）
 ```
 
-**通过判据**：`Ran 132 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）。
+**通过判据**：`Ran 161 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）；
+`PASS - 0 channel(s) outside tolerance`；`PASS - workbench ran headless ... interactions verified`；
+`28 项检查：28 通过，0 失败`。**四条全绿才算改完**（AGENTS.md 规则 7）。
 
 测试覆盖：
 
@@ -1329,6 +1404,8 @@ python -m unittest discover -s tests -v
 | `TestPoints` | 散点原始样本、时间窗裁剪、超窗口自动 stride |
 | `TestMaths` | 数学通道引擎（42 项）：白名单与 AST 断言、函数集、区间统计的条件与复位、微分积分、平滑与低通、成环与前向引用、一条坏了不拖累其它、本地覆盖全局、缓存命中与失效、派生列在下游等价于原生通道、通道名的识别（少空格/换分隔符/大小写/歧义不猜） |
 | `TestSections` | 赛道区段（19 项）：切分覆盖整圈不重不漏、弯切在该在的位置、灵敏度单调、测度整条平线时不造弯、最短段长决定"尖峰算不算弯"、手工编辑的排序/夹紧/补齐、名字去重、同一份不算改过、侧车往返与坏文件、真数据的份数与里程、每条圈的边界时刻（含"换了参考圈要提醒"）、**落在哪一段**（边界归后一段、空档不算、最后一段含终点、坏输入不猜）与**一段的时间窗口**（零宽度不给窗口） |
+| `TestHistogram` | 直方图（10 项）：计数与格边界、门槛三种模式、着色取箱内均值、常量通道的区间撑开、NaN 分开报、格数夹取并说明、门槛可以是通道名或数学表达式、四种坏输入的下一步、金标准窗口统计 |
+| `TestHistogramOverHttp` | `/histogram` 端点（1 项）：缺 `channel=` 400、通道不存在 400、半开区间、格数夹过带 `notice` |
 | `TestSectionsOverHttp` | 赛道区段走到 HTTP：GET 不落盘、重切落盘、手工改名字与边界、`edited` 立起来、被挡住的重切 400 + `needs_force` 且侧车不动、带 `force` 才覆盖、坏请求的下一步、`.ld` 字节不变 |
 | `TestMathsOverHttp` | 数学通道走到 HTTP：存本地 / 全局、侧车落盘、坏表达式 400 且不动已存侧车、同名拦截、`shadowed`、试算接口、函数表 |
 | `TestRender` | 静态/服务两种 payload、自包含性 |
@@ -1336,5 +1413,5 @@ python -m unittest discover -s tests -v
 | `TestIndependentParsers` | 第二套实现交叉验证、213 通道 CSV 全量对照 |
 | `TestBeaconUndo` | 撤销的纯函数层：什么是"同一版"、什么时候没有可撤销的一步、交回去的是上一版本身 |
 | `TestBeaconUndoOverHttp` | 撤销走真实 `PUT`：改名 / 插入 / 删除各自一步回到原样、`trusted` 迁移、落盘、一次无改动的保存不吃掉上一步、没有可撤销的一步时 400 并说明下一步、页面注入的 `laps_can_undo` 三态 |
-| `TestViewerScript` | 无头驱动前端：脚本里 **260 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
+| `TestViewerScript` | 无头驱动前端：脚本里 **281 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
 | `TestLaunchers` | 一键启动：快照批量导出 + 索引页、缺数据目录的报错、端口占用自动换端口 |

@@ -41,13 +41,21 @@ Multi-context repo (presence of `CONTEXT-MAP.md` at the root):
 ## This repo
 
 **single-context.** The glossary lives in [`CONTEXT.md`](../../CONTEXT.md) at the repo root — read it
-for vocabulary; it holds nothing but terms. `docs/adr/` will hold decisions that are hard to
-reverse, surprising without context, and the result of a real trade-off; it is created when the
-first such decision is recorded.
+for vocabulary; it holds nothing but terms. `docs/adr/` holds decisions that are hard to reverse,
+surprising without context, and the result of a real trade-off (two so far: read-only logs +
+sidecar; single-file no-build front end).
 
-Terms still being settled (deliberately **not** in `CONTEXT.md` yet) are tracked with the user:
-`lap` vs `loop`, and whether `beacon` means a crossing of the line (i2 Pro's sense) or the line
-itself. Until they are settled, do not invent a third word for either.
+Two terms are easy to get wrong, so they are spelled out in the glossary — read them before
+writing anything about lap timing:
+
+- **beacon** is *one crossing of the line*, not the line itself; its position and its time are both
+  attributes of it, not two different things.
+- **lap** is *the interval between two crossings of the same beacon*; a geometric loop on a
+  figure-of-eight is a **loop**, never a lap.
+
+The code has not caught up with this yet: `laps.py` still separates `gate`/`gates` (position) from
+`beacons` (time). Reconcile to `beacons: [{name, lat?, lon?, time?}]` when next touching that file —
+`LapConfig.from_dict` must keep accepting the old shape so existing sidecars keep loading.
 
 ## Use the glossary's vocabulary
 

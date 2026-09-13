@@ -1956,6 +1956,15 @@ python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘�
 `PASS - 0 channel(s) outside tolerance`；`PASS - workbench ran headless ... interactions verified`；
 `51 项检查：51 通过，0 失败`。**四条全绿才算改完**（AGENTS.md 规则 7）。
 
+**金标准场次先复制再读**：`tests/test_i3pro.py` 在导入时把两份金标准场次复制到
+`out/_test_data/`（实测各 1 份、共 148.2 MB，复制 0.08 s；该目录每轮先清空），
+测试只碰这份副本。侧车（信标 / 区段 / 注释 / GPS / 数学通道 / CSV 列映射）是
+**用户资产**，就躺在 `i2pro_data` 里，队员在浏览器里给金标准场次改一次信标就会改变
+测试读到的配置——实测 `20260908-cjh 高避5圈.laps.json` 里多一个 GPS 信标之后，
+`TestSections.test_the_golden_hill_lap_splits_into_corners_and_straights` 与
+`TestServer.test_http_api_end_to_end` 两条当场变红（后者 `/overlay` 报 500）。
+复制之后两条都绿，且 HTTP 用例写的侧车也落在副本里，车队数据一个字节不动。
+
 测试覆盖：
 
 | 分组 | 内容 |
@@ -1987,7 +1996,7 @@ python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘�
 | `TestBeaconUndoOverHttp` | 撤销走真实 `PUT`：改名 / 插入 / 删除各自一步回到原样、`trusted` 迁移、落盘、一次无改动的保存不吃掉上一步、没有可撤销的一步时 400 并说明下一步、页面注入的 `laps_can_undo` 三态 |
 | `TestViewerScript` | 无头驱动前端：脚本里 **402 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
 | `TestComponentRegistry` | 组件类型注册表（#17 / #19 / #20 / #21，6 项）：每种显示形式都在表里、分派只剩"哪个是图"与"哪一列是文字列"（实测 10 处）、每种形式都声明了怎么画与怎么取数、取数只有一条路（六个端点不许自己 fetch）、自检形式只挂在无头驱动的标记上 |
-| `TestChannelSeam` | 通道接缝（#18，8 项）：那条规则只准写在一个模块里（扫源码）、会话必须显式声明三样、原生通道保留自己的采样率与单位、同名覆盖时保持因子/采样率/单位、Parquet 写出的是派生列本身、挂载与卸载走声明、金标准 437 条通道逐条与旧公式一致（无数学通道时逐点不变） |
+| `TestChannelSeam` | 通道接缝（#18，10 项）：那条规则只准写在一个模块里（扫源码）、会话必须显式声明三样、原生通道保留自己的采样率与单位、同名覆盖时保持因子/采样率/单位、Parquet 写出的是派生列本身、挂载与卸载走声明、金标准 437 条通道逐条与旧公式一致（无数学通道时逐点不变） |
 | `TestNotes` / `TestNotesOverHttp` | 注释（#15，15 项）：文字折行与截断、时刻校验的下一步、增删改不改原表、距离在主采样上插值、轨迹取最近抽稀点、越界不猜位置、侧车往返与坏文件、**注释不动圈速表**、HTTP 的 PUT 落盘 / 400 说明下一步 / `.ld` 字节不变 |
 | `TestGpsFix` / `TestGpsFixOverHttp` | GPS 校正（#14，15 项）：`(0,0)` 只计数不进轨迹、跳点与空档各自断开、跳变两端都算坏点、**关掉校正逐点不变**、按秒与按更新周期两种偏移、分段插值绝不跨空档、路径里程跳过跳变、距离轴作用域的开关、抽稀后断点必须落在**跨着跳变的那一段**上、参数校验的中文下一步、侧车往返与坏文件、金标准（耐久 1 个 214.5 m 跳点且断的就是那 214 m 幽灵线 / 高避 0 跳点 638 个空定位）；HTTP 的 GET / PUT / 落盘 / 400 不动侧车 / `.ld` 字节不变 |
 | `TestLaunchers` | 一键启动：快照批量导出 + 索引页、缺数据目录的报错、端口占用自动换端口 |

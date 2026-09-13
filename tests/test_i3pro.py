@@ -3,6 +3,10 @@
 The regression tests need the team's sample logs in ``i2pro_data/``; they are
 skipped automatically when the data is not present.
 
+They read a *copy* of the two golden sessions (``out/_test_data/``), never the
+originals: sidecars belong to whoever drives the workbench, so a team mate
+saving a beacon next to a golden log must not turn this suite red.
+
 Run:  python -m unittest discover -s tests -v
 """
 
@@ -59,8 +63,40 @@ def _return_sidecar(sidecar: Path, kept: bytes | None) -> None:
         sidecar.unlink(missing_ok=True)
     else:
         sidecar.write_bytes(kept)
-ENDURANCE = DATA / "20260524-耐久正赛.ld"
-HILL = DATA / "20260908-cjh 高避5圈.ld"
+
+
+#: 测试只碰这份副本，不碰 ``i2pro_data`` 里的金标准场次本身。
+#:
+#: 侧车（信标 / 区段 / 注释 / GPS / 数学通道 / CSV 列映射）是**用户资产**，就躺在场次
+#: 旁边。队员在浏览器里给金标准场次改一次信标，读原目录的用例就会红——实测过：
+#: ``20260908-cjh 高避5圈.laps.json`` 里多一个 GPS 信标之后，下面两条当场变红
+#: （``TestSections.test_the_golden_hill_lap_splits_into_corners_and_straights``、
+#: ``TestServer.test_http_api_end_to_end``，后者是 ``/overlay`` 报 500）。所以每轮
+#: 开始先清掉这份副本目录、再复制一次（实测两份共 148.2 MB、0.08 s），写侧车的用例
+#: 也就写在副本里，车队数据一个字节都不动。
+STAGE = ROOT / "out" / "_test_data"
+
+
+def _stage(name: str) -> Path:
+    """把金标准场次复制进 ``out/_test_data``，返回副本路径。
+
+    源文件不存在时原样返回（``@_needs`` 会据此跳过，不算通过）。
+    """
+    source = DATA / name
+    target = STAGE / name
+    if source.exists():
+        shutil.copy2(source, target)
+    return target
+
+
+shutil.rmtree(STAGE, ignore_errors=True)
+STAGE.mkdir(parents=True, exist_ok=True)
+ENDURANCE = _stage("20260524-耐久正赛.ld")
+HILL = _stage("20260908-cjh 高避5圈.ld")
+
+#: 服务测试用的两条根目录。副本在前，所以金标准场次那个**普通名字**解析到没有侧车的
+#: 那一份；``i2pro_data`` 里其它的场次（CSV 导出等）照旧可用。
+LIBRARY_ROOTS = [STAGE, DATA]
 
 
 def _needs(path: Path):
@@ -309,7 +345,7 @@ class TestServer(unittest.TestCase):
     def test_http_api_end_to_end(self):
         from http.server import ThreadingHTTPServer
 
-        library = server.SessionLibrary([DATA], cache_size=1)
+        library = server.SessionLibrary(LIBRARY_ROOTS, cache_size=1)
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(library, buckets=250))
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
         thread.start()
@@ -779,7 +815,7 @@ class TestBeaconEditingOverHttp(unittest.TestCase):
     def test_insert_rename_and_the_range_guard(self):
         from http.server import ThreadingHTTPServer
 
-        library = server.SessionLibrary([DATA], cache_size=1)
+        library = server.SessionLibrary(LIBRARY_ROOTS, cache_size=1)
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(library, buckets=200))
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
         thread.start()
@@ -883,7 +919,7 @@ class TestBeaconEditingOverHttp(unittest.TestCase):
         """#5 needs metres -> seconds over HTTP, and a notice when nothing split."""
         from http.server import ThreadingHTTPServer
 
-        library = server.SessionLibrary([DATA], cache_size=1)
+        library = server.SessionLibrary(LIBRARY_ROOTS, cache_size=1)
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(library, buckets=200))
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
@@ -995,7 +1031,7 @@ class TestBeaconUndoOverHttp(unittest.TestCase):
     def test_rename_insert_and_delete_are_each_one_step_back(self):
         from http.server import ThreadingHTTPServer
 
-        library = server.SessionLibrary([DATA], cache_size=1)
+        library = server.SessionLibrary(LIBRARY_ROOTS, cache_size=1)
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(library, buckets=200))
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         base = f"http://127.0.0.1:{httpd.server_address[1]}"

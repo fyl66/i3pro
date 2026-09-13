@@ -323,8 +323,9 @@ def build_overlay(log: ldmod.LogFile, laps, channels, step: float = 1.0) -> dict
 
 
 def detect(log: ldmod.LogFile):
+    """Laps for this session, honouring the saved beacon/lap sidecar."""
     try:
-        return lapsmod.detect_laps(log)
+        return lapsmod.detect_from_config(log)
     except ValueError:
         return []
 
@@ -348,25 +349,51 @@ def default_lap_pair(log: ldmod.LogFile, laps, ref: str | None = None, cmp: str 
     return chosen_ref, chosen_cmp
 
 
-def track_payload(log: ldmod.LogFile, points: int = 1500) -> dict | None:
-    """GPS trajectory in local metres, coloured by the best available speed."""
+def track_payload(
+    log: ldmod.LogFile,
+    points: int = 1500,
+    start: float | None = None,
+    end: float | None = None,
+) -> dict | None:
+    """GPS trajectory in local metres, coloured by the best available speed.
+
+    With ``start``/``end`` only the trajectory inside that time window is
+    returned - i2 Pro's GPS Track component can plot either the whole selected
+    data or just the zoomed data, and showing the lap you are looking at is what
+    makes the map useful while analysing a corner.
+    """
     try:
         track = derive.gps_track(log)
     except ValueError:
         return None
+    time = track["time"]
+    x, y = track["x"], track["y"]
+    lat, lon = track["lat"], track["lon"]
+    if start is not None or end is not None:
+        lo = 0 if start is None else int(np.searchsorted(time, start))
+        hi = time.size if end is None else int(np.searchsorted(time, end))
+        lo, hi = max(0, lo), min(time.size, hi)
+        time, x, y = time[lo:hi], x[lo:hi], y[lo:hi]
+        lat, lon = lat[lo:hi], lon[lo:hi]
+    if time.size < 2:
+        return None
     speed_name = next((n for n in SPEED_FOR_COLORING if log.has(n)), None)
     if speed_name is None:
-        speed = np.zeros(track["x"].size)
+        speed = np.zeros(time.size)
     else:
         master = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
-        speed = np.interp(track["time"], master, derive.hold_to_master(log, speed_name))
-    step = max(1, track["x"].size // points)
+        speed = np.interp(time, master, derive.hold_to_master(log, speed_name))
+    step = max(1, time.size // max(1, points))
     return {
-        "x": np.round(track["x"][::step], 2).tolist(),
-        "y": np.round(track["y"][::step], 2).tolist(),
+        "x": np.round(x[::step], 2).tolist(),
+        "y": np.round(y[::step], 2).tolist(),
         "speed": np.round(speed[::step], 2).tolist(),
-        "time": np.round(track["time"][::step], 3).tolist(),
+        "time": np.round(time[::step], 3).tolist(),
         "speed_channel": speed_name,
+        "lat": np.round(lat[::step], 7).tolist(),
+        "lon": np.round(lon[::step], 7).tolist(),
+        # local frame origin, so a click on the map can be turned back into lat/lon
+        "origin": list(track.get("origin") or (float(track["lat"][0]), float(track["lon"][0]))),
     }
 
 
@@ -433,6 +460,7 @@ def build_payload(
         "ref": None if chosen_ref is None else chosen_ref.label,
         "cmp": None if chosen_cmp is None else chosen_cmp.label,
         "track": track_payload(log) if with_track else None,
+        "laps_config": lapsmod.load_config(log.path).as_dict(),
         "api": api_base,
         "buckets": buckets,
         "session": log.path.stem,

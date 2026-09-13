@@ -344,7 +344,33 @@ class TestServer(unittest.TestCase):
             self.assertEqual(missing_channel.exception.code, 400)
 
             laps = get_json(f"/api/session/{quoted}/laps")
-            self.assertGreaterEqual(len([l for l in laps if l["complete"]]), 5)
+            self.assertIn("config", laps)
+            self.assertGreaterEqual(len([l for l in laps["laps"] if l["complete"]]), 5)
+
+            # windowed GPS track, for the "only the selected time range" view
+            windowed = get_json(f"/api/session/{quoted}/track?from=200&to=230&points=4000")
+            self.assertLessEqual(max(windowed["time"]), 230.5)
+            self.assertGreaterEqual(min(windowed["time"]), 199.5)
+            self.assertIn("origin", windowed)
+            self.assertEqual(len(windowed["lat"]), len(windowed["x"]))
+
+            # saving beacons writes the sidecar and re-cuts the laps
+            import urllib.request as _u
+            payload = json.dumps({
+                "mode": "beacons",
+                "gates": [{"name": "测试信标", "lat": 22.0, "lon": 113.0}],
+            }).encode("utf-8")
+            request = _u.Request(
+                base + f"/api/session/{quoted}/laps", data=payload, method="PUT",
+                headers={"Content-Type": "application/json"},
+            )
+            with _u.urlopen(request, timeout=30) as response:
+                saved = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(saved["config"]["gates"][0]["name"], "测试信标")
+            self.assertTrue(str(saved["saved"]).endswith(".laps.json"))
+            sidecar = (HILL.parent / f"{HILL.stem}.laps.json")
+            self.assertTrue(sidecar.exists())
+            sidecar.unlink()          # leave no trace in the data folder
 
             with self.assertRaises(urllib.error.HTTPError) as caught:
                 urllib.request.urlopen(base + "/api/session/nope/trace", timeout=15)

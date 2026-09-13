@@ -485,6 +485,31 @@ if (api) {
   check(decoded && decoded.map((c) => c.type).join(",") === state.components.map((c) => c.type).join(","),
     "the worksheet link round trip lost or reordered components");
 
+  // 16b. lap-splitting controls and the windowed GPS track option
+  const modeSel = registry.get("lapMode");
+  check(!!modeSel, "the lap splitting-mode selector is missing");
+  check(modeSel && String(modeSel._html).indexOf('value="run"') >= 0
+    && String(modeSel._html).indexOf('value="figure8"') >= 0,
+    "the lap mode selector does not offer run / figure8");
+  check(!!registry.get("addBeacon"), "the beacon button is missing");
+  const trackComp = state.components.find((c) => c.type === "track");
+  check(!!trackComp, "no track component on the default worksheet");
+  check(trackComp && (trackComp.config.window || "all") === "all",
+    "the track component should start in whole-session mode");
+  const trackEl = trackComp && SHEETEl(worksheet, trackComp.id);
+  if (trackEl) {
+    const found = [];
+    (function walk(node) {
+      if (!node || !node._children) return;
+      for (const child of node._children) {
+        if (child.tagName === "SELECT" && String(child._html).indexOf('value="zoom"') >= 0) found.push(child);
+        walk(child);
+      }
+    })(trackEl);
+    check(found.length > 0,
+      "the track component has no whole-session / time-range switch");
+  }
+
   // 17. clicking a lap must jump the view to that lap
   const lapTableEl = registry.get("lapTable");
   const lapRows = lapTableEl && lapTableEl._rows ? lapTableEl._rows : [];

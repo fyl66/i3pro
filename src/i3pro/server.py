@@ -324,15 +324,56 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                 return self._json(overlay)
 
             if action == "track":
-                return self._json(render.track_payload(log))
+                return self._json(
+                    render.track_payload(
+                        log,
+                        points=_int_arg(query, "points", 1500),
+                        start=_float_arg(query, "from"),
+                        end=_float_arg(query, "to"),
+                    )
+                )
 
             if action == "laps":
-                return self._json(lapsmod.lap_table(log, render.detect(log)))
+                # laps after the saved beacons/mode, plus the config itself
+                if method == "PUT":
+                    return self.save_laps(log)
+                config = lapsmod.load_config(log.path)
+                laps = render.detect(log)
+                return self._json(
+                    {
+                        "config": config.as_dict(),
+                        "laps": lapsmod.lap_table(log, laps),
+                    }
+                )
 
             if action == "export":
                 return self._error(501, "export is done from the UI or the CLI")
 
             self._error(404, "no such api action")
+
+        # --------------------------------------------------------- lap editing
+        def save_laps(self, log) -> None:
+            """PUT /api/session/<name>/laps with the beacon / mode config."""
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b""
+            if not body:
+                return self._error(400, "空请求体")
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError) as exc:
+                return self._error(400, f"JSON 解析失败: {exc}")
+            if not isinstance(data, dict):
+                return self._error(400, "需要一个 JSON 对象")
+            config = lapsmod.LapConfig.from_dict(data)
+            path = lapsmod.save_config(log.path, config)
+            laps = render.detect(log)
+            self._json(
+                {
+                    "saved": path.name,
+                    "config": config.as_dict(),
+                    "laps": lapsmod.lap_table(log, laps),
+                }
+            )
 
         # ------------------------------------------------------------ upload
         def upload(self, query: dict, method: str) -> None:

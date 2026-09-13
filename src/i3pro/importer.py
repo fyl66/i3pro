@@ -20,10 +20,11 @@ from typing import BinaryIO, Iterable
 
 __all__ = ["ALLOWED_SUFFIXES", "safe_name", "unique_target", "store_stream", "import_paths"]
 
-#: MoTeC writes the log as ``.ld`` plus an optional ``.ldx`` sidecar (layers,
-#: beacons). ``.csv`` exports are not imported: they are the comparison baseline,
-#: not the primary data source.
-ALLOWED_SUFFIXES = (".ld", ".ldx")
+#: ``.ld`` plus its ``.ldx`` sidecar (layers, beacons) is the primary source.
+#: ``.csv`` is accepted too: i2 Pro exports and other teams' / other tools'
+#: tables both go through the same session model, so ``.csv`` is imported, not
+#: treated as a second-class citizen.
+ALLOWED_SUFFIXES = (".ld", ".ldx", ".csv")
 
 
 def safe_name(name: str) -> str:

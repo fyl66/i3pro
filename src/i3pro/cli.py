@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import laps as lapsmod
+from . import csvlog, laps as lapsmod
 from . import derive
 from . import ld as ldmod
 from . import render as rendermod
@@ -41,7 +41,7 @@ def _print_table(rows: list[dict], columns: list[str] | None = None) -> None:
 def cmd_info(args: argparse.Namespace) -> int:
     rows = []
     for path in args.files:
-        with ldmod.LogFile.read(path) as log:
+        with csvlog.open_session(path) as log:
             meta = log.metadata()
             rows.append(
                 {
@@ -61,7 +61,7 @@ def cmd_info(args: argparse.Namespace) -> int:
 
 
 def cmd_channels(args: argparse.Namespace) -> int:
-    with ldmod.LogFile.read(args.file) as log:
+    with csvlog.open_session(args.file) as log:
         rows = []
         for ch in log.channels:
             if args.filter and args.filter.lower() not in ch.name.lower():
@@ -87,7 +87,7 @@ def cmd_channels(args: argparse.Namespace) -> int:
 def cmd_convert(args: argparse.Namespace) -> int:
     channels = [c.strip() for c in args.channels.split(",")] if args.channels else None
     for path in args.files:
-        with ldmod.LogFile.read(path) as log:
+        with csvlog.open_session(path) as log:
             pq_path, meta_path = store.write_parquet(
                 log, args.out, channels=channels, master_rate=args.rate
             )
@@ -96,7 +96,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
 
 
 def cmd_laps(args: argparse.Namespace) -> int:
-    with ldmod.LogFile.read(args.file) as log:
+    with csvlog.open_session(args.file) as log:
         if args.mode or args.gate:
             config = lapsmod.load_config(args.file)
             if args.mode:
@@ -151,13 +151,48 @@ def _parse_gate(spec: str):
     return _laps.Beacon(name=name.strip() or f"信标{lat:.5f}", lat=lat, lon=lon)
 
 
+def _parse_pairs(specs: list[str]) -> dict[str, str]:
+    """``原始列=新名字`` (or ``原始列=单位``) arguments -> a dict."""
+    out: dict[str, str] = {}
+    for spec in specs:
+        if "=" not in spec:
+            print(f"# 忽略无法解析的映射: {spec!r}（格式 原始列=新值）")
+            continue
+        key, value = spec.split("=", 1)
+        key, value = key.strip(), value.strip()
+        if key and value:
+            out[key] = value
+    return out
+
+
+def _csv_mapping_note(log) -> str:
+    """How each CSV column was matched, and what to do about the rest."""
+    tiers: dict[str, int] = {}
+    unmatched: list[str] = []
+    for entry in log.report:
+        tier = entry.get("matched_by")
+        if tier in ("原名", "别名", "手工指定"):
+            tiers[tier] = tiers.get(tier, 0) + 1
+        elif entry.get("status") == "通道" or tier == "未匹配":
+            unmatched.append(entry["column"])
+    summary = "、".join(f"{k} {v}" for k, v in sorted(tiers.items())) or "无"
+    lines = [f"    列匹配: {summary}；未匹配 {len(unmatched)} 列（按原列名保留，可手工指定）"]
+    for column in unmatched[:8]:
+        lines.append(f"      ? {column}")
+    if len(unmatched) > 8:
+        lines.append(f"      … 其余 {len(unmatched) - 8} 列见 --map")
+    if unmatched:
+        lines.append('      修正: i3pro import <文件> --map "原始列=通道名" --unit "原始列=单位"')
+    return "\n".join(lines)
+
+
 def cmd_delta(args: argparse.Namespace) -> int:
     channels = (
         [c.strip() for c in args.channels.split(",")]
         if args.channels
         else ["Ground Speed", "G Force Long", "Brake Signal", "Throttle"]
     )
-    with ldmod.LogFile.read(args.file) as log:
+    with csvlog.open_session(args.file) as log:
         try:
             laps = lapsmod.detect_laps(log)
         except ValueError as exc:
@@ -225,7 +260,7 @@ def cmd_delta(args: argparse.Namespace) -> int:
 def cmd_export(args: argparse.Namespace) -> int:
     import numpy as np
 
-    with ldmod.LogFile.read(args.file) as log:
+    with csvlog.open_session(args.file) as log:
         names = [c.strip() for c in args.channels.split(",")] if args.channels else ["Time"] + [c.name for c in log.channels]
         explicit_time = any(n.lower() == "time" for n in names)
         cols: dict[str, np.ndarray] = {}
@@ -278,7 +313,7 @@ def cmd_series(args: argparse.Namespace) -> int:
 def cmd_render(args: argparse.Namespace) -> int:
     channels = [c.strip() for c in args.channels.split(",")] if args.channels else None
     out = Path(args.out) if args.out else Path("out") / f"{Path(args.file).stem}.html"
-    with ldmod.LogFile.read(args.file) as log:
+    with csvlog.open_session(args.file) as log:
         out = rendermod.render_html(
             log, out, channels=channels, ref=args.ref, cmp=args.cmp, buckets=args.buckets
         )
@@ -330,7 +365,7 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
         target = out / f"{path.stem}.html"
         print(f"  {path.name} ...", end="", flush=True)
         try:
-            with ldmod.LogFile.read(path) as log:
+            with csvlog.open_session(path) as log:
                 laps: list = []
                 try:
                     laps = lapsmod.detect_laps(log)
@@ -380,17 +415,24 @@ def cmd_import(args: argparse.Namespace) -> int:
     from . import importer
 
     destination = Path(args.data)
+    renames, units = _parse_pairs(args.map or []), _parse_pairs(args.unit or [])
     results = importer.import_paths(args.paths, destination, move=args.move)
     imported = [r for r in results if "error" not in r]
     failed = [r for r in results if "error" in r]
 
     for row in imported:
         note = ""
-        if row["file"].lower().endswith(".ld"):
+        suffix = Path(row["file"]).suffix.lower()
+        if suffix == ".csv" and (renames or units):
+            csvlog.save_map(row["path"], renames, units)
+            note += "已写入列映射 · "
+        if suffix in (".ld", ".csv"):
             try:
-                with ldmod.LogFile.read(row["path"]) as log:
+                with csvlog.open_session(row["path"]) as log:
                     meta = log.metadata()
                     note = f"{meta['channels']} 通道 · {meta['duration']:.0f} s · {meta['device']}"
+                    if suffix == ".csv":
+                        note += "\n" + _csv_mapping_note(log)
             except Exception as exc:  # imported but unreadable -> say so now
                 note = f"⚠ 无法解析: {type(exc).__name__}: {exc}"
         print(f"  + {row['file']}  ({row['bytes'] / 1e6:.1f} MB)  {note}")
@@ -462,7 +504,7 @@ def _snapshot_index(rows: list[dict], data_dir: Path) -> str:
 
 def cmd_track(args: argparse.Namespace) -> int:
     """Print a coarse ASCII trace of the detected lap times (quick sanity check)."""
-    with ldmod.LogFile.read(args.file) as log:
+    with csvlog.open_session(args.file) as log:
         try:
             laps = lapsmod.detect_laps(log)
         except ValueError as exc:
@@ -566,10 +608,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--open", action="store_true", help="生成后打开索引页")
     p.set_defaults(func=cmd_snapshot)
 
-    p = sub.add_parser("import", help="把 .ld/.ldx 导入数据目录（可拖拽到 导入数据.bat 上）")
+    p = sub.add_parser("import", help="把 .ld/.ldx/.csv 导入数据目录（可拖拽到 导入数据.bat 上）")
     p.add_argument("paths", nargs="+", help="文件或目录，可多个")
     p.add_argument("--data", default="i2pro_data", help="目标数据目录")
     p.add_argument("--move", action="store_true", help="移动而不是复制")
+    p.add_argument("--map", action="append", default=[],
+                   help='CSV 列改名: "原始列=通道名"，可重复；写进 <场次>.map.json')
+    p.add_argument("--unit", action="append", default=[],
+                   help='CSV 列单位: "原始列=单位"，可重复')
     p.set_defaults(func=cmd_import)
 
     p = sub.add_parser("track", help="圈速柱状速览")

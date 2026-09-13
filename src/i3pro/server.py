@@ -26,7 +26,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import numpy as np
 
-from . import derive, importer, laps as lapsmod, render, store
+from . import csvlog, derive, importer, laps as lapsmod, render, store
 from . import ld as ldmod
 
 __all__ = ["SessionLibrary", "serve", "make_handler"]
@@ -72,8 +72,9 @@ class SessionLibrary:
         for root in self.roots:
             if not root.exists():
                 continue
-            for path in sorted(root.rglob("*.ld")):
-                found.setdefault(path.stem, path)
+            for pattern in ("*.ld", "*.csv"):
+                for path in sorted(root.rglob(pattern)):
+                    found.setdefault(path.stem, path)
         return found
 
     def names(self) -> list[str]:
@@ -92,7 +93,7 @@ class SessionLibrary:
             if key in self._cache:
                 self._cache.move_to_end(key)
                 return self._cache[key]
-        log = ldmod.LogFile.read(path)
+        log = csvlog.open_session(path)
         with self._lock:
             self._cache[key] = log
             while len(self._cache) > self.cache_size:

@@ -80,8 +80,14 @@ def distance_series(log: ldmod.LogFile, min_speed: float = 0.0) -> np.ndarray:
     for name in ("Distance", "Distance (2)"):
         if log.has(name):
             values = log.values(name)
-            if np.nanmax(values) - np.nanmin(values) > 1.0:
-                return hold_to_master(log, name) - np.nanmin(values)
+            # A distance channel has to actually *accumulate*: asking only for
+            # max-min accepts a channel that is zero everywhere with a single
+            # spike, which silently collapses every lap to zero length. Require
+            # the endpoints to differ and the curve to be mostly non-decreasing.
+            if values.size > 2 and float(values[-1] - values[0]) > 1.0:
+                rising = float(np.mean(np.diff(values) >= -0.5))
+                if rising > 0.95:
+                    return hold_to_master(log, name) - float(values[0])
     speed = speed_series(log) / 3.6  # km/h -> m/s
     # Rolling backwards / GPS jitter would otherwise make the axis shrink.
     speed = np.where(speed < max(min_speed, 0.0), 0.0, speed)

@@ -25,7 +25,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from i3pro import derive, laps as lapsmod, ld, motec_csv, render, server, store  # noqa: E402
+from i3pro import csvlog, derive, laps as lapsmod, ld, motec_csv, render, server, store  # noqa: E402
 
 DATA = ROOT / "i2pro_data"
 ENDURANCE = DATA / "20260524-耐久正赛.ld"
@@ -547,6 +547,122 @@ class TestChannelGroups(unittest.TestCase):
         self.assertTrue(all("error" in n.lower() or "temp" not in n for n in status))
         self.assertIn("MCU1 FR Error", status)
         self.assertNotIn("MCU1 FR TempMotor", status)
+
+
+class TestCsvSession(unittest.TestCase):
+    """A CSV session must be usable exactly like a `.ld` session."""
+
+    STEM = "20260522-yjw第二次直线3.72"
+
+    @_needs(DATA / "20260522-yjw第二次直线3.72.csv")
+    def test_i2pro_export_reads_as_a_session(self):
+        with csvlog.read_csv_session(DATA / f"{self.STEM}.csv") as session:
+            self.assertGreater(len(session.channels), 300)
+            self.assertAlmostEqual(session.sample_rate, 100.0, places=3)
+            self.assertGreater(session.duration, 800)
+            self.assertEqual(session.metadata()["format"], "csv")
+            self.assertTrue(session.has("GPS Speed"))
+            self.assertEqual(len(session.values("GPS Speed")),
+                             session.channel("GPS Speed").sample_count)
+            self.assertEqual({c.name: c.unit for c in session.channels}["G Force Lat"], "G")
+
+    @_needs(DATA / "20260522-yjw第二次直线3.72.csv")
+    def test_csv_and_ld_agree_on_the_channels_they_share(self):
+        """The two sources of one session must not disagree downstream."""
+        if not (DATA / f"{self.STEM}.ld").exists():
+            self.skipTest("matching .ld missing")
+        with ld.LogFile.read(DATA / f"{self.STEM}.ld") as binary:
+            with csvlog.read_csv_session(DATA / f"{self.STEM}.csv") as text:
+                compared = 0
+                for ch in binary.channels:
+                    if not text.has(ch.name) or abs(ch.sample_rate - text.sample_rate) > 0.5:
+                        continue
+                    a = binary.values(ch)[:2000]
+                    b = text.values(ch.name)[: a.size]
+                    tolerance = 0.5 * 10.0 ** (-ch.decimals) + 1e-6
+                    self.assertLessEqual(float(np.max(np.abs(a - b))), tolerance, ch.name)
+                    compared += 1
+                self.assertGreater(compared, 200)
+
+    @_needs(DATA / "20260522-yjw第二次直线3.72.csv")
+    def test_the_report_accounts_for_every_column(self):
+        with csvlog.read_csv_session(DATA / f"{self.STEM}.csv") as session:
+            report, channels = session.report, len(session.channels)
+        statuses = {entry.get("matched_by") for entry in report}
+        self.assertIn("时间列", statuses)
+        self.assertIn("原名", statuses)
+        self.assertEqual(len(report), channels + 1)      # + the time column
+        for entry in report:
+            self.assertTrue(entry.get("status"), entry)
+
+    def test_a_foreign_csv_is_matched_by_name_alias_and_unit(self):
+        import tempfile
+
+        rows = [
+            "Time,GPS Speed,Wheel Speed FL,Throttle Position,Left Rear Damper",
+            "s,km/h,km/h,%,mm",
+            "0.00,10.5,10.1,0.0,12.0",
+            "0.01,20.5,19.9,55.0,13.5",
+            "0.02,30.5,29.5,100.0,15.0",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "other-team.csv"
+            path.write_text("\n".join(rows), encoding="utf-8")
+            session = csvlog.read_csv_session(path)
+        cells = {e["column"]: e for e in session.report if e.get("status") == "通道"}
+        self.assertEqual(cells["GPS Speed"]["matched_by"], "原名")
+        self.assertEqual(cells["Wheel Speed FL"]["name"], "SpeedFL")
+        self.assertEqual(cells["Wheel Speed FL"]["matched_by"], "别名")
+        self.assertEqual(cells["Throttle Position"]["name"], "TH")
+        self.assertEqual(cells["Left Rear Damper"]["name"], "Left Rear Damper")
+        self.assertEqual(cells["Left Rear Damper"]["unit"], "mm")
+        self.assertEqual(cells["Left Rear Damper"]["matched_by"], "未匹配")
+
+    def test_a_csv_without_a_time_column_is_refused_with_a_next_step(self):
+        """Silently eating the first data column as time would be worse."""
+        import tempfile
+
+        rows = ["GPS Speed,Throttle Position", "10.5,0.0", "20.5,55.0", "30.5,100.0"]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "no-time.csv"
+            path.write_text("\n".join(rows), encoding="utf-8")
+            with self.assertRaises(ValueError) as caught:
+                csvlog.read_csv_session(path)
+        message = str(caught.exception)
+        self.assertIn("找不到时间列", message)
+        self.assertIn("--map", message)          # says what to do next
+
+    def test_manual_mapping_persists_in_a_sidecar(self):
+        """Unmatched columns can be corrected, not just reported."""
+        import tempfile
+
+        rows = ["Time,Speed,Weird Name", "s,km/h,bar", "0.00,1.0,2.0", "0.01,2.0,3.0",
+                "0.02,3.0,4.0"]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "run.csv"
+            path.write_text("\n".join(rows), encoding="utf-8")
+            self.assertTrue(csvlog.read_csv_session(path).has("Weird Name"))
+            sidecar = csvlog.save_map(path, {"Weird Name": "RearPress Mpa"},
+                                      {"Weird Name": "MPa"})
+            self.assertTrue(sidecar.exists())
+            after = csvlog.read_csv_session(path)
+            self.assertFalse(after.has("Weird Name"))
+            self.assertEqual(after.channel("RearPress Mpa").unit, "MPa")
+            self.assertEqual(
+                next(e["matched_by"] for e in after.report if e["column"] == "Weird Name"),
+                "手工指定",
+            )
+            explicit = csvlog.read_csv_session(path, renames={"Weird Name": "别的名字"})
+            self.assertTrue(explicit.has("别的名字"))     # argument beats the sidecar
+
+    @_needs(DATA / "20260522-yjw第二次直线3.72.csv")
+    def test_a_csv_session_goes_through_laps_and_distance(self):
+        with csvlog.read_csv_session(DATA / f"{self.STEM}.csv") as session:
+            distance = derive.distance_series(session)
+            laps = lapsmod.detect_laps(session)
+        self.assertGreater(float(distance[-1]), 100.0)
+        self.assertTrue(laps)
+        self.assertGreater(max(lap.distance for lap in laps), 50.0)
 
 
 class TestPoints(unittest.TestCase):

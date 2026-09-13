@@ -81,12 +81,31 @@ class Element {
   set innerHTML(value) {
     this._html = String(value);
     this._rows = [];
+    // Beacon pills: one editable name box and one delete link per beacon. The
+    // viewer wires these up with querySelectorAll, so the shim has to hand back
+    // the same elements the markup describes.
+    this._bnames = [];
+    this._dels = [];
     const re = /<tr data-lap="([^"]+)"/g;
     let m;
     while ((m = re.exec(this._html))) {
       const row = new Element("tr");
       row.dataset.lap = m[1];
       this._rows.push(row);
+    }
+    const bname = /data-beacon-name="(\d+)"[^>]*?value="([^"]*)"/g;
+    while ((m = bname.exec(this._html))) {
+      const box = new Element("input");
+      box.dataset.beaconName = m[1];
+      box.value = m[2].replace(/&quot;/g, '"').replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+      this._bnames.push(box);
+    }
+    const del = /data-beacon="(\d+)"/g;
+    while ((m = del.exec(this._html))) {
+      const link = new Element("a");
+      link.dataset.beacon = m[1];
+      this._dels.push(link);
     }
     const idre = /id="([^"]+)"/g;
     while ((m = idre.exec(this._html))) {
@@ -128,6 +147,8 @@ class Element {
 
   querySelectorAll(selector) {
     if (selector === "tr[data-lap]" || selector === "tr") return this._rows;
+    if (selector === "input[data-beacon-name]") return this._bnames || [];
+    if (selector === "a[data-beacon]") return this._dels || [];
     if (selector.indexOf("canvas") >= 0) return this._q.canvas ? [this._q.canvas] : [];
     if (selector === "input") return this._children.filter((c) => c.tagName === "INPUT");
     return [];
@@ -628,6 +649,113 @@ if (api) {
       window.dispatch("mouseup", {});
       check(target.w !== w0 && target.h === h0, "the right-edge handle must change width only");
     }
+  }
+
+  // 21. beacon editing: rename in place, insert a crossing at the cursor
+  const beaconHost = registry.get("beaconList");
+  check(!!beaconHost, "the beacon list element is missing");
+  check(!!registry.get("addCrossing"), "the insert-crossing button is missing");
+  if (beaconHost) {
+    const apiBase = api.data.api;
+    state.lapsConfig = {
+      mode: "auto",
+      beacons: [{ name: "左环", lat: 34.1, lon: 113.6 },
+                { name: "右环", lat: 34.2, lon: 113.7 }],
+      trusted: { "左环 1": false },
+    };
+    // A snapshot has no server to save to: both edits must say so rather than
+    // silently doing nothing.
+    if (!apiBase) {
+      api.renameBeacon(0, "不该生效");
+      check(state.lapsConfig.beacons[0].name === "左环",
+        "a snapshot must not rename a beacon");
+      api.insertCrossing();
+      check(String(registry.get("toast").textContent).indexOf("serve") >= 0,
+        "in snapshot mode the beacon edits must tell the user to run serve mode");
+    }
+    // ...and with the api base the payload carries in serve mode, they save.
+    api.data.api = "/api";
+    api.renderLapControls();
+    const nameBoxes = beaconHost.querySelectorAll("input[data-beacon-name]");
+    check(nameBoxes.length === 2,
+      "expected one editable name box per beacon, got " + nameBoxes.length);
+    check(beaconHost._html.indexOf('data-beacon-name="0"') >= 0,
+      "beacon names are not editable in place");
+
+    // a name is user text: it must not be able to break out of the markup
+    state.lapsConfig.beacons[0].name = 'a"b<c>';
+    api.renderLapControls();
+    check(beaconHost._html.indexOf("&quot;") >= 0 && beaconHost._html.indexOf("<c>") < 0,
+      "a beacon name with quotes / angle brackets was not escaped");
+    state.lapsConfig.beacons[0].name = "左环";
+    api.renderLapControls();
+
+    // re-query: every render replaces the boxes (and re-attaches the handlers)
+    const renameBox = beaconHost.querySelectorAll("input[data-beacon-name]")[0];
+    renameBox.value = "  左环A  ";
+    renameBox.dispatch("keydown", { key: "Enter", preventDefault() {} });
+    check(state.lapsConfig.beacons[0].name === "左环A",
+      "Enter did not commit the new beacon name (got "
+      + state.lapsConfig.beacons[0].name + ")");
+
+    renameBox.value = "别改我";
+    renameBox.dispatch("keydown", { key: "Escape", preventDefault() {} });
+    check(state.lapsConfig.beacons[0].name === "左环A",
+      "Esc must not send the edit it is cancelling");
+    // The box goes back to the last *rendered* name - in a browser that is the
+    // saved one, because a successful save re-renders the list.
+    check(renameBox.value !== "别改我", "Esc must put the name back in the box");
+
+    api.renameBeacon(0, "   ");
+    check(state.lapsConfig.beacons[0].name === "左环A",
+      "an empty name must not rename a beacon");
+
+    state.mode = "time";
+    state.cursor = null;
+    const beforeInsert = state.lapsConfig.beacons.length;
+    api.insertCrossing();
+    check(state.lapsConfig.beacons.length === beforeInsert,
+      "inserting with no cursor must not add a beacon at t = 0");
+
+    state.cursor = 123.456;
+    api.insertCrossing();
+    const added = state.lapsConfig.beacons[state.lapsConfig.beacons.length - 1];
+    check(state.lapsConfig.beacons.length === beforeInsert + 1 && !!added,
+      "the insert-crossing button did not add a beacon");
+    check(added && added.time === 123.456 && added.lat === undefined && added.lon === undefined,
+      "an inserted crossing must carry a time and no position");
+    api.renderLapControls();
+    check(beaconHost._html.indexOf("t = 123.456 s") >= 0,
+      "the beacon list does not show the time of a hand-inserted crossing");
+    check(beaconHost._html.indexOf("manual") >= 0,
+      "a hand-inserted crossing is not drawn differently from a placed beacon");
+
+    const dels = beaconHost.querySelectorAll("a[data-beacon]");
+    check(dels.length === 3, "every beacon needs a delete link, got " + dels.length);
+    if (dels.length === 3) {
+      dels[2].dispatch("click", { preventDefault() {} });
+      check(state.lapsConfig.beacons.length === beforeInsert,
+        "the ✕ did not remove the hand-inserted crossing");
+      check(state.lapsConfig.beacons.every((b) => b.time !== 123.456),
+        "the ✕ removed the wrong beacon");
+    }
+
+    // On the distance axis the cursor is metres, so it has to be converted.
+    state.cursor = 300;
+    if (api.data.meta && api.data.meta.has_distance) {
+      state.mode = "distance";
+      const seconds = api.cursorTime();
+      check(seconds !== null && seconds > 0 && seconds < api.data.meta.duration,
+        "on the distance axis the cursor must still map to a time (got " + seconds + ")");
+      state.mode = "overlay";
+      check(api.cursorTime() === null,
+        "overlay mode has no single time for a distance, so it must refuse");
+    }
+    state.mode = "time";
+    state.cursor = null;
+    state.lapsConfig = { mode: "auto", beacons: [], trusted: {} };
+    api.renderLapControls();
+    api.data.api = apiBase;
   }
 }
 

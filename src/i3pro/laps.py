@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import math
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -32,6 +32,8 @@ __all__ = [
     "Beacon",
     "Lap",
     "LapConfig",
+    "reconcile_edits",
+    "check_new_crossings",
     "detect_laps",
     "detect_from_config",
     "load_config",
@@ -49,6 +51,12 @@ __all__ = [
 #: Sidecar written next to the ``.ld`` file. The ``.ld`` itself stays read-only
 #: (see AGENTS.md); everything the user edits about laps lives here.
 CONFIG_SUFFIX = ".laps.json"
+
+#: A beacon name becomes the prefix of every lap label in its series
+#: (``左环 3``), so it stays short enough for the side panel and a share link.
+MAX_BEACON_NAME = 24
+DEFAULT_BEACON_NAME = "信标"
+DEFAULT_CROSSING_NAME = "手工穿越"
 
 LAP_NUMBER_CHANNELS = ("Lap Number", "Lap counter", "Lap No")
 BEACON_CHANNELS = ("Beacon", "Beacon Number")
@@ -728,6 +736,98 @@ def _opt_float(value) -> float | None:
     return None if value is None else float(value)
 
 
+# ------------------------------------------------------------ editing rules
+def reconcile_edits(old: LapConfig, new: LapConfig) -> LapConfig:
+    """Apply the beacon-name rules to a config the user just edited.
+
+    The UI sends the whole config, so the rules live here, once, instead of being
+    re-implemented by every caller (and re-implemented slightly differently each
+    time): a name is trimmed, an empty name falls back to what the beacon was
+    called before, duplicates get a numeric suffix, and over-long names are
+    truncated.
+
+    Renaming also carries the ``trusted`` marks over to the new label. Labels are
+    ``<beacon name> <lap number>``, so without this a rename would silently lose
+    every "this lap is untrusted" decision the user made in the lap table.
+
+    Names that did not change are left exactly as they are - an existing sidecar
+    must not be rewritten behind the user's back.
+    """
+    beacons = list(new.beacons)
+    trusted = dict(new.trusted)
+    for index, beacon in enumerate(beacons):
+        before = old.beacons[index] if index < len(old.beacons) else None
+        if before is not None and before.name == beacon.name:
+            continue
+        fallback = before.name if before is not None else DEFAULT_BEACON_NAME
+        name = _unique_name(
+            _clean_name(beacon.name, fallback),
+            [b.name for other, b in enumerate(beacons) if other != index],
+        )
+        beacons[index] = replace(beacon, name=name)
+        if before is not None:
+            trusted = _migrate_trusted(trusted, before.name, name)
+    return replace(new, beacons=beacons, trusted=trusted)
+
+
+def check_new_crossings(old: LapConfig, new: LapConfig, duration: float) -> str | None:
+    """Reject a hand-entered crossing that is not inside this session.
+
+    Returns a message for the user (in Chinese, saying what to do next) or
+    ``None`` when the edit is fine. Only crossings that are *new* in this edit
+    are checked: an out-of-range time that already sits in a sidecar must never
+    lock the user out of editing that session.
+    """
+    known = {(b.name, b.time) for b in old.beacons}
+    for beacon in new.beacons:
+        if beacon.has_position or (beacon.name, beacon.time) in known:
+            continue
+        if beacon.time is None or not math.isfinite(beacon.time):
+            return f"信标「{beacon.name}」缺少穿越时刻"
+        if not 0.0 <= beacon.time <= duration:
+            return (
+                f"「{beacon.name}」的穿越时刻 {beacon.time:.3f} s 超出本场时长 "
+                f"0–{duration:.1f} s，请把光标放到图上再插入"
+            )
+    return None
+
+
+def _clean_name(name: object, fallback: str) -> str:
+    """Trim the name; empty means "keep whatever it was called before"."""
+    return str(name or "").strip() or fallback
+
+
+def _unique_name(stem: str, taken: Iterable[str], limit: int = MAX_BEACON_NAME) -> str:
+    """Truncate to ``limit`` characters and add " 2", " 3"… until it is free."""
+    used = set(taken)
+    name = stem[:limit]
+    if name not in used:
+        return name
+    for number in range(2, 1000):
+        suffix = f" {number}"
+        candidate = stem[: max(1, limit - len(suffix))] + suffix
+        if candidate not in used:
+            return candidate
+    return name
+
+
+def _migrate_trusted(trusted: dict[str, bool], old: str, new: str) -> dict[str, bool]:
+    """Move ``<old> <n>`` trusted marks onto ``<new> <n>``.
+
+    The remainder after the prefix must be a plain lap number: a beacon that
+    legitimately ends in a digit (``左环`` renamed to ``左环 2``) leaves labels
+    like ``左环 2 1``, which a rename of ``左环`` must not re-point at itself.
+    """
+    if old == new:
+        return trusted
+    prefix = old + " "
+    migrated: dict[str, bool] = {}
+    for key, value in trusted.items():
+        rest = key[len(prefix) :] if key.startswith(prefix) else None
+        migrated[f"{new} {rest}" if rest is not None and rest.isdigit() else key] = value
+    return migrated
+
+
 def config_path(ld_path: str | Path) -> Path:
     """``<session>.ld`` -> ``<session>.laps.json``."""
     return Path(ld_path).with_suffix(CONFIG_SUFFIX)
@@ -772,21 +872,13 @@ def _laps_for_beacons(log: ldmod.LogFile, config: LapConfig) -> list[Lap]:
 
     A figure-of-eight gets one beacon per loop, so each loop is timed on its own
     and there is nothing to guess. A beacon that carries only a time is a
-    hand-inserted crossing (i2 Pro's "Missed Beacons"); it is merged into the
-    series it is closest to in time, or - when there is no placed beacon at all -
-    the times alone cut the laps.
+    hand-inserted crossing (i2 Pro's "Missed Beacons"): it is inserted into the
+    series it is closest to in time, or - when no placed beacon produced a series
+    - into the boundaries the session already has.
     """
     distance = _distance_series(log)
     placed = [b for b in config.beacons if b.has_position]
     timed = sorted(b.time for b in config.beacons if not b.has_position and b.time is not None)
-    if not placed:
-        if len(timed) < 2:
-            return []
-        bounds = [
-            (start, end, f"信标 {n}", True)
-            for n, (start, end) in enumerate(zip(timed, timed[1:]), start=1)
-        ]
-        return _lap_from_bounds(log, distance, bounds)
 
     series = []
     for beacon in placed:
@@ -798,27 +890,60 @@ def _laps_for_beacons(log: ldmod.LogFile, config: LapConfig) -> list[Lap]:
             "edges": [b[0] for b in bounds],
             "end": bounds[-1][1],
         })
-    for when in timed:                      # merge each missed crossing by time
-        if not series:
-            break
-        nearest = min(series, key=lambda s: min(abs(when - e) for e in s["edges"]))
-        nearest["edges"] = sorted(nearest["edges"] + [when])
 
-    laps: list[Lap] = []
-    for entry in series:
-        edges = sorted(entry["edges"] + [entry["end"]])
-        bounds = [
-            (start, end, f"{entry['beacon'].name} {n}", n not in (1, len(edges) - 1))
-            for n, (start, end) in enumerate(zip(edges, edges[1:]), start=1)
-            if end > start
-        ]
-        laps.extend(_lap_from_bounds(log, distance, bounds))
-    laps.sort(key=lambda lap: lap.start_time)
+    if not series:
+        laps = _laps_with_inserted_crossings(log, config, distance)
+    else:
+        for when in timed:                  # merge each missed crossing by time
+            nearest = min(series, key=lambda s: min(abs(when - e) for e in s["edges"]))
+            nearest["edges"] = sorted(nearest["edges"] + [when])
+        laps = []
+        for entry in series:
+            edges = sorted(entry["edges"] + [entry["end"]])
+            bounds = [
+                (start, end, f"{entry['beacon'].name} {n}", n not in (1, len(edges) - 1))
+                for n, (start, end) in enumerate(zip(edges, edges[1:]), start=1)
+                if end > start
+            ]
+            laps.extend(_lap_from_bounds(log, distance, bounds))
+        laps.sort(key=lambda lap: lap.start_time)
+
     for index, lap in enumerate(laps):
         lap.index = index
         if lap.label in config.trusted:
             lap.complete = config.trusted[lap.label]
     return laps
+
+
+def _laps_with_inserted_crossings(
+    log: ldmod.LogFile, config: LapConfig, distance: np.ndarray
+) -> list[Lap]:
+    """Insert hand-entered crossings into the boundaries the session already has.
+
+    A time-only beacon is a *missed* crossing: it adds one boundary. It must
+    never replace the lap set, so the boundaries come from whatever cutting
+    method the config asks for and the entered times are merged into them. Only
+    when there is nothing at all to insert into do the times stand alone.
+    """
+    times = sorted(
+        b.time for b in config.beacons if not b.has_position and b.time is not None
+    )
+    mode = config.mode if config.mode in ("auto", "run", "figure8") else "auto"
+    try:
+        base = detect_laps(log, method=mode)
+    except ValueError:
+        base = []
+    if base:
+        edges = sorted({*(lap.start_time for lap in base), base[-1].end_time, *times})
+    elif len(times) >= 2:
+        edges = times
+    else:
+        return []
+    bounds = [
+        (start, end, str(n), n not in (1, len(edges) - 1))
+        for n, (start, end) in enumerate(zip(edges, edges[1:]), start=1)
+    ]
+    return _flag_implausible(_lap_from_bounds(log, distance, bounds))
 
 
 def _distance_series(log: ldmod.LogFile) -> np.ndarray:

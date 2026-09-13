@@ -457,6 +457,71 @@ lap  turn  lap_time  delta_to_best  distance  start_time  end_time
 
 ---
 
+## A26 · 给信标改名（ticket #4）
+
+信标名是它那条圈速序列的**标签前缀**（`左环 3`），所以改名不只是改个字符串：
+标签变了，按标签存的「可信 / 不可信」标记就会集体失配。四条命名规则与一次标记迁移，
+全部实现为纯函数 `laps.reconcile_edits`，由服务端在每次保存配置时应用——界面、CLI、
+手改边车文件走的是同一份规则。
+
+| 规则 | 行为 |
+| --- | --- |
+| 去首尾空格 | `"  左环A  "` → `左环A` |
+| 空名回退 | `"   "` → 保持原名（不是"改成一个没名字的信标"） |
+| 重名加后缀 | 第二个 `左环` → `左环 2`，第三个 → `左环 3` |
+| 超长截断 | 40 个字的名字截到 `laps.MAX_BEACON_NAME`（24） |
+| **可信标记迁移** | `{"左环 1": false}` → 改名后 `{"左环A 1": false}` |
+
+**通过判据**（`python -m unittest tests.test_i3pro.TestBeaconEditing -v`，6 项）：
+
+```powershell
+python -m unittest tests.test_i3pro.TestBeaconEditing -v
+python -m unittest tests.test_i3pro.TestBeaconEditingOverHttp -v
+```
+
+单测断言：四条规则各一条；**连续插入两个信标的名字互不相同**；
+改名后 `trusted` 的三个键分别落到新名字与"与本次改名无关的键原样保留"；
+以及一条容易错的边界——信标名本身以数字结尾时（`左环` 改名为 `左环 2`）会产生
+`左环 2 1` 这样的标签，迁移只认"前缀去掉之后是纯数字"的键，
+**不会把 `左环 2 1` 误当成 `左环` 的一条圈**。
+
+HTTP 端到端（同一份配置提交，走真实 `PUT /api/session/<场次>/laps`）：
+
+1. 放一个带经纬度的信标 → 圈速表标签全部以 `左环 ` 开头；
+2. 改名 ` 左环A  ` → 响应里名字已规范化，**`trusted` 已迁移成 `{"左环A 1": false}`**，
+   圈速表标签全部跟着变成 `左环A `；重开该场次仍是新名字（它在 `<场次>.laps.json` 里）；
+3. 同名放第二个信标 → `["左环A", "左环A 2"]`。
+
+界面：点信标名就地编辑，`回车` 保存、`Esc` 取消（取消时一个字节都不会写进边车）。
+快照模式下输入框只读，并提示改用 `serve` 模式。
+
+---
+
+## A27 · 在光标处插入一次穿越（ticket #5）
+
+i2 Pro 的 **Missed Beacons**：车确实穿过了起终点，但没被检出，于是手工把那个**时刻**补进去。
+在 i3pro 里它就是"只有 `time`、没有 `lat/lon`"的信标。
+
+**最关键的一条语义**：插入的穿越**只增加边界，绝不替换已有的圈次集合**。
+（旧实现在没有摆放信标时是"用两个时刻自己切"，于是一个时刻会把整张圈速表清空——
+用户看到的是"我一插入，圈就全没了"。）
+
+**通过判据**：
+
+| 断言 | 命令 / 位置 |
+| --- | --- |
+| 插入后**正好多一条边界**，且新边界等于插入的时刻 | `TestBeaconEditing::test_an_inserted_crossing_splits_the_automatic_laps` |
+| 插入的穿越**不另立一条序列**（标签里不出现 `手工穿越 n`） | 同上 |
+| 超出本场时长的时刻被拒绝，报文写明"超出本场时长 … 请把光标放到图上再插入" | `TestBeaconEditing::test_only_new_crossings_are_range_checked` |
+| 边车里**原本就有**的越界时刻不会把这一场锁死（只校验本次新增的） | 同上 |
+| HTTP：插入后圈速表行数 +1、新边界 = 插入时刻、条目 `lat` 为空、边车落盘 | `TestBeaconEditingOverHttp` |
+| UI：没有光标时**不插入**（不会插到 0 秒）；插入的条目在信标列表里是虚线药丸 + `t = 123.456 s`；`✕` 能单独删掉它、圈速表复原 | `tools/smoke_viewer.js` 第 21 组 |
+| 距离轴上的光标是**米**，先换算成秒再插入；双圈对比的距离轴对应两条圈，**明确拒绝**并提示切到时间轴 | 同上 |
+| 快照模式（没有服务端）提示改用 `serve` 模式，而不是点了没反应 | 同上 |
+| 两份金标准数据实跑通过 | `20260908-cjh 高避5圈` / `20260524-耐久正赛` 两个快照的 `smoke_viewer.js` 均 `PASS` |
+
+---
+
 ## A9 · 缩放模型（对齐 i2 Pro）
 
 i2 Pro 的缩放不是"滚轮放大"这么简单，它是一整套鼠标 + 键盘分工。照搬后必须逐条成立：
@@ -582,7 +647,7 @@ python -m unittest tests.test_i3pro.TestChannelGroups -v
 python -m unittest discover -s tests -v
 ```
 
-**通过判据**：`Ran 29 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）。
+**通过判据**：`Ran 54 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）。
 
 测试覆盖：
 
@@ -592,6 +657,9 @@ python -m unittest discover -s tests -v
 | `TestScaling` | 缩放公式、负小数位（×10）、与 CSV 导出对照 |
 | `TestDerived` | 距离单调性、GPS 轨迹尺度合理 |
 | `TestLaps` | 两种赛道的切圈、距离轴重叠、Δ 收敛 |
+| `TestLapModes` | 切分方式（auto / run / figure8）、一个信标一条序列、旧侧车四种结构仍能读 |
+| `TestBeaconEditing` | 信标改名的四条规则、可信标记迁移、插入的穿越只加边界不换集合、越界时刻被拒 |
+| `TestBeaconEditingOverHttp` | 改名 / 插入穿越走真实 `PUT .../laps`：规范化、标记迁移、落盘、越界 400 |
 | `TestStore` | Parquet 往返、列式裁剪、SQL 查询 |
 | `TestCsvReader` | i2 Pro CSV 导出结构解析 |
 | `TestChannelGroups` | 通道按单位分组：不重不漏、单位一致、状态通道识别 |
@@ -599,5 +667,5 @@ python -m unittest discover -s tests -v
 | `TestRender` | 静态/服务两种 payload、自包含性 |
 | `TestServer` | HTTP 端到端：场次列表、工作台页、通道、时间窗、散点、概览、对比圈、赛道、404 |
 | `TestIndependentParsers` | 第二套实现交叉验证、213 通道 CSV 全量对照 |
-| `TestViewerScript` | 无头驱动前端：15 项交互断言 + 时间轴 / 双圈两条渲染路径 |
+| `TestViewerScript` | 无头驱动前端：**97 条断言**（22 组交互）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
 | `TestLaunchers` | 一键启动：快照批量导出 + 索引页、缺数据目录的报错、端口占用自动换端口 |

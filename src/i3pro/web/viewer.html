@@ -78,6 +78,18 @@
         border-radius:3px; padding:0 4px; font-size:10px; font-family:inherit; }
   .vals { font-variant-numeric:tabular-nums; max-height:30vh; overflow:auto; }
   .vals .delta { color:var(--muted); }
+  /* beacons: one pill per series, name editable in place */
+  .beacons { display:flex; flex-wrap:wrap; gap:4px; margin-top:4px; }
+  .pill { display:inline-flex; align-items:center; gap:4px; background:var(--panel2);
+          border:1px solid var(--line); border-radius:999px; padding:1px 6px 1px 4px; }
+  .pill.manual { border-style:dashed; }
+  .pill input.bname { background:transparent; border:1px solid transparent; color:var(--fg);
+                      font-size:11px; font-family:inherit; padding:1px 3px; width:7ch;
+                      max-width:15ch; border-radius:4px; }
+  .pill input.bname:hover { background:#ffffff12; }
+  .pill input.bname:focus { background:var(--panel); border-color:var(--accent); outline:none; }
+  .pill .btime { color:var(--muted); font-size:10px; font-style:normal; }
+  .pill a.del { color:#ff5d6c; text-decoration:none; font-size:11px; }
   .scattercfg { display:flex; gap:5px; align-items:center; flex-wrap:wrap; font-size:11px;
                 padding:2px 9px 0; color:var(--muted); }
   .scattercfg select { font-size:11px; padding:2px 5px; max-width:150px; }
@@ -157,8 +169,10 @@
       <div class="row">
         <select id="lapMode" title="切分方式"></select>
         <button id="addBeacon" title="点一下赛道图上的位置放一个信标">＋ 信标</button>
+        <button id="addCrossing" title="在光标处插入一次漏掉的穿越（i2 Pro 的 Missed Beacon）">＋ 穿越</button>
       </div>
-      <div class="hint" id="beaconList"></div>
+      <div class="hint">点信标名可以就地改名（<kbd>回车</kbd> 保存 · <kbd>Esc</kbd> 取消）</div>
+      <div class="beacons" id="beaconList"></div>
       <table id="lapTable"></table>
       <div class="hint">点=基准圈(蓝)并跳到该圈 · <kbd>Ctrl</kbd>+点=对比圈(橙) · <kbd>Shift</kbd>+点=只跳转</div>
     </div>
@@ -482,8 +496,15 @@ function fmt(v, digits) {
   const a = Math.abs(v);
   if (a >= 100000) return v.toExponential(2);
   if (a >= 1000) return v.toFixed(0);
-  if (a >= 100) return v.toFixed(1);
-  return v.toFixed(digits);
+    if (a >= 100) return v.toFixed(1);
+    return v.toFixed(digits);
+}
+
+/** Escape for a value that goes into markup (beacon names are user text). */
+function esc(text) {
+  return String(text === undefined || text === null ? "" : text)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
 function axisUnit() { return state.mode === "time" ? "s" : "m"; }
@@ -678,6 +699,37 @@ function fullRange() {
 }
 
 function lane() { return state.view || fullRange(); }
+
+/** Linear interpolation over a monotonic grid (binary search inside). */
+function interpAt(xs, ys, x) {
+  if (!xs || !ys || xs.length < 2) return null;
+  if (x <= xs[0]) return ys[0];
+  const last = xs.length - 1;
+  if (x >= xs[last]) return ys[last];
+  let lo = 0, hi = last;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (xs[mid] <= x) lo = mid; else hi = mid;
+  }
+  const span = xs[hi] - xs[lo];
+  return span > 0 ? ys[lo] + (ys[hi] - ys[lo]) * ((x - xs[lo]) / span) : ys[lo];
+}
+
+/**
+ * Where the cursor is in **seconds**, whichever axis is on screen. The time axis
+ * is already seconds; on the distance axis we interpolate distance -> time over
+ * the whole-session overview trace. In overlay mode the distance belongs to a
+ * lap-length grid shared by two different laps, so there is no single time to
+ * give - the caller asks the user for the time axis instead of guessing.
+ */
+function cursorTime() {
+  if (state.cursor === null || !Number.isFinite(state.cursor)) return null;
+  if (state.mode === "overlay") return null;
+  if (state.mode === "time") return state.cursor;
+  const overview = state.overview;
+  if (!overview || !overview.distance || !overview.distance.length) return null;
+  return interpAt(overview.distance, overview.time, state.cursor);
+}
 
 function scheduleRefresh() {
   clearTimeout(refreshTimer);
@@ -2122,6 +2174,24 @@ function markLapRows() {
 }
 
 /* ------------------------------------------------------------ lap editing */
+/**
+ * One beacon: its name (editable in place), where it is - or, for a crossing the
+ * user entered by hand, the time it stands for - and a delete link. A manual
+ * crossing is drawn as a dashed pill so it is never confused with a placed one.
+ */
+function beaconPill(beacon, index) {
+  const placed = beacon.lat !== undefined && beacon.lat !== null;
+  const where = placed
+    ? "起终点线 @ " + beacon.lat.toFixed(6) + ", " + beacon.lon.toFixed(6)
+    : "手工插入的穿越";
+  return '<span class="pill' + (placed ? "" : " manual") + '" title="' + where + '">'
+    + '<input class="bname" data-beacon-name="' + index + '" value="' + esc(beacon.name) + '"'
+    + ' title="' + where + '"' + (DATA.api ? "" : " readonly") + ">"
+    + (placed ? "" : '<i class="btime">t = ' + Number(beacon.time || 0).toFixed(3) + " s</i>")
+    + '<a class="del" href="#" data-beacon="' + index + '" title="删掉这个信标">✕</a>'
+    + "</span>";
+}
+
 function renderLapControls() {
   const sel = $("lapMode");
   if (!sel) return;
@@ -2133,18 +2203,31 @@ function renderLapControls() {
   const beacons = (state.lapsConfig && state.lapsConfig.beacons) || [];
   const list = $("beaconList");
   if (!beacons.length) {
-    list.innerHTML = DATA.api
-      ? '没有信标 —— 点「＋ 信标」，再点赛道图上的位置（八字就在左右环各点一个）。'
-      : "快照模式：信标由生成时决定，要改请用 serve 模式。";
+    list.innerHTML = '<span class="hint">' + (DATA.api
+      ? "没有信标 —— 点「＋ 信标」，再点赛道图上的位置（八字就在左右环各点一个）。"
+      : "快照模式：信标由生成时决定，要改请用 serve 模式。") + "</span>";
   } else {
-    list.innerHTML = "信标: " + beacons.map((b, i) => {
-      const where = (b.lat !== undefined && b.lat !== null)
-        ? b.lat.toFixed(6) + ", " + b.lon.toFixed(6)
-        : "t = " + Number(b.time || 0).toFixed(3) + " s（手工插入的穿越）";
-      return '<span class="pill" title="' + where + '">' + b.name
-        + ' <a href="#" data-beacon="' + i + '" style="color:#ff5d6c;text-decoration:none">✕</a>'
-        + "</span>";
-    }).join(" ");
+    list.innerHTML = beacons.map(beaconPill).join("");
+    list.querySelectorAll("input[data-beacon-name]").forEach((box) => {
+      const index = Number(box.dataset.beaconName);
+      const original = box.value;
+      let dirty = true;
+      const commit = () => {
+        if (!dirty) return;
+        dirty = false;
+        if (box.value !== original) renameBeacon(index, box.value);
+      };
+      box.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") { event.preventDefault(); commit(); box.blur(); }
+        else if (event.key === "Escape") {
+          event.preventDefault();
+          dirty = false;                    // cancel: not one byte reaches the sidecar
+          box.value = original;
+          box.blur();
+        }
+      });
+      box.addEventListener("blur", commit);
+    });
     list.querySelectorAll("a[data-beacon]").forEach((link) => {
       link.addEventListener("click", (event) => {
         event.preventDefault();
@@ -2156,6 +2239,46 @@ function renderLapControls() {
   }
   $("addBeacon").classList.toggle("on", !!state.placeBeacon);
   $("addBeacon").disabled = !DATA.api;
+}
+
+/**
+ * Rename one beacon in place. The rules that matter (trim, empty falls back to
+ * the previous name, duplicates get a suffix, over-long names are truncated) are
+ * enforced by the server in ``laps.reconcile_edits``, so every caller gets the
+ * same ones; here we only avoid sending an edit that changes nothing.
+ */
+async function renameBeacon(index, name) {
+  if (!DATA.api) { toast("快照模式不能改名，用 serve 模式"); return; }
+  const beacons = (state.lapsConfig.beacons || []).slice();
+  if (!beacons[index]) return;
+  const clean = String(name === undefined || name === null ? "" : name).trim();
+  if (!clean || clean === beacons[index].name) return;
+  beacons[index] = Object.assign({}, beacons[index], { name: clean });
+  await saveLaps(Object.assign({}, state.lapsConfig, { beacons: beacons }));
+}
+
+/**
+ * Insert one crossing at the cursor - i2 Pro's "Missed Beacons". The entry has a
+ * time and no position, so the server merges it into the series it is nearest to
+ * in time rather than starting a series of its own.
+ */
+async function insertCrossing() {
+  if (!DATA.api) { toast("快照模式不能插入穿越，用 serve 模式"); return; }
+  const when = cursorTime();
+  if (when === null) {
+    toast(state.mode === "overlay"
+      ? "双圈对比的距离轴对应两条圈，切到时间轴再插入"
+      : "先把鼠标移到图上，再按「＋ 穿越」");
+    return;
+  }
+  const full = fullRange();
+  if (!(when >= full[0] && when <= full[1])) {
+    toast("光标在本场数据之外，无法插入穿越");
+    return;
+  }
+  const beacons = (state.lapsConfig.beacons || []).slice();
+  beacons.push({ name: "手工穿越", time: Number(when.toFixed(4)) });
+  await saveLaps(Object.assign({}, state.lapsConfig, { beacons: beacons }));
 }
 
 async function saveLaps(config) {
@@ -2962,6 +3085,7 @@ function init() {
     renderLapControls();
     renderAll();
   });
+  $("addCrossing").addEventListener("click", () => { insertCrossing(); });
   state.lapsConfig = Object.assign({ mode: "auto", beacons: [], trusted: {} },
                                    DATA.laps_config || {});
   renderLapControls();
@@ -3026,6 +3150,8 @@ window.i3pro = {
   encodeLayout: encodeLayout, decodeLayout: decodeLayout, saveLayout: saveLayout,
   buildWorksheet: buildWorksheet, syncScatterSelectors: syncScatterSelectors,
   selectLap: selectLap, zoomToLap: zoomToLap,
+  renderLapControls: renderLapControls, renameBeacon: renameBeacon,
+  insertCrossing: insertCrossing, cursorTime: cursorTime,
 };
 </script>
 </body>

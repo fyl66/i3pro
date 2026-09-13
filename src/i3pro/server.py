@@ -370,7 +370,14 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                 return self._error(400, f"JSON 解析失败: {exc}")
             if not isinstance(data, dict):
                 return self._error(400, "需要一个 JSON 对象")
-            config = lapsmod.LapConfig.from_dict(data)
+            # The client sends the whole config, so the name rules (trim, empty
+            # falls back, duplicate suffix, truncation) and the trusted-mark
+            # migration are applied here - one implementation, every caller.
+            previous = lapsmod.load_config(log.path)
+            config = lapsmod.reconcile_edits(previous, lapsmod.LapConfig.from_dict(data))
+            problem = lapsmod.check_new_crossings(previous, config, log.duration)
+            if problem:
+                return self._error(400, problem)
             path = lapsmod.save_config(log.path, config)
             laps = render.detect(log)
             self._json(

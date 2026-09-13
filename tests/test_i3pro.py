@@ -540,6 +540,211 @@ class TestLapModes(unittest.TestCase):
             self.assertTrue(loaded.beacons[0].has_position or loaded.beacons[0].time is not None)
 
 
+class TestBeaconEditing(unittest.TestCase):
+    """Tickets #4 and #5: renaming a beacon, and inserting a missed crossing."""
+
+    @staticmethod
+    def _edit(old: lapsmod.LapConfig, *names: str) -> lapsmod.LapConfig:
+        """Return `old` with every beacon renamed to the given name."""
+        beacons = [
+            lapsmod.Beacon(name, b.lat, b.lon, b.time) for name, b in zip(names, old.beacons)
+        ]
+        return lapsmod.reconcile_edits(old, lapsmod.LapConfig(mode=old.mode, beacons=beacons,
+                                                             trusted=old.trusted))
+
+    def test_the_four_name_rules(self):
+        """Trim, empty falls back, duplicates get a suffix, over-long truncates."""
+        old = lapsmod.LapConfig(beacons=[lapsmod.Beacon("左环", 34.1, 113.6),
+                                        lapsmod.Beacon("右环", 34.2, 113.7)])
+
+        self.assertEqual(self._edit(old, "  左环A  ", "右环").beacons[0].name, "左环A")
+        # an empty name means "keep what it was called", not "call it nothing"
+        self.assertEqual(self._edit(old, "   ", "右环").beacons[0].name, "左环")
+        # two beacons may not share a name: labels are "<name> <n>"
+        deduped = self._edit(old, "右环", "右环")
+        self.assertEqual([b.name for b in deduped.beacons], ["右环 2", "右环"])
+        long_name = "环" * 40
+        self.assertEqual(len(self._edit(old, long_name, "右环").beacons[0].name),
+                         lapsmod.MAX_BEACON_NAME)
+
+    def test_a_new_beacon_is_named_uniquely_too(self):
+        """Two crossings inserted in a row must not end up with the same name."""
+        empty = lapsmod.LapConfig()
+        first = lapsmod.reconcile_edits(
+            empty, lapsmod.LapConfig(beacons=[lapsmod.Beacon("手工穿越", time=10.0)])
+        )
+        second = lapsmod.reconcile_edits(
+            first,
+            lapsmod.LapConfig(beacons=[*first.beacons, lapsmod.Beacon("手工穿越", time=40.0)]),
+        )
+        self.assertEqual([b.name for b in second.beacons], ["手工穿越", "手工穿越 2"])
+
+    def test_renaming_carries_the_trusted_marks_over(self):
+        """Labels are "<name> <n>", so a rename would otherwise drop every mark."""
+        old = lapsmod.LapConfig(
+            beacons=[lapsmod.Beacon("左环", 34.1, 113.6)],
+            trusted={"左环 1": False, "左环 2": True, "别的圈 1": False},
+        )
+        renamed = lapsmod.reconcile_edits(
+            old, lapsmod.LapConfig(beacons=[lapsmod.Beacon("左环A", 34.1, 113.6)],
+                                   trusted=dict(old.trusted))
+        )
+        self.assertEqual(renamed.trusted,
+                         {"左环A 1": False, "左环A 2": True, "别的圈 1": False})
+
+    def test_a_name_ending_in_a_digit_is_not_mistaken_for_a_lap_number(self):
+        """`左环 2` yields labels like `左环 2 1`; renaming `左环` must not take them."""
+        old = lapsmod.LapConfig(
+            beacons=[lapsmod.Beacon("左环", 34.1, 113.6)],
+            trusted={"左环 1": False, "左环 2 1": True},
+        )
+        renamed = lapsmod.reconcile_edits(
+            old, lapsmod.LapConfig(beacons=[lapsmod.Beacon("L", 34.1, 113.6)],
+                                   trusted=dict(old.trusted))
+        )
+        self.assertEqual(renamed.trusted, {"L 1": False, "左环 2 1": True})
+
+    def test_only_new_crossings_are_range_checked(self):
+        """A stale out-of-range time in a sidecar must not lock the session."""
+        old = lapsmod.LapConfig(beacons=[lapsmod.Beacon("手工穿越", time=9999.0)])
+        self.assertIsNone(lapsmod.check_new_crossings(old, old, 100.0))
+        added = lapsmod.LapConfig(beacons=[*old.beacons,
+                                          lapsmod.Beacon("手工穿越 2", time=1e6)])
+        message = lapsmod.check_new_crossings(old, added, 100.0)
+        self.assertIsNotNone(message)
+        self.assertIn("超出本场时长", message)
+        # a placed beacon carries no time, so it is never range-checked
+        placed = lapsmod.LapConfig(beacons=[lapsmod.Beacon("左环", 34.1, 113.6)])
+        self.assertIsNone(lapsmod.check_new_crossings(old, placed, 100.0))
+
+    @_needs(HILL)
+    def test_an_inserted_crossing_splits_the_automatic_laps(self):
+        """A time-only beacon adds one boundary - it never replaces the lap set."""
+        with ld.LogFile.read(HILL) as log:
+            auto = lapsmod.detect_laps(log, method="auto")
+            self.assertGreaterEqual(len(auto), 3)
+            middle = auto[len(auto) // 2]
+            when = (middle.start_time + middle.end_time) / 2.0
+            config = lapsmod.LapConfig(beacons=[lapsmod.Beacon("手工穿越", time=when)])
+            after = lapsmod.detect_from_config(log, config)
+        self.assertEqual(len(after), len(auto) + 1,
+                         "the inserted crossing did not add exactly one boundary")
+        self.assertTrue(any(abs(lap.start_time - when) < 0.05 for lap in after),
+                        "the inserted time is not one of the lap boundaries")
+        self.assertFalse([lap for lap in after if lap.label.startswith("手工穿越")],
+                         "a hand-entered crossing must merge into the auto series, "
+                         "not start a series of its own")
+
+
+class TestBeaconEditingOverHttp(unittest.TestCase):
+    """#4 / #5 as the UI reaches them: one PUT carrying the whole config."""
+
+    @_needs(HILL)
+    def test_insert_rename_and_the_range_guard(self):
+        from http.server import ThreadingHTTPServer
+
+        library = server.SessionLibrary([DATA], cache_size=1)
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(library, buckets=200))
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        quoted = urllib.parse.quote(HILL.stem)
+        sidecar = HILL.parent / f"{HILL.stem}.laps.json"
+        self.assertFalse(sidecar.exists(), "a stale sidecar would poison this test")
+
+        def get_json(path):
+            with urllib.request.urlopen(base + path, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8"))
+
+        def put_json(path, payload):
+            request = urllib.request.Request(
+                base + path, data=json.dumps(payload).encode("utf-8"), method="PUT",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8"))
+
+        try:
+            # ---- #5: an inserted crossing becomes a boundary of the automatic series
+            before = get_json(f"/api/session/{quoted}/laps")
+            auto = [row for row in before["laps"] if row["complete"]]
+            self.assertGreaterEqual(len(auto), 3)
+            target = auto[len(auto) // 2]
+            when = (target["start_time"] + target["end_time"]) / 2.0
+
+            inserted = put_json(f"/api/session/{quoted}/laps", {
+                "mode": "auto",
+                "beacons": [{"name": "手工穿越", "time": when}],
+            })
+            self.assertEqual(len(inserted["laps"]), len(before["laps"]) + 1)
+            self.assertTrue(any(abs(row["start_time"] - when) < 0.05
+                                for row in inserted["laps"]),
+                            "the inserted crossing is not a lap boundary")
+            self.assertIsNone(inserted["config"]["beacons"][0].get("lat"))
+            self.assertTrue(sidecar.exists(), "the inserted crossing was not saved")
+
+            # the range guard: nothing may be inserted outside the session
+            with self.assertRaises(urllib.error.HTTPError) as refused:
+                put_json(f"/api/session/{quoted}/laps", {
+                    "mode": "auto",
+                    "beacons": [{"name": "手工穿越", "time": 1e6}],
+                })
+            self.assertEqual(refused.exception.code, 400)
+            message = json.loads(refused.exception.read().decode("utf-8"))["error"]
+            self.assertIn("超出本场时长", message)
+            self.assertEqual(len(get_json(f"/api/session/{quoted}/laps")["laps"]),
+                             len(inserted["laps"]))
+
+            # ---- #4: rename, with the trusted marks following the new label
+            with ld.LogFile.read(HILL) as log:
+                track = derive.gps_track(log)
+            launch = int(np.searchsorted(track["time"], auto[0]["start_time"]))
+            far = int(np.argmax(track["x"]))
+            start_gate = {"lat": float(track["lat"][launch]), "lon": float(track["lon"][launch])}
+
+            placed = put_json(f"/api/session/{quoted}/laps", {
+                "mode": "auto",
+                "beacons": [dict(start_gate, name="左环")],
+                "trusted": {"左环 1": False},
+            })
+            self.assertGreaterEqual(len(placed["laps"]), 3)
+            self.assertTrue(all(row["lap"].startswith("左环 ") for row in placed["laps"]))
+            self.assertEqual(placed["config"]["trusted"], {"左环 1": False})
+
+            renamed = put_json(f"/api/session/{quoted}/laps", {
+                "mode": "auto",
+                "beacons": [dict(start_gate, name=" 左环A  ")],
+                "trusted": placed["config"]["trusted"],
+            })
+            self.assertEqual(renamed["config"]["beacons"][0]["name"], "左环A")
+            self.assertEqual(renamed["config"]["trusted"], {"左环A 1": False},
+                             "renaming lost the trusted marks")
+            self.assertTrue(all(row["lap"].startswith("左环A ") for row in renamed["laps"]),
+                            "the lap labels did not follow the new name")
+
+            # two beacons may not share a name: the second one gets a suffix
+            two = put_json(f"/api/session/{quoted}/laps", {
+                "mode": "auto",
+                "beacons": [dict(start_gate, name="左环A"),
+                            {"name": "左环A", "lat": float(track["lat"][far]),
+                             "lon": float(track["lon"][far])}],
+                "trusted": renamed["config"]["trusted"],
+            })
+            self.assertEqual([b["name"] for b in two["config"]["beacons"]],
+                             ["左环A", "左环A 2"])
+
+            # it is on disk, not just in the response
+            self.assertEqual([b["name"] for b in get_json(
+                f"/api/session/{quoted}/laps")["config"]["beacons"]],
+                ["左环A", "左环A 2"])
+        finally:
+            # never leave a sidecar behind: it would change every later test
+            sidecar.unlink(missing_ok=True)
+            httpd.shutdown()
+            httpd.server_close()
+            library.close()
+
+
 class TestChannelGroups(unittest.TestCase):
     """i2 Pro groups channels that share a unit so they can share one axis."""
 
@@ -895,7 +1100,8 @@ class TestViewerScript(unittest.TestCase):
             env = {**os.environ, "I3PRO_HASH": hash_value}
             finished = subprocess.run(
                 [node, str(ROOT / "tools" / "smoke_viewer.js"), str(out)],
-                capture_output=True, text=True, env=env, timeout=120,
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                env=env, timeout=120,
             )
         self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
         self.assertIn("PASS", finished.stdout)

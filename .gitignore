@@ -23,3 +23,8 @@ i2pro_data/
 i2pro-help/
 *.ld
 *.ldx
+
+# 代理干活时的临时草稿（提交信息、给票的验收草稿）：不是项目资产，别进仓库。
+# `_commit_msg.txt` 曾经被误提交进 06e31dd，这里补上规则免得再来一次。
+_commit_msg.txt
+_issue*.md

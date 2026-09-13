@@ -423,18 +423,44 @@ const ROW_PX = 24;
  *   encode(comp) / decode(comp, payload)  分享链接里的紧凑载荷
  */
 const COMPONENT_TYPES = {
-  graph:   { label: "时间/距离图", cols: 12, rows: 8 },
-  scatter: { label: "散点图",      cols: 4,  rows: 13 },
-  histogram: { label: "直方图",    cols: 6,  rows: 13 },
-  spectrum: { label: "频谱",      cols: 6,  rows: 13 },
+  graph: {
+    label: "时间/距离图", cols: 12, rows: 8,
+    defaults: graphDefaults, title: graphTitle, needs: graphNeeds,
+    onAdd: graphOnAdd,
+    get sidebar() { return graphSidebar; },
+    encode: graphEncode, decode: graphDecode,
+    render: renderGraphComponent,
+  },
+  scatter: {
+    label: "散点图", cols: 4, rows: 13, caption: true,
+    defaults: scatterDefaults, needs: scatterNeeds,
+    controls: scatterControls, hooks: scatterHooks, sync: scatterSync,
+    encode: scatterEncode, decode: scatterDecode,
+    get data() { return scatterData; },
+    render: renderScatterComponent,
+  },
+  histogram: {
+    label: "直方图", cols: 6, rows: 13, caption: true,
+    defaults: histogramDefaults, title: histogramTitle, needs: histogramNeeds,
+    controls: histogramControls, sync: histogramSync,
+    encode: histogramEncode, decode: histogramDecode,
+    get data() { return histogramData; },
+    render: renderHistogramComponent,
+  },
+  spectrum: {
+    label: "频谱", cols: 6, rows: 13, caption: true,
+    defaults: spectrumDefaults, title: spectrumTitle, needs: spectrumNeeds,
+    controls: spectrumControls, sync: spectrumSync,
+    encode: spectrumEncode, decode: spectrumDecode,
+    get data() { return spectrumData; },
+    render: renderSpectrumComponent,
+  },
   track: {
-    label: "赛道轨迹", cols: 4, rows: 13,
+    label: "赛道轨迹", cols: 4, rows: 13, caption: true,
     // window：all = 整场轨迹，zoom = 只看当前缩放出来的那一段（去问服务端要）
     defaults: () => ({ channel: null, window: "all" }),
     controls: trackControls,
     hooks: (comp, b) => b.canvas.addEventListener("click", (e) => onTrackClick(e, comp, b)),
-    // 只有"看当前时间段"才需要重新取数；整场轨迹用页面注入的那一份。
-    refreshWindow: (comp) => ((comp.config.window || "all") === "zoom" ? refreshTrackFor(comp) : null),
     // 载荷 = 通道名 | 窗口。老链接里只有一个通道名（没有 "|"），照旧解成整场。
     encode: (comp) => [comp.config.channel || "", comp.config.window || "all"].join("|"),
     decode: (comp, payload) => {
@@ -442,21 +468,44 @@ const COMPONENT_TYPES = {
       comp.config.channel = parts[0] || null;
       comp.config.window = parts[1] === "zoom" ? "zoom" : "all";
     },
+    get data() { return trackData; },
     render: renderTrackComponent,
   },
-  gauge:   { label: "仪表",        cols: 4,  rows: 13 },
+  gauge: {
+    label: "仪表", cols: 4, rows: 13, caption: true,
+    defaults: gaugeDefaults, title: gaugeTitle, needs: gaugeNeeds,
+    controls: gaugeControls, sync: gaugeSync,
+    encode: gaugeEncode, decode: gaugeDecode,
+    render: renderGaugeComponent,
+  },
   delta: {
-    label: "时间差 Δ", cols: 12, rows: 8,
+    label: "时间差 Δ", cols: 12, rows: 8, caption: true,
     render: renderDeltaComponent,
   },
   status: {
-    label: "状态与故障", cols: 12, rows: 4,
+    label: "状态与故障", cols: 12, rows: 4, caption: true,
     hotkey: "e",        // E 加/去这个组件（i2 Pro 里是按 E 看状态通道）
     needs: (comp, add) => (DATA.status || []).forEach(add),
     render: renderStatusComponent,
   },
-  report:  { label: "时间报告",    cols: 12, rows: 10, tabular: true },
-  chreport:{ label: "通道报告",    cols: 12, rows: 12, tabular: true },
+  report: {
+    label: "时间报告", cols: 12, rows: 10, tabular: true,
+    defaults: () => ({ filter: "all" }), title: reportTitle,
+    table: "time", controls: reportControls,
+    encode: reportEncode, decode: reportDecode,
+    get data() { return reportData; },
+    render: renderTimeReport,
+  },
+  chreport: {
+    label: "通道报告", cols: 12, rows: 12, tabular: true,
+    defaults: () => ({ channels: [], by: "lap", lap: null, filter: "all" }),
+    title: chreportTitle, table: "channels", onAdd: chreportOnAdd,
+    controls: chreportControls,
+    get sidebar() { return chreportSidebar; },
+    encode: chreportEncode, decode: chreportDecode,
+    get data() { return reportData; },
+    render: renderChannelReport,
+  },
 };
 
 /** 组件的声明；没声明过的类型给 null（别拿它当分支条件猜）。 */
@@ -470,6 +519,527 @@ function componentTypeWithHotkey(letter) {
     if (spec && spec.hotkey && String(spec.hotkey).toLowerCase() === want) return type;
   }
   return null;
+}
+
+/* ------------------------------------------- 每种显示形式自己那几件事（#19/#20）
+ * 上面那张表里写的名字，实现都在这里。函数声明会提升，所以表里可以直接写名字。
+ * 读的顺序是：先看一种形式声明了什么，再看它每一件事怎么做。 */
+
+/** 标题的公共前缀 = 这一类在表里的名字；后面接这一屏的具体参数。 */
+function typeTitle(comp, rest) {
+  const spec = specOf(comp);
+  return ((spec && spec.label) || comp.type) + (rest ? " · " + rest : "");
+}
+
+function graphDefaults() { return { channels: [], mode: "tiled" }; }
+function graphTitle(comp) {
+  const n = (comp.config.channels || []).length;
+  const mode = comp.config.mode === "overlapped" ? "重叠" : "分栏";
+  return typeTitle(comp, (n ? n + " 通道 · " : "") + mode);
+}
+function graphNeeds(comp, add) { (comp.config.channels || []).forEach(add); }
+/** 刚加进来的图先看侧边栏勾着的那些通道，别给一张空图。 */
+function graphOnAdd(comp) { comp.config.channels = (DATA.selected || []).slice(); }
+/** 侧边栏那份通道清单：图直接读写自己的通道。 */
+const graphSidebar = {
+  get: (comp) => comp.config.channels,
+  set: (comp, names) => { comp.config.channels = names; state.dataVersion += 1; },
+};
+function graphEncode(comp) {
+  return comp.config.channels.join("|") + "#" + (comp.config.mode || "tiled");
+}
+function graphDecode(comp, payload) {
+  const parts = String(payload || "").split("#");
+  comp.config.channels = parts[0] ? parts[0].split("|") : [];
+  comp.config.mode = parts[1] === "overlapped" ? "overlapped" : "tiled";
+}
+
+function scatterDefaults() {
+  return { x: null, y: [], colour: null, style: "points" };
+}
+function scatterNeeds(comp, add) {
+  add(comp.config.x);
+  (comp.config.y || []).forEach(add);
+  add(comp.config.colour);
+}
+/** 散点的控件条（X / Y / 色）。 */
+function scatterControls(comp, bundle, body) {
+  const cfgBar = makeEl("div", "scattercfg", body);
+  makeEl("span", "", cfgBar).textContent = "X";
+  const sx = makeEl("select", "", cfgBar);
+  makeEl("span", "", cfgBar).textContent = "Y";
+  const sy = makeEl("select", "", cfgBar);
+  makeEl("span", "", cfgBar).textContent = "色";
+  const sc = makeEl("select", "", cfgBar);
+  bundle.selX = sx; bundle.selY = sy; bundle.selC = sc;
+  const on = () => {
+    comp.config.x = sx.value || null;
+    comp.config.y = sy.value ? [sy.value] : [];
+    comp.config.colour = sc.value || null;
+    state.dataVersion += 1;
+    refreshComponentData(comp, true).then(renderAll);
+    renderAll();
+  };
+  [sx, sy, sc].forEach((s) => s.addEventListener("change", on));
+}
+/** 双击散点图在「散点」与「散点+趋势线」之间切换。 */
+function scatterHooks(comp, b) {
+  b.canvas.addEventListener("dblclick", () => {
+    comp.config.style = comp.config.style === "points" ? "trend" : "points";
+    b.cacheKey = "";
+    renderAll();
+  });
+}
+function scatterEncode(comp) {
+  return [comp.config.x, (comp.config.y || [])[0], comp.config.colour,
+          comp.config.style].join("|");
+}
+function scatterDecode(comp, payload) {
+  const parts = String(payload || "").split("|");
+  comp.config.x = parts[0] || null;
+  comp.config.y = parts[1] ? [parts[1]] : [];
+  comp.config.colour = parts[2] || null;
+  comp.config.style = parts[3] === "trend" ? "trend" : "points";
+}
+/** 散点要的是原始点（不是画图那份抽稀曲线），所以走 /points。 */
+const scatterData = {
+  error: "取不到散点数据",
+  key: (comp) => {
+    const cfg = comp.config;
+    const w = windowRange();
+    return [cfg.x || "", (cfg.y || [])[0] || "", cfg.colour || "",
+            Math.round(w.from * 1000) + "-" + Math.round(w.to * 1000),
+            DATA.api ? "serve" : "snap"].join("|");
+  },
+  load: (comp) => {
+    const cfg = comp.config;
+    if (!cfg.x || !cfg.y.length) return null;
+    const w = windowRange();
+    const names = [cfg.x].concat(cfg.y).concat(cfg.colour ? [cfg.colour] : []);
+    return apiGet(apiUrl("/points", {
+      channels: names.join(","), from: w.from, to: w.to, max: 20000,
+    }));
+  },
+  snapshot: () => null,          // 快照只内嵌折线，没有原始点
+};
+
+function histogramDefaults() {
+  return { channel: null, bins: 40, style: "bars", colour: null, gate: "",
+           window: "zoom" };
+}
+function histogramTitle(comp) {
+  const name = comp.config.channel || "还没选通道";
+  const style = (HISTOGRAM_STYLES.find((pair) => pair[0] === (comp.config.style || "bars"))
+    || HISTOGRAM_STYLES[0])[1];
+  const bits = [name + " · " + (comp.config.bins || 40) + " 格 · " + style];
+  if (comp.config.colour) bits.push("色=" + comp.config.colour);
+  if (comp.config.gate) bits.push("门槛=" + comp.config.gate);
+  return typeTitle(comp, bits.join(" · "));
+}
+function histogramNeeds(comp, add) {
+  add(comp.config.channel);
+  add(comp.config.colour);
+}
+function histogramEncode(comp) {
+  return [comp.config.channel || "", comp.config.bins || 40,
+          comp.config.style || "bars", comp.config.colour || "",
+          comp.config.window || "zoom"].join("|") + "#" + (comp.config.gate || "");
+}
+function histogramDecode(comp, payload) {
+  const parts = String(payload || "").split("#");
+  const head = parts[0].split("|");
+  comp.config.channel = head[0] || null;
+  comp.config.bins = Math.max(1, parseInt(head[1], 10) || 40);
+  comp.config.style = HISTOGRAM_STYLES.some((pair) => pair[0] === head[2])
+    ? head[2] : "bars";
+  comp.config.colour = head[3] || null;
+  comp.config.window = head[4] || "zoom";
+  comp.config.gate = parts[1] || "";
+}
+const histogramData = {
+  error: "取不到分布",
+  key: histogramKey,
+  load: (comp) => {
+    const cfg = comp.config;
+    if (!cfg.channel) return null;
+    const w = windowRange();
+    const windowed = (cfg.window || "zoom") !== "all";
+    return apiGet(apiUrl("/histogram", {
+      channel: cfg.channel, bins: Math.round(cfg.bins || 40),
+      from: windowed ? w.from : undefined, to: windowed ? w.to : undefined,
+      gate: cfg.gate || undefined, colour: cfg.colour || undefined,
+    }));
+  },
+  snapshot: snapshotHistogramFor,
+};
+
+/** 直方图的控件条。控件全部打进 bundle，syncHistogramSelectors 负责填。 */
+function histogramControls(comp, bundle, body) {
+  const cfgBar = makeEl("div", "scattercfg", body);
+  const selChannel = makeEl("select", "", cfgBar);
+  selChannel.dataset.hist = "channel";
+  selChannel.title = "统计哪一条通道（按单位分组）";
+  makeEl("span", "", cfgBar).textContent = "格";
+  const selBins = makeEl("input", "", cfgBar);
+  selBins.type = "number";
+  selBins.min = "4";
+  selBins.max = "500";
+  selBins.step = "1";
+  selBins.style.width = "52px";
+  selBins.dataset.hist = "bins";
+  selBins.title = "分几格（4–500）；快照里只能往粗里并";
+  const selStyle = makeEl("select", "", cfgBar);
+  selStyle.dataset.hist = "style";
+  selStyle.innerHTML = HISTOGRAM_STYLES.map(
+    (pair) => '<option value="' + pair[0] + '">' + pair[1] + "</option>"
+  ).join("");
+  makeEl("span", "", cfgBar).textContent = "色";
+  const selColour = makeEl("select", "", cfgBar);
+  selColour.dataset.hist = "colour";
+  selColour.title = "按第三通道着色：每格取该通道的均值（色标上写着范围）";
+  makeEl("span", "", cfgBar).textContent = "门槛";
+  const gateInput = makeEl("input", "", cfgBar);
+  gateInput.type = "text";
+  gateInput.placeholder = "通道名或表达式（可留空）";
+  gateInput.dataset.hist = "gate";
+  gateInput.title = "条件为假（0）的样本不算进分布；写法和「数学通道」一样";
+  makeEl("span", "", cfgBar).textContent = "窗口";
+  const selWindow = makeEl("select", "", cfgBar);
+  selWindow.dataset.hist = "window";
+  bundle.selChannel = selChannel;
+  bundle.selBins = selBins;
+  bundle.selStyle = selStyle;
+  bundle.selColour = selColour;
+  bundle.selWindow = selWindow;
+  bundle.gateInput = gateInput;
+  const changed = () => {
+    comp.config.channel = selChannel.value || null;
+    comp.config.colour = selColour.value || null;
+    const want = Math.round(Number(selBins.value) || 40);
+    if (!DATA.api && DATA.histograms && want > DATA.histograms.bins) {
+      // 快照里只带了 bins 格，再细分就是编出来的——夹回去并说清楚。
+      selBins.value = String(DATA.histograms.bins);
+      toast("快照里只带了 " + DATA.histograms.bins + " 格的分布：改格数只能往粗里并，"
+        + "要更细请用 serve 模式打开");
+    }
+    comp.config.bins = Math.max(1, Math.round(Number(selBins.value) || 40));
+    comp.config.style = selStyle.value;
+    comp.config.window = selWindow.value;
+    comp.config.gate = gateInput.value.trim();
+    bundle.cacheKey = "";
+    refreshComponentTitle(comp);
+    saveLayout();
+    renderAll();
+  };
+  [selChannel, selBins, selStyle, selColour, selWindow].forEach(
+    (el) => el.addEventListener("change", changed)
+  );
+  gateInput.addEventListener("change", changed);
+}
+
+function spectrumDefaults() {
+  return { channel: null, against: null, points: 1024, win: "hann", overlap: 0.5,
+           smooth: 1, scale: "psd", axis: "log", span: "zoom" };
+}
+function spectrumTitle(comp) {
+  const name = comp.config.channel || "还没选通道";
+  const win = (SPECTRUM_WINDOWS.find((pair) => pair[0] === (comp.config.win || "hann"))
+    || SPECTRUM_WINDOWS[0])[1];
+  return typeTitle(comp, name + " · " + (comp.config.points || 1024) + " 点 · " + win);
+}
+function spectrumNeeds(comp, add) {
+  add(comp.config.channel);
+  add(comp.config.against);
+}
+function spectrumEncode(comp) {
+  return [comp.config.channel || "", comp.config.against || "",
+          comp.config.points || 1024, comp.config.win || "hann",
+          comp.config.overlap === undefined ? 0.5 : comp.config.overlap,
+          comp.config.smooth || 1, comp.config.scale || "psd",
+          comp.config.axis || "log", comp.config.span || "zoom"].join("|");
+}
+function spectrumDecode(comp, payload) {
+  const parts = String(payload || "").split("|");
+  comp.config.channel = parts[0] || null;
+  comp.config.against = parts[1] || null;
+  comp.config.points = Math.max(16, parseInt(parts[2], 10) || 1024);
+  comp.config.win = SPECTRUM_WINDOWS.some((pair) => pair[0] === parts[3])
+    ? parts[3] : "hann";
+  const overlap = parseFloat(parts[4]);
+  comp.config.overlap = Number.isFinite(overlap)
+    ? Math.max(0, Math.min(0.95, overlap)) : 0.5;
+  comp.config.smooth = Math.max(1, parseInt(parts[5], 10) || 1);
+  comp.config.scale = SPECTRUM_SCALES.some((pair) => pair[0] === parts[6])
+    ? parts[6] : "psd";
+  comp.config.axis = parts[7] === "linear" ? "linear" : "log";
+  comp.config.span = parts[8] === "all" ? "all" : "zoom";
+}
+/** 频谱的请求地址：同一份参数对两条通道各要一次（叠加对比）。 */
+function spectrumUrl(comp, channel) {
+  const cfg = comp.config;
+  const w = windowRange();
+  const spanAll = (cfg.span || "zoom") === "all";
+  return apiUrl("/spectrum", {
+    channel: channel, points: Math.round(cfg.points || 1024),
+    window: cfg.win || "hann",
+    overlap: cfg.overlap === undefined ? 0.5 : cfg.overlap,
+    smooth: Math.round(cfg.smooth || 1), scale: "psd",
+    from: spanAll ? undefined : w.from, to: spanAll ? undefined : w.to,
+  });
+}
+const spectrumData = {
+  error: "取不到频谱",
+  key: spectrumKey,
+  load: (comp) => (comp.config.channel ? apiGet(spectrumUrl(comp, comp.config.channel)) : null),
+  // 叠加对比的第二条通道：只有当它真的不是主通道时才问。
+  load2: (comp) => (comp.config.channel && comp.config.against
+    && comp.config.against !== comp.config.channel
+    ? apiGet(spectrumUrl(comp, comp.config.against)) : null),
+  snapshot: snapshotSpectrumFor,
+};
+
+/** 频谱的控件条：Welch 平均周期图。参数多，所以每个控件都带一句 title 说清它改什么。 */
+function spectrumControls(comp, bundle, body) {
+  const cfgBar = makeEl("div", "scattercfg", body);
+  const selChannel = makeEl("select", "", cfgBar);
+  selChannel.dataset.spec = "channel";
+  selChannel.title = "分析哪一条通道（按单位分组）";
+  const selAgainst = makeEl("select", "", cfgBar);
+  selAgainst.dataset.spec = "against";
+  selAgainst.title = "叠加对比的第二条通道（可留空）";
+  makeEl("span", "", cfgBar).textContent = "点";
+  const selPoints = makeEl("select", "", cfgBar);
+  selPoints.dataset.spec = "points";
+  selPoints.title = "FFT 点数：频率分辨率 = 通道采样率 / 点数（点数越大越细、越慢）";
+  makeEl("span", "", cfgBar).textContent = "窗";
+  const selWindow = makeEl("select", "", cfgBar);
+  selWindow.dataset.spec = "win";
+  selWindow.title = "窗函数：把一段的两端衰减到零，减少泄漏（默认 hann）";
+  makeEl("span", "", cfgBar).textContent = "重叠";
+  const selOverlap = makeEl("select", "", cfgBar);
+  selOverlap.dataset.spec = "overlap";
+  selOverlap.title = "段间重叠：数据比点数长时切成多段各算一次再平均（Welch）";
+  makeEl("span", "", cfgBar).textContent = "平滑";
+  const selSmooth = makeEl("input", "", cfgBar);
+  selSmooth.type = "number";
+  selSmooth.min = "1";
+  selSmooth.max = "99";
+  selSmooth.step = "1";
+  selSmooth.style.width = "52px";
+  selSmooth.dataset.spec = "smooth";
+  selSmooth.title = "频域平滑格数：把相邻几格平均（总功率不变），1 = 不平滑";
+  makeEl("span", "", cfgBar).textContent = "纵轴";
+  const selScale = makeEl("select", "", cfgBar);
+  selScale.dataset.spec = "scale";
+  selScale.title = "功率谱密度（单位²/Hz）或有效值（与通道同单位）";
+  makeEl("span", "", cfgBar).textContent = "对数";
+  const selAxis = makeEl("select", "", cfgBar);
+  selAxis.dataset.spec = "axis";
+  selAxis.title = "纵轴用 dB（10·log10）还是线性";
+  makeEl("span", "", cfgBar).textContent = "窗口";
+  const selSpan = makeEl("select", "", cfgBar);
+  selSpan.dataset.spec = "span";
+  bundle.selSpecChannel = selChannel;
+  bundle.selSpecAgainst = selAgainst;
+  bundle.selPoints = selPoints;
+  bundle.selWindow = selWindow;
+  bundle.selOverlap = selOverlap;
+  bundle.selSmooth = selSmooth;
+  bundle.selScale = selScale;
+  bundle.selAxis = selAxis;
+  bundle.selSpan = selSpan;
+  const changed = () => {
+    comp.config.channel = selChannel.value || null;
+    comp.config.against = selAgainst.value || null;
+    comp.config.points = Math.max(16, parseInt(selPoints.value, 10) || 1024);
+    comp.config.win = selWindow.value || "hann";
+    comp.config.overlap = Math.max(0, Math.min(0.95, parseFloat(selOverlap.value) || 0));
+    comp.config.smooth = Math.max(1, parseInt(selSmooth.value, 10) || 1);
+    comp.config.scale = selScale.value || "psd";
+    comp.config.axis = selAxis.value || "log";
+    comp.config.span = selSpan.value || "zoom";
+    refreshComponentTitle(comp);
+    saveLayout();
+    renderAll();
+  };
+  [selChannel, selAgainst, selPoints, selWindow, selOverlap, selScale, selAxis, selSpan]
+    .forEach((el) => el.addEventListener("change", changed));
+  selSmooth.addEventListener("change", changed);
+}
+
+/** 轨迹数据：整场用页面注入的那一份，只看当前时间段才去问服务端。 */
+const trackData = {
+  error: "轨迹加载失败",
+  key: (comp) => [(comp.config.window || "all") === "zoom"
+                    ? (DATA.api ? windowKey() : "all") : "all",
+                  DATA.api ? "serve" : "snap"].join("|"),
+  load: (comp) => {
+    if ((comp.config.window || "all") !== "zoom") return state.track;
+    const w = windowRange();
+    return apiGet(apiUrl("/track", { from: w.from, to: w.to, points: 6000 }));
+  },
+  snapshot: () => state.track,
+};
+
+function gaugeDefaults(o) {
+  return { subtype: o.subtype || "numeric", channels: [] };
+}
+function gaugeTitle(comp) {
+  return typeTitle(comp, GAUGE_SUBTYPES[comp.config.subtype] || comp.config.subtype);
+}
+function gaugeNeeds(comp, add) { (comp.config.channels || []).forEach(add); }
+/** 仪表的控件条（子类型 + 看哪条通道）。 */
+function gaugeControls(comp, bundle, body) {
+  const cfgBar = makeEl("div", "scattercfg", body);
+  const selSub = makeEl("select", "", cfgBar);
+  selSub.innerHTML = Object.keys(GAUGE_SUBTYPES)
+    .map((k) => '<option value="' + k + '">' + GAUGE_SUBTYPES[k] + "</option>").join("");
+  selSub.value = comp.config.subtype;
+  const selCh = makeEl("select", "", cfgBar);
+  bundle.selSub = selSub;
+  bundle.selCh = selCh;
+  selSub.addEventListener("change", () => {
+    comp.config.subtype = selSub.value;
+    bundle.cacheKey = "";
+    renderAll();
+  });
+  selCh.addEventListener("change", () => {
+    comp.config.channels = selCh.value ? [selCh.value] : [];
+    bundle.cacheKey = "";
+    renderAll();
+  });
+}
+function gaugeEncode(comp) {
+  return [comp.config.subtype, (comp.config.channels || []).join("~")].join("|");
+}
+function gaugeDecode(comp, payload) {
+  const parts = String(payload || "").split("|");
+  comp.config.subtype = GAUGE_SUBTYPES[parts[0]] ? parts[0] : "numeric";
+  comp.config.channels = parts[1] ? parts[1].split("~").filter(Boolean) : [];
+}
+
+function sectionFilterTitle(comp) {
+  const filter = SECTION_FILTERS.find((pair) => pair[0] === comp.config.filter);
+  return (filter && filter[1]) || "全部区段";
+}
+function reportTitle(comp) { return typeTitle(comp, sectionFilterTitle(comp)); }
+function reportEncode(comp) { return comp.config.filter || "all"; }
+function reportDecode(comp, payload) {
+  comp.config.filter = ["all", "corner", "straight"].indexOf(payload) >= 0
+    ? payload : "all";
+}
+/** 两张报表共用的控件条：区段过滤。返回这根条，通道报告接着往上加自己的。 */
+function reportControls(comp, bundle, body) {
+  const cfgBar = makeEl("div", "scattercfg", body);
+  makeEl("span", "", cfgBar).textContent = "区段";
+  const selFilter = makeEl("select", "", cfgBar);
+  selFilter.innerHTML = SECTION_FILTERS.map(
+    (pair) => '<option value="' + pair[0] + '">' + pair[1] + "</option>"
+  ).join("");
+  selFilter.value = comp.config.filter || "all";
+  bundle.selFilter = selFilter;
+  selFilter.addEventListener("change", () => {
+    comp.config.filter = selFilter.value;
+    refreshComponentTitle(comp);
+    saveLayout();
+    renderAll();
+  });
+  return cfgBar;
+}
+/** 通道报告多两件：按圈 / 按区段分组，以及按区段时看哪条圈。 */
+function chreportControls(comp, bundle, body) {
+  const cfgBar = reportControls(comp, bundle, body);
+  makeEl("span", "", cfgBar).textContent = "分组";
+  const selBy = makeEl("select", "", cfgBar);
+  selBy.innerHTML = '<option value="lap">按圈</option>'
+    + '<option value="section">按区段</option>';
+  selBy.value = comp.config.by || "lap";
+  bundle.selBy = selBy;
+  const selLap = makeEl("select", "", cfgBar);
+  bundle.selLap = selLap;
+  selBy.addEventListener("change", () => {
+    comp.config.by = selBy.value;
+    saveLayout();
+    buildWorksheet();
+    renderAll();
+  });
+  selLap.addEventListener("change", () => {
+    comp.config.lap = selLap.value || null;
+    saveLayout();
+    renderAll();
+  });
+  makeEl("span", "", cfgBar).textContent = "通道在左侧勾选";
+}
+
+/** 报表的请求地址（时间报告 / 通道报告共用一条）。 */
+function reportUrl(comp) {
+  const cfg = comp.config;
+  const params = { table: specOf(comp).table };
+  if (specOf(comp).table === "channels") {
+    params.by = cfg.by || "lap";
+    if ((cfg.by || "lap") === "section" && cfg.lap) params.lap = cfg.lap;
+    const names = (cfg.channels || []).filter((n) => CHANNELS.has(n))
+      .slice(0, MAX_REPORT_CHANNELS);
+    if (names.length) params.channels = names.join(",");
+  }
+  return apiUrl("/report", params);
+}
+/** 快照里的报表：导出时算好的那一份（可能只有参考圈那一条区段表）。 */
+function reportSnapshot(comp) {
+  const table = snapshotReportTable(comp);
+  if (table) return { table: table, notice: null };
+  return { table: null,
+           notice: DATA.report
+             ? "快照里只有参考圈那一条的区段表；换成「按圈」，或者回 serve 模式换圈"
+             : "这份快照没带报表数据：用「报表」预设重新导出一份，或者用 serve 模式" };
+}
+const reportData = {
+  error: "报表没算出来",
+  key: reportFetchKey,
+  load: (comp) => apiGet(reportUrl(comp)),
+  snapshot: reportSnapshot,
+  // 服务端给的是整份载荷（time / channels），快照给的是已经切好的那张表。
+  pick: (comp, src) => {
+    if (!src) return null;
+    if (src.table !== undefined) return src.table;
+    return specOf(comp).table === "time" ? (src.time || null) : (src.channels || null);
+  },
+  notice: (comp, src) => (src && src.notice) || null,
+};
+
+function chreportTitle(comp) {
+  const n = (comp.config.channels || []).length;
+  const by = (comp.config.by || "lap") === "section" ? "按区段" : "按圈";
+  return typeTitle(comp, by + (n ? " · " + n + " 通道" : " · 还没选通道"));
+}
+/** 刚加进来的通道报告先挑几条快照/服务都一定有的通道。 */
+function chreportOnAdd(comp) {
+  if (!comp.config.channels.length) comp.config.channels = defaultReportChannels(3);
+}
+/** 侧边栏那份通道清单：通道报告吃同一份，但只留得下前几条。 */
+const chreportSidebar = {
+  get: (comp) => comp.config.channels || [],
+  set: (comp, names) => {
+    comp.config.channels = names.slice(0, MAX_REPORT_CHANNELS);
+    state.dataVersion += 1;
+    saveLayout();
+  },
+};
+function chreportEncode(comp) {
+  return [comp.config.by || "lap", comp.config.lap || "",
+          comp.config.filter || "all"].join("|") + "#"
+    + (comp.config.channels || []).slice(0, MAX_REPORT_CHANNELS).join("~");
+}
+function chreportDecode(comp, payload) {
+  const parts = String(payload || "").split("#");
+  const head = parts[0].split("|");
+  comp.config.by = head[0] === "section" ? "section" : "lap";
+  comp.config.lap = head[1] || null;
+  comp.config.filter = ["all", "corner", "straight"].indexOf(head[2]) >= 0
+    ? head[2] : "all";
+  comp.config.channels = parts[1]
+    ? parts[1].split("~").filter((n) => CHANNELS.has(n)).slice(0, MAX_REPORT_CHANNELS)
+    : [];
 }
 
 /* 只给验收用的「只有标题」形式（ticket #17）：**一条声明**就够被工作表认出来——
@@ -575,49 +1145,9 @@ function makeComponent(type, overrides) {
   while (state.components.some((other) => other.id === comp.id)) {
     comp.id = type + "-" + (++compSeq);
   }
-  if (type === "graph") {
-    comp.config.channels = [];
-    comp.config.mode = "tiled";        // G toggles this per component, like i2 Pro
-  }
-  if (type === "scatter") {
-    comp.config.x = null;
-    comp.config.y = [];
-    comp.config.colour = null;
-    comp.config.style = "points";
-  }
-  if (type === "histogram") {
-    comp.config.channel = null;      // 统计哪条通道
-    comp.config.bins = 40;           // 格数
-    comp.config.style = "bars";      // bars | line | text
-    comp.config.colour = null;       // 按第三通道着色（每格取均值）
-    comp.config.gate = "";           // 门槛：通道名或数学通道表达式
-    comp.config.window = "zoom";     // zoom | all（快照里是整场 / 某条完整圈）
-  }
-  if (type === "spectrum") {
-    comp.config.channel = null;      // 分析哪条通道
-    comp.config.against = null;      // 叠加对比的第二条通道（可无）
-    comp.config.points = 1024;       // FFT 点数（决定频率分辨率）
-    comp.config.win = "hann";        // 窗函数 hann | hamming | blackman | rectangular | flattop
-    comp.config.overlap = 0.5;       // 段间重叠比例
-    comp.config.smooth = 1;          // 频域平滑格数（1 = 不平滑）
-    comp.config.scale = "psd";       // psd（单位²/Hz）| amplitude（有效值，与通道同单位）
-    comp.config.axis = "log";        // 纵轴 log（dB）| linear
-    comp.config.span = "zoom";       // zoom | all
-  }
-  if (type === "gauge") {
-    comp.config.subtype = o.subtype || "numeric";
-    comp.config.channels = [];
-  }
-  if (type === "report") comp.config.filter = "all";
-  if (type === "chreport") {
-    comp.config.channels = [];
-    comp.config.by = "lap";              // lap | section
-    comp.config.lap = null;              // 按区段分组时看哪条圈（null = 参考圈）
-    comp.config.filter = "all";
-  }
-  // 默认配置：注册表说了算（已迁移的类型），上面那些过渡分支留给还没迁完的。
+  // 默认配置完全由这一类自己的声明给（#19 / #20）：这里不再认类型。
   comp.config = Object.assign({}, spec.defaults ? spec.defaults(o) : {},
-                              comp.config, o.config || {});
+                              o.config || {});
   return comp;
 }
 
@@ -707,29 +1237,11 @@ function defaultComponents() {
 
 /** A component's config in the compact wire form a share link carries.
  *
- * 注册表接管的类型自己声明怎么编（`encode`）；下面那串过渡分支留给还没迁完的
- * 类型——#19 / #20 迁完之后它就该整段消失。 */
+ * 每一种显示形式自己声明怎么编（注册表 #19 / #20）。这里没有类型分支：
+ * 没声明 encode 的形式带一个空载荷，位置与尺寸照样保得住。 */
 function encodeComponentConfig(c) {
   const spec = specOf(c);
-  if (spec && spec.encode) return spec.encode(c);
-  return c.type === "graph" ? c.config.channels.join("|") + "#" + (c.config.mode || "tiled")
-      : c.type === "scatter" ? [c.config.x, (c.config.y || [])[0], c.config.colour, c.config.style].join("|")
-      : c.type === "histogram" ? [
-          c.config.channel || "", c.config.bins || 40, c.config.style || "bars",
-          c.config.colour || "", c.config.window || "zoom",
-        ].join("|") + "#" + (c.config.gate || "")
-      : c.type === "spectrum" ? [
-          c.config.channel || "", c.config.against || "", c.config.points || 1024,
-          c.config.win || "hann", c.config.overlap === undefined ? 0.5 : c.config.overlap,
-          c.config.smooth || 1, c.config.scale || "psd", c.config.axis || "log",
-          c.config.span || "zoom",
-        ].join("|")
-      : c.type === "gauge" ? [c.config.subtype, (c.config.channels || []).join("~")].join("|")
-      : c.type === "report" ? (c.config.filter || "all")
-      : c.type === "chreport" ? [
-          c.config.by || "lap", c.config.lap || "", c.config.filter || "all",
-        ].join("|") + "#" + (c.config.channels || []).slice(0, MAX_REPORT_CHANNELS).join("~")
-      : "";
+  return spec && spec.encode ? spec.encode(c) : "";
 }
 
 // Compact wire form so a worksheet can travel in a URL.
@@ -754,65 +1266,8 @@ function decodeLayout(text) {
       if (!spec) return null;
       const comp = makeComponent(type, { x: row[1], y: row[2], w: row[3], h: row[4] });
       const payload = String(row[5] || "");
-      // 注册表接管的类型自己解析自己的载荷；下面的过渡分支留给还没迁完的。
-      if (spec.decode) { spec.decode(comp, payload); return comp; }
-      if (type === "graph") {
-        const parts = payload.split("#");
-        comp.config.channels = parts[0] ? parts[0].split("|") : [];
-        comp.config.mode = parts[1] === "overlapped" ? "overlapped" : "tiled";
-      }
-      else if (type === "scatter") {
-        const parts = payload.split("|");
-        comp.config.x = parts[0] || null;
-        comp.config.y = parts[1] ? [parts[1]] : [];
-        comp.config.colour = parts[2] || null;
-        comp.config.style = parts[3] === "trend" ? "trend" : "points";
-      }
-      else if (type === "histogram") {
-        const parts = payload.split("#");
-        const head = parts[0].split("|");
-        comp.config.channel = head[0] || null;
-        comp.config.bins = Math.max(1, parseInt(head[1], 10) || 40);
-        comp.config.style = HISTOGRAM_STYLES.some((pair) => pair[0] === head[2])
-          ? head[2] : "bars";
-        comp.config.colour = head[3] || null;
-        comp.config.window = head[4] || "zoom";
-        comp.config.gate = parts[1] || "";
-      }
-      else if (type === "spectrum") {
-        const parts = payload.split("|");
-        comp.config.channel = parts[0] || null;
-        comp.config.against = parts[1] || null;
-        comp.config.points = Math.max(16, parseInt(parts[2], 10) || 1024);
-        comp.config.win = SPECTRUM_WINDOWS.some((pair) => pair[0] === parts[3])
-          ? parts[3] : "hann";
-        const overlap = parseFloat(parts[4]);
-        comp.config.overlap = Number.isFinite(overlap) ? Math.max(0, Math.min(0.95, overlap)) : 0.5;
-        comp.config.smooth = Math.max(1, parseInt(parts[5], 10) || 1);
-        comp.config.scale = SPECTRUM_SCALES.some((pair) => pair[0] === parts[6])
-          ? parts[6] : "psd";
-        comp.config.axis = parts[7] === "linear" ? "linear" : "log";
-        comp.config.span = parts[8] === "all" ? "all" : "zoom";
-      }
-      else if (type === "gauge") {
-        const parts = payload.split("|");
-        comp.config.subtype = GAUGE_SUBTYPES[parts[0]] ? parts[0] : "numeric";
-        comp.config.channels = parts[1] ? parts[1].split("~").filter(Boolean) : [];
-      }
-      else if (type === "report") {
-        comp.config.filter = ["all", "corner", "straight"].indexOf(payload) >= 0
-          ? payload : "all";
-      } else if (type === "chreport") {
-        const parts = payload.split("#");
-        const head = parts[0].split("|");
-        comp.config.by = head[0] === "section" ? "section" : "lap";
-        comp.config.lap = head[1] || null;
-        comp.config.filter = ["all", "corner", "straight"].indexOf(head[2]) >= 0
-          ? head[2] : "all";
-        comp.config.channels = parts[1]
-          ? parts[1].split("~").filter((n) => CHANNELS.has(n)).slice(0, MAX_REPORT_CHANNELS)
-          : [];
-      }
+      // 载荷也归这一类自己解析（注册表 #19 / #20）。
+      if (spec.decode) spec.decode(comp, payload);
       return comp;
     }).filter(Boolean);
   } catch (err) {
@@ -859,7 +1314,6 @@ const state = {
   cmp: (DATA && DATA.cmp) || null,
   overlay: (DATA && DATA.overlay) || null,
   track: (DATA && DATA.track) || null,
-  points: null,
   lapsConfig: { mode: "auto", beacons: [], trusted: {} },
   //: 赛道区段：GET/PUT 的最近一次载荷；快照模式下来自注入的 DATA.sections。
   sections: (DATA && DATA.sections) || null,
@@ -953,25 +1407,17 @@ function focusedComponent() {
  *
  * 图组件与**通道报告**都从这份清单吃东西：共用一个勾选界面，就不必再给报表
  * 造一个通道选择器（445 条通道的场次里，那多半会做成一个更难用的下拉框）。
- */
+ * 谁能吃这份清单由显示形式自己声明（注册表 #20 的 sidebar）。 */
 function selectedChannels() {
   const comp = focusedComponent();
-  if (!comp) return [];
-  if (comp.type === "graph") return comp.config.channels;
-  if (comp.type === "chreport") return comp.config.channels || [];
-  return [];
+  const spec = comp && specOf(comp);
+  return spec && spec.sidebar ? spec.sidebar.get(comp) : [];
 }
 
 function setSelectedChannels(names) {
   const comp = focusedComponent();
-  if (comp && comp.type === "graph") {
-    comp.config.channels = names;
-    state.dataVersion += 1;
-  } else if (comp && comp.type === "chreport") {
-    comp.config.channels = names.slice(0, MAX_REPORT_CHANNELS);
-    state.dataVersion += 1;
-    saveLayout();
-  }
+  const spec = comp && specOf(comp);
+  if (spec && spec.sidebar) spec.sidebar.set(comp, names);
 }
 
 function allGraphChannels() {
@@ -1009,18 +1455,16 @@ function neededChannels() {
   const out = allGraphChannels();
   const add = (name) => { if (name && out.indexOf(name) < 0) out.push(name); };
   for (const comp of state.components) {
-    if (comp.type === "scatter") {
-      add(comp.config.x);
-      (comp.config.y || []).forEach(add);
-      add(comp.config.colour);
-    }
     const spec = specOf(comp);
     if (spec && spec.needs) spec.needs(comp, add);
   }
   return out;
 }
 
-/* --------------------------------------------------------------- fetching */
+/* --------------------------------------------------------------- fetching
+ * 取数只有一条路（ticket #21）：地址由 apiUrl 拼、请求由 apiGet 发、出错由它统一
+ * 成一句话。每个组件的结果放在**它自己的槽**里（bundle.data / bundle.data2），
+ * 不再有全表共用的 state.points 那种格子——那是两张散点互相顶掉的根源。 */
 function plotWidth() {
   const host = $("worksheet");
   return Math.max(240, (host.clientWidth || 900) - 82);
@@ -1037,6 +1481,90 @@ function windowRange() {
   return { from: state.view[0], to: state.view[1] };
 }
 
+/** 请求地址的唯一出处：路由 + 参数 → URL。空参数（undefined / null / ""）不写进去。 */
+function apiUrl(route, params) {
+  const pairs = [];
+  for (const key of Object.keys(params || {})) {
+    const value = params[key];
+    if (value === undefined || value === null || value === "") continue;
+    pairs.push(encodeURIComponent(key) + "=" + encodeURIComponent(value));
+  }
+  const url = DATA.api + "/session/" + encodeURIComponent(DATA.session) + route;
+  return pairs.length ? url + "?" + pairs.join("&") : url;
+}
+
+/** 唯一的请求出口：非 2xx 或正文里带 error 都算失败，原因跟着异常一起抛。 */
+async function apiGet(url) {
+  const res = await fetch(url);
+  let body = null;
+  try { body = await res.json(); } catch (err) { body = null; }
+  if (!res.ok || (body && body.error)) {
+    const failure = new Error((body && body.error) || ("HTTP " + res.status));
+    failure.body = body;
+    throw failure;
+  }
+  return body;
+}
+
+/**
+ * 一个显示形式的取数全归它自己的 `data` 声明管：
+ *   key(comp)               "这一屏问的问题"，没变就不重新问
+ *   load(comp)              serve 模式去要什么（返回 Promise）
+ *   load2(comp)             可选：还要第二份（频谱的叠加对比）
+ *   snapshot(comp)          快照模式用页面注入的那一份
+ *   pick / notice(comp,src) 可选：从载荷里取出真正的值 / 附一句说明
+ *   error                   出错时的前缀，后面接原因
+ */
+async function refreshComponentData(comp, force) {
+  const spec = specOf(comp);
+  const d = spec && spec.data;
+  const b = SHEET.get(comp.id);
+  if (!d || !b) return;
+  const key = d.key ? d.key(comp) : "";
+  if (!force && b.dataKey === key) return;
+  b.dataKey = key;
+  b.dataError = null;
+  b.dataError2 = null;
+  b.dataNotice = null;
+  b.data2 = null;
+  b.cacheKey = "";                          // 画好的离屏副本作废
+  const accept = (raw) => {
+    b.data = (raw === null || raw === undefined)
+      ? null : (d.pick ? d.pick(comp, raw) : raw);
+    if (d.notice) b.dataNotice = d.notice(comp, raw);
+  };
+  if (!DATA.api) {                          // 快照：用页面注入的那一份，不问服务端
+    accept(d.snapshot ? d.snapshot(comp) : null);
+    renderAll();
+    return;
+  }
+  state.pending += 1;
+  setStatus();
+  try {
+    accept(await d.load(comp));
+    if (d.load2) {
+      try { b.data2 = await d.load2(comp); }
+      catch (err) { b.dataError2 = err.message; }
+    }
+  } catch (err) {
+    b.data = null;
+    b.dataError = (d.error || "取不到数据") + "：" + err.message;
+  } finally {
+    state.pending -= 1;
+    renderAll();
+  }
+}
+
+/** 工作表上所有需要数据的显示形式各问一次（键没变的那些是空转）。 */
+function refreshAllComponentData() {
+  const jobs = [];
+  for (const comp of state.components) {
+    const spec = specOf(comp);
+    if (spec && spec.data) jobs.push(refreshComponentData(comp));
+  }
+  return Promise.all(jobs);
+}
+
 async function refreshWindowTraces(force) {
   if (!DATA.api) return;                       // static snapshot: nothing to fetch
   const key = windowKey();
@@ -1048,12 +1576,11 @@ async function refreshWindowTraces(force) {
   setStatus();
   try {
     const w = windowRange();
-    const url = DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/trace"
-      + "?channels=" + encodeURIComponent(names.join(","))
-      + "&from=" + w.from + "&to=" + w.to + "&buckets=" + Math.round(plotWidth());
-    const res = await fetch(url);
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    Object.assign(state.traces, await res.json());
+    const body = await apiGet(apiUrl("/trace", {
+      channels: names.join(","), from: w.from, to: w.to,
+      buckets: Math.round(plotWidth()),
+    }));
+    Object.assign(state.traces, body);
     state.dataVersion += 1;
   } catch (err) {
     toast("通道加载失败: " + err.message);
@@ -1061,31 +1588,6 @@ async function refreshWindowTraces(force) {
     state.pending -= 1;
     renderAll();
   }
-}
-
-async function refreshPointsFor(comp) {
-  const cfg = comp.config;
-  if (!cfg.x || !cfg.y.length || !DATA.api) { state.points = null; return; }
-  const w = windowRange();
-  const names = [cfg.x].concat(cfg.y).concat(cfg.colour ? [cfg.colour] : []);
-  try {
-    const url = DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/points"
-      + "?channels=" + encodeURIComponent(names.join(","))
-      + "&from=" + w.from + "&to=" + w.to + "&max=20000";
-    const res = await fetch(url);
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    state.points = await res.json();
-    state.dataVersion += 1;
-  } catch {
-    state.points = null;
-  }
-}
-
-/** Refresh the scatter points for the first scatter component on the sheet. */
-function refreshPoints() {
-  const comp = state.components.find((c) => c.type === "scatter");
-  if (!comp) { state.points = null; return Promise.resolve(); }
-  return refreshPointsFor(comp);
 }
 
 /* -------------------------------------------------------------- view/mode */
@@ -1185,11 +1687,7 @@ async function exactCursorTime(quick) {
   const seconds = quick === undefined ? cursorTime() : quick;
   if (state.mode !== "distance" || !DATA.api || seconds === null) return seconds;
   try {
-    const url = DATA.api + "/session/" + encodeURIComponent(DATA.session)
-      + "/at?distance=" + state.cursor;
-    const res = await fetch(url);
-    if (!res.ok) return seconds;
-    const data = await res.json();
+    const data = await apiGet(apiUrl("/at", { distance: state.cursor }));
     return Number.isFinite(data.time) ? data.time : seconds;
   } catch (err) {
     return seconds;
@@ -1200,14 +1698,9 @@ function scheduleRefresh() {
   clearTimeout(refreshTimer);
   refreshTimer = setTimeout(() => {
     refreshWindowTraces();
-    refreshPoints().then(renderAll);
-    for (const comp of state.components) {
-      // "缩放之后要不要重新取数"由组件自己声明（注册表 #17）：不看窗口的组件
-      // 返回 null，看窗口的返回一个 Promise。scheduleRefresh 不再认类型。
-      const spec = specOf(comp);
-      const pending = spec && spec.refreshWindow ? spec.refreshWindow(comp) : null;
-      if (pending) pending.then(renderAll);
-    }
+    // 缩放之后要不要重新取数，由每个显示形式自己的缓存键说了算（#21）：
+    // 窗口进了键的那些会重新问，不进键的那些是空转。scheduleRefresh 不认类型。
+    refreshAllComponentData().then(renderAll);
   }, 150);
 }
 
@@ -1593,216 +2086,9 @@ function buildWorksheet() {
     const bundle = { comp: comp, el: el, body: body, canvas: null, head: null,
                      sizeSpan: sizeSpan, titleSpan: titleSpan,
                      off: null, cacheKey: "", legendKey: "", valueNodes: [] };
-    if (comp.type === "scatter") {
-      const cfgBar = makeEl("div", "scattercfg", body);
-      makeEl("span", "", cfgBar).textContent = "X";
-      const sx = makeEl("select", "", cfgBar);
-      makeEl("span", "", cfgBar).textContent = "Y";
-      const sy = makeEl("select", "", cfgBar);
-      makeEl("span", "", cfgBar).textContent = "色";
-      const sc = makeEl("select", "", cfgBar);
-      bundle.selX = sx; bundle.selY = sy; bundle.selC = sc;
-      const on = () => {
-        comp.config.x = sx.value || null;
-        comp.config.y = sy.value ? [sy.value] : [];
-        comp.config.colour = sc.value || null;
-        state.dataVersion += 1;
-        refreshPointsFor(comp).then(renderAll);
-        renderAll();
-      };
-      [sx, sy, sc].forEach((s) => s.addEventListener("change", on));
-    }
-    if (comp.type === "gauge") {
-      const cfgBar = makeEl("div", "scattercfg", body);
-      const selSub = makeEl("select", "", cfgBar);
-      selSub.innerHTML = Object.keys(GAUGE_SUBTYPES)
-        .map((k) => '<option value="' + k + '">' + GAUGE_SUBTYPES[k] + "</option>").join("");
-      selSub.value = comp.config.subtype;
-      const selCh = makeEl("select", "", cfgBar);
-      bundle.selSub = selSub;
-      bundle.selCh = selCh;
-      selSub.addEventListener("change", () => {
-        comp.config.subtype = selSub.value;
-        bundle.cacheKey = "";
-        renderAll();
-      });
-      selCh.addEventListener("change", () => {
-        comp.config.channels = selCh.value ? [selCh.value] : [];
-        bundle.cacheKey = "";
-        renderAll();
-      });
-    }
-    if (comp.type === "histogram") {
-      // 一条通道的取值分布。控件全部打进 bundle，syncHistogramSelectors 负责填。
-      const cfgBar = makeEl("div", "scattercfg", body);
-      const selChannel = makeEl("select", "", cfgBar);
-      selChannel.dataset.hist = "channel";
-      selChannel.title = "统计哪一条通道（按单位分组）";
-      makeEl("span", "", cfgBar).textContent = "格";
-      const selBins = makeEl("input", "", cfgBar);
-      selBins.type = "number";
-      selBins.min = "4";
-      selBins.max = "500";
-      selBins.step = "1";
-      selBins.style.width = "52px";
-      selBins.dataset.hist = "bins";
-      selBins.title = "分几格（4–500）；快照里只能往粗里并";
-      const selStyle = makeEl("select", "", cfgBar);
-      selStyle.dataset.hist = "style";
-      selStyle.innerHTML = HISTOGRAM_STYLES.map(
-        (pair) => '<option value="' + pair[0] + '">' + pair[1] + "</option>"
-      ).join("");
-      makeEl("span", "", cfgBar).textContent = "色";
-      const selColour = makeEl("select", "", cfgBar);
-      selColour.dataset.hist = "colour";
-      selColour.title = "按第三通道着色：每格取该通道的均值（色标上写着范围）";
-      makeEl("span", "", cfgBar).textContent = "门槛";
-      const gateInput = makeEl("input", "", cfgBar);
-      gateInput.type = "text";
-      gateInput.placeholder = "通道名或表达式（可留空）";
-      gateInput.dataset.hist = "gate";
-      gateInput.title = "条件为假（0）的样本不算进分布；写法和「数学通道」一样";
-      makeEl("span", "", cfgBar).textContent = "窗口";
-      const selWindow = makeEl("select", "", cfgBar);
-      selWindow.dataset.hist = "window";
-      bundle.selChannel = selChannel;
-      bundle.selBins = selBins;
-      bundle.selStyle = selStyle;
-      bundle.selColour = selColour;
-      bundle.selWindow = selWindow;
-      bundle.gateInput = gateInput;
-      const changed = () => {
-        comp.config.channel = selChannel.value || null;
-        comp.config.colour = selColour.value || null;
-        const want = Math.round(Number(selBins.value) || 40);
-        if (!DATA.api && DATA.histograms && want > DATA.histograms.bins) {
-          // 快照里只带了 bins 格，再细分就是编出来的——夹回去并说清楚。
-          selBins.value = String(DATA.histograms.bins);
-          toast("快照里只带了 " + DATA.histograms.bins + " 格的分布：改格数只能往粗里并，"
-            + "要更细请用 serve 模式打开");
-        }
-        comp.config.bins = Math.max(1, Math.round(Number(selBins.value) || 40));
-        comp.config.style = selStyle.value;
-        comp.config.window = selWindow.value;
-        comp.config.gate = gateInput.value.trim();
-        bundle.cacheKey = "";
-        refreshComponentTitle(comp);
-        saveLayout();
-        renderAll();
-      };
-      [selChannel, selBins, selStyle, selColour, selWindow].forEach(
-        (el) => el.addEventListener("change", changed)
-      );
-      gateInput.addEventListener("change", changed);
-    }
-    if (comp.type === "spectrum") {
-      // 频谱：Welch 平均周期图。参数多，所以每个控件都带一句 title 说清它改什么。
-      const cfgBar = makeEl("div", "scattercfg", body);
-      const selChannel = makeEl("select", "", cfgBar);
-      selChannel.dataset.spec = "channel";
-      selChannel.title = "分析哪一条通道（按单位分组）";
-      const selAgainst = makeEl("select", "", cfgBar);
-      selAgainst.dataset.spec = "against";
-      selAgainst.title = "叠加对比的第二条通道（可留空）";
-      makeEl("span", "", cfgBar).textContent = "点";
-      const selPoints = makeEl("select", "", cfgBar);
-      selPoints.dataset.spec = "points";
-      selPoints.title = "FFT 点数：频率分辨率 = 通道采样率 / 点数（点数越大越细、越慢）";
-      makeEl("span", "", cfgBar).textContent = "窗";
-      const selWindow = makeEl("select", "", cfgBar);
-      selWindow.dataset.spec = "win";
-      selWindow.title = "窗函数：把一段的两端衰减到零，减少泄漏（默认 hann）";
-      makeEl("span", "", cfgBar).textContent = "重叠";
-      const selOverlap = makeEl("select", "", cfgBar);
-      selOverlap.dataset.spec = "overlap";
-      selOverlap.title = "段间重叠：数据比点数长时切成多段各算一次再平均（Welch）";
-      makeEl("span", "", cfgBar).textContent = "平滑";
-      const selSmooth = makeEl("input", "", cfgBar);
-      selSmooth.type = "number";
-      selSmooth.min = "1";
-      selSmooth.max = "99";
-      selSmooth.step = "1";
-      selSmooth.style.width = "52px";
-      selSmooth.dataset.spec = "smooth";
-      selSmooth.title = "频域平滑格数：把相邻几格平均（总功率不变），1 = 不平滑";
-      makeEl("span", "", cfgBar).textContent = "纵轴";
-      const selScale = makeEl("select", "", cfgBar);
-      selScale.dataset.spec = "scale";
-      selScale.title = "功率谱密度（单位²/Hz）或有效值（与通道同单位）";
-      makeEl("span", "", cfgBar).textContent = "对数";
-      const selAxis = makeEl("select", "", cfgBar);
-      selAxis.dataset.spec = "axis";
-      selAxis.title = "纵轴用 dB（10·log10）还是线性";
-      makeEl("span", "", cfgBar).textContent = "窗口";
-      const selSpan = makeEl("select", "", cfgBar);
-      selSpan.dataset.spec = "span";
-      bundle.selSpecChannel = selChannel;
-      bundle.selSpecAgainst = selAgainst;
-      bundle.selPoints = selPoints;
-      bundle.selWindow = selWindow;
-      bundle.selOverlap = selOverlap;
-      bundle.selSmooth = selSmooth;
-      bundle.selScale = selScale;
-      bundle.selAxis = selAxis;
-      bundle.selSpan = selSpan;
-      const changed = () => {
-        comp.config.channel = selChannel.value || null;
-        comp.config.against = selAgainst.value || null;
-        comp.config.points = Math.max(16, parseInt(selPoints.value, 10) || 1024);
-        comp.config.win = selWindow.value || "hann";
-        comp.config.overlap = Math.max(0, Math.min(0.95, parseFloat(selOverlap.value) || 0));
-        comp.config.smooth = Math.max(1, parseInt(selSmooth.value, 10) || 1);
-        comp.config.scale = selScale.value || "psd";
-        comp.config.axis = selAxis.value || "log";
-        comp.config.span = selSpan.value || "zoom";
-        bundle.specKey = "";
-        refreshComponentTitle(comp);
-        saveLayout();
-        renderAll();
-      };
-      [selChannel, selAgainst, selPoints, selWindow, selOverlap, selScale, selAxis, selSpan]
-        .forEach((el) => el.addEventListener("change", changed));
-      selSmooth.addEventListener("change", changed);
-    }
-    // 控件条由组件自己声明（注册表 #17）。位置与迁移前一致：在 canvas 之前。
+    // 控件条由组件自己声明（注册表 #17/#19/#20）。位置与迁移前一致：在 canvas 之前。
     if (spec && spec.controls) spec.controls(comp, bundle, body);
     if (tabular) {
-      const cfgBar = makeEl("div", "scattercfg", body);
-      makeEl("span", "", cfgBar).textContent = "区段";
-      const selFilter = makeEl("select", "", cfgBar);
-      selFilter.innerHTML = SECTION_FILTERS.map(
-        (pair) => '<option value="' + pair[0] + '">' + pair[1] + "</option>"
-      ).join("");
-      selFilter.value = comp.config.filter || "all";
-      bundle.selFilter = selFilter;
-      selFilter.addEventListener("change", () => {
-        comp.config.filter = selFilter.value;
-        refreshComponentTitle(comp);
-        saveLayout();
-        renderAll();
-      });
-      if (comp.type === "chreport") {
-        makeEl("span", "", cfgBar).textContent = "分组";
-        const selBy = makeEl("select", "", cfgBar);
-        selBy.innerHTML = '<option value="lap">按圈</option>'
-          + '<option value="section">按区段</option>';
-        selBy.value = comp.config.by || "lap";
-        bundle.selBy = selBy;
-        const selLap = makeEl("select", "", cfgBar);
-        bundle.selLap = selLap;
-        selBy.addEventListener("change", () => {
-          comp.config.by = selBy.value;
-          saveLayout();
-          buildWorksheet();
-          renderAll();
-        });
-        selLap.addEventListener("change", () => {
-          comp.config.lap = selLap.value || null;
-          saveLayout();
-          renderAll();
-        });
-        makeEl("span", "", cfgBar).textContent = "通道在左侧勾选";
-      }
       const tableHost = makeEl("div", "rwrap", body);
       const noteHost = makeEl("div", "rnote", body);
       bundle.tableHost = tableHost;
@@ -1810,17 +2096,10 @@ function buildWorksheet() {
     } else {
       bundle.canvas = makeEl("canvas", "", body);
     }
-    if (comp.type === "scatter") {
-      bundle.canvas.addEventListener("dblclick", () => {
-        comp.config.style = comp.config.style === "points" ? "trend" : "points";
-        bundle.cacheKey = "";
-        renderAll();
-      });
-    }
     if (spec && spec.hooks) spec.hooks(comp, bundle);
     if (!tabular) {
       const head = makeEl("div", "graphhead", body);
-      if (comp.type !== "graph") head.className = "graphhead caption";
+      if (spec && spec.caption) head.className = "graphhead caption";
       bundle.head = head;
     }
     const handle = (cls, axis, title) => {
@@ -2007,42 +2286,9 @@ function beginResize(event, comp, el, axis) {
 
 function componentTitle(comp) {
   const spec = specOf(comp) || { label: comp.type };
-  // 标题也归组件自己声明：写了 title() 就用它，没写就用 label（#17）。
-  if (spec.title) return spec.title(comp);
-  if (comp.type === "graph") {
-    const n = comp.config.channels.length;
-    const mode = comp.config.mode === "overlapped" ? "重叠" : "分栏";
-    return spec.label + (n ? " · " + n + " 通道" : "") + " · " + mode;
-  }
-  if (comp.type === "gauge") {
-    return spec.label + " · " + (GAUGE_SUBTYPES[comp.config.subtype] || comp.config.subtype);
-  }
-  if (comp.type === "histogram") {
-    const name = comp.config.channel || "还没选通道";
-    const style = (HISTOGRAM_STYLES.find((pair) => pair[0] === (comp.config.style || "bars"))
-      || HISTOGRAM_STYLES[0])[1];
-    const bits = [spec.label + " · " + name + " · " + (comp.config.bins || 40) + " 格 · " + style];
-    if (comp.config.colour) bits.push("色=" + comp.config.colour);
-    if (comp.config.gate) bits.push("门槛=" + comp.config.gate);
-    return bits.join(" · ");
-  }
-  if (comp.type === "spectrum") {
-    const name = comp.config.channel || "还没选通道";
-    const win = (SPECTRUM_WINDOWS.find((pair) => pair[0] === (comp.config.win || "hann"))
-      || SPECTRUM_WINDOWS[0])[1];
-    return spec.label + " · " + name + " · " + (comp.config.points || 1024) + " 点 · "
-      + win;
-  }
-  if (comp.type === "report") {
-    const filter = SECTION_FILTERS.find((pair) => pair[0] === comp.config.filter);
-    return spec.label + " · " + ((filter && filter[1]) || "全部区段");
-  }
-  if (comp.type === "chreport") {
-    const n = (comp.config.channels || []).length;
-    const by = (comp.config.by || "lap") === "section" ? "按区段" : "按圈";
-    return spec.label + " · " + by + (n ? " · " + n + " 通道" : " · 还没选通道");
-  }
-  return spec.label;
+  // 标题也归显示形式自己声明（注册表 #17/#19/#20）：写了 title() 就用它，
+  // 没写就用 label。这里不认识任何类型。
+  return spec.title ? spec.title(comp) : spec.label;
 }
 
 function refreshComponentTitle(comp) {
@@ -2083,36 +2329,11 @@ function renderComponents() {
     const bundle = SHEET.get(comp.id);
     if (!bundle) continue;
     const spec = specOf(comp);
-    if (spec && spec.tabular) {
-      // 表还没到就先挂个占位，然后去要数据——这样任何入口（预设、分享链接、
-      // 改区段、改数学通道）加进来都不用额外接线。
-      if (!bundle.report || bundle.reportKey !== reportFetchKey(comp)) {
-        refreshReport(comp);
-      }
-      if (comp.type === "report") renderTimeReport(comp, bundle);
-      else renderChannelReport(comp, bundle);
-      continue;
-    }
-    if (!bundle.canvas) continue;
-    if (comp.type === "histogram") {
-      // 分布只在服务端算（数的是原始样本）。这一屏要问的问题变了就重新问一次。
-      const key = histogramKey(comp);
-      if (bundle.histKey !== key) refreshHistogramFor(comp);
-      renderHistogramComponent(comp, bundle);
-      continue;
-    }
-    if (comp.type === "spectrum") {
-      // 频谱同样在服务端算（按通道自己的采样率）。参数或窗口变了就重新问一次。
-      const key = spectrumKey(comp);
-      if (bundle.specKey !== key) refreshSpectrumFor(comp);
-      renderSpectrumComponent(comp, bundle);
-      continue;
-    }
-    // 注册表接管的类型自己画；其余仍是过渡分支（#19 / #20 会把它们也迁走）。
-    if (spec && spec.render) spec.render(comp, bundle);
-    else if (comp.type === "graph") renderGraphComponent(comp, bundle);
-    else if (comp.type === "scatter") renderScatterComponent(comp, bundle);
-    else if (comp.type === "gauge") renderGaugeComponent(comp, bundle);
+    if (!spec || !spec.render) continue;      // 没声明过的类型不进工作表
+    // 要服务端数据的显示形式：先把"这一屏问的问题"交给那一条取数路径（#21）。
+    // 键没变它就是空转，所以每次重画都叫它是安全的。
+    if (spec.data) refreshComponentData(comp);
+    spec.render(comp, bundle);
   }
 }
 
@@ -2341,7 +2562,7 @@ function attachOverviewInteractions(canvas) {
     if (!drag) return;
     drag = null;
     refreshWindowTraces();
-    refreshPoints().then(renderAll);
+    refreshAllComponentData().then(renderAll);
   });
 }
 
@@ -2379,7 +2600,7 @@ function renderScrollbar() {
       if (!drag) return;
       drag = null;
       refreshWindowTraces();
-      refreshPoints().then(renderAll);
+      refreshAllComponentData().then(renderAll);
     });
   }
   const canvas = $("scrollCanvas");
@@ -2398,13 +2619,15 @@ function renderScrollbar() {
   ctx.strokeStyle = "#4cc2ff";
   ctx.strokeRect(x0 + .5, 2.5, Math.max(4, x1 - x0) - 1, c.h - 5);
 }
-/** Static layer of a scatter component; returns the mapping for the cursor. */
-function paintScatter(cfg, ctx, cw, ch) {
+/** Static layer of a scatter component; returns the mapping for the cursor.
+ *
+ * `src` 是这个组件自己那一份取值（bundle.data.values，见取数一条路 #21）——
+ * 不再从全表共用的 state.points 里拿，所以两张散点同屏不会互相顶掉。 */
+function paintScatter(cfg, ctx, cw, ch, src) {
   const c = { ctx: ctx, w: cw, h: ch };
   if (!cfg.x || !cfg.y.length) return null;
   const pad = { l: 58, r: 16, t: 8, b: 20 };
   const plotW = c.w - pad.l - pad.r, plotH = c.h - pad.t - pad.b;
-  const src = state.points && state.points.values ? state.points.values : null;
   const xSeries = src ? src[cfg.x] : null;
   if (!xSeries || !xSeries.length) return null;
   const ys = cfg.y.filter((n) => src[n]);
@@ -2498,7 +2721,8 @@ function renderScatterComponent(comp, b) {
     if (!b.off) b.off = document.createElement("canvas");
     const off = sizeCanvas(b.off, c.w, c.h);
     off.ctx.clearRect(0, 0, off.w, off.h);
-    b.mapping = paintScatter(cfg, off.ctx, c.w, c.h);
+    b.mapping = paintScatter(cfg, off.ctx, c.w, c.h,
+                             b.data && b.data.values ? b.data.values : null);
     b.cacheKey = b.mapping ? key : "";
   }
   if (!b.mapping) {
@@ -2511,10 +2735,10 @@ function renderScatterComponent(comp, b) {
   }
   ctx.drawImage(b.off, 0, 0, c.w, c.h);
   const m = b.mapping;
-  if (state.cursor !== null && state.points && state.points.time) {
+  if (state.cursor !== null && b.data && b.data.time) {
     let best = -1, bestD = Infinity;
-    for (let i = 0; i < state.points.time.length; i++) {
-      const d = Math.abs(state.points.time[i] - state.cursor);
+    for (let i = 0; i < b.data.time.length; i++) {
+      const d = Math.abs(b.data.time[i] - state.cursor);
       if (d < bestD) { bestD = d; best = i; }
     }
     if (best >= 0) {
@@ -2528,7 +2752,7 @@ function renderScatterComponent(comp, b) {
       }
     }
   }
-  b.head.textContent = (state.points.time.length || 0) + " 点 · "
+  b.head.textContent = (b.data.time.length || 0) + " 点 · "
     + (cfg.style === "points" ? "散点" : "散点+趋势线") + " · 只显示当前缩放区间";
 }
 
@@ -2602,41 +2826,6 @@ function histogramKey(comp) {
           DATA.api ? "serve" : "snap", span].join("|");
 }
 
-async function refreshHistogramFor(comp) {
-  const b = SHEET.get(comp.id);
-  if (!b) return;
-  const cfg = comp.config;
-  b.histKey = histogramKey(comp);
-  b.histError = null;
-  if (!cfg.channel) { b.hist = null; return; }
-  if (!DATA.api) { b.hist = snapshotHistogramFor(comp); return; }
-  const w = windowRange();
-  let url = DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/histogram"
-    + "?channel=" + encodeURIComponent(cfg.channel)
-    + "&bins=" + Math.round(cfg.bins || 40);
-  if ((cfg.window || "zoom") !== "all") url += "&from=" + w.from + "&to=" + w.to;
-  if (cfg.gate) url += "&gate=" + encodeURIComponent(cfg.gate);
-  if (cfg.colour) url += "&colour=" + encodeURIComponent(cfg.colour);
-  state.pending += 1;
-  setStatus();
-  try {
-    const res = await fetch(url);
-    const body = await res.json();
-    if (!res.ok) {
-      b.hist = null;
-      b.histError = body.error || ("HTTP " + res.status);
-    } else {
-      b.hist = body;
-    }
-  } catch (err) {
-    b.hist = null;
-    b.histError = "取不到分布：" + err.message;
-  } finally {
-    state.pending -= 1;
-    renderAll();
-  }
-}
-
 /** 快照模式能看的窗口：整场 + 每条完整圈（导出时算好的）。 */
 function histogramWindowChoices() {
   if (DATA.api) {
@@ -2669,40 +2858,37 @@ function fillChannelSelectGrouped(select, value, allowNone) {
   select.value = value || (allowNone ? "" : "");
 }
 
-function syncHistogramSelectors() {
-  for (const comp of state.components) {
-    if (comp.type !== "histogram") continue;
-    const b = SHEET.get(comp.id);
-    if (!b || !b.selChannel) continue;
-    const names = CHANNELS ? Array.from(CHANNELS.keys()) : [];
-    if (comp.config.channel && names.indexOf(comp.config.channel) < 0) {
-      comp.config.channel = null;
-    }
-    fillChannelSelectGrouped(b.selChannel, comp.config.channel, false);
-    fillChannelSelectGrouped(b.selColour, comp.config.colour, true);
-    if (!comp.config.channel && names.length) {
-      const guess = names.find((n) => /Vx KF/i.test(n)) || names[0];
-      // 快照里只内嵌了"勾选的那几条通道"的分布：默认值要是挑到没内嵌的那条，
-      // 一打开就是一句"没带这条通道"——和报表默认通道一个道理，先挑有数据的。
-      const embedded = DATA.histograms && DATA.histograms.series;
-      comp.config.channel = (!DATA.api && embedded && !embedded[guess])
-        ? (names.find((n) => embedded[n]) || guess)
-        : guess;
-      b.selChannel.value = comp.config.channel;
-    }
-    b.selBins.value = String(comp.config.bins || 40);
-    b.selStyle.value = comp.config.style || "bars";
-    b.selColour.value = comp.config.colour || "";
-    b.gateInput.value = comp.config.gate || "";
-    const choices = histogramWindowChoices();
-    const wanted = comp.config.window || (DATA.api ? "zoom" : "all");
-    b.selWindow.innerHTML = choices.map(
-      (pair) => '<option value="' + esc(pair[0]) + '">' + esc(pair[1]) + "</option>"
-    ).join("");
-    comp.config.window = choices.some((pair) => pair[0] === wanted)
-      ? wanted : choices[0][0];
-    b.selWindow.value = comp.config.window;
+/** 直方图自己的下拉填值（注册表 #20：由它自己声明，工作表不再认类型）。 */
+function histogramSync(comp, b, pool) {
+  if (!b || !b.selChannel) return;
+  const names = pool.all;
+  if (comp.config.channel && names.indexOf(comp.config.channel) < 0) {
+    comp.config.channel = null;
   }
+  fillChannelSelectGrouped(b.selChannel, comp.config.channel, false);
+  fillChannelSelectGrouped(b.selColour, comp.config.colour, true);
+  if (!comp.config.channel && names.length) {
+    const guess = names.find((n) => /Vx KF/i.test(n)) || names[0];
+    // 快照里只内嵌了"勾选的那几条通道"的分布：默认值要是挑到没内嵌的那条，
+    // 一打开就是一句"没带这条通道"——和报表默认通道一个道理，先挑有数据的。
+    const embedded = DATA.histograms && DATA.histograms.series;
+    comp.config.channel = (!DATA.api && embedded && !embedded[guess])
+      ? (names.find((n) => embedded[n]) || guess)
+      : guess;
+    b.selChannel.value = comp.config.channel;
+  }
+  b.selBins.value = String(comp.config.bins || 40);
+  b.selStyle.value = comp.config.style || "bars";
+  b.selColour.value = comp.config.colour || "";
+  b.gateInput.value = comp.config.gate || "";
+  const choices = histogramWindowChoices();
+  const wanted = comp.config.window || (DATA.api ? "zoom" : "all");
+  b.selWindow.innerHTML = choices.map(
+    (pair) => '<option value="' + esc(pair[0]) + '">' + esc(pair[1]) + "</option>"
+  ).join("");
+  comp.config.window = choices.some((pair) => pair[0] === wanted)
+    ? wanted : choices[0][0];
+  b.selWindow.value = comp.config.window;
 }
 
 function renderHistogramComponent(comp, b) {
@@ -2717,15 +2903,15 @@ function renderHistogramComponent(comp, b) {
     ctx.fillText(text, 12, 24);
   };
   if (!cfg.channel) { hint("选一条要看分布的通道"); b.head.textContent = ""; return; }
-  if (!b.hist || !b.hist.bins || !b.hist.bins.length) {
+  if (!b.data || !b.data.bins || !b.data.bins.length) {
     // 这句话既画在画布上，也写进表头——表头是 DOM，断言与读屏都拿得到。
-    const message = b.histError || (DATA.api ? "载入分布…"
+    const message = b.dataError || (DATA.api ? "载入分布…"
       : "快照里没带这条通道的分布（导出时它没被勾选）——换一条，或用 serve 模式打开");
     b.head.textContent = message;
     hint(message);
     return;
   }
-  const hist = b.hist;
+  const hist = b.data;
   const bins = hist.bins;
   const painted = cfg.colour && bins.some((box) => Number.isFinite(box.colour_mean));
   const pad = { l: 44, r: painted ? 72 : 14, t: 8, b: 20 };
@@ -2907,54 +3093,6 @@ function spectrumKey(comp) {
           DATA.api ? "serve" : "snap"].join("|");
 }
 
-async function refreshSpectrumFor(comp) {
-  const b = SHEET.get(comp.id);
-  if (!b) return;
-  const cfg = comp.config;
-  b.specKey = spectrumKey(comp);
-  b.specError = null;
-  b.spec2 = null;
-  b.spec2Error = null;
-  if (!cfg.channel) { b.spec = null; return; }
-  if (!DATA.api) { b.spec = snapshotSpectrumFor(comp); return; }
-  const w = windowRange();
-  const urlOf = (name) => {
-    let url = DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/spectrum"
-      + "?channel=" + encodeURIComponent(name)
-      + "&points=" + Math.round(cfg.points || 1024)
-      + "&window=" + encodeURIComponent(cfg.win || "hann")
-      + "&overlap=" + (cfg.overlap === undefined ? 0.5 : cfg.overlap)
-      + "&smooth=" + Math.round(cfg.smooth || 1)
-      + "&scale=psd";
-    if ((cfg.span || "zoom") !== "all") url += "&from=" + w.from + "&to=" + w.to;
-    return url;
-  };
-  state.pending += 1;
-  setStatus();
-  try {
-    const res = await fetch(urlOf(cfg.channel));
-    const body = await res.json();
-    if (!res.ok) {
-      b.spec = null;
-      b.specError = body.error || ("HTTP " + res.status);
-    } else {
-      b.spec = body;
-    }
-    if (res.ok && cfg.against && cfg.against !== cfg.channel) {
-      const res2 = await fetch(urlOf(cfg.against));
-      const body2 = await res2.json();
-      if (!res2.ok) b.spec2Error = body2.error || ("HTTP " + res2.status);
-      else b.spec2 = body2;
-    }
-  } catch (err) {
-    b.spec = null;
-    b.specError = "取不到频谱：" + err.message;
-  } finally {
-    state.pending -= 1;
-    renderAll();
-  }
-}
-
 /** 功率谱密度 → 这一屏要画的纵值（有效值或 dB）。两者都是同一份数据的换算。 */
 function spectrumY(series, cfg, floorDb) {
   const df = series.resolution || 1;
@@ -2977,17 +3115,17 @@ function renderSpectrumComponent(comp, b) {
     ctx.fillText(text, 12, 24);
   };
   if (!cfg.channel) { hint("选一条要做频谱的通道"); b.head.textContent = ""; return; }
-  if (!b.spec || !b.spec.power || !b.spec.power.length) {
-    const message = b.specError || (DATA.api ? "算频谱…"
+  if (!b.data || !b.data.power || !b.data.power.length) {
+    const message = b.dataError || (DATA.api ? "算频谱…"
       : "快照里没带这条通道的频谱（导出时它没被勾选）——换一条，或用 serve 模式打开");
     b.head.textContent = message;
     hint(message);
     return;
   }
-  const main = b.spec;
+  const main = b.data;
   const series = [{ data: main, colour: channelColor(cfg.channel, comp) }];
-  if (b.spec2 && b.spec2.power && b.spec2.power.length) {
-    series.push({ data: b.spec2, colour: channelColor(cfg.against, comp) });
+  if (b.data2 && b.data2.power && b.data2.power.length) {
+    series.push({ data: b.data2, colour: channelColor(cfg.against, comp) });
   }
   const pad = { l: 46, r: 12, t: 8, b: 20 };
   const plotW = Math.max(10, c.w - pad.l - pad.r);
@@ -3064,78 +3202,75 @@ function renderSpectrumComponent(comp, b) {
       + "——换别的通道要用 serve 模式");
   }
   b.head.textContent = bits.join(" · ");
-  if (b.spec2Error) b.head.textContent += " · 对比通道：" + b.spec2Error;
+  if (b.dataError2) b.head.textContent += " · 对比通道：" + b.dataError2;
   if (main.notice) b.head.textContent += " · " + main.notice;
 }
 
-/** 控件填值。快照模式下把"只有服务端能算"的那几个灰掉并说明。 */
-function syncSpectrumSelectors() {
-  for (const comp of state.components) {
-    if (comp.type !== "spectrum") continue;
-    const b = SHEET.get(comp.id);
-    if (!b || !b.selSpecChannel) continue;
-    const names = CHANNELS ? Array.from(CHANNELS.keys()) : [];
-    if (comp.config.channel && names.indexOf(comp.config.channel) < 0) {
-      comp.config.channel = null;
+/** 频谱自己的控件填值（注册表 #20）。
+ *  快照模式下把"只有服务端能算"的那几个灰掉并说明。 */
+function spectrumSync(comp, b, pool) {
+  if (!b || !b.selSpecChannel) return;
+  const names = pool.all;
+  if (comp.config.channel && names.indexOf(comp.config.channel) < 0) {
+    comp.config.channel = null;
+  }
+  if (comp.config.against && names.indexOf(comp.config.against) < 0) {
+    comp.config.against = null;
+  }
+  fillChannelSelectGrouped(b.selSpecChannel, comp.config.channel, false);
+  fillChannelSelectGrouped(b.selSpecAgainst, comp.config.against, true);
+  if (!comp.config.channel && names.length) {
+    const guess = names.find((n) => /Susp Pos|G Force Vert|Accel/i.test(n)) || names[0];
+    // 快照里只内嵌了"勾选的那几条通道"的频谱。默认值挑到没内嵌的那条，一打开
+    // 就是"取不到频谱"——先挑一条真的带了数据的（和报表默认通道同一个道理）。
+    const embedded = DATA.spectra && DATA.spectra.series;
+    comp.config.channel = (!DATA.api && embedded && !embedded[guess])
+      ? (names.find((n) => embedded[n]) || guess)
+      : guess;
+    b.selSpecChannel.value = comp.config.channel;
+  }
+  b.selPoints.innerHTML = SPECTRUM_POINTS.map(
+    (n) => '<option value="' + n + '">' + n + "</option>").join("");
+  if (SPECTRUM_POINTS.indexOf(comp.config.points) < 0) comp.config.points = 1024;
+  b.selPoints.value = String(comp.config.points);
+  b.selWindow.innerHTML = SPECTRUM_WINDOWS.map(
+    (pair) => '<option value="' + pair[0] + '">' + esc(pair[1]) + "</option>").join("");
+  b.selWindow.value = comp.config.win || "hann";
+  b.selOverlap.innerHTML = SPECTRUM_OVERLAPS.map(
+    (pair) => '<option value="' + pair[0] + '">' + esc(pair[1]) + "</option>").join("");
+  b.selOverlap.value = String(comp.config.overlap === undefined ? 0.5 : comp.config.overlap);
+  b.selSmooth.value = String(comp.config.smooth || 1);
+  b.selScale.innerHTML = SPECTRUM_SCALES.map(
+    (pair) => '<option value="' + pair[0] + '">' + esc(pair[1]) + "</option>").join("");
+  b.selScale.value = comp.config.scale || "psd";
+  b.selAxis.innerHTML = '<option value="log">dB（对数）</option>'
+    + '<option value="linear">线性</option>';
+  b.selAxis.value = comp.config.axis || "log";
+  const choices = DATA.api
+    ? [["zoom", "当前窗口"], ["all", "整场"]]
+    : [["all", "整场"]];
+  b.selSpan.innerHTML = choices.map(
+    (pair) => '<option value="' + pair[0] + '">' + esc(pair[1]) + "</option>").join("");
+  comp.config.span = choices.some((pair) => pair[0] === comp.config.span)
+    ? comp.config.span : choices[0][0];
+  b.selSpan.value = comp.config.span;
+  if (!DATA.api) {
+    // 快照里只有一份（整场 + 默认点数与窗）：把参数控件灰掉，而不是让用户改完没反应。
+    const why = "快照里只带了整场那一份频谱：换点数 / 窗函数 / 重叠 / 平滑都要 serve 模式打开。";
+    for (const el of [b.selPoints, b.selWindow, b.selOverlap, b.selSmooth]) {
+      el.disabled = true;
+      el.title = why;
     }
-    if (comp.config.against && names.indexOf(comp.config.against) < 0) {
-      comp.config.against = null;
+    comp.config.points = (DATA.spectra && DATA.spectra.points) || comp.config.points;
+    comp.config.win = (DATA.spectra && DATA.spectra.window) || comp.config.win;
+    if (DATA.spectra && DATA.spectra.overlap !== undefined) {
+      comp.config.overlap = DATA.spectra.overlap;
     }
-    fillChannelSelectGrouped(b.selSpecChannel, comp.config.channel, false);
-    fillChannelSelectGrouped(b.selSpecAgainst, comp.config.against, true);
-    if (!comp.config.channel && names.length) {
-      const guess = names.find((n) => /Susp Pos|G Force Vert|Accel/i.test(n)) || names[0];
-      // 快照里只内嵌了"勾选的那几条通道"的频谱。默认值挑到没内嵌的那条，一打开
-      // 就是"取不到频谱"——先挑一条真的带了数据的（和报表默认通道同一个道理）。
-      const embedded = DATA.spectra && DATA.spectra.series;
-      comp.config.channel = (!DATA.api && embedded && !embedded[guess])
-        ? (names.find((n) => embedded[n]) || guess)
-        : guess;
-      b.selSpecChannel.value = comp.config.channel;
-    }
-    b.selPoints.innerHTML = SPECTRUM_POINTS.map(
-      (n) => '<option value="' + n + '">' + n + "</option>").join("");
-    if (SPECTRUM_POINTS.indexOf(comp.config.points) < 0) comp.config.points = 1024;
+    comp.config.smooth = 1;
     b.selPoints.value = String(comp.config.points);
-    b.selWindow.innerHTML = SPECTRUM_WINDOWS.map(
-      (pair) => '<option value="' + pair[0] + '">' + esc(pair[1]) + "</option>").join("");
-    b.selWindow.value = comp.config.win || "hann";
-    b.selOverlap.innerHTML = SPECTRUM_OVERLAPS.map(
-      (pair) => '<option value="' + pair[0] + '">' + esc(pair[1]) + "</option>").join("");
-    b.selOverlap.value = String(comp.config.overlap === undefined ? 0.5 : comp.config.overlap);
-    b.selSmooth.value = String(comp.config.smooth || 1);
-    b.selScale.innerHTML = SPECTRUM_SCALES.map(
-      (pair) => '<option value="' + pair[0] + '">' + esc(pair[1]) + "</option>").join("");
-    b.selScale.value = comp.config.scale || "psd";
-    b.selAxis.innerHTML = '<option value="log">dB（对数）</option>'
-      + '<option value="linear">线性</option>';
-    b.selAxis.value = comp.config.axis || "log";
-    const choices = DATA.api
-      ? [["zoom", "当前窗口"], ["all", "整场"]]
-      : [["all", "整场"]];
-    b.selSpan.innerHTML = choices.map(
-      (pair) => '<option value="' + pair[0] + '">' + esc(pair[1]) + "</option>").join("");
-    comp.config.span = choices.some((pair) => pair[0] === comp.config.span)
-      ? comp.config.span : choices[0][0];
-    b.selSpan.value = comp.config.span;
-    if (!DATA.api) {
-      // 快照里只有一份（整场 + 默认点数与窗）：把参数控件灰掉，而不是让用户改完没反应。
-      const why = "快照里只带了整场那一份频谱：换点数 / 窗函数 / 重叠 / 平滑都要 serve 模式打开。";
-      for (const el of [b.selPoints, b.selWindow, b.selOverlap, b.selSmooth]) {
-        el.disabled = true;
-        el.title = why;
-      }
-      comp.config.points = (DATA.spectra && DATA.spectra.points) || comp.config.points;
-      comp.config.win = (DATA.spectra && DATA.spectra.window) || comp.config.win;
-      if (DATA.spectra && DATA.spectra.overlap !== undefined) {
-        comp.config.overlap = DATA.spectra.overlap;
-      }
-      comp.config.smooth = 1;
-      b.selPoints.value = String(comp.config.points);
-      b.selWindow.value = comp.config.win;
-      b.selOverlap.value = String(comp.config.overlap);
-      b.selSmooth.value = "1";
-    }
+    b.selWindow.value = comp.config.win;
+    b.selOverlap.value = String(comp.config.overlap);
+    b.selSmooth.value = "1";
   }
 }
 
@@ -3448,17 +3583,15 @@ function trackControls(comp, bundle, body) {
   bundle.selWindow = sel;
   sel.addEventListener("change", () => {
     comp.config.window = sel.value;
-    bundle.cacheKey = "";
-    bundle.trackData = null;
-    refreshTrackFor(comp).then(renderAll);
+    refreshComponentData(comp, true).then(renderAll);
     renderAll();
   });
-  if (state.track) bundle.trackData = state.track;
+  refreshComponentData(comp);
 }
 
 function renderTrackComponent(comp, b) {
   const windowed = (comp.config.window || "all") === "zoom";
-  const track = (windowed && (b.trackData || state.track)) || state.track;
+  const track = (windowed && (b.data || state.track)) || state.track;
   const c = sizeCanvas(b.canvas, b.canvas.clientWidth || 320, Math.max(150, comp.h * ROW_PX - 24));
   const ctx = c.ctx;
   ctx.clearRect(0, 0, c.w, c.h);
@@ -3551,24 +3684,6 @@ function renderTrackComponent(comp, b) {
 }
 
 /** Fetch the GPS track for the current zoom window (serve mode only). */
-async function refreshTrackFor(comp) {
-  if (!DATA.api || (comp.config.window || "all") !== "zoom") {
-    const b = SHEET.get(comp.id);
-    if (b) b.trackData = state.track;
-    return;
-  }
-  const w = windowRange();
-  const b = SHEET.get(comp.id);
-  try {
-    const res = await fetch(DATA.api + "/session/" + encodeURIComponent(DATA.session)
-      + "/track?from=" + w.from + "&to=" + w.to + "&points=6000");
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    if (b) { b.trackData = await res.json(); b.cacheKey = ""; }
-  } catch (err) {
-    toast("轨迹加载失败: " + err.message);
-  }
-}
-
 /* ------------------------------------------------------------ 报表组件 #11 */
 /* 时间报告与通道报告。两张表都由 Python 算好（`report.py`），界面只负责排版、
    着色和导出——同一个数字在快照、服务、命令行里必须是同一个，所以这里不做
@@ -3577,7 +3692,7 @@ async function refreshTrackFor(comp) {
 function reportFetchKey(comp) {
   const cfg = comp.config;
   const channels = (cfg.channels || []).slice(0, MAX_REPORT_CHANNELS).join(",");
-  const shape = comp.type === "report"
+  const shape = specOf(comp).table === "time"
     ? "time"
     : "channels|" + (cfg.by || "lap") + "|" + (cfg.lap || "");
   // dataVersion 进键：改过区段 / 数学通道 / 圈之后，同一张表也得重算
@@ -3587,7 +3702,7 @@ function reportFetchKey(comp) {
 function snapshotReportTable(comp) {
   const src = (DATA && DATA.report) || null;
   if (!src) return null;
-  if (comp.type === "report") return src.time || null;
+  if (specOf(comp).table === "time") return src.time || null;
   if ((comp.config.by || "lap") === "section") {
     const reference = src.reference_lap;
     const wanted = comp.config.lap;
@@ -3597,53 +3712,6 @@ function snapshotReportTable(comp) {
   return src.channels_lap || null;
 }
 
-async function refreshReport(comp) {
-  const b = SHEET.get(comp.id);
-  if (!b || b.reportPending) return;
-  const key = reportFetchKey(comp);
-  if (b.reportKey === key) return;
-  if (!DATA.api) {
-    b.report = snapshotReportTable(comp);
-    b.reportKey = key;
-    b.reportNotice = b.report ? null
-      : (DATA.report
-        ? "快照里只有参考圈那一条的区段表；换成「按圈」，或者回 serve 模式换圈"
-        : "这份快照没带报表数据：用「报表」预设重新导出一份，或者用 serve 模式");
-    renderAll();
-    return;
-  }
-  b.reportPending = true;
-  const cfg = comp.config;
-  const params = new URLSearchParams();
-  params.set("table", comp.type === "report" ? "time" : "channels");
-  if (comp.type === "chreport") {
-    params.set("by", cfg.by || "lap");
-    if ((cfg.by || "lap") === "section" && cfg.lap) params.set("lap", cfg.lap);
-    const names = (cfg.channels || []).filter((n) => CHANNELS.has(n))
-      .slice(0, MAX_REPORT_CHANNELS);
-    if (names.length) params.set("channels", names.join(","));
-  }
-  const url = DATA.api + "/session/" + encodeURIComponent(DATA.session)
-    + "/report?" + params.toString();
-  try {
-    const res = await fetch(url);
-    const data = await res.json();
-    if (data.error) {
-      b.report = null;
-      b.reportNotice = data.error;
-    } else {
-      b.report = comp.type === "report" ? data.time : data.channels;
-      b.reportNotice = data.notice || null;
-    }
-  } catch (err) {
-    b.report = null;
-    b.reportNotice = "报表没算出来（" + err.message + "）；看看本地服务还在不在";
-  }
-  b.reportPending = false;
-  b.reportKey = key;
-  renderAll();
-}
-
 function reportRowsOf(comp, table) {
   const kinds = table.row_kinds || [];
   const filter = comp.config.filter || "all";
@@ -3651,7 +3719,7 @@ function reportRowsOf(comp, table) {
   // 组件自己选的可能多出来，这里按组件要的那几条筛。
   let wanted = null;
   let channelAt = -1;
-  if (comp.type === "chreport") {
+  if (specOf(comp).table === "channels") {
     wanted = new Set(comp.config.channels || []);
     channelAt = (table.columns || []).findIndex((c) => c.key === "channel");
   }
@@ -3680,11 +3748,11 @@ function cellText(value, column) {
 }
 
 function reportPlaceholder(b) {
-  return '<p class="rnote">' + esc(b.reportNotice || "正在算这张表…") + "</p>";
+  return '<p class="rnote">' + esc(b.dataNotice || "正在算这张表…") + "</p>";
 }
 
 function renderTimeReport(comp, b) {
-  const table = b.report;
+  const table = b.data;
   if (!table) {
     b.tableHost.innerHTML = reportPlaceholder(b);
     b.noteHost.innerHTML = "";
@@ -3734,7 +3802,7 @@ function timeReportNote(comp, table, shown) {
 }
 
 function renderChannelReport(comp, b) {
-  const table = b.report;
+  const table = b.data;
   if (!table) {
     b.tableHost.innerHTML = reportPlaceholder(b);
     b.noteHost.innerHTML = "";
@@ -3817,14 +3885,14 @@ function reportCSVText(comp, table) {
 
 function exportReportCSV(comp) {
   const b = SHEET.get(comp.id);
-  const table = b && b.report;
+  const table = b && b.data;
   if (!table) {
     toast("这张表还没算出来；等它出现再点 CSV");
     return "";
   }
   const text = reportCSVText(comp, table);
   const name = String(DATA.meta.file || "i3pro").replace(/\.ld$/i, "")
-    + "-" + (comp.type === "report" ? "时间报告" : "通道报告") + ".csv";
+    + "-" + (specOf(comp) || { label: "报表" }).label + ".csv";
   try {
     const blob = new Blob(["\ufeff" + text], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -3859,7 +3927,7 @@ function syncReportSelectors(comp) {
   b.selLap.value = comp.config.lap || "";
   b.selLap.disabled = !bySection;
   b.selLap.title = bySection ? "按区段分组时统计哪一条圈" : "切成「按区段」再选圈";
-  if (b.selFilter && !bySection && comp.type === "chreport") {
+  if (b.selFilter && !bySection && specOf(comp).table === "channels") {
     b.selFilter.disabled = true;
     b.selFilter.title = "按圈分组时每一行就是一整条圈，没有区段类型可分；切成「按区段」再用过滤";
   }
@@ -4188,12 +4256,9 @@ async function ensureOverlay() {
   }
   try {
     const channels = (state.overlay && state.overlay.channels) || [];
-    const url = DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/overlay"
-      + "?ref=" + encodeURIComponent(state.ref) + "&cmp=" + encodeURIComponent(state.cmp)
-      + "&channels=" + encodeURIComponent(channels.join(","));
-    const res = await fetch(url);
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    state.overlay = await res.json();
+    state.overlay = await apiGet(apiUrl("/overlay", {
+      ref: state.ref, cmp: state.cmp, channels: channels.join(","),
+    }));
   } catch (err) {
     toast("对比圈加载失败: " + err.message);
   }
@@ -4885,7 +4950,7 @@ async function mathsCommit() {
   if (selectChannel(draft.name)) {
     buildWorksheet();
     renderChannelList();
-    refreshWindowTraces(true).then(() => { refreshPoints().then(renderAll); });
+    refreshWindowTraces(true).then(() => { refreshAllComponentData().then(renderAll); });
     renderAll();
   }
   if (out) out.textContent = "已保存到 " + (data.saved || "侧车文件");
@@ -5320,48 +5385,64 @@ function toggleChannel(name, on) {
   renderAll();
 }
 
-/** Fill each scatter component's X / Y / colour pickers from the sheet's channels.
+/** 工作表上所有组件的下拉填值（注册表 #20）。
  *
- * 直方图的四个下拉也在这里填（同一个时机：工作表刚建好、勾选的通道变了）——
- * 分开两个入口的话，总有一个调用点会漏掉，表现就是"新加的组件下拉是空的"。 */
-function syncScatterSelectors() {
-  const names = allGraphChannels();
+ * 每种显示形式自己声明 sync(comp, b, pool) —— pool.selected 是这一屏勾选的
+ * 通道，pool.all 是整场所有通道（直方图 / 频谱要按单位分组列全部）。
+ * 一个入口走完所有组件：分开几个入口的话，总有一个调用点会漏掉，
+ * 表现就是"新加的组件下拉是空的"。 */
+function syncComponentSelectors() {
+  const pool = {
+    selected: allGraphChannels(),
+    all: CHANNELS ? Array.from(CHANNELS.keys()) : [],
+  };
   for (const comp of state.components) {
+    const spec = specOf(comp);
+    if (!spec || !spec.sync) continue;
     const b = SHEET.get(comp.id);
-    if (comp.type === "gauge") {
-      if (!b || !b.selCh || !names.length) continue;
-      if (!comp.config.channels.length) {
-        const guess = gaugeDefaultChannel(comp.config.subtype);
-        if (guess) comp.config.channels = [guess];
-      }
-      if (comp.config.channels.length && names.indexOf(comp.config.channels[0]) < 0) {
-        comp.config.channels = [names[0]];
-      }
-      fillSelect(b.selCh, names, comp.config.channels[0], false);
-      b.selSub.value = comp.config.subtype;
-      continue;
-    }
-    if (comp.type !== "scatter") continue;
-    if (!b || !b.selX) continue;
-    if (!names.length) continue;
-    fillSelect(b.selX, names, comp.config.x, false);
-    fillSelect(b.selY, names, (comp.config.y || [])[0], false);
-    fillSelect(b.selC, names, comp.config.colour, true);
-    if (!comp.config.x || names.indexOf(comp.config.x) < 0) {
-      comp.config.x = names.find((n) => /G Force Lat/i.test(n))
-        || names.find((n) => /km\/h/.test((CHANNELS.get(n) || {}).unit || ""))
-        || names[0];
-    }
-    if (!comp.config.y.length || names.indexOf(comp.config.y[0]) < 0) {
-      comp.config.y = [names.find((n) => /G Force Long/i.test(n)) || names[1] || names[0]];
-    }
-    if (comp.config.colour && names.indexOf(comp.config.colour) < 0) comp.config.colour = null;
-    b.selX.value = comp.config.x;
-    b.selY.value = comp.config.y[0] || "";
-    b.selC.value = comp.config.colour || "";
+    if (b) spec.sync(comp, b, pool);
   }
-  syncHistogramSelectors();
-  syncSpectrumSelectors();
+}
+
+/* 老的三个名字留着：调用点与调试句柄都还在用，它们现在都指同一个入口。 */
+function syncScatterSelectors() { syncComponentSelectors(); }
+function syncHistogramSelectors() { syncComponentSelectors(); }
+function syncSpectrumSelectors() { syncComponentSelectors(); }
+
+/** 散点的 X / Y / 色三个下拉。 */
+function scatterSync(comp, b, pool) {
+  const names = pool.selected;
+  if (!b || !b.selX || !names.length) return;
+  fillSelect(b.selX, names, comp.config.x, false);
+  fillSelect(b.selY, names, (comp.config.y || [])[0], false);
+  fillSelect(b.selC, names, comp.config.colour, true);
+  if (!comp.config.x || names.indexOf(comp.config.x) < 0) {
+    comp.config.x = names.find((n) => /G Force Lat/i.test(n))
+      || names.find((n) => /km\/h/.test((CHANNELS.get(n) || {}).unit || ""))
+      || names[0];
+  }
+  if (!comp.config.y.length || names.indexOf(comp.config.y[0]) < 0) {
+    comp.config.y = [names.find((n) => /G Force Long/i.test(n)) || names[1] || names[0]];
+  }
+  if (comp.config.colour && names.indexOf(comp.config.colour) < 0) comp.config.colour = null;
+  b.selX.value = comp.config.x;
+  b.selY.value = comp.config.y[0] || "";
+  b.selC.value = comp.config.colour || "";
+}
+
+/** 仪表的子类型与通道两个下拉。 */
+function gaugeSync(comp, b, pool) {
+  const names = pool.selected;
+  if (!b || !b.selCh || !names.length) return;
+  if (!comp.config.channels.length) {
+    const guess = gaugeDefaultChannel(comp.config.subtype);
+    if (guess) comp.config.channels = [guess];
+  }
+  if (comp.config.channels.length && names.indexOf(comp.config.channels[0]) < 0) {
+    comp.config.channels = [names[0]];
+  }
+  fillSelect(b.selCh, names, comp.config.channels[0], false);
+  b.selSub.value = comp.config.subtype;
 }
 
 function fillSelect(select, names, value, allowNone) {
@@ -5524,7 +5605,7 @@ function attachInteractions() {
     if (dragPan) {
       dragPan = null;
       refreshWindowTraces();
-      refreshPoints().then(renderAll);
+      refreshAllComponentData().then(renderAll);
     }
   });
 
@@ -5879,7 +5960,7 @@ function applyPreset(name) {
   renderPresetButtons();
   renderChannelList();
   syncScatterSelectors();
-  refreshWindowTraces(true).then(() => { refreshPoints().then(renderAll); });
+  refreshWindowTraces(true).then(() => { refreshAllComponentData().then(renderAll); });
   renderAll();
 }
 
@@ -5892,10 +5973,9 @@ function renderAddTypeOptions() {
 
 function addComponentOfType(type) {
   const comp = makeComponent(type);
-  if (type === "graph") comp.config.channels = (DATA.selected || []).slice();
-  if (type === "chreport" && !comp.config.channels.length) {
-    comp.config.channels = defaultReportChannels(3);
-  }
+  const spec = specOf(comp);
+  // "刚加进来时先看什么"也归这一类自己声明（注册表 #20）。
+  if (spec && spec.onAdd) spec.onAdd(comp);
   state.components.push(comp);
   state.focusId = comp.id;
   state.preset = "自定义";
@@ -5905,7 +5985,7 @@ function addComponentOfType(type) {
   renderPresetButtons();
   renderChannelList();
   syncScatterSelectors();
-  refreshWindowTraces(true).then(() => { refreshPoints().then(renderAll); });
+  refreshWindowTraces(true).then(() => { refreshAllComponentData().then(renderAll); });
   renderAll();
 }
 
@@ -6139,7 +6219,7 @@ function init() {
   $("shareBtn").addEventListener("click", shareURL);
 
   renderAll();
-  refreshWindowTraces(true).then(() => { refreshPoints().then(renderAll); });
+  refreshWindowTraces(true).then(() => { refreshAllComponentData().then(renderAll); });
 }
 init();
 // Debugging handle: poke at the workbench from the browser console, e.g.
@@ -6156,10 +6236,13 @@ window.i3pro = {
   componentTypeWithHotkey: componentTypeWithHotkey,
   encodeComponentConfig: encodeComponentConfig,
   buildWorksheet: buildWorksheet, syncScatterSelectors: syncScatterSelectors,
-  histogramKey: histogramKey, refreshHistogramFor: refreshHistogramFor,
+  apiUrl: apiUrl, apiGet: apiGet,
+  refreshComponentData: refreshComponentData,
+  refreshAllComponentData: refreshAllComponentData,
+  histogramKey: histogramKey,
   mergeCounts: mergeCounts, snapshotHistogramFor: snapshotHistogramFor,
   syncHistogramSelectors: syncHistogramSelectors, componentTitle: componentTitle,
-  spectrumKey: spectrumKey, refreshSpectrumFor: refreshSpectrumFor,
+  spectrumKey: spectrumKey,
   snapshotSpectrumFor: snapshotSpectrumFor, spectrumY: spectrumY,
   syncSpectrumSelectors: syncSpectrumSelectors,
   adoptComponentIds: adoptComponentIds, sheetSize: () => SHEET.size,
@@ -6195,7 +6278,7 @@ window.i3pro = {
   zoomToSection: zoomToSection, onSectionRowDoubleClick: onSectionRowDoubleClick,
   sectionRowIndexOf: sectionRowIndexOf,
   sectionStripAt: sectionStripAt, SECTION_STRIP_PX: SECTION_STRIP_PX,
-  refreshReport: refreshReport, reportFetchKey: reportFetchKey,
+  reportFetchKey: reportFetchKey,
   reportRowsOf: reportRowsOf, reportCSVText: reportCSVText,
   exportReportCSV: exportReportCSV, syncReportSelectors: syncReportSelectors,
   snapshotReportTable: snapshotReportTable, bandForRatio: bandForRatio,

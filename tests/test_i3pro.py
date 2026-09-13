@@ -1573,32 +1573,76 @@ class TestViewerScript(unittest.TestCase):
 
 
 class TestComponentRegistry(unittest.TestCase):
-    """ticket #17：每种显示形式只在注册表里声明一次。
+    """ticket #17 / #19 / #20：每种显示形式只在注册表里声明一次。
 
     守的是"再加一种显示形式要改几处"这件事本身——前端唯一会被反复加东西的
-    地方就是它。已经迁进注册表的类型，代码里不该再有 `type === "..."` 那种
-    分派；还没迁完的（#19 图表类 / #20 表格与仪表类）不在此列。
+    地方就是它。迁移分三批走完（#17 骨架 → #19 图表类 → #20 表格与仪表类），
+    现在每一种显示形式都在那张表里；代码里剩下的 `type === "graph"` 只有
+    "哪个组件是图"这一类语义判断（侧边栏编辑谁、键盘作用在谁身上），不是
+    显示形式的分派，所以它们留着，条数也钉住。
 
-    这里只扫源码，跑不了注册表本身；注册表"真的管用"由无头驱动的第 32 组断言
-    （`tools/smoke_viewer.js`）负责——它会新加一个只声明过的形式并走完
-    添加下拉 → 标题 → 默认配置 → 渲染 → 分享链接往返。
+    这里只扫源码，跑不了注册表本身；注册表"真的管用"由无头驱动的第 32 / 33 组
+    断言（`tools/smoke_viewer.js`）负责——它会新加一个只声明过的形式并走完
+    添加下拉 → 标题 → 默认配置 → 渲染 → 分享链接往返，也会核对五类图表形式
+    的声明与"取数只剩一条路"。
     """
 
     VIEWER = ROOT / "src" / "i3pro" / "web" / "viewer.html"
     DRIVER = ROOT / "tools" / "smoke_viewer.js"
 
-    #: 迁移完成的类型：它们的形状只该由注册表声明说了算。
-    MIGRATED = ("delta", "status", "track")
+    #: 注册表里声明过的全部显示形式（= 添加下拉里能看到的那几个 + 已声明的）。
+    DECLARED = ("graph", "scatter", "histogram", "spectrum", "track", "gauge",
+                "delta", "status", "report", "chreport")
+
+    #: 需要服务端数据的显示形式：它们的声明里必须说清"这一屏问的问题"。
+    NEEDS_DATA = ("scatter", "histogram", "spectrum", "track", "report", "chreport")
+
+    #: 迁移之后还剩几处 `type === "..."`。实测值：9 处"哪个组件是图"
+    #: （`channelColor` / `focusedComponent` / 键盘与侧边栏作用在谁身上），
+    #: 1 处"哪一列是文字列"（报表排版，`column.type === "text"`）。
+    #: 变多了说明新的显示形式又在自己判类型——那要么改成声明，要么在这里
+    #: 写清为什么它算语义判断。
+    TYPE_DISPATCH = 10
+
+    def test_每种显示形式都在注册表里有声明(self):
+        source = self.VIEWER.read_text(encoding="utf-8")
+        for name in self.DECLARED:
+            self.assertRegex(
+                source, rf"\n  {name}: \{{",
+                f"注册表里没有 {name} 的声明块——「有哪些显示形式」必须只有表一个答案",
+            )
+
+    def test_类型分派只剩哪个组件是图(self):
+        source = self.VIEWER.read_text(encoding="utf-8")
+        # 注释里提到 `type === "..."` 的写法不算分派。
+        code = "\n".join(
+            line for line in source.splitlines()
+            if not line.lstrip().startswith(("*", "//"))
+        )
+        hits = re.findall(r'\.type [!=]== "([^"]+)"', code)
+        self.assertEqual(
+            len(hits), self.TYPE_DISPATCH,
+            f"工作表里还剩 {len(hits)} 处按类型分派（实测是 {self.TYPE_DISPATCH}）："
+            "新的显示形式要么把这件事交给声明（defaults / needs / controls / hooks / "
+            "sync / encode / decode / render / data），要么把这条数字与理由一起改。",
+        )
+        self.assertEqual(
+            sorted(set(hits)), ["graph", "text"],
+            f"剩下的分派只该是「哪个组件是图」与「哪一列是文字列」这两类语义判断，"
+            f"实际还有：{sorted(set(hits))}",
+        )
 
     def test_已迁移的类型不再留类型分派分支(self):
         source = self.VIEWER.read_text(encoding="utf-8")
-        for name in self.MIGRATED:
+        for name in self.DECLARED:
+            if name == "graph":
+                continue        # 见 test_类型分派只剩哪个组件是图：这是语义判断
             for pattern in (f'type === "{name}"', f"type !== \"{name}\"",
                             f"type === '{name}'"):
                 self.assertNotIn(
                     pattern, source,
                     f"{name} 既然已经迁进注册表，就不该再有 {pattern} 这种分派；"
-                    "要么把漏掉的那处也交给声明，要么把状态改回未迁移。",
+                    "把漏掉的那处也交给声明（那条路该怎么走，看表里它自己声明了什么）。",
                 )
 
     def _spec_block(self, name):
@@ -1608,12 +1652,12 @@ class TestComponentRegistry(unittest.TestCase):
         self.assertIsNotNone(match, f"注册表里没有 {name} 的声明块")
         return match.group(1)
 
-    def test_三类形式各自声明了怎么画与怎么取数(self):
+    def test_每种显示形式都声明了怎么画与怎么取数(self):
         """钉的是**结构**，不是字段清单。
 
-        #19 / #20 / #21 要把 `refreshWindow` 这类字段收成统一的 `data`——那是
-        注册表自己的演进，不该让这条守卫变红。所以这里只要求：三类形式都声明了
-        `render`，而且"怎么取数"在它自己的声明块里说了（`needs` 或 `data` 都算）。
+        每一种形式都要说自己怎么画（`render`）；要服务端数据的那几种还要说清
+        "这一屏问的问题"（`data`，写 `data:` 或延迟取的 `get data()` 都算）。
+        字段叫什么是注册表自己的演进，不该让这条守卫变红。
         """
         for name, render_fn in (("delta", "renderDeltaComponent"),
                                 ("status", "renderStatusComponent"),
@@ -1622,16 +1666,36 @@ class TestComponentRegistry(unittest.TestCase):
             self.assertIn("render:", block, f"{name} 的声明里没有 render")
             self.assertIn(render_fn, block, f"{name} 的 render 该是 {render_fn}")
 
+        for name in self.DECLARED:
+            block = self._spec_block(name)
+            self.assertIn("render:", block, f"{name} 的声明里没有 render")
+            if name in self.NEEDS_DATA:
+                self.assertTrue(
+                    "data:" in block or "get data()" in block,
+                    f"{name} 要服务端的数据，却没说清自己怎么取（data 或 get data()）",
+                )
+
         status = self._spec_block("status")
         self.assertTrue("needs:" in status or "data:" in status,
                         "状态组件的取数该由它自己的声明说了算（needs 或 data）")
         self.assertIn("hotkey", status, "状态组件占着 E 键，这也得它自己声明")
 
         track = self._spec_block("track")
-        self.assertTrue("data:" in track or "refreshWindow:" in track,
-                        "轨迹要声明自己怎么取数（data 或 refreshWindow）")
+        self.assertTrue("data:" in track or "get data()" in track,
+                        "轨迹要声明自己怎么取数（data）")
         for field in ("defaults:", "controls:", "hooks:", "encode:", "decode:"):
             self.assertIn(field, track, f"轨迹的声明里少了 {field}")
+
+    def test_取数只有一条路(self):
+        """ticket #21：组件取数都得经 apiUrl / apiGet，脚本里不许自己拼自己发。"""
+        source = self.VIEWER.read_text(encoding="utf-8")
+        self.assertIn("function apiUrl(", source, "没有 apiUrl：地址就没有唯一出处")
+        self.assertIn("function apiGet(", source, "没有 apiGet：请求与出错就没有唯一出处")
+        for endpoint in ("points", "histogram", "spectrum", "track", "report", "trace"):
+            self.assertNotRegex(
+                source, rf'fetch\([^\n]*"/{endpoint}"',
+                f"{endpoint} 还在自己发请求：它该走 apiGet(apiUrl(...))（ticket #21）",
+            )
 
     def test_自检用的形式只在无头驱动里注册(self):
         """队员的浏览器里不许出现「只有标题（自检）」这种东西。"""

@@ -1616,9 +1616,9 @@ if (api) {
     const savedApi = api.data.api;
     api.data.api = "/api";
     const chBundle = api.bundleOf(chComp);
-    chBundle.reportKey = "";
+    chBundle.dataKey = "";
     const beforeReport = httpCalls.length;
-    api.refreshReport(chComp).then(() => {}, () => {});
+    api.refreshComponentData(chComp, true).then(() => {}, () => {});
     const reportCalls = httpCalls.slice(beforeReport)
       .filter((call) => call.url.indexOf("/report") >= 0);
     check(reportCalls.length === 1,
@@ -1801,9 +1801,9 @@ if (embeddedHist && embeddedHist.series) {
     histComp.config.gate = "Vx KF";
     histComp.config.colour = "G Force Lat";
     histComp.config.window = "zoom";
-    api.bundleOf(histComp).histKey = "";
+    api.bundleOf(histComp).dataKey = "";
     const beforeHist = httpCalls.length;
-    api.refreshHistogramFor(histComp).then(() => {}, () => {});
+    api.refreshComponentData(histComp, true).then(() => {}, () => {});
     const histCalls = httpCalls.slice(beforeHist)
       .filter((call) => call.url.indexOf("/histogram") >= 0);
     check(histCalls.length === 1,
@@ -1952,9 +1952,9 @@ if (embeddedSpec && embeddedSpec.series) {
     specComp.config.against = null;
     // 纵轴只是显示方式，服务端一律回功率谱密度——请求里必须是 scale=psd
     specComp.config.scale = "amplitude";
-    api.bundleOf(specComp).specKey = "";
+    api.bundleOf(specComp).dataKey = "";
     const beforeSpec = httpCalls.length;
-    api.refreshSpectrumFor(specComp).then(() => {}, () => {});
+    api.refreshComponentData(specComp, true).then(() => {}, () => {});
     const specCalls = httpCalls.slice(beforeSpec)
       .filter((call) => call.url.indexOf("/spectrum") >= 0);
     check(specCalls.length === 1,
@@ -2347,8 +2347,157 @@ if (embeddedSpec && embeddedSpec.series) {
       ["没这个类型", 0, 0, 4, 13, ""], ["delta", 0, 0, 12, 8, ""],
     ])).toString("base64");
     const kept = api.decodeLayout(mixed);
-    check(!!kept && kept.length === 1 && kept[0].type === "delta",
-      "分享链接里没声明过的类型该被丢掉，而不是整条链接解不出来");
+      check(!!kept && kept.length === 1 && kept[0].type === "delta",
+        "分享链接里没声明过的类型该被丢掉，而不是整条链接解不出来");
+  }
+
+  // 33. 图表类迁进注册表（#19）+ 取数收成一条路径（#21）+ 表格与仪表类收口（#20）。
+  //     要证明三件事：五类图表形式的声明是完整的；两张同类同屏不会互相顶掉；
+  //     脚本里没有第二条取数的路。
+  check(!!(api.apiUrl && api.apiGet && api.refreshComponentData && api.componentTypes),
+    "调试句柄没有导出取数入口（#21）");
+  if (api.componentTypes && api.apiUrl) {
+    const types2 = api.componentTypes;
+    const charts = ["graph", "scatter", "histogram", "spectrum", "track"];
+
+    // 收口：每一种显示形式都得声明 label 与 render —— 表是「有哪些显示形式」
+    // 的唯答案；表格类还必须声明 table（服务端就是按它分两套列的）。
+    for (const t of Object.keys(types2)) {
+      const spec = types2[t];
+      check(typeof spec.label === "string" && spec.label.length > 0
+        && typeof spec.render === "function",
+        t + " 的声明缺 label 或 render（工作表就认不出它）");
+      if (spec.tabular) {
+        check(spec.table === "time" || spec.table === "channels",
+          t + " 是表格却没声明 table");
+      }
+    }
+    // 五类图表形式：各自那几件事都要在表里（不再散在 buildWorksheet / render 里）。
+    for (const t of charts) {
+      const spec = types2[t];
+      check(!!(spec && spec.defaults && spec.encode && spec.decode && spec.render),
+        "图表类 " + t + " 的声明不完整（默认配置 / 分享链接 / 画）");
+    }
+    for (const t of ["scatter", "histogram", "spectrum", "track"]) {
+      const d = types2[t] && types2[t].data;
+      check(!!(d && d.key && d.load && d.error),
+        t + " 没声明取数（键 / 去哪里要 / 出错说什么）");
+    }
+    check(!!(types2.scatter.controls && types2.histogram.controls
+      && types2.spectrum.controls && types2.gauge.controls
+      && types2.report.controls && types2.chreport.controls),
+      "控件条还有没迁进注册表的类型");
+    check(!!(types2.scatter.sync && types2.histogram.sync
+      && types2.spectrum.sync && types2.gauge.sync),
+      "下拉填值还有没迁进注册表的类型");
+    check(!!(types2.graph.sidebar && types2.chreport.sidebar),
+      "侧边栏通道清单的归属没有声明");
+
+    // 取数只有一条路：地址由 apiUrl 拼、请求由 apiGet 发。
+    const urlApiSaved = api.data.api;
+    api.data.api = "/api";                     // 拼地址要处在 serve 模式才有前缀
+    const pointsUrl = api.apiUrl("/points", { channels: "a,b", from: 1.5, to: 2, max: 20000 });
+    check(pointsUrl === "/api/session/" + encodeURIComponent(api.data.session)
+        + "/points?channels=a%2Cb&from=1.5&to=2&max=20000",
+      "apiUrl 拼出来的地址不对: " + pointsUrl);
+    const thinUrl = api.apiUrl("/points", { channels: "a", from: undefined, to: null, max: "" });
+    check(thinUrl.indexOf("?channels=a") >= 0 && thinUrl.indexOf("from=") < 0
+      && thinUrl.indexOf("max=") < 0,
+      "apiUrl 把空参数也写进地址了: " + thinUrl);
+    api.data.api = urlApiSaved;
+    // 六个组件数据端点谁都不许自己发请求（脚本里搜得到就是绕过了这条路）。
+    const stray = script.split("\n").filter(
+      (line) => /fetch\([^\n]*"(points|histogram|spectrum|track|report|trace)"/.test(line));
+    check(stray.length === 0,
+      "还有组件取数绕过了 apiGet（#21）:\n    " + stray.join("\n    "));
+    // 工作表里的类型分派：收口之后只剩「哪个组件是图」（9 处）与「哪一列是
+    // 文字列」（1 处，报表排版）这两类语义判断，合计实测 10 处。
+    const dispatch = (script.match(/\.type === "/g) || []).length
+      + (script.match(/\.type !== "/g) || []).length;
+    check(dispatch <= 10,
+      "工作表里还有 " + dispatch + " 处按类型分派（#20 收口前是 80 处）："
+      + "新的分派要么改成声明，要么把这条门限与理由一起写进验收条目");
+
+    // 五类图表形式的配置要经得起分享链接往返（#19 验收条目之一）。
+    const chartProbes = [
+      { id: "p1", type: "graph", x: 0, y: 0, w: 12, h: 8,
+        config: { channels: ["Vx KF", "GPS Speed"], mode: "overlapped" } },
+      { id: "p2", type: "scatter", x: 0, y: 8, w: 4, h: 13,
+        config: { x: "Vx KF", y: ["G Force Lat"], colour: "TH", style: "trend" } },
+      { id: "p3", type: "histogram", x: 4, y: 8, w: 6, h: 13,
+        config: { channel: "Vx KF", bins: 77, style: "line", colour: "TH",
+                  gate: "Vx KF", window: "all" } },
+      { id: "p4", type: "spectrum", x: 0, y: 21, w: 6, h: 13,
+        config: { channel: "Susp Pos FL", against: "Susp Pos FR", points: 2048,
+                  win: "blackman", overlap: 0.6, smooth: 3, scale: "psd",
+                  axis: "linear", span: "all" } },
+      { id: "p5", type: "track", x: 6, y: 21, w: 4, h: 13,
+        config: { channel: "GPS Speed", window: "zoom" } },
+    ];
+    const chartBack = api.decodeLayout(api.encodeLayout(chartProbes));
+    check(!!chartBack && chartBack.length === 5, "五类图表形式的分享链接往返丢了组件");
+    if (chartBack && chartBack.length === 5) {
+      check(chartBack.map((c) => c.type).join(",") === "graph,scatter,histogram,spectrum,track",
+        "五类图表形式的分享链接往返换了类型或次序");
+      check(chartBack[0].config.channels.join("|") === "Vx KF|GPS Speed"
+        && chartBack[0].config.mode === "overlapped", "图的往返没保住通道或分栏方式");
+      check(chartBack[1].config.x === "Vx KF" && chartBack[1].config.y.join("|") === "G Force Lat"
+        && chartBack[1].config.colour === "TH" && chartBack[1].config.style === "trend",
+        "散点的往返没保住 X / Y / 色 / 画法");
+      check(chartBack[2].config.bins === 77 && chartBack[2].config.style === "line"
+        && chartBack[2].config.colour === "TH" && chartBack[2].config.gate === "Vx KF"
+        && chartBack[2].config.window === "all",
+        "直方图的往返没保住格数 / 画法 / 色 / 门槛 / 窗口");
+      check(chartBack[3].config.points === 2048 && chartBack[3].config.win === "blackman"
+        && chartBack[3].config.overlap === 0.6 && chartBack[3].config.smooth === 3
+        && chartBack[3].config.axis === "linear" && chartBack[3].config.span === "all"
+        && chartBack[3].config.against === "Susp Pos FR",
+        "频谱的往返没保住点数 / 窗 / 重叠 / 平滑 / 纵轴 / 窗口 / 对比通道");
+      check(chartBack[4].config.channel === "GPS Speed" && chartBack[4].config.window === "zoom",
+        "轨迹的往返没保住通道或窗口");
+    }
+
+    // 两张散点同屏：各拿自己那一份数据（#21 的核心 —— 原来它们挤在
+    // 全表共用的 state.points 里，谁后问谁把对方顶掉）。
+    const sheetState = api.state;
+    const savedApiForScatter = api.data.api;
+    api.data.api = null;                       // 快照模式：不问服务端，直接塞数据
+    api.addComponentOfType("scatter");
+    api.addComponentOfType("scatter");
+    const scats = sheetState.components.filter((c) => c.type === "scatter").slice(-2);
+    const [scatA, scatB] = scats;
+    if (scatA && scatB) {
+      scatA.config.x = "甲X"; scatA.config.y = ["甲Y"];
+      scatB.config.x = "乙X"; scatB.config.y = ["乙Y"];
+      const dataA = { time: [0, 1, 2], values: { "甲X": [0, 1, 2], "甲Y": [0, 1, 2] } };
+      const dataB = { time: [0, 1, 2, 3, 4], values: { "乙X": [0, 1, 2, 3, 4], "乙Y": [0, 1, 2, 3, 4] } };
+      for (const [comp, payload] of [[scatA, dataA], [scatB, dataB]]) {
+        const b = api.bundleOf(comp);
+        b.data = payload;
+        b.dataKey = api.componentSpec(comp).data.key(comp);   // 键吻合 → 重画时不再去要
+        b.cacheKey = "";
+      }
+      api.renderAll();
+      check(api.bundleOf(scatA).data === dataA && api.bundleOf(scatB).data === dataB,
+        "两张散点共用了一个数据槽（互相顶掉的旧毛病）");
+      check(String(api.bundleOf(scatA).head.textContent).indexOf("3 点") === 0,
+        "第一张散点画的不是自己那份数据: " + api.bundleOf(scatA).head.textContent);
+      check(String(api.bundleOf(scatB).head.textContent).indexOf("5 点") === 0,
+        "第二张散点画的不是自己那份数据: " + api.bundleOf(scatB).head.textContent);
+      check(api.componentSpec(scatA).data.key(scatA) !== api.componentSpec(scatB).data.key(scatB),
+        "两张散点的缓存键一样：换一张的配置会顶掉另一张");
+      const ids = [scatA.id, scatB.id];
+      sheetState.components = sheetState.components.filter(
+        (c) => ids.indexOf(c.id) < 0);
+      api.buildWorksheet();
+      check(ids.every((id) => {
+        const gone = { id: id };
+        return api.bundleOf(gone) === undefined;
+      }), "删掉散点之后它的数据槽还留着（缓存残留）");
+    } else {
+      check(false, "加不出两张散点组件");
+    }
+    api.data.api = savedApiForScatter;
   }
 
 /* --------------------------------------------------------------- DOM checks */

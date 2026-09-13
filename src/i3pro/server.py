@@ -33,6 +33,7 @@ from . import (
     histogram as histogrammod,
     importer,
     laps as lapsmod,
+    spectrum as spectrummod,
     maths,
     render,
     report as reportmod,
@@ -461,6 +462,38 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                             gate_lo=_float_arg(query, "gate_min"),
                             gate_hi=_float_arg(query, "gate_max"),
                             colour=colour,
+                        )
+                    )
+                except ValueError as exc:
+                    return self._error(400, str(exc))
+
+            if action == "spectrum":
+                # 一条通道在当前窗口里的频谱（ticket #10）。按通道自己的采样率算，
+                # 不是主时间基——慢通道被"保持"拉长会有假高频。
+                channel = (query.get("channel") or [None])[0]
+                if not channel:
+                    return self._error(
+                        400, "spectrum 需要 ?channel= 参数（要分析哪条通道）"
+                    )
+                if not log.has(channel):
+                    return self._error(
+                        400,
+                        f"本场次没有 {channel!r} 这条通道。先在左侧「通道」里搜一下名字，"
+                        f"或者把 ?channel= 换成 /api/session/<名>/info 里列出的通道名。",
+                    )
+                try:
+                    return self._json(
+                        render.spectrum(
+                            log,
+                            channel,
+                            start=_float_arg(query, "from"),
+                            end=_float_arg(query, "to"),
+                            points=_int_arg(query, "points", spectrummod.DEFAULT_POINTS),
+                            window=(query.get("window") or [spectrummod.DEFAULT_WINDOW])[0],
+                            overlap=_float_arg(query, "overlap") if query.get("overlap")
+                            else spectrummod.DEFAULT_OVERLAP,
+                            smooth=_int_arg(query, "smooth", 1),
+                            scale=(query.get("scale") or [spectrummod.DEFAULT_SCALE])[0],
                         )
                     )
                 except ValueError as exc:

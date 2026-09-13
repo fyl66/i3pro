@@ -719,6 +719,117 @@ class Checker:
         self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-histogram-colour.png"),
                           self.session)
 
+    def spectrum(self):
+        """#10：频谱——加得出来、真画出曲线、换参数/缩放会重问、纵轴只是显示。
+
+        这里验的是假 DOM 证明不了的：新组件在真浏览器里**真的画出了曲线**（读回画布
+        像素）、原生下拉的键盘操作**真的发出去了**（看 __fetchLog）、以及"换纵轴不该
+        重新问服务端"（那只是同一份功率谱换个写法）。
+        """
+        def comp_json():
+            raw = self.js(
+                "(function(){var a=i3pro.state.components.filter(function(c){"
+                "return c.type==='spectrum';});var c=a[a.length-1];"
+                "return c?JSON.stringify({id:c.id,channel:c.config.channel,"
+                "points:c.config.points,win:c.config.win}):'null';})()"
+            )
+            return json.loads(raw) if raw and raw != "null" else None
+
+        def spec_calls():
+            raw = self.js("JSON.stringify(window.__fetchLog.filter(function(e){"
+                          "return e.url.indexOf('/spectrum')>=0;}))")
+            return json.loads(raw) if raw else []
+
+        def wait_for_spec(seen, needle, timeout=5.0):
+            """有界轮询：等第 seen 条之后出现一条含 needle 的 /spectrum 请求。"""
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                calls = spec_calls()
+                for call in calls[seen:]:
+                    if needle in call["url"]:
+                        return calls
+                time.sleep(0.2)
+            return spec_calls()
+
+        before = self.js("i3pro.state.components.length")
+        self.js("(function(){document.getElementById('addType').value='spectrum';"
+                "return true;})()")
+        add = json.loads(self.js("JSON.stringify(__rectOf('addBtn'))"))
+        self.browser.click(add["x"], add["y"], self.session)
+        self.browser.wait_for("i3pro.state.components.length === %d" % (before + 1),
+                              self.session, timeout=10)
+        time.sleep(1.2)
+        comp = comp_json()
+        self.check("#10 真点「＋ 组件」-> 工作表里多了一个频谱，并且自己挑好了一条通道",
+                   bool(comp) and bool(comp["channel"]),
+                   json.dumps(comp, ensure_ascii=False) if comp else "没有频谱组件")
+        if not comp:
+            return
+
+        painted = self.js(
+            "(function(){var cv=document.querySelector('.comp[data-id=\"%s\"] canvas');"
+            "if(!cv)return -1;var d=cv.getContext('2d').getImageData(0,0,cv.width,cv.height).data;"
+            "var n=0;for(var i=3;i<d.length;i+=4){if(d[i]>0)n++;}return n;})()" % comp["id"]
+        )
+        self.check("#10 频谱画布上真的有曲线（不是一张白纸）",
+                   isinstance(painted, (int, float)) and painted > 500,
+                   "%s 个像素" % painted)
+        self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-spectrum.png"),
+                          self.session)
+
+        # 换窗函数：原生下拉 + 真键盘（ArrowDown 就会派发 change）
+        win_box = self.js(
+            "(function(){var el=document.querySelector('.comp[data-id=\"%s\"]"
+            " select[data-spec=\"win\"]');if(!el)return 'null';el.focus();return 'ok';})()"
+            % comp["id"]
+        )
+        if win_box == "ok":
+            seen = len(spec_calls())
+            self.browser.key_named("ArrowDown", "ArrowDown", 40, self.session)
+            calls = wait_for_spec(seen, "window=")
+            new_comp = comp_json() or {}
+            fresh = calls[seen:] if len(calls) > seen else []
+            self.check("#10 真键盘换窗函数 -> 用新窗重新问了服务端",
+                       bool(fresh) and any("window=" in c["url"] for c in fresh)
+                       and new_comp.get("win") != comp["win"],
+                       "请求=%s；配置 %s -> %s" % (
+                           fresh[-1]["url"].split("?")[-1] if fresh else "(没有请求)",
+                           comp["win"], new_comp.get("win")))
+        else:
+            self.check("#10 真键盘换窗函数 -> 用新窗重新问了服务端", False, "没有窗函数下拉")
+
+        # 缩放：真双击图 -> 频谱必须跟着重问一次，而且请求里带着新窗口
+        seen = len(spec_calls())
+        x = self.js("__px((i3pro.lane()[0]+i3pro.lane()[1])/2)")
+        y = self.js("__py(60)")
+        before_view = self.view()
+        self.browser.double_click(x, y, self.session)
+        time.sleep(1.0)
+        calls = spec_calls()
+        view = self.view()
+        self.check("#10 真双击放大 -> 频谱跟着换了窗口（重新问了一次）",
+                   len(calls) > seen and (view[1] - view[0]) < (before_view[1] - before_view[0]),
+                   "view %.1f-%.1f -> %.1f-%.1f，请求 %d 次"
+                   % (before_view[0], before_view[1], view[0], view[1], len(calls) - seen))
+
+        # 纵轴只是显示：切 dB / 线性不该再问一次服务端（服务端一律回功率谱密度）
+        axis_box = self.js(
+            "(function(){var el=document.querySelector('.comp[data-id=\"%s\"]"
+            " select[data-spec=\"axis\"]');if(!el)return 'null';el.focus();return 'ok';})()"
+            % comp["id"]
+        )
+        if axis_box == "ok":
+            seen = len(spec_calls())
+            self.browser.key_named("ArrowDown", "ArrowDown", 40, self.session)
+            time.sleep(1.2)
+            calls = spec_calls()
+            self.check("#10 切纵轴（dB/线性）不该重新问服务端：那是同一份功率谱的写法",
+                       len(calls) == seen,
+                       "又多发了 %d 个 /spectrum 请求" % (len(calls) - seen))
+        else:
+            self.check("#10 切纵轴（dB/线性）不该重新问服务端：那是同一份功率谱的写法",
+                       False, "没有纵轴下拉")
+
     def rename(self, sidecar):
         """#4 / #6：就地改名（回车存、Esc 撤）+ 撤销。
 
@@ -837,8 +948,12 @@ def main(argv=None):
     server = start_server(work_dir, args.port)
     browser = None
     try:
+        # 验收从**干净的浏览器状态**开始：上一次跑留下的工作表存在 localStorage 里
+        # （开着几个组件、什么通道），不清掉的话这一跑就不是在验同一件事。
+        profile = os.path.join(ROOT, "out", "_edge_profile_%d" % args.cdp_port)
+        shutil.rmtree(profile, ignore_errors=True)
         browser = Browser(
-            edge, args.cdp_port, os.path.join(ROOT, "out", "_edge_profile_%d" % args.cdp_port)
+            edge, args.cdp_port, profile
         )
         url = "http://127.0.0.1:%d/session/%s" % (args.port, urllib.parse.quote(args.session))
         session = browser.open(url, wait=1.0)

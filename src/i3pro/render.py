@@ -23,6 +23,7 @@ import numpy as np
 from . import derive, histogram as histogrammod, laps as lapsmod
 from . import report as reportmod, sections as sectionsmod
 from . import ld as ldmod
+from . import spectrum as spectrummod
 
 __all__ = [
     "render_html",
@@ -34,6 +35,7 @@ __all__ = [
     "trace",
     "points",
     "histogram",
+    "spectrum",
     "groups",
     "pick_channels",
     "track_payload",
@@ -41,6 +43,7 @@ __all__ = [
     "report_payload",
     "snapshot_report",
     "snapshot_histograms",
+    "snapshot_spectra",
 ]
 
 TEMPLATE = Path(__file__).with_name("web") / "viewer.html"
@@ -346,6 +349,106 @@ def snapshot_histograms(
         "windows": windows,     # 一份，索引用；数据在 series 里按窗口 key 存
         "series": series,
         "notice": None if series else "本场没有可统计的通道",
+    }
+
+
+def spectrum(
+    log: ldmod.LogFile,
+    name: str,
+    start: float | None = None,
+    end: float | None = None,
+    points: int = spectrummod.DEFAULT_POINTS,
+    window: str = spectrummod.DEFAULT_WINDOW,
+    overlap: float = spectrummod.DEFAULT_OVERLAP,
+    smooth: int = 1,
+    scale: str = spectrummod.DEFAULT_SCALE,
+    detrend: bool = True,
+) -> dict:
+    """一条通道在 ``[start, end)`` 上的频谱（Welch 平均周期图，ticket #10）。
+
+    **按通道自己的采样率算**：慢通道在主时间基上是被"保持"拉长的，那种台阶的频谱
+    会凭空多出一堆高频。窗口时间也是按该通道自己的时间基切的——两边都是从 0 起算，
+    所以"第几秒"是同一个意思。
+    """
+    if not log.has(name):
+        raise ValueError(
+            f"本场次没有通道 {name!r}。先在左侧「通道」里搜一下名字——"
+            f"名字里含空格 / 括号 / 短横线的，在表达式里要用单引号括起来。"
+        )
+    channel = log.channel(name)
+    derived = ldmod.is_derived_channel(log, channel)
+    # 派生列（数学通道）在主时间基上，原生通道用自己那一档。
+    fs = float(log.sample_rate if derived else channel.sample_rate)
+    values = np.asarray(log.values(channel), dtype=np.float64)
+    lo = 0 if start is None else max(0, int(round(float(start) * fs)))
+    hi = values.size if end is None else min(values.size, int(round(float(end) * fs)))
+    if hi <= lo:
+        return {
+            "channel": name,
+            "unit": channel.unit,
+            "frequencies": [], "power": [],
+            "points": 0, "sample_rate": fs, "nyquist": fs / 2.0,
+            "resolution": None, "segments": 0, "samples": 0,
+            "window": window, "overlap": overlap, "smooth": smooth, "scale": scale,
+            "window_range": [start, end],
+            "peak_frequency": None, "peak_value": None,
+            "notice": "这个区间里没有样本——时间轴的起止是不是选反了？",
+            "derived": derived,
+        }
+    payload = spectrummod.welch(
+        values[lo:hi], fs, points=points, window=window, overlap=overlap,
+        smooth=smooth, scale=scale, detrend=detrend,
+    )
+    payload["frequencies"] = [float(v) for v in payload["frequencies"]]
+    payload["power"] = [float(v) for v in payload["power"]]
+    payload["channel"] = name
+    payload["unit"] = channel.unit
+    payload["derived"] = derived
+    payload["window_range"] = [round(lo / fs, 4), round(max(lo, hi - 1) / fs, 4)]
+    if name.endswith(" Temp") and payload["peak_frequency"] and payload["peak_frequency"] < 0.05:
+        # 温度这类慢通道的谱大部分是漂移，不说一句用户会以为"悬架很软"。
+        payload["notice"] = ((payload["notice"] or "")
+                             + " 这条通道变化很慢，谱里的能量基本是漂移而不是振动——"
+                               "看悬架请选 G Force / 位移 / 加速度那类通道。").strip()
+    return payload
+
+
+def snapshot_spectra(
+    log: ldmod.LogFile,
+    channels: list[str],
+    points: int = spectrummod.DEFAULT_POINTS,
+    window: str = spectrummod.DEFAULT_WINDOW,
+    overlap: float = spectrummod.DEFAULT_OVERLAP,
+) -> dict:
+    """快照里内嵌的那几份频谱：整场，每条被勾选的通道一份（ticket #10）。
+
+    只嵌**整场**、只嵌**默认参数**：频谱的每个参数组合都是一整条曲线，按圈再各带一份
+    会让快照大到发不出去。要按区段或按参数现算，用 serve 模式。
+    """
+    series: dict[str, dict] = {}
+    for name in channels:
+        if not name or not log.has(name):
+            continue
+        try:
+            payload = spectrum(log, name, points=points, window=window, overlap=overlap)
+        except ValueError:
+            continue
+        series[name] = {
+            "unit": payload["unit"],
+            "sample_rate": payload["sample_rate"],
+            "points": payload["points"],
+            "resolution": payload["resolution"],
+            "segments": payload["segments"],
+            "peak_frequency": payload["peak_frequency"],
+            "peak_value": payload["peak_value"],
+            "power": payload["power"],
+        }
+    return {
+        "points": int(points),
+        "window": window,
+        "overlap": float(overlap),
+        "series": series,
+        "notice": None if series else "本场没有可做频谱的通道",
     }
 
 
@@ -688,6 +791,7 @@ def build_payload(
     overview_buckets: int = 900,
     with_report: bool = False,
     with_histograms: bool = False,
+    with_spectra: bool = False,
 ) -> dict:
     """Everything the workbench needs. Traces are only embedded in static mode."""
     time = np.arange(int(round(log.duration * log.sample_rate)) + 1) / log.sample_rate
@@ -751,6 +855,11 @@ def build_payload(
         "histograms": (
             snapshot_histograms(log, recognized, selected) if with_histograms else None
         ),
+        # 快照里内嵌的频谱（整场、默认参数）。serve 模式不内嵌——那边按当前窗口现算，
+        # 见 /api/session/<名>/spectrum。
+        "spectra": (
+            snapshot_spectra(log, selected) if with_spectra else None
+        ),
         "api": api_base,
         "buckets": buckets,
         "session": log.path.stem,
@@ -783,6 +892,7 @@ def render_html(
     with_track: bool = True,
     with_report: bool = True,
     with_histograms: bool = True,
+    with_spectra: bool = True,
 ) -> Path:
     """Write a self-contained workbench snapshot and return its path."""
     payload = build_payload(
@@ -794,6 +904,7 @@ def render_html(
         with_track=with_track,
         with_report=with_report,
         with_histograms=with_histograms,
+        with_spectra=with_spectra,
     )
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)

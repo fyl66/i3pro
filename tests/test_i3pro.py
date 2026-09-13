@@ -3158,6 +3158,230 @@ class TestHistogramOverHttp(unittest.TestCase):
                 httpd.shutdown()
                 library.close()
 
+
+class TestSpectrum(unittest.TestCase):
+    """#10 频谱：Welch 平均周期图，按通道自己的采样率算。"""
+
+    FS = 100.0
+
+    @staticmethod
+    def _sine(freq, seconds=100.0, fs=100.0, amplitude=1.0):
+        t = np.arange(int(seconds * fs)) / fs
+        return np.sin(2 * np.pi * freq * t) * amplitude
+
+    def test_a_sine_lands_in_the_right_bin(self):
+        from i3pro import spectrum
+
+        out = spectrum.welch(self._sine(10.0), self.FS, points=1024)
+        self.assertLessEqual(abs(out["peak_frequency"] - 10.0), out["resolution"])
+        # 峰值格必须是整条曲线的最大值——表头报的主频不能是另算一遍的结果
+        self.assertEqual(out["power"][out["peak_index"]], max(out["power"]))
+        self.assertAlmostEqual(out["nyquist"], 50.0)
+        self.assertEqual(len(out["power"]), 1024 // 2 + 1)
+
+    def test_parseval_power_matches_the_variance(self):
+        """Σ P·Δf 必须等于信号功率：缩放写错时这条会立刻炸。"""
+        from i3pro import spectrum
+
+        for window in ("hann", "hamming", "blackman", "rectangular"):
+            out = spectrum.welch(self._sine(10.0), self.FS, points=1024, window=window)
+            power = float(np.sum(out["power"]) * out["resolution"])
+            # 幅值 1 的正弦功率 = 1/2
+            self.assertAlmostEqual(power, 0.5, places=3, msg=f"{window} 的功率对不上")
+        noise = np.random.default_rng(7).normal(size=20000)
+        out = spectrum.welch(noise, self.FS, points=1024)
+        self.assertAlmostEqual(float(np.sum(out["power"]) * out["resolution"]),
+                               float(np.var(noise)), places=1)
+
+    def test_hann_window_holds_the_leakage_down(self):
+        """非整格频率上的正弦：矩形窗会漏出一圈旁瓣，Hann 不会。"""
+        from i3pro import spectrum
+
+        off_bin = self._sine(10.3)
+        shares = {}
+        for window in ("rectangular", "hann", "blackman"):
+            out = spectrum.welch(off_bin, self.FS, points=1024, window=window)
+            power = out["power"]
+            peak = int(np.argmax(power))
+            shares[window] = float(power[peak - 3:peak + 4].sum() / power.sum())
+        self.assertGreater(shares["hann"], shares["rectangular"] + 0.01,
+                           f"Hann 没有把泄漏压住: {shares}")
+        self.assertGreater(shares["blackman"], shares["rectangular"])
+
+    def test_points_snap_to_a_power_of_two_and_say_so(self):
+        from i3pro import spectrum
+
+        self.assertEqual(spectrum.clamp_points(1024), (1024, None))
+        points, notice = spectrum.clamp_points(1000)
+        self.assertEqual(points, 1024)
+        self.assertIn("2 的幂", notice)
+        self.assertEqual(spectrum.clamp_points(8)[0], spectrum.MIN_POINTS)
+        self.assertEqual(spectrum.clamp_points(10 ** 9)[0], spectrum.MAX_POINTS)
+        self.assertIn("看不懂", spectrum.clamp_points("abc")[1])
+
+    def test_short_data_is_zero_padded_and_said_out_loud(self):
+        from i3pro import spectrum
+
+        out = spectrum.welch(np.zeros(100), self.FS, points=1024)
+        self.assertTrue(out["padded"])
+        self.assertEqual(out["segments"], 1)
+        self.assertEqual(out["samples"], 100)
+        self.assertIn("补零", out["notice"])
+
+    def test_overlapping_segments_average(self):
+        from i3pro import spectrum
+
+        values = self._sine(10.0)
+        half = spectrum.welch(values, self.FS, points=1024, overlap=0.5)
+        none = spectrum.welch(values, self.FS, points=1024, overlap=0.0)
+        self.assertEqual(half["segments"], 19)      # 10000 个样本、1024 点、50 % 重叠
+        self.assertEqual(none["segments"], 10)
+        self.assertGreater(half["segments"], none["segments"])
+        self.assertLessEqual(half["overlap"], 0.95)
+
+    def test_amplitude_scale_is_the_rms_of_the_band(self):
+        from i3pro import spectrum
+
+        out = spectrum.welch(self._sine(10.0), self.FS, points=1024,
+                             window="rectangular", scale="amplitude")
+        rms = float(np.sqrt(np.sum(np.square(out["power"]))))
+        self.assertAlmostEqual(rms, 1.0 / np.sqrt(2.0), places=3)
+        # 换一种窗也要成立：换算的是同一份数据，不该因窗而异
+        hann = spectrum.welch(self._sine(10.0), self.FS, points=1024, scale="amplitude")
+        self.assertAlmostEqual(float(np.sqrt(np.sum(np.square(hann["power"])))),
+                               1.0 / np.sqrt(2.0), places=3)
+
+    def test_smoothing_lowers_the_peak_but_keeps_the_power(self):
+        from i3pro import spectrum
+
+        raw = spectrum.welch(self._sine(10.0), self.FS, points=1024)
+        smooth = spectrum.welch(self._sine(10.0), self.FS, points=1024, smooth=5)
+        self.assertLess(max(smooth["power"]), max(raw["power"]))
+        self.assertAlmostEqual(float(np.sum(smooth["power"])), float(np.sum(raw["power"])),
+                               places=9)
+
+    def test_nan_is_filled_and_reported(self):
+        from i3pro import spectrum
+
+        values = self._sine(10.0)
+        values[10:20] = np.nan
+        out = spectrum.welch(values, self.FS, points=1024)
+        self.assertEqual(out["filled"], 10)
+        self.assertFalse(np.isnan(out["power"]).any())
+        with self.assertRaises(ValueError) as caught:
+            spectrum.fill_gaps(np.full(100, np.nan))
+        self.assertIn("换个窗口", str(caught.exception))
+
+    def test_bad_input_says_what_to_do_next(self):
+        from i3pro import spectrum
+
+        with self.assertRaises(ValueError) as caught:
+            spectrum.window_values("triangle", 64)
+        self.assertIn("hann", str(caught.exception))
+        with self.assertRaises(ValueError) as caught:
+            spectrum.welch(self._sine(10.0), self.FS, scale="power")
+        self.assertIn("psd", str(caught.exception))
+        with self.assertRaises(ValueError) as caught:
+            spectrum.welch(self._sine(10.0), 0.0)
+        self.assertIn("采样率", str(caught.exception))
+
+    @_needs(HILL)
+    def test_golden_sessions_use_the_channel_own_sample_rate(self):
+        """慢通道必须按它自己的采样率算：拿主时间基算会造出假高频。"""
+        with ld.LogFile.read(HILL) as log:
+            slow = render.spectrum(log, "GPS Speed", start=100.0, end=140.0)
+            fast = render.spectrum(log, "Vx KF", start=100.0, end=140.0)
+            self.assertEqual(slow["sample_rate"], 20.0)
+            self.assertEqual(slow["nyquist"], 10.0)
+            self.assertEqual(fast["sample_rate"], 100.0)
+            self.assertEqual(fast["nyquist"], 50.0)
+            self.assertLessEqual(slow["peak_frequency"], slow["nyquist"])
+            self.assertLessEqual(fast["peak_frequency"], fast["nyquist"])
+            self.assertEqual(len(fast["power"]), fast["points"] // 2 + 1)
+            self.assertEqual(fast["unit"], "km/h")
+            # 空窗口不是"频谱是零"：给一句能照做的话
+            empty = render.spectrum(log, "Vx KF", start=200.0, end=200.0)
+            self.assertEqual(empty["power"], [])
+            self.assertIn("起止", empty["notice"])
+
+    @_needs(HILL)
+    def test_snapshot_spectra_only_embed_what_was_selected(self):
+        from i3pro import spectrum
+
+        with ld.LogFile.read(HILL) as log:
+            payload = render.snapshot_spectra(log, ["Vx KF", "GPS Speed", "查无此通道"],
+                                              points=512)
+            self.assertEqual(payload["points"], 512)
+            self.assertEqual(sorted(payload["series"]), ["GPS Speed", "Vx KF"])
+            entry = payload["series"]["Vx KF"]
+            self.assertEqual(len(entry["power"]), 512 // 2 + 1)
+            self.assertAlmostEqual(entry["resolution"], 100.0 / 512)
+            self.assertEqual(entry["sample_rate"], 100.0)
+            # 内嵌的是功率谱密度（前端换算有效值 / dB 都从它来）
+            self.assertEqual(spectrum.DEFAULT_WINDOW, payload["window"])
+
+
+class TestSpectrumOverHttp(unittest.TestCase):
+    """#10 走到界面之前的那一段：/spectrum 的参数、奈奎斯特频率与报错。"""
+
+    @_needs(HILL)
+    def test_spectrum_endpoint(self):
+        import tempfile
+        from http.server import ThreadingHTTPServer
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            copy = root / HILL.name
+            copy.write_bytes(HILL.read_bytes())
+            library = server.SessionLibrary([root], cache_size=1, maths_root=root)
+            httpd = ThreadingHTTPServer(
+                ("127.0.0.1", 0), server.make_handler(library, buckets=50)
+            )
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            base = f"http://127.0.0.1:{httpd.server_address[1]}"
+            quoted = urllib.parse.quote(copy.stem)
+
+            def get(path):
+                try:
+                    with urllib.request.urlopen(base + path, timeout=120) as response:
+                        return response.status, json.loads(response.read().decode("utf-8"))
+                except urllib.error.HTTPError as exc:
+                    return exc.code, json.loads(exc.read().decode("utf-8"))
+
+            try:
+                status, body = get(f"/api/session/{quoted}/spectrum"
+                                   f"?channel={urllib.parse.quote('GPS Speed')}"
+                                   f"&points=512&window=hann&overlap=0.5&from=100&to=140")
+                self.assertEqual(status, 200)
+                self.assertEqual(body["channel"], "GPS Speed")
+                self.assertEqual(body["points"], 512)
+                self.assertEqual(body["window"], "hann")
+                self.assertEqual(body["sample_rate"], 20.0)     # 通道自己那一档
+                self.assertEqual(body["nyquist"], 10.0)
+                self.assertAlmostEqual(body["resolution"], 20.0 / 512)
+                self.assertEqual(len(body["power"]), 512 // 2 + 1)
+                self.assertLessEqual(body["peak_frequency"], body["nyquist"])
+                # 40 s × 20 Hz = 800 个样本；512 点一段、50 % 重叠 → 3 段
+                self.assertEqual(body["samples"], 800)
+                self.assertEqual(body["segments"], 3)
+
+                # 缺参数 / 通道不存在 / 窗函数写错：都是 400，而且要说下一步
+                status, body = get(f"/api/session/{quoted}/spectrum")
+                self.assertEqual(status, 400)
+                self.assertIn("channel", body["error"])
+                status, body = get(f"/api/session/{quoted}/spectrum"
+                                   f"?channel={urllib.parse.quote('查无此通道')}")
+                self.assertEqual(status, 400)
+                self.assertIn("「通道」", body["error"])
+                status, body = get(f"/api/session/{quoted}/spectrum"
+                                   f"?channel=Vx%20KF&window=triangle")
+                self.assertEqual(status, 400)
+                self.assertIn("hann", body["error"])
+            finally:
+                httpd.shutdown()
+                library.close()
+
+
 class TestMathsOverHttp(unittest.TestCase):
     """#3 走到界面之前的那一段：PUT/GET/POST + 侧车文件 + 作用域。"""
 

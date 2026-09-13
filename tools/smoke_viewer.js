@@ -1638,6 +1638,34 @@ const embeddedHist = api.data.histograms;
 // 这一段在报表那一段的块作用域之外，自己取一次句柄（同一个 state 对象）。
 const state = api.state;
 const worksheet = registry.get("worksheet");
+// 27.0 组件 id 不许撞：SHEET 拿 id 当键，两份组件撞了 id 就共用一个 bundle，
+// 缓存/刷新键全串味——实测的表现是直方图无限重新请求（见 A34）。
+{
+  const ids = state.components.map((c) => c.id);
+  check(new Set(ids).size === ids.length,
+    "工作表里有重复的组件 id：" + ids.join(","));
+  check(api.sheetSize() === state.components.length,
+    "SHEET 里的 bundle 数与组件数对不上：" + api.sheetSize()
+    + " vs " + state.components.length);
+  // 模拟"恢复了一份带着上次会话 id 的布局"，再加一个组件：编号必须接着最大的那个数
+  api.adoptComponentIds([{ id: "histogram-9999" }]);
+  const before = state.components.length;
+  api.addComponentOfType("histogram");
+  const after = state.components.map((c) => c.id);
+  check(new Set(after).size === after.length && state.components.length === before + 1,
+    "恢复布局后再加组件会撞 id：" + after.join(","));
+  const fresh = state.components[state.components.length - 1];
+  check(/-(\d+)$/.test(fresh.id) && parseInt(/-(\d+)$/.exec(fresh.id)[1], 10) > 9999,
+    "新组件的编号没有接在已有最大号之后：" + fresh.id);
+  api.componentAction(fresh, "close");
+  // 旧版本存下来的布局里可能真有两条一样的 id：恢复时要顺手修掉，
+  // 否则一开页就共用一个 bundle（这正是直方图那次无限请求的根因）。
+  const poisoned = state.components.map((c) => ({ id: c.id, type: c.type }));
+  poisoned[1].id = poisoned[0].id;
+  api.adoptComponentIds(poisoned);
+  check(new Set(poisoned.map((c) => c.id)).size === poisoned.length,
+    "恢复一份带重复 id 的旧布局时没有修好：" + poisoned.map((c) => c.id).join(","));
+}
 // 这一段里**只有**进入 serve 分支之后才允许发 /histogram；前面报表那一段会临时
 // 把 DATA.api 打开，那时发出去的请求不算快照的账。
 const histCallsAtStart = httpCalls.length;
@@ -1724,10 +1752,15 @@ if (embeddedHist && embeddedHist.series) {
       if (missing) {
         histComp.config.channel = missing;
         api.renderAll();
-        check(api.snapshotHistogramFor(histComp) === null,
-          "换到没内嵌的通道时快照还编出了一份分布");
+        const swapped = api.snapshotHistogramFor(histComp);
+        check(!!swapped && swapped.substituted === true && swapped.requested === missing
+          && swapped.channel !== missing,
+          "快照里没带这条通道时，要换一条真带了的，并记住原来挑的是谁: "
+          + JSON.stringify(swapped && { channel: swapped.channel,
+                                        requested: swapped.requested,
+                                        substituted: swapped.substituted }) + " 挑的是 " + missing);
         const hintText = String(insideOf(histEl, "graphhead")[0].textContent);
-        check(hintText.indexOf("serve") >= 0 && hintText.indexOf("换一条") >= 0,
+        check(hintText.indexOf("serve") >= 0 && hintText.indexOf("没带") >= 0,
           "缺数据时没给出能照做的提示: " + JSON.stringify(hintText));
       }
       histComp.config.channel = snap.channel;
@@ -1782,6 +1815,181 @@ if (embeddedHist && embeddedHist.series) {
     histComp.config.style = "bars";
     histComp.config.gate = "";
     histComp.config.colour = null;
+    api.renderAll();
+  }
+}
+
+/* 28. 频谱（#10）：快照离线可用 / serve 参数一个不少 / 布局能带走
+ *
+ * 频谱和直方图一个规矩：算在服务端（按通道**自己的采样率**）。所以这里同样分两半验：
+ * 快照必须离线可用，而且要**说清**只有整场那默认一份；serve 必须把通道、点数、窗、
+ * 重叠、平滑、窗口一个不少地带上。
+ */
+const embeddedSpec = api.data.spectra;
+const specCallsAtStart = httpCalls.length;
+check(!!embeddedSpec && !!embeddedSpec.series
+  && Object.keys(embeddedSpec.series).length > 0,
+  "快照载荷里没有频谱：导出快照时要带上 spectra（整场那一份）");
+if (embeddedSpec && embeddedSpec.series) {
+  api.applyPreset("底盘");
+  const specComp = state.components.find((c) => c.type === "spectrum");
+  check(!!specComp,
+    "「底盘」预设里没有频谱组件：" + state.components.map((c) => c.type).join(","));
+  if (specComp) {
+    api.syncSpectrumSelectors();
+    api.renderAll();
+    check(!!specComp.config.channel,
+      "频谱没有默认通道（加进工作表时应该挑一条悬架 / 加速度通道）");
+    const specEl = SHEETEl(worksheet, specComp.id);
+    const specSelects = insideOf(specEl, "scattercfg")[0]._children
+      .filter((child) => child.tagName === "SELECT");
+    check(specSelects.length === 8,
+      "频谱的配置栏应该有 8 个下拉（通道 / 对比 / 点数 / 窗 / 重叠 / 纵轴 / 窗口 …），实际 "
+      + specSelects.length);
+    check(specSelects.length > 0 && String(specSelects[0]._html).indexOf("<optgroup") >= 0,
+      "频谱的通道下拉没有按单位分组：一场 400 多条通道平铺没法找");
+
+    // 快照：只有整场那一份，参数控件必须灰掉（而不是让用户改完没反应）
+    const snapSpec = api.snapshotSpectrumFor(specComp);
+    check(!!snapSpec && snapSpec.power.length > 0,
+      "快照里取不到这条通道的频谱（导出时应该把勾选的通道都算一份）");
+    if (snapSpec) {
+      const fields = insideOf(specEl, "scattercfg")[0]._children;
+      const pointsBox = fields.filter((child) => child.dataset
+        && child.dataset.spec === "points")[0];
+      const winBox = fields.filter((child) => child.dataset
+        && child.dataset.spec === "win")[0];
+      check(!!pointsBox && pointsBox.disabled === true,
+        "快照模式下「点数」应该是灰的：只有 serve 模式能换点数");
+      check(!!winBox && winBox.disabled === true,
+        "快照模式下「窗函数」应该是灰的：只有 serve 模式能换窗");
+      const head = String(insideOf(specEl, "graphhead")[0].textContent);
+      check(head.indexOf(specComp.config.channel) >= 0 && head.indexOf("Hz") >= 0
+        && head.indexOf("段") >= 0 && head.indexOf("主频") >= 0,
+        "频谱表头没写清它算了什么: " + head);
+      check(head.indexOf("serve") >= 0,
+        "快照里只有一份频谱，表头必须说清「换参数要 serve 模式」: " + head);
+      check(!httpCalls.slice(specCallsAtStart)
+        .some((call) => call.url.indexOf("/spectrum") >= 0),
+        "快照模式下去请求了 /spectrum：快照必须离线可用");
+
+      // 峰值必须落在内嵌曲线自己的最大值上——不然表头报的主频是编的
+      let peakAt = 0;
+      snapSpec.power.forEach((value, i) => {
+        if (value > snapSpec.power[peakAt]) peakAt = i;
+      });
+      check(Math.abs(snapSpec.frequencies[peakAt] - snapSpec.peak_frequency) < 1e-9,
+        "内嵌频谱的峰值频率和曲线对不上：" + snapSpec.peak_frequency
+        + " vs " + snapSpec.frequencies[peakAt]);
+
+      // 有效值换算：√(Σ A²) 必须等于 √(Σ P·Δf)——同一份数据的两种写法，
+      // 换算写错会让"有效值"这个轴整体偏 √2 倍。
+      const df = snapSpec.resolution;
+      const rmsFromPsd = Math.sqrt(snapSpec.power.reduce((sum, p) => sum + p * df, 0));
+      const rmsFromAmp = Math.sqrt(api.spectrumY(snapSpec, { scale: "amplitude" }, -200)
+        .reduce((sum, a) => sum + a * a, 0));
+      check(Math.abs(rmsFromPsd - rmsFromAmp) < rmsFromPsd * 1e-9 + 1e-12,
+        "有效值换算和功率谱对不上：" + rmsFromPsd + " vs " + rmsFromAmp);
+
+      // 换一条快照没带的通道：要给一句能照做的话，而不是一片空白
+      const missingSpec = (api.data.channels || []).map((ch) => ch.name)
+        .find((name) => !embeddedSpec.series[name]);
+      if (missingSpec) {
+        specComp.config.channel = missingSpec;
+        api.renderAll();
+        const swappedSpec = api.snapshotSpectrumFor(specComp);
+        check(!!swappedSpec && swappedSpec.substituted === true
+          && swappedSpec.requested === missingSpec && swappedSpec.channel !== missingSpec,
+          "快照里没带这条通道时，要换一条真带了的，并记住原来挑的是谁: "
+          + JSON.stringify(swappedSpec && { channel: swappedSpec.channel,
+                                            requested: swappedSpec.requested,
+                                            substituted: swappedSpec.substituted })
+          + " 挑的是 " + missingSpec);
+        const hintText = String(insideOf(specEl, "graphhead")[0].textContent);
+        check(hintText.indexOf("serve") >= 0 && hintText.indexOf("没带") >= 0,
+          "缺数据时没给出能照做的提示: " + JSON.stringify(hintText));
+      }
+      specComp.config.channel = snapSpec.channel;
+      api.renderAll();
+    }
+
+    // serve 模式：参数一个不少，而且缩放变了要重新问
+    const savedSpecApi = api.data.api;
+    api.data.api = "/api";
+    specComp.config.span = "zoom";
+    specComp.config.points = 2048;
+    specComp.config.win = "blackman";
+    specComp.config.overlap = 0.75;
+    specComp.config.smooth = 3;
+    specComp.config.against = null;
+    // 纵轴只是显示方式，服务端一律回功率谱密度——请求里必须是 scale=psd
+    specComp.config.scale = "amplitude";
+    api.bundleOf(specComp).specKey = "";
+    const beforeSpec = httpCalls.length;
+    api.refreshSpectrumFor(specComp).then(() => {}, () => {});
+    const specCalls = httpCalls.slice(beforeSpec)
+      .filter((call) => call.url.indexOf("/spectrum") >= 0);
+    check(specCalls.length === 1,
+      "serve 模式下没有向 /spectrum 要频谱（拿到 " + specCalls.length + " 个请求）");
+    if (specCalls.length === 1) {
+      const url = decodeURIComponent(specCalls[0].url);
+      check(url.indexOf("channel=") >= 0 && url.indexOf("points=") >= 0
+        && url.indexOf("window=") >= 0 && url.indexOf("overlap=") >= 0
+        && url.indexOf("smooth=") >= 0 && url.indexOf("from=") >= 0
+        && url.indexOf("to=") >= 0,
+        "频谱请求少了 channel / points / window / overlap / smooth / from / to: " + url);
+      check(url.indexOf("points=2048") >= 0 && url.indexOf("window=blackman") >= 0
+        && url.indexOf("overlap=0.75") >= 0 && url.indexOf("smooth=3") >= 0,
+        "频谱请求没带上用户选的参数: " + url);
+      check(url.indexOf("scale=psd") >= 0,
+        "频谱请求应该一律要功率谱密度（纵轴是显示换算）: " + url);
+    }
+    const specKeyBefore = api.spectrumKey(specComp);
+    const savedSpecView = state.view;
+    state.view = [10, 20];
+    check(api.spectrumKey(specComp) !== specKeyBefore,
+      "缩放之后频谱的刷新键没变：会拿旧窗口的频谱糊弄");
+    // 换窗函数同样要重新问（点数/重叠/平滑也一样，这里验一个代表）
+    state.view = savedSpecView;
+    const keyBeforeWin = api.spectrumKey(specComp);
+    specComp.config.win = "hamming";
+    check(api.spectrumKey(specComp) !== keyBeforeWin,
+      "换窗函数之后频谱的刷新键没变：会拿旧窗的频谱糊弄");
+    api.data.api = savedSpecApi;
+    specComp.config.points = embeddedSpec.points || 1024;
+    specComp.config.win = embeddedSpec.window || "hann";
+    specComp.config.overlap = embeddedSpec.overlap === undefined ? 0.5 : embeddedSpec.overlap;
+    specComp.config.smooth = 1;
+    specComp.config.scale = "psd";
+    specComp.config.span = "all";
+
+    // 布局要靠 URL 带走：通道、对比通道、点数、窗、重叠、平滑、纵轴、窗口一个不落
+    specComp.config.channel = snapSpec ? snapSpec.channel : specComp.config.channel;
+    specComp.config.against = "G Force Lat";
+    specComp.config.points = 4096;
+    specComp.config.win = "flattop";
+    specComp.config.overlap = 0.75;
+    specComp.config.smooth = 5;
+    specComp.config.scale = "amplitude";
+    specComp.config.axis = "linear";
+    const specEncoded = api.encodeLayout(state.components);
+    const specDecoded = api.decodeLayout(specEncoded);
+    const specBack = specDecoded.find((comp) => comp.type === "spectrum");
+    check(!!specBack && specBack.config.channel === specComp.config.channel
+      && specBack.config.against === "G Force Lat"
+      && specBack.config.points === 4096
+      && specBack.config.win === "flattop"
+      && specBack.config.overlap === 0.75
+      && specBack.config.smooth === 5
+      && specBack.config.scale === "amplitude"
+      && specBack.config.axis === "linear",
+      "分享链接丢了频谱的配置: " + JSON.stringify(specBack && specBack.config));
+    specComp.config.against = null;
+    specComp.config.win = embeddedSpec.window || "hann";
+    specComp.config.scale = "psd";
+    specComp.config.axis = "log";
+    specComp.config.smooth = 1;
+    specComp.config.overlap = embeddedSpec.overlap === undefined ? 0.5 : embeddedSpec.overlap;
     api.renderAll();
   }
 }

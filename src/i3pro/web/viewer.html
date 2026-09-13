@@ -354,6 +354,7 @@ const COMPONENT_TYPES = {
   graph:   { label: "时间/距离图", cols: 12, rows: 8 },
   scatter: { label: "散点图",      cols: 4,  rows: 13 },
   histogram: { label: "直方图",    cols: 6,  rows: 13 },
+  spectrum: { label: "频谱",      cols: 6,  rows: 13 },
   track:   { label: "赛道轨迹",    cols: 4,  rows: 13 },
   gauge:   { label: "仪表",        cols: 4,  rows: 13 },
   delta:   { label: "时间差 Δ",    cols: 12, rows: 8 },
@@ -434,6 +435,13 @@ function makeComponent(type, overrides) {
     h: o.h === undefined ? spec.rows : o.h,
     config: {},
   };
+  // id 撞了就等于两份组件共用一个 bundle（SHEET 是拿 id 当键的），缓存键、
+  // 刷新键、光标全串在一起。从 localStorage 恢复的布局带着**上一次会话的 id**，
+  // 而 compSeq 每次开页都从 0 重新数——"恢复的 histogram-3"和"新加的
+  // histogram-3"就是这样撞上的（实测会让直方图无限重新请求）。这里兜底。
+  while (state.components.some((other) => other.id === comp.id)) {
+    comp.id = type + "-" + (++compSeq);
+  }
   if (type === "graph") {
     comp.config.channels = [];
     comp.config.mode = "tiled";        // G toggles this per component, like i2 Pro
@@ -451,6 +459,17 @@ function makeComponent(type, overrides) {
     comp.config.colour = null;       // 按第三通道着色（每格取均值）
     comp.config.gate = "";           // 门槛：通道名或数学通道表达式
     comp.config.window = "zoom";     // zoom | all（快照里是整场 / 某条完整圈）
+  }
+  if (type === "spectrum") {
+    comp.config.channel = null;      // 分析哪条通道
+    comp.config.against = null;      // 叠加对比的第二条通道（可无）
+    comp.config.points = 1024;       // FFT 点数（决定频率分辨率）
+    comp.config.win = "hann";        // 窗函数 hann | hamming | blackman | rectangular | flattop
+    comp.config.overlap = 0.5;       // 段间重叠比例
+    comp.config.smooth = 1;          // 频域平滑格数（1 = 不平滑）
+    comp.config.scale = "psd";       // psd（单位²/Hz）| amplitude（有效值，与通道同单位）
+    comp.config.axis = "log";        // 纵轴 log（dB）| linear
+    comp.config.span = "zoom";       // zoom | all
   }
   if (type === "track") comp.config.channel = null;
   if (type === "track") comp.config.window = "all";     // all | zoom
@@ -512,6 +531,13 @@ function presetDefinitions() {
       placed(makeComponent("track"), 0, 10, 4, 13),
       placed(makeComponent("scatter"), 4, 10, 4, 13),
       placed(makeComponent("gauge", { subtype: "wheel" }), 8, 10, 4, 13),
+      placed(makeComponent("spectrum", {
+        config: { channel: pick("底盘", 8)[7] || pick("底盘", 1)[0] || null,
+                  against: pick("底盘", 7)[6] || null },
+      }), 0, 23, 6, 13),
+      placed(makeComponent("histogram", {
+        config: { channel: pick("底盘", 6)[5] || pick("底盘", 1)[0] || null },
+      }), 6, 23, 6, 13),
     ],
     车手: [
       placed(makeComponent("graph", { config: { channels: pick("车手", 8) } }), 0, 0, 8, 10),
@@ -556,6 +582,12 @@ function encodeLayout(components) {
           c.config.channel || "", c.config.bins || 40, c.config.style || "bars",
           c.config.colour || "", c.config.window || "zoom",
         ].join("|") + "#" + (c.config.gate || "")
+      : c.type === "spectrum" ? [
+          c.config.channel || "", c.config.against || "", c.config.points || 1024,
+          c.config.win || "hann", c.config.overlap === undefined ? 0.5 : c.config.overlap,
+          c.config.smooth || 1, c.config.scale || "psd", c.config.axis || "log",
+          c.config.span || "zoom",
+        ].join("|")
       : c.type === "track" ? (c.config.channel || "")
       : c.type === "gauge" ? [c.config.subtype, (c.config.channels || []).join("~")].join("|")
       : c.type === "report" ? (c.config.filter || "all")
@@ -602,6 +634,21 @@ function decodeLayout(text) {
         comp.config.colour = head[3] || null;
         comp.config.window = head[4] || "zoom";
         comp.config.gate = parts[1] || "";
+      }
+      else if (type === "spectrum") {
+        const parts = payload.split("|");
+        comp.config.channel = parts[0] || null;
+        comp.config.against = parts[1] || null;
+        comp.config.points = Math.max(16, parseInt(parts[2], 10) || 1024);
+        comp.config.win = SPECTRUM_WINDOWS.some((pair) => pair[0] === parts[3])
+          ? parts[3] : "hann";
+        const overlap = parseFloat(parts[4]);
+        comp.config.overlap = Number.isFinite(overlap) ? Math.max(0, Math.min(0.95, overlap)) : 0.5;
+        comp.config.smooth = Math.max(1, parseInt(parts[5], 10) || 1);
+        comp.config.scale = SPECTRUM_SCALES.some((pair) => pair[0] === parts[6])
+          ? parts[6] : "psd";
+        comp.config.axis = parts[7] === "linear" ? "linear" : "log";
+        comp.config.span = parts[8] === "all" ? "all" : "zoom";
       }
       else if (type === "gauge") {
         const parts = payload.split("|");
@@ -1282,7 +1329,6 @@ function componentKey(comp, b, w, h) {
 }
 
 function buildWorksheet() {
-  if (window.__i3proDebug) window.__bwCount = (window.__bwCount || 0) + 1;
   const host = $("worksheet");
   host.innerHTML = "";
   SHEET.clear();
@@ -1417,6 +1463,75 @@ function buildWorksheet() {
         (el) => el.addEventListener("change", changed)
       );
       gateInput.addEventListener("change", changed);
+    }
+    if (comp.type === "spectrum") {
+      // 频谱：Welch 平均周期图。参数多，所以每个控件都带一句 title 说清它改什么。
+      const cfgBar = makeEl("div", "scattercfg", body);
+      const selChannel = makeEl("select", "", cfgBar);
+      selChannel.dataset.spec = "channel";
+      selChannel.title = "分析哪一条通道（按单位分组）";
+      const selAgainst = makeEl("select", "", cfgBar);
+      selAgainst.dataset.spec = "against";
+      selAgainst.title = "叠加对比的第二条通道（可留空）";
+      makeEl("span", "", cfgBar).textContent = "点";
+      const selPoints = makeEl("select", "", cfgBar);
+      selPoints.dataset.spec = "points";
+      selPoints.title = "FFT 点数：频率分辨率 = 通道采样率 / 点数（点数越大越细、越慢）";
+      makeEl("span", "", cfgBar).textContent = "窗";
+      const selWindow = makeEl("select", "", cfgBar);
+      selWindow.dataset.spec = "win";
+      selWindow.title = "窗函数：把一段的两端衰减到零，减少泄漏（默认 hann）";
+      makeEl("span", "", cfgBar).textContent = "重叠";
+      const selOverlap = makeEl("select", "", cfgBar);
+      selOverlap.dataset.spec = "overlap";
+      selOverlap.title = "段间重叠：数据比点数长时切成多段各算一次再平均（Welch）";
+      makeEl("span", "", cfgBar).textContent = "平滑";
+      const selSmooth = makeEl("input", "", cfgBar);
+      selSmooth.type = "number";
+      selSmooth.min = "1";
+      selSmooth.max = "99";
+      selSmooth.step = "1";
+      selSmooth.style.width = "52px";
+      selSmooth.dataset.spec = "smooth";
+      selSmooth.title = "频域平滑格数：把相邻几格平均（总功率不变），1 = 不平滑";
+      makeEl("span", "", cfgBar).textContent = "纵轴";
+      const selScale = makeEl("select", "", cfgBar);
+      selScale.dataset.spec = "scale";
+      selScale.title = "功率谱密度（单位²/Hz）或有效值（与通道同单位）";
+      makeEl("span", "", cfgBar).textContent = "对数";
+      const selAxis = makeEl("select", "", cfgBar);
+      selAxis.dataset.spec = "axis";
+      selAxis.title = "纵轴用 dB（10·log10）还是线性";
+      makeEl("span", "", cfgBar).textContent = "窗口";
+      const selSpan = makeEl("select", "", cfgBar);
+      selSpan.dataset.spec = "span";
+      bundle.selSpecChannel = selChannel;
+      bundle.selSpecAgainst = selAgainst;
+      bundle.selPoints = selPoints;
+      bundle.selWindow = selWindow;
+      bundle.selOverlap = selOverlap;
+      bundle.selSmooth = selSmooth;
+      bundle.selScale = selScale;
+      bundle.selAxis = selAxis;
+      bundle.selSpan = selSpan;
+      const changed = () => {
+        comp.config.channel = selChannel.value || null;
+        comp.config.against = selAgainst.value || null;
+        comp.config.points = Math.max(16, parseInt(selPoints.value, 10) || 1024);
+        comp.config.win = selWindow.value || "hann";
+        comp.config.overlap = Math.max(0, Math.min(0.95, parseFloat(selOverlap.value) || 0));
+        comp.config.smooth = Math.max(1, parseInt(selSmooth.value, 10) || 1);
+        comp.config.scale = selScale.value || "psd";
+        comp.config.axis = selAxis.value || "log";
+        comp.config.span = selSpan.value || "zoom";
+        bundle.specKey = "";
+        refreshComponentTitle(comp);
+        saveLayout();
+        renderAll();
+      };
+      [selChannel, selAgainst, selPoints, selWindow, selOverlap, selScale, selAxis, selSpan]
+        .forEach((el) => el.addEventListener("change", changed));
+      selSmooth.addEventListener("change", changed);
     }
     if (comp.type === "track") {
       const cfgBar = makeEl("div", "scattercfg", body);
@@ -1694,6 +1809,13 @@ function componentTitle(comp) {
     if (comp.config.gate) bits.push("门槛=" + comp.config.gate);
     return bits.join(" · ");
   }
+  if (comp.type === "spectrum") {
+    const name = comp.config.channel || "还没选通道";
+    const win = (SPECTRUM_WINDOWS.find((pair) => pair[0] === (comp.config.win || "hann"))
+      || SPECTRUM_WINDOWS[0])[1];
+    return spec.label + " · " + name + " · " + (comp.config.points || 1024) + " 点 · "
+      + win;
+  }
   if (comp.type === "report") {
     const filter = SECTION_FILTERS.find((pair) => pair[0] === comp.config.filter);
     return spec.label + " · " + ((filter && filter[1]) || "全部区段");
@@ -1759,6 +1881,13 @@ function renderComponents() {
       const key = histogramKey(comp);
       if (bundle.histKey !== key) refreshHistogramFor(comp);
       renderHistogramComponent(comp, bundle);
+      continue;
+    }
+    if (comp.type === "spectrum") {
+      // 频谱同样在服务端算（按通道自己的采样率）。参数或窗口变了就重新问一次。
+      const key = spectrumKey(comp);
+      if (bundle.specKey !== key) refreshSpectrumFor(comp);
+      renderSpectrumComponent(comp, bundle);
       continue;
     }
     if (comp.type === "graph") renderGraphComponent(comp, bundle);
@@ -2207,7 +2336,15 @@ function mergeCounts(counts, want) {
 /** 快照里那一份：整场或某条完整圈，来自导出时算好的 DATA.histograms。 */
 function snapshotHistogramFor(comp) {
   const all = DATA.histograms;
-  const entry = all && all.series ? all.series[comp.config.channel] : null;
+  let name = comp.config.channel;
+  let entry = all && all.series ? all.series[name] : null;
+  let swapped = false;
+  if (!entry && all && all.series) {
+    // 快照只内嵌了勾选的那几条通道。挑到没带的，就直接说"这一条没带"，然后
+    // 画一条带了的——比留一片空白强，但必须写明画的是谁。
+    const alt = Object.keys(all.series).find((key) => all.series[key]);
+    if (alt) { swapped = true; entry = all.series[alt]; name = alt; }
+  }
   if (!entry) return null;
   const key = comp.config.window && comp.config.window !== "zoom"
     ? comp.config.window : "all";
@@ -2223,7 +2360,9 @@ function snapshotHistogramFor(comp) {
   }));
   const meta = (all.windows || []).find((w) => w.key === key) || {};
   return {
-    channel: comp.config.channel, unit: entry.unit, bins: bins, count: win.count,
+    channel: name, unit: entry.unit, bins: bins, count: win.count,
+    requested: swapped ? comp.config.channel : null,
+    substituted: swapped,
     excluded: 0, skipped: 0, range: win.range, stats: win.stats, colour: null,
     window: [meta.start, meta.end], window_label: meta.label || "整场",
     embedded: true, embedded_bins: all.bins,
@@ -2321,7 +2460,13 @@ function syncHistogramSelectors() {
     fillChannelSelectGrouped(b.selChannel, comp.config.channel, false);
     fillChannelSelectGrouped(b.selColour, comp.config.colour, true);
     if (!comp.config.channel && names.length) {
-      comp.config.channel = names.find((n) => /Vx KF/i.test(n)) || names[0];
+      const guess = names.find((n) => /Vx KF/i.test(n)) || names[0];
+      // 快照里只内嵌了"勾选的那几条通道"的分布：默认值要是挑到没内嵌的那条，
+      // 一打开就是一句"没带这条通道"——和报表默认通道一个道理，先挑有数据的。
+      const embedded = DATA.histograms && DATA.histograms.series;
+      comp.config.channel = (!DATA.api && embedded && !embedded[guess])
+        ? (names.find((n) => embedded[n]) || guess)
+        : guess;
       b.selChannel.value = comp.config.channel;
     }
     b.selBins.value = String(comp.config.bins || 40);
@@ -2461,8 +2606,316 @@ function renderHistogramComponent(comp, b) {
     bits.push("色=" + cfg.colour + "（这份数据里没有色值，serve 模式才有）");
   }
   if (hist.embedded) bits.push("快照内嵌 " + hist.embedded_bins + " 格");
+  if (hist.substituted) {
+    bits.unshift("快照里没带 " + hist.requested + " 的分布，画的是 " + hist.channel
+      + "——换别的通道要用 serve 模式");
+  }
   b.head.textContent = bits.join(" · ");
   if (hist.notice) b.head.textContent += " · " + hist.notice;
+}
+
+/* -------------------------------------------------------------- 频谱（#10） */
+// 数据只有两个来源，和直方图一个规矩：
+//   serve 模式：按当前窗口现问 /spectrum。服务端**按通道自己的采样率**算——
+//              慢通道（10 Hz 悬架、1 Hz 温度）在主时间基上是被"保持"拉长的，
+//              那种台阶的频谱里全是假高频；
+//   快照：用导出时算好的那一份（整场、默认点数与窗），参数控件灰掉并说明。
+//
+// 服务端一律回**功率谱密度**，界面上的"有效值 / dB"都是同一份数据的换算
+// （√(P·Δf) 与 10·log10）：换算不改峰值位置，也不会出现第二套算法。
+const SPECTRUM_WINDOWS = [
+  ["hann", "Hann"], ["hamming", "Hamming"], ["blackman", "Blackman"],
+  ["rectangular", "矩形（不做窗）"], ["flattop", "平顶（幅值准）"],
+];
+const SPECTRUM_SCALES = [
+  ["psd", "功率谱密度（单位²/Hz）"], ["amplitude", "有效值（同单位）"],
+];
+const SPECTRUM_POINTS = [128, 256, 512, 1024, 2048, 4096, 8192];
+const SPECTRUM_OVERLAPS = [[0, "0 %"], [0.5, "50 %"], [0.75, "75 %"]];
+
+/** 快照里那一份：整场、默认参数，来自导出时算好的 DATA.spectra。 */
+function snapshotSpectrumFor(comp) {
+  const all = DATA.spectra;
+  let name = comp.config.channel;
+  let entry = all && all.series ? all.series[name] : null;
+  let swapped = false;
+  if (!entry && all && all.series) {
+    // 快照只内嵌了勾选的那几条通道（整场、默认参数）。挑到没带的就换一条带了的，
+    // 但要在表头写明"画的是谁"——默默换一条比留空更糟。
+    const alt = Object.keys(all.series).find((key) => all.series[key]);
+    if (alt) { swapped = true; entry = all.series[alt]; name = alt; }
+  }
+  if (!entry || !entry.power || !entry.power.length) return null;
+  const points = entry.points || all.points || 1024;
+  const df = entry.resolution || ((entry.sample_rate || 0) / points);
+  return {
+    channel: name,
+    requested: swapped ? comp.config.channel : null,
+    substituted: swapped,
+    unit: entry.unit,
+    power: entry.power,
+    frequencies: entry.power.map((_, i) => i * df),
+    points: points,
+    sample_rate: entry.sample_rate,
+    nyquist: (entry.sample_rate || 0) / 2,
+    resolution: df,
+    segments: entry.segments,
+    scale: "psd",
+    window: all.window,
+    overlap: all.overlap,
+    smooth: 1,
+    peak_frequency: entry.peak_frequency,
+    peak_value: entry.peak_value,
+    embedded: true,
+    embedded_points: all.points,
+    embedded_window: all.window,
+    notice: "快照里内嵌的是整场 " + (all.points || points) + " 点 "
+      + (all.window || "hann") + " 窗的那一份：换一段、换点数、换窗函数都要 serve 模式。",
+  };
+}
+
+/** 这一屏的频谱对应的"问题"：换一个就得重新问一次服务。 */
+function spectrumKey(comp) {
+  const cfg = comp.config;
+  const w = windowRange();
+  const span = (cfg.span || "zoom") === "all" || !DATA.api
+    ? (cfg.span || "all")
+    : (Math.round(w.from * 1000) + "-" + Math.round(w.to * 1000));
+  return [cfg.channel || "", cfg.against || "", cfg.points || 1024, cfg.win || "hann",
+          cfg.overlap === undefined ? 0.5 : cfg.overlap, cfg.smooth || 1, span,
+          DATA.api ? "serve" : "snap"].join("|");
+}
+
+async function refreshSpectrumFor(comp) {
+  const b = SHEET.get(comp.id);
+  if (!b) return;
+  const cfg = comp.config;
+  b.specKey = spectrumKey(comp);
+  b.specError = null;
+  b.spec2 = null;
+  b.spec2Error = null;
+  if (!cfg.channel) { b.spec = null; return; }
+  if (!DATA.api) { b.spec = snapshotSpectrumFor(comp); return; }
+  const w = windowRange();
+  const urlOf = (name) => {
+    let url = DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/spectrum"
+      + "?channel=" + encodeURIComponent(name)
+      + "&points=" + Math.round(cfg.points || 1024)
+      + "&window=" + encodeURIComponent(cfg.win || "hann")
+      + "&overlap=" + (cfg.overlap === undefined ? 0.5 : cfg.overlap)
+      + "&smooth=" + Math.round(cfg.smooth || 1)
+      + "&scale=psd";
+    if ((cfg.span || "zoom") !== "all") url += "&from=" + w.from + "&to=" + w.to;
+    return url;
+  };
+  state.pending += 1;
+  setStatus();
+  try {
+    const res = await fetch(urlOf(cfg.channel));
+    const body = await res.json();
+    if (!res.ok) {
+      b.spec = null;
+      b.specError = body.error || ("HTTP " + res.status);
+    } else {
+      b.spec = body;
+    }
+    if (res.ok && cfg.against && cfg.against !== cfg.channel) {
+      const res2 = await fetch(urlOf(cfg.against));
+      const body2 = await res2.json();
+      if (!res2.ok) b.spec2Error = body2.error || ("HTTP " + res2.status);
+      else b.spec2 = body2;
+    }
+  } catch (err) {
+    b.spec = null;
+    b.specError = "取不到频谱：" + err.message;
+  } finally {
+    state.pending -= 1;
+    renderAll();
+  }
+}
+
+/** 功率谱密度 → 这一屏要画的纵值（有效值或 dB）。两者都是同一份数据的换算。 */
+function spectrumY(series, cfg, floorDb) {
+  const df = series.resolution || 1;
+  return series.power.map((p) => {
+    if (!(p > 0)) return cfg.scale === "amplitude" ? 0 : floorDb;
+    if (cfg.scale === "amplitude") return Math.sqrt(p * df);
+    return 10 * Math.log10(p);
+  });
+}
+
+function renderSpectrumComponent(comp, b) {
+  const cfg = comp.config;
+  const c = sizeCanvas(b.canvas, b.canvas.clientWidth || 420, Math.max(150, comp.h * ROW_PX - 26));
+  const ctx = c.ctx;
+  ctx.clearRect(0, 0, c.w, c.h);
+  const hint = (text) => {
+    ctx.fillStyle = "#8b94a7";
+    ctx.font = "12px Segoe UI";
+    ctx.textAlign = "left";
+    ctx.fillText(text, 12, 24);
+  };
+  if (!cfg.channel) { hint("选一条要做频谱的通道"); b.head.textContent = ""; return; }
+  if (!b.spec || !b.spec.power || !b.spec.power.length) {
+    const message = b.specError || (DATA.api ? "算频谱…"
+      : "快照里没带这条通道的频谱（导出时它没被勾选）——换一条，或用 serve 模式打开");
+    b.head.textContent = message;
+    hint(message);
+    return;
+  }
+  const main = b.spec;
+  const series = [{ data: main, colour: channelColor(cfg.channel, comp) }];
+  if (b.spec2 && b.spec2.power && b.spec2.power.length) {
+    series.push({ data: b.spec2, colour: channelColor(cfg.against, comp) });
+  }
+  const pad = { l: 46, r: 12, t: 8, b: 20 };
+  const plotW = Math.max(10, c.w - pad.l - pad.r);
+  const plotH = Math.max(10, c.h - pad.t - pad.b);
+  const nyquist = main.nyquist || (main.sample_rate || 0) / 2 || 1;
+  const px = (f) => pad.l + Math.max(0, Math.min(1, f / nyquist)) * plotW;
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const item of series) {
+    item.values = spectrumY(item.data, cfg, -200);
+    for (const v of item.values) {
+      if (Number.isFinite(v)) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+    }
+  }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) { lo = 0; hi = 1; }
+  if (cfg.scale === "psd" && cfg.axis === "log") {
+    // 只画峰下 80 dB：谱的尾巴能低到 -200 dB，全画出来主瓣就成一条线了。
+    lo = Math.max(lo, hi - 80);
+  } else if (hi <= lo) {
+    hi = lo + 1;
+  }
+  const py = (v) => pad.t + plotH
+    - ((Math.max(lo, Math.min(hi, v)) - lo) / (hi - lo || 1)) * plotH;
+  ctx.strokeStyle = GRID;
+  ctx.lineWidth = 1;
+  ctx.font = "10px Segoe UI";
+  ctx.fillStyle = "#8b94a7";
+  ctx.textAlign = "center";
+  for (const f of [0, nyquist / 4, nyquist / 2, nyquist * 3 / 4, nyquist]) {
+    const x = px(f);
+    ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, pad.t + plotH); ctx.stroke();
+    ctx.fillText(fmt(f, f < 10 ? 1 : 0) + " Hz", x, pad.t + plotH + 14);
+  }
+  ctx.textAlign = "right";
+  for (let i = 0; i <= 3; i++) {
+    const value = lo + (hi - lo) * i / 3;
+    const y = py(value);
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(pad.l + plotW, y); ctx.stroke();
+    ctx.fillText(fmt(value, cfg.scale === "amplitude" ? 3 : 1), pad.l - 4, y + 3);
+  }
+  for (const item of series) {
+    ctx.strokeStyle = item.colour;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    item.values.forEach((v, i) => {
+      const x = px(item.data.frequencies[i]);
+      const y = py(v);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    // 主频：一根竖线，免得用户在几百个格子里自己找峰。
+    const peak = item.data.peak_frequency;
+    if (Number.isFinite(peak)) {
+      const x = px(peak);
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, pad.t + plotH); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+  const unit = main.unit ? " [" + main.unit + "]" : "";
+  const axisLabel = cfg.scale === "amplitude"
+    ? "有效值" : (cfg.axis === "log" ? "dB" : "功率谱密度");
+  const bits = [cfg.channel + unit, (main.sample_rate || 0) + " Hz 采样 · "
+    + (main.points || 0) + " 点 · " + fmt(main.resolution, 4) + " Hz/格 · "
+    + (main.segments || 1) + " 段"];
+  if (cfg.against && cfg.against !== cfg.channel) bits.push("叠加 " + cfg.against);
+  if (Number.isFinite(main.peak_frequency)) {
+    bits.push("主频 " + fmt(main.peak_frequency, 3) + " Hz");
+  }
+  bits.push(axisLabel);
+  if (main.substituted) {
+    // 快照里没带用户挑的那一条：必须写清楚现在画的是谁，不然这条曲线会被当成他的通道。
+    bits.unshift("快照里没带 " + main.requested + " 的频谱，画的是 " + main.channel
+      + "——换别的通道要用 serve 模式");
+  }
+  b.head.textContent = bits.join(" · ");
+  if (b.spec2Error) b.head.textContent += " · 对比通道：" + b.spec2Error;
+  if (main.notice) b.head.textContent += " · " + main.notice;
+}
+
+/** 控件填值。快照模式下把"只有服务端能算"的那几个灰掉并说明。 */
+function syncSpectrumSelectors() {
+  for (const comp of state.components) {
+    if (comp.type !== "spectrum") continue;
+    const b = SHEET.get(comp.id);
+    if (!b || !b.selSpecChannel) continue;
+    const names = CHANNELS ? Array.from(CHANNELS.keys()) : [];
+    if (comp.config.channel && names.indexOf(comp.config.channel) < 0) {
+      comp.config.channel = null;
+    }
+    if (comp.config.against && names.indexOf(comp.config.against) < 0) {
+      comp.config.against = null;
+    }
+    fillChannelSelectGrouped(b.selSpecChannel, comp.config.channel, false);
+    fillChannelSelectGrouped(b.selSpecAgainst, comp.config.against, true);
+    if (!comp.config.channel && names.length) {
+      const guess = names.find((n) => /Susp Pos|G Force Vert|Accel/i.test(n)) || names[0];
+      // 快照里只内嵌了"勾选的那几条通道"的频谱。默认值挑到没内嵌的那条，一打开
+      // 就是"取不到频谱"——先挑一条真的带了数据的（和报表默认通道同一个道理）。
+      const embedded = DATA.spectra && DATA.spectra.series;
+      comp.config.channel = (!DATA.api && embedded && !embedded[guess])
+        ? (names.find((n) => embedded[n]) || guess)
+        : guess;
+      b.selSpecChannel.value = comp.config.channel;
+    }
+    b.selPoints.innerHTML = SPECTRUM_POINTS.map(
+      (n) => '<option value="' + n + '">' + n + "</option>").join("");
+    if (SPECTRUM_POINTS.indexOf(comp.config.points) < 0) comp.config.points = 1024;
+    b.selPoints.value = String(comp.config.points);
+    b.selWindow.innerHTML = SPECTRUM_WINDOWS.map(
+      (pair) => '<option value="' + pair[0] + '">' + esc(pair[1]) + "</option>").join("");
+    b.selWindow.value = comp.config.win || "hann";
+    b.selOverlap.innerHTML = SPECTRUM_OVERLAPS.map(
+      (pair) => '<option value="' + pair[0] + '">' + esc(pair[1]) + "</option>").join("");
+    b.selOverlap.value = String(comp.config.overlap === undefined ? 0.5 : comp.config.overlap);
+    b.selSmooth.value = String(comp.config.smooth || 1);
+    b.selScale.innerHTML = SPECTRUM_SCALES.map(
+      (pair) => '<option value="' + pair[0] + '">' + esc(pair[1]) + "</option>").join("");
+    b.selScale.value = comp.config.scale || "psd";
+    b.selAxis.innerHTML = '<option value="log">dB（对数）</option>'
+      + '<option value="linear">线性</option>';
+    b.selAxis.value = comp.config.axis || "log";
+    const choices = DATA.api
+      ? [["zoom", "当前窗口"], ["all", "整场"]]
+      : [["all", "整场"]];
+    b.selSpan.innerHTML = choices.map(
+      (pair) => '<option value="' + pair[0] + '">' + esc(pair[1]) + "</option>").join("");
+    comp.config.span = choices.some((pair) => pair[0] === comp.config.span)
+      ? comp.config.span : choices[0][0];
+    b.selSpan.value = comp.config.span;
+    if (!DATA.api) {
+      // 快照里只有一份（整场 + 默认点数与窗）：把参数控件灰掉，而不是让用户改完没反应。
+      const why = "快照里只带了整场那一份频谱：换点数 / 窗函数 / 重叠 / 平滑都要 serve 模式打开。";
+      for (const el of [b.selPoints, b.selWindow, b.selOverlap, b.selSmooth]) {
+        el.disabled = true;
+        el.title = why;
+      }
+      comp.config.points = (DATA.spectra && DATA.spectra.points) || comp.config.points;
+      comp.config.win = (DATA.spectra && DATA.spectra.window) || comp.config.win;
+      if (DATA.spectra && DATA.spectra.overlap !== undefined) {
+        comp.config.overlap = DATA.spectra.overlap;
+      }
+      comp.config.smooth = 1;
+      b.selPoints.value = String(comp.config.points);
+      b.selWindow.value = comp.config.win;
+      b.selOverlap.value = String(comp.config.overlap);
+      b.selSmooth.value = "1";
+    }
+  }
 }
 
 function renderDeltaComponent(comp, b) {
@@ -4322,6 +4775,7 @@ function syncScatterSelectors() {
     b.selC.value = comp.config.colour || "";
   }
   syncHistogramSelectors();
+  syncSpectrumSelectors();
 }
 
 function fillSelect(select, names, value, allowNone) {
@@ -4746,6 +5200,33 @@ function urlParams() {
   return new URLSearchParams(hash);
 }
 
+/** 把恢复回来的组件编号收进"当前会话"的坐标系里。
+ *
+ * 两件事：① 新组件的编号从**已有最大号之后**接着数——恢复的布局带着上次会话的 id，
+ * 而 compSeq 每次开页都从 0 开始，不推一下，"新加的第 3 个组件"就会和"恢复回来的
+ * 第 3 个组件"撞 id；② 顺手**修**已经撞了的 id——旧版本存下来的布局里可能真的存着
+ * 两条一样的 id（那时还没有这道防线），不修就一开页就共用一个 bundle。
+ */
+function adoptComponentIds(components) {
+  const list = components || [];
+  let top = compSeq;
+  for (const comp of list) {
+    const match = /-(\d+)$/.exec(String((comp && comp.id) || ""));
+    if (match) top = Math.max(top, parseInt(match[1], 10) || 0);
+  }
+  const seen = new Set();
+  for (const comp of list) {
+    if (comp && comp.id && !seen.has(comp.id)) {
+      seen.add(comp.id);
+      continue;
+    }
+    const base = (comp && comp.type) || "component";
+    comp.id = base + "-" + (++top);
+    seen.add(comp.id);
+  }
+  compSeq = top;
+}
+
 /** URL layout > saved layout > built-in preset. */
 function restoreWorksheet() {
   const fromURL = urlParams().get("layout");
@@ -4754,6 +5235,7 @@ function restoreWorksheet() {
     if (decoded && decoded.length) {
       state.components = decoded;
       state.preset = "自定义";
+      adoptComponentIds(state.components);
       return;
     }
   }
@@ -4761,10 +5243,12 @@ function restoreWorksheet() {
   if (saved) {
     state.components = saved.components;
     state.preset = saved.preset || "分析";
+    adoptComponentIds(state.components);
     return;
   }
   state.components = defaultComponents();
   state.preset = "分析";
+  adoptComponentIds(state.components);
 }
 
 function readHashState() {
@@ -5074,6 +5558,10 @@ window.i3pro = {
   histogramKey: histogramKey, refreshHistogramFor: refreshHistogramFor,
   mergeCounts: mergeCounts, snapshotHistogramFor: snapshotHistogramFor,
   syncHistogramSelectors: syncHistogramSelectors, componentTitle: componentTitle,
+  spectrumKey: spectrumKey, refreshSpectrumFor: refreshSpectrumFor,
+  snapshotSpectrumFor: snapshotSpectrumFor, spectrumY: spectrumY,
+  syncSpectrumSelectors: syncSpectrumSelectors,
+  adoptComponentIds: adoptComponentIds, sheetSize: () => SHEET.size,
   selectLap: selectLap, zoomToLap: zoomToLap,
   renderLapControls: renderLapControls, renameBeacon: renameBeacon,
   insertCrossing: insertCrossing, cursorTime: cursorTime,

@@ -40,20 +40,14 @@ Multi-context repo (presence of `CONTEXT-MAP.md` at the root):
 
 ## This repo
 
-**single-context.** `CONTEXT.md` and `docs/adr/` do not exist yet — that is expected and fine; `/domain-modeling` creates them the first time a term or a decision actually needs pinning down.
+**single-context.** The glossary lives in [`CONTEXT.md`](../../CONTEXT.md) at the repo root — read it
+for vocabulary; it holds nothing but terms. `docs/adr/` will hold decisions that are hard to
+reverse, surprising without context, and the result of a real trade-off; it is created when the
+first such decision is recorded.
 
-Vocabulary already load-bearing in this repo (do not drift to synonyms):
-
-| Term | Means |
-| --- | --- |
-| **session / 场次** | one `.ld` log file, identified by its stem |
-| **channel / 通道** | one logged signal; has unit, sample rate, decimals |
-| **group / 分组** | channels sharing a unit, drawn on one shared y-axis |
-| **lap / 圈** | an interval between two beacon crossings — never "a distance" |
-| **beacon / 信标** | a start/finish point (lat, lon) that cuts laps; one beacon = one lap series |
-| **run / 运行** | one attempt: sustained movement between two standstills (for 八字, acceleration, skidpad) |
-| **component / 组件** | one panel on the worksheet (graph, scatter, track, gauge, delta, status) |
-| **worksheet / 工作表** | the ordered grid of components, with its own shareable layout |
+Terms still being settled (deliberately **not** in `CONTEXT.md` yet) are tracked with the user:
+`lap` vs `loop`, and whether `beacon` means a crossing of the line (i2 Pro's sense) or the line
+itself. Until they are settled, do not invent a third word for either.
 
 ## Use the glossary's vocabulary
 

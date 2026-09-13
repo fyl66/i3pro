@@ -352,6 +352,20 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                     }
                 )
 
+            if action == "at":
+                # Distance axis -> time: a crossing is a moment, but on the
+                # distance axis the cursor is metres. Answered from the distance
+                # series itself, not from the downsampled plot.
+                distance = _float_arg(query, "distance")
+                if distance is None:
+                    return self._error(400, "需要 distance= 参数（米）")
+                when = lapsmod.time_at_distance(log, distance)
+                if when is None:
+                    return self._error(
+                        400, "这个距离不在本场已行驶的范围内（或本场没有距离轴）"
+                    )
+                return self._json({"distance": distance, "time": when})
+
             if action == "export":
                 return self._error(501, "export is done from the UI or the CLI")
 
@@ -378,13 +392,16 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
             problem = lapsmod.check_new_crossings(previous, config, log.duration)
             if problem:
                 return self._error(400, problem)
+            before = render.detect(log)              # laps as they are right now
             path = lapsmod.save_config(log.path, config)
             laps = render.detect(log)
+            notice = lapsmod.insertion_notice(previous, config, len(before), len(laps))
             self._json(
                 {
                     "saved": path.name,
                     "config": config.as_dict(),
                     "laps": lapsmod.lap_table(log, laps),
+                    "notice": notice,
                 }
             )
 

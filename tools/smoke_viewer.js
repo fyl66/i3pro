@@ -227,16 +227,27 @@ function run(hash) {
       setItem(k, v) { this._v[k] = String(v); },
       removeItem(k) { delete this._v[k]; },
     },
-    fetch: () => Promise.reject(new Error("fetch unavailable headless")),
+    // Every request is recorded so the payloads the UI *sends* can be asserted;
+    // none of them resolve, because nothing answers on the other end. The
+    // response -> screen half is driven through api.applyLapsResponse instead.
+    fetch: (url, options) => {
+      httpCalls.push({
+        url: String(url),
+        method: (options && options.method) || "GET",
+        body: options && options.body ? String(options.body) : null,
+      });
+      return Promise.reject(new Error("fetch unavailable headless"));
+    },
   };
   vm.runInNewContext(script, sandbox);
-  return { window, registry, document, api: window.i3pro };
+  return { window, registry, document, api: window.i3pro, httpCalls: httpCalls };
 }
 
 /* ------------------------------------------------------------------- drive */
 const problems = [];
 const check = (ok, message) => { if (!ok) problems.push(message); };
 const expectTemplate = process.argv.indexOf("--expect-template") >= 0;
+const httpCalls = [];
 
 let ctx;
 try {
@@ -692,16 +703,31 @@ if (api) {
 
     // re-query: every render replaces the boxes (and re-attaches the handlers)
     const renameBox = beaconHost.querySelectorAll("input[data-beacon-name]")[0];
+    const beforeRename = httpCalls.length;
     renameBox.value = "  左环A  ";
     renameBox.dispatch("keydown", { key: "Enter", preventDefault() {} });
     check(state.lapsConfig.beacons[0].name === "左环A",
       "Enter did not commit the new beacon name (got "
       + state.lapsConfig.beacons[0].name + ")");
+    // ...and the edit reached the server as one PUT carrying the trimmed name
+    const puts = httpCalls.slice(beforeRename).filter(
+      (call) => call.method === "PUT" && call.url.indexOf("/laps") >= 0);
+    check(puts.length === 1, "Enter must save through exactly one PUT, got " + puts.length);
+    if (puts.length === 1) {
+      const sent = JSON.parse(puts[0].body);
+      check(sent.beacons[0].name === "左环A",
+        "the payload does not carry the trimmed name: " + sent.beacons[0].name);
+      check(puts[0].url.indexOf("/session/") >= 0,
+        "the save did not address the open session: " + puts[0].url);
+    }
 
+    const beforeCancel = httpCalls.length;
     renameBox.value = "别改我";
     renameBox.dispatch("keydown", { key: "Escape", preventDefault() {} });
     check(state.lapsConfig.beacons[0].name === "左环A",
       "Esc must not send the edit it is cancelling");
+    check(httpCalls.length === beforeCancel,
+      "Esc sent a request anyway: " + JSON.stringify(httpCalls.slice(beforeCancel)));
     // The box goes back to the last *rendered* name - in a browser that is the
     // saved one, because a successful save re-renders the list.
     check(renameBox.value !== "别改我", "Esc must put the name back in the box");
@@ -718,10 +744,14 @@ if (api) {
       "inserting with no cursor must not add a beacon at t = 0");
 
     state.cursor = 123.456;
+    const beforeInsertCall = httpCalls.length;
     api.insertCrossing();
     const added = state.lapsConfig.beacons[state.lapsConfig.beacons.length - 1];
     check(state.lapsConfig.beacons.length === beforeInsert + 1 && !!added,
       "the insert-crossing button did not add a beacon");
+    check(httpCalls.slice(beforeInsertCall).some((call) => call.method === "PUT"
+      && call.body && call.body.indexOf('"time":123.456') >= 0),
+      "the inserted crossing was not sent with its time");
     check(added && added.time === 123.456 && added.lat === undefined && added.lon === undefined,
       "an inserted crossing must carry a time and no position");
     api.renderLapControls();
@@ -756,6 +786,30 @@ if (api) {
     state.lapsConfig = { mode: "auto", beacons: [], trusted: {} };
     api.renderLapControls();
     api.data.api = apiBase;
+
+    // The screen has to follow the *server's* answer - names it trimmed and
+    // de-duplicated, lap rows it recomputed. Headless fetch never resolves, so
+    // that half is driven straight through the response handler.
+    const rowsBefore = (api.data.laps || []).slice();
+    const sample = rowsBefore[0] || { lap: "1", lap_time: 1.0, start_time: 0.0,
+                                      end_time: 1.0, distance: 1.0,
+                                      delta_to_best: 0.0, complete: true };
+    api.applyLapsResponse({
+      config: { mode: "auto", beacons: [{ name: "左环A", lat: 34.1, lon: 113.6 }],
+                trusted: { "左环A 1": false } },
+      laps: rowsBefore.concat([Object.assign({}, sample, { lap: "左环A 9" })]),
+      notice: "这次穿越没有切出新圈",
+    });
+    check((api.data.laps || []).length === rowsBefore.length + 1,
+      "the lap table did not take the rows the server returned");
+    check(String(registry.get("lapTable")._html).indexOf("左环A 9") >= 0,
+      "the lap table does not show the lap the server returned");
+    check(beaconHost._html.indexOf('value="左环A"') >= 0,
+      "the beacon list did not take the names the server returned");
+    check(String(registry.get("toast").textContent).indexOf("没有切出新圈") >= 0,
+      "a notice from the server was not shown to the user");
+    api.applyLapsResponse({ config: { mode: "auto", beacons: [], trusted: {} },
+                            laps: rowsBefore });
   }
 }
 

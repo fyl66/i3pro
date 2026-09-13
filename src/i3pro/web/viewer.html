@@ -496,8 +496,8 @@ function fmt(v, digits) {
   const a = Math.abs(v);
   if (a >= 100000) return v.toExponential(2);
   if (a >= 1000) return v.toFixed(0);
-    if (a >= 100) return v.toFixed(1);
-    return v.toFixed(digits);
+  if (a >= 100) return v.toFixed(1);
+  return v.toFixed(digits);
 }
 
 /** Escape for a value that goes into markup (beacon names are user text). */
@@ -718,17 +718,54 @@ function interpAt(xs, ys, x) {
 /**
  * Where the cursor is in **seconds**, whichever axis is on screen. The time axis
  * is already seconds; on the distance axis we interpolate distance -> time over
- * the whole-session overview trace. In overlay mode the distance belongs to a
- * lap-length grid shared by two different laps, so there is no single time to
- * give - the caller asks the user for the time axis instead of guessing.
+ * the plotted traces, which is fast but only as precise as the plot: they are
+ * bucket-downsampled, so a whole-session view is off by up to a bucket. Anything
+ * that has to be *exact* (inserting a crossing) asks exactCursorTime() instead.
+ * In overlay mode the distance belongs to a lap-length grid shared by two
+ * different laps, so there is no single time to give - the caller asks the user
+ * for the time axis instead of guessing.
  */
 function cursorTime() {
   if (state.cursor === null || !Number.isFinite(state.cursor)) return null;
   if (state.mode === "overlay") return null;
   if (state.mode === "time") return state.cursor;
+  const window = state.traces || {};
+  for (const name of Object.keys(window)) {
+    const trace = window[name];
+    if (trace && trace.distance && trace.time
+        && trace.distance.length === trace.time.length && trace.distance.length > 1) {
+      const seconds = interpAt(trace.distance, trace.time, state.cursor);
+      if (seconds !== null) return seconds;
+    }
+  }
   const overview = state.overview;
   if (!overview || !overview.distance || !overview.distance.length) return null;
   return interpAt(overview.distance, overview.time, state.cursor);
+}
+
+/**
+ * The cursor in seconds, as exact as this session can make it.
+ *
+ * On the distance axis the on-screen answer is only as good as the bucket width
+ * of whatever is plotted, and a whole-session view can be seconds wide per
+ * bucket. A crossing is a moment, so in serve mode we ask the server to convert
+ * metres -> seconds over the full-resolution distance series instead
+ * (`/at?distance=`). If the session has no distance axis, or the request fails,
+ * the on-screen approximation stands in rather than nothing at all.
+ */
+async function exactCursorTime(quick) {
+  const seconds = quick === undefined ? cursorTime() : quick;
+  if (state.mode !== "distance" || !DATA.api || seconds === null) return seconds;
+  try {
+    const url = DATA.api + "/session/" + encodeURIComponent(DATA.session)
+      + "/at?distance=" + state.cursor;
+    const res = await fetch(url);
+    if (!res.ok) return seconds;
+    const data = await res.json();
+    return Number.isFinite(data.time) ? data.time : seconds;
+  } catch (err) {
+    return seconds;
+  }
 }
 
 function scheduleRefresh() {
@@ -2227,6 +2264,11 @@ function renderLapControls() {
         }
       });
       box.addEventListener("blur", commit);
+      // A snapshot has no server to save to. Saying so beats a box that swallows
+      // every keystroke without a word.
+      box.addEventListener("focus", () => {
+        if (!DATA.api) toast("快照模式不能改名，用 serve 模式");
+      });
     });
     list.querySelectorAll("a[data-beacon]").forEach((link) => {
       link.addEventListener("click", (event) => {
@@ -2252,7 +2294,8 @@ async function renameBeacon(index, name) {
   const beacons = (state.lapsConfig.beacons || []).slice();
   if (!beacons[index]) return;
   const clean = String(name === undefined || name === null ? "" : name).trim();
-  if (!clean || clean === beacons[index].name) return;
+  if (!clean) { toast("名字不能为空，仍然是「" + beacons[index].name + "」"); return; }
+  if (clean === beacons[index].name) return;
   beacons[index] = Object.assign({}, beacons[index], { name: clean });
   await saveLaps(Object.assign({}, state.lapsConfig, { beacons: beacons }));
 }
@@ -2264,7 +2307,11 @@ async function renameBeacon(index, name) {
  */
 async function insertCrossing() {
   if (!DATA.api) { toast("快照模式不能插入穿越，用 serve 模式"); return; }
-  const when = cursorTime();
+  // The time axis needs no round trip, and staying synchronous there keeps the
+  // click-does-something guarantee direct - only the distance axis waits.
+  const quick = cursorTime();
+  const when = (state.mode === "distance" && quick !== null)
+    ? await exactCursorTime(quick) : quick;
   if (when === null) {
     toast(state.mode === "overlay"
       ? "双圈对比的距离轴对应两条圈，切到时间轴再插入"
@@ -2281,6 +2328,24 @@ async function insertCrossing() {
   await saveLaps(Object.assign({}, state.lapsConfig, { beacons: beacons }));
 }
 
+/**
+ * Everything that happens when the server answers a lap edit: the config it
+ * actually stored (names trimmed / de-duplicated / truncated by the rules),
+ * the recomputed lap table, and the notice when an inserted crossing changed
+ * nothing. Kept as one function so the response -> screen mapping is testable
+ * without a server.
+ */
+function applyLapsResponse(data) {
+  state.lapsConfig = data.config;
+  DATA.laps = data.laps;
+  renderLapControls();
+  renderLapTable();
+  if (data.notice) toast(data.notice);
+  state.windowKey = "";
+  refreshWindowTraces(true).then(renderAll);
+  renderAll();
+}
+
 async function saveLaps(config) {
   state.lapsConfig = config;
   if (!DATA.api) { toast("快照模式不能改信标，用 serve 模式"); return; }
@@ -2291,14 +2356,7 @@ async function saveLaps(config) {
       body: JSON.stringify(config),
     });
     if (!res.ok) throw new Error("HTTP " + res.status);
-    const data = await res.json();
-    state.lapsConfig = data.config;
-    DATA.laps = data.laps;
-    renderLapControls();
-    renderLapTable();
-    state.windowKey = "";
-    refreshWindowTraces(true).then(renderAll);
-    renderAll();
+    applyLapsResponse(await res.json());
   } catch (err) {
     toast("信标保存失败: " + err.message);
   }
@@ -3152,6 +3210,7 @@ window.i3pro = {
   selectLap: selectLap, zoomToLap: zoomToLap,
   renderLapControls: renderLapControls, renameBeacon: renameBeacon,
   insertCrossing: insertCrossing, cursorTime: cursorTime,
+  exactCursorTime: exactCursorTime, applyLapsResponse: applyLapsResponse,
 };
 </script>
 </body>

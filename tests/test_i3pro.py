@@ -635,6 +635,72 @@ class TestBeaconEditing(unittest.TestCase):
                          "a hand-entered crossing must merge into the auto series, "
                          "not start a series of its own")
 
+    def test_deleting_a_beacon_does_not_move_its_marks(self):
+        """The whole list is sent: pairing by position reads a delete as a rename.
+
+        Regression guard - pairing by index handed the deleted beacon's trusted
+        marks to whichever beacon slid into its slot, and saved that. A beacon
+        that is simply gone must carry its marks nowhere.
+        """
+        old = lapsmod.LapConfig(
+            beacons=[lapsmod.Beacon("左环", 34.1, 113.6),
+                     lapsmod.Beacon("右环", 34.2, 113.7),
+                     lapsmod.Beacon("手工穿越", time=12.5)],
+            trusted={"左环 1": False, "右环 1": True},
+        )
+        kept = lapsmod.LapConfig(beacons=[old.beacons[0], old.beacons[2]],
+                                 trusted=dict(old.trusted))
+        after = lapsmod.reconcile_edits(old, kept)
+        self.assertEqual([b.name for b in after.beacons], ["左环", "手工穿越"])
+        self.assertEqual(after.trusted, {"左环 1": False, "右环 1": True},
+                         "deleting 右环 moved its trusted mark onto another series")
+
+    def test_a_rename_in_place_still_carries_the_marks(self):
+        """The same edit without the delete: the marks must follow the beacon."""
+        old = lapsmod.LapConfig(
+            beacons=[lapsmod.Beacon("左环", 34.1, 113.6),
+                     lapsmod.Beacon("右环", 34.2, 113.7)],
+            trusted={"右环 1": True},
+        )
+        renamed = lapsmod.LapConfig(
+            beacons=[old.beacons[0], lapsmod.Beacon("右环B", 34.2, 113.7)],
+            trusted=dict(old.trusted),
+        )
+        after = lapsmod.reconcile_edits(old, renamed)
+        self.assertEqual([b.name for b in after.beacons], ["左环", "右环B"])
+        self.assertEqual(after.trusted, {"右环B 1": True})
+
+    def test_renaming_a_stale_crossing_is_not_treated_as_a_new_one(self):
+        """Otherwise a stale time in a sidecar makes its entry un-renamable."""
+        old = lapsmod.LapConfig(beacons=[lapsmod.Beacon("手工穿越", time=9999.0)])
+        renamed = lapsmod.LapConfig(beacons=[lapsmod.Beacon("补一圈", time=9999.0)])
+        self.assertIsNone(lapsmod.check_new_crossings(old, renamed, 100.0))
+
+    @_needs(HILL)
+    def test_a_crossing_on_a_boundary_that_is_already_there_changes_nothing(self):
+        """Clicking i2 Pro's own boundary must not leave a hair-thin phantom lap."""
+        with ld.LogFile.read(HILL) as log:
+            auto = lapsmod.detect_laps(log, method="auto")
+            # a sidecar carries milliseconds, so the two times never match exactly
+            on_the_edge = round(auto[1].start_time, 3)
+            config = lapsmod.LapConfig(beacons=[lapsmod.Beacon("手工穿越", time=on_the_edge)])
+            after = lapsmod.detect_from_config(log, config)
+        self.assertEqual(len(after), len(auto))
+        self.assertGreater(min(lap.lap_time for lap in after), 1.0,
+                           "a phantom lap was created")
+
+    def test_a_crossing_that_split_nothing_says_so(self):
+        """A button that quietly changes nothing reads as broken."""
+        empty = lapsmod.LapConfig()
+        crossing = lapsmod.LapConfig(beacons=[lapsmod.Beacon("手工穿越", time=10.0)])
+        message = lapsmod.insertion_notice(empty, crossing, laps_before=7, laps_after=7)
+        self.assertIsNotNone(message)
+        self.assertIn("没有切出新圈", message)
+        # a crossing that did split a lap needs no notice...
+        self.assertIsNone(lapsmod.insertion_notice(empty, crossing, 7, 8))
+        # ...and neither does an edit that added no crossing at all
+        self.assertIsNone(lapsmod.insertion_notice(empty, lapsmod.LapConfig(), 7, 7))
+
 
 class TestBeaconEditingOverHttp(unittest.TestCase):
     """#4 / #5 as the UI reaches them: one PUT carrying the whole config."""
@@ -743,6 +809,134 @@ class TestBeaconEditingOverHttp(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
             library.close()
+
+    @_needs(HILL)
+    def test_the_distance_lookup_and_a_do_nothing_insert_over_http(self):
+        """#5 needs metres -> seconds over HTTP, and a notice when nothing split."""
+        from http.server import ThreadingHTTPServer
+
+        library = server.SessionLibrary([DATA], cache_size=1)
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(library, buckets=200))
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        quoted = urllib.parse.quote(HILL.stem)
+        sidecar = HILL.parent / f"{HILL.stem}.laps.json"
+        self.assertFalse(sidecar.exists(), "a stale sidecar would poison this test")
+
+        def get_json(path):
+            with urllib.request.urlopen(base + path, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8"))
+
+        def put_json(path, payload):
+            request = urllib.request.Request(
+                base + path, data=json.dumps(payload).encode("utf-8"), method="PUT",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8"))
+
+        try:
+            with ld.LogFile.read(HILL) as log:
+                exact = lapsmod.time_at_distance(log, 1500.0)
+            self.assertIsNotNone(exact)
+            self.assertAlmostEqual(
+                get_json(f"/api/session/{quoted}/at?distance=1500")["time"], exact, places=6
+            )
+            with self.assertRaises(urllib.error.HTTPError) as refused:
+                get_json(f"/api/session/{quoted}/at?distance=999999")
+            self.assertEqual(refused.exception.code, 400)
+
+            rows = get_json(f"/api/session/{quoted}/laps")["laps"]
+            self.assertGreater(len(rows), 1)
+            same = put_json(f"/api/session/{quoted}/laps", {
+                "mode": "auto",
+                "beacons": [{"name": "手工穿越", "time": rows[1]["start_time"]}],
+            })
+            self.assertEqual(len(same["laps"]), len(rows),
+                             "a crossing on an existing boundary changed the lap set")
+            self.assertIn("没有切出新圈", same["notice"] or "",
+                          "the UI was given nothing to tell the user with")
+        finally:
+            sidecar.unlink(missing_ok=True)
+            httpd.shutdown()
+            httpd.server_close()
+            library.close()
+
+
+class TestDistanceAxisLookup(unittest.TestCase):
+    """On the distance axis the cursor is metres, but a crossing is a moment."""
+
+    @_needs(ENDURANCE)
+    def test_a_held_distance_resolves_to_the_moment_the_car_got_there(self):
+        """A parked car holds its distance for minutes; arrival is the answer.
+
+        Interpolating (over the plotted trace, or over the distance series, which
+        is flat there) answers with the moment the car *left* that distance
+        instead - 127 s late on this session.
+        """
+        with ld.LogFile.read(ENDURANCE) as log:
+            distance = np.maximum.accumulate(
+                np.asarray(lapsmod._distance_series(log), dtype=float)
+            )
+            time = np.asarray(lapsmod._master_time(log), dtype=float)
+            rate = log.sample_rate
+            changed = np.flatnonzero(np.diff(distance) != 0)
+            starts = np.concatenate([[0], changed + 1])
+            ends = np.concatenate([changed, [distance.size - 1]])
+            held = (ends - starts) / rate
+            found = np.flatnonzero((held > 5.0) & (ends < distance.size - 2)
+                                   & (distance[starts] > 1.0))
+            self.assertTrue(found.size, "no held-distance stretch to test with")
+            index = int(found[np.argmax(held[found])])
+            arrival = float(time[starts[index]])
+            departure = float(time[ends[index]])
+            when = lapsmod.time_at_distance(log, float(distance[starts[index]]))
+        self.assertGreater(departure - arrival, 5.0)
+        self.assertAlmostEqual(when, arrival, places=3)
+        self.assertLess(when, departure - 1.0,
+                        "the lookup answered with the departure, not the arrival")
+
+    @_needs(ENDURANCE)
+    def test_the_lookup_is_exact_to_the_sample_not_to_the_plot(self):
+        """The plotted overview has ~2 s buckets; this walks the distance series."""
+        with ld.LogFile.read(ENDURANCE) as log:
+            distance = np.maximum.accumulate(
+                np.asarray(lapsmod._distance_series(log), dtype=float)
+            )
+            time = np.asarray(lapsmod._master_time(log), dtype=float)
+            rate = log.sample_rate
+            moving = np.flatnonzero(
+                (np.diff(distance, prepend=distance[0]) > 0)
+                & (np.diff(distance, append=distance[-1] + 1.0) > 0)
+            )
+            sample = moving[np.linspace(0, moving.size - 1, 200).astype(int)]
+            worst = max(
+                abs(lapsmod.time_at_distance(log, float(distance[i])) - time[i])
+                for i in sample
+            )
+            bucket = float(time[-1] - time[0]) / 900.0      # the overview's bucket
+        self.assertEqual(len(sample), 200)
+        self.assertLessEqual(
+            worst, 1.0 / rate + 1e-9,
+            f"worst error {worst:.4f} s - only as good as the plot "
+            f"({bucket:.2f} s per bucket)",
+        )
+
+    @_needs(HILL)
+    def test_a_distance_the_car_never_drove_is_refused(self):
+        with ld.LogFile.read(HILL) as log:
+            distance = np.maximum.accumulate(
+                np.asarray(lapsmod._distance_series(log), dtype=float)
+            )
+            far = float(distance[-1]) + 500.0
+            grid = [float(value) for value in np.linspace(distance[0], distance[-1], 50)]
+            walked = [lapsmod.time_at_distance(log, value) for value in grid]
+            inside = lapsmod.time_at_distance(log, float(distance[-1]) / 2.0)
+            self.assertIsNone(lapsmod.time_at_distance(log, far))
+            self.assertIsNone(lapsmod.time_at_distance(log, -10.0))
+            self.assertIsNone(lapsmod.time_at_distance(log, float("nan")))
+        self.assertIsNotNone(inside)
+        self.assertEqual(walked, sorted(walked), "the mapping must not run backwards")
 
 
 class TestChannelGroups(unittest.TestCase):

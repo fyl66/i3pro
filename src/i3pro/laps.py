@@ -34,6 +34,8 @@ __all__ = [
     "LapConfig",
     "reconcile_edits",
     "check_new_crossings",
+    "insertion_notice",
+    "time_at_distance",
     "detect_laps",
     "detect_from_config",
     "load_config",
@@ -57,6 +59,9 @@ CONFIG_SUFFIX = ".laps.json"
 MAX_BEACON_NAME = 24
 DEFAULT_BEACON_NAME = "信标"
 DEFAULT_CROSSING_NAME = "手工穿越"
+#: A hand-entered crossing this close to a boundary that already exists is that
+#: boundary - see ``_merge_crossings``.
+CROSSING_SNAP = 0.05
 
 LAP_NUMBER_CHANNELS = ("Lap Number", "Lap counter", "Lap No")
 BEACON_CHANNELS = ("Beacon", "Beacon Number")
@@ -755,8 +760,9 @@ def reconcile_edits(old: LapConfig, new: LapConfig) -> LapConfig:
     """
     beacons = list(new.beacons)
     trusted = dict(new.trusted)
+    pairs = _pair_beacons(old.beacons, beacons)
     for index, beacon in enumerate(beacons):
-        before = old.beacons[index] if index < len(old.beacons) else None
+        before = pairs[index]
         if before is not None and before.name == beacon.name:
             continue
         fallback = before.name if before is not None else DEFAULT_BEACON_NAME
@@ -770,19 +776,56 @@ def reconcile_edits(old: LapConfig, new: LapConfig) -> LapConfig:
     return replace(new, beacons=beacons, trusted=trusted)
 
 
+def _pair_beacons(old: list[Beacon], new: list[Beacon]) -> list[Beacon | None]:
+    """Say which beacon each edited beacon came from.
+
+    The client sends the whole list, so the pairing rule decides whether an edit
+    reads as a rename (marks follow) or as a delete + an insert (marks do not).
+    Positions alone get a delete wrong: removing the middle of
+    ``[左环, 右环, 手工穿越]`` slides ``手工穿越`` into slot 1 and hands it
+    ``右环``'s marks. Names alone get a rename-onto-an-existing-name wrong: two
+    beacons called ``右环`` would move the marks sideways to a different line.
+
+    So: an edit that keeps the length is a rename in place (pair by position, the
+    physical beacon is what the marks belong to); an edit that changes the length
+    inserted or deleted something (pair by name, which is what survives both).
+    Leftovers are paired by position only when that is unambiguous. A beacon that
+    is simply gone comes back as ``None`` and carries no marks anywhere.
+    """
+    if len(old) == len(new):
+        return [before for before in old]
+    pairs: list[Beacon | None] = [None] * len(new)
+    claimed: set[int] = set()
+    for index, beacon in enumerate(new):
+        for other, before in enumerate(old):
+            if other not in claimed and before.name == beacon.name:
+                pairs[index] = before
+                claimed.add(other)
+                break
+    left_old = [index for index in range(len(old)) if index not in claimed]
+    left_new = [index for index in range(len(new)) if pairs[index] is None]
+    if len(left_old) == len(left_new):                  # one rename + one insert
+        for before_index, index in zip(left_old, left_new):
+            pairs[index] = old[before_index]
+    return pairs
+
+
 def check_new_crossings(old: LapConfig, new: LapConfig, duration: float) -> str | None:
     """Reject a hand-entered crossing that is not inside this session.
 
     Returns a message for the user (in Chinese, saying what to do next) or
     ``None`` when the edit is fine. Only crossings that are *new* in this edit
     are checked: an out-of-range time that already sits in a sidecar must never
-    lock the user out of editing that session.
+    lock the user out of editing that session. "New" is judged by the moment
+    itself and not by the name, so renaming such a crossing still works.
     """
-    known = {(b.name, b.time) for b in old.beacons}
+    known = _crossing_times(old)
     for beacon in new.beacons:
-        if beacon.has_position or (beacon.name, beacon.time) in known:
+        if beacon.has_position or beacon.time is None:
             continue
-        if beacon.time is None or not math.isfinite(beacon.time):
+        if round(float(beacon.time), 4) in known:
+            continue
+        if not math.isfinite(beacon.time):
             return f"信标「{beacon.name}」缺少穿越时刻"
         if not 0.0 <= beacon.time <= duration:
             return (
@@ -790,6 +833,88 @@ def check_new_crossings(old: LapConfig, new: LapConfig, duration: float) -> str 
                 f"0–{duration:.1f} s，请把光标放到图上再插入"
             )
     return None
+
+
+def insertion_notice(
+    old: LapConfig, new: LapConfig, laps_before: int, laps_after: int
+) -> str | None:
+    """Warn when a hand-entered crossing did not split anything.
+
+    A crossing *is* a boundary, so a crossing that lands inside a series always
+    changes the lap count. When it does not - the session has no boundary to
+    insert into yet, or the moment coincides with one that is already there - the
+    user has to be told, because a button that quietly does nothing reads as
+    "the program is broken".
+    """
+    added = _crossing_times(new) - _crossing_times(old)
+    if not added:
+        return None
+    if laps_after > laps_before:
+        return None
+    return (
+        "这次穿越没有切出新圈：它和已有边界重合，或者本场还没有可插入的边界。"
+        "请放大到那一圈、把光标放准再插一次。"
+    )
+
+
+def _crossing_times(config: LapConfig) -> set[float]:
+    """The moments of every hand-entered crossing, at sidecar precision."""
+    return {
+        round(float(b.time), 4)
+        for b in config.beacons
+        if not b.has_position and b.time is not None
+    }
+
+
+def _merge_crossings(edges: Iterable[float], times: Iterable[float]) -> list[float]:
+    """Add hand-entered crossings to the boundaries that are already there.
+
+    A crossing that lands within :data:`CROSSING_SNAP` of an existing boundary
+    *is* that boundary: pointing at i2 Pro's own detected crossing and clicking
+    would otherwise leave a hair-thin phantom lap (the times sidecars carry are
+    rounded, so the two never match bit for bit).
+    """
+    merged = sorted(float(edge) for edge in edges)
+    for when in times:
+        if all(abs(float(when) - edge) > CROSSING_SNAP for edge in merged):
+            merged.append(float(when))
+    return sorted(merged)
+
+
+def time_at_distance(log: ldmod.LogFile, distance: float) -> float | None:
+    """The moment the car was ``distance`` metres into the session.
+
+    The distance axis puts the cursor in metres, but a crossing is a *time*: this
+    is the conversion. It walks the cumulative distance series - which is monotone
+    by construction - instead of the plotted, bucket-downsampled trace, so the
+    answer is good to the sample rate and does not get coarser when the whole
+    session is on screen (a 900-bucket overview is ~2.7 s per bucket on a
+    40-minute endurance run).
+
+    A parked car holds its distance: the series has flat spots of arbitrary
+    length, so "the time at distance D" is ambiguous there. The answer is the
+    **first** moment the car reached D - when the crossing happened - not the
+    moment it finally moved on, which can be a minute of waiting later.
+
+    Returns ``None`` for a session with no usable distance axis, and for a value
+    outside the range the car actually drove.
+    """
+    try:
+        series = np.asarray(_distance_series(log), dtype=np.float64)
+    except ValueError:
+        return None
+    time = np.asarray(_master_time(log), dtype=np.float64)
+    count = min(series.size, time.size)
+    series, time = series[:count], time[:count]
+    if count < 2 or not math.isfinite(distance):
+        return None
+    if distance < series[0] or distance > series[-1]:
+        return None
+    series = np.maximum.accumulate(series)          # flat spots and jitter are fine
+    if series[-1] <= series[0]:
+        return None
+    index = int(np.searchsorted(series, float(distance), side="left"))
+    return float(time[min(index, count - 1)])
 
 
 def _clean_name(name: object, fallback: str) -> str:
@@ -896,7 +1021,7 @@ def _laps_for_beacons(log: ldmod.LogFile, config: LapConfig) -> list[Lap]:
     else:
         for when in timed:                  # merge each missed crossing by time
             nearest = min(series, key=lambda s: min(abs(when - e) for e in s["edges"]))
-            nearest["edges"] = sorted(nearest["edges"] + [when])
+            nearest["edges"] = _merge_crossings(nearest["edges"], [when])
         laps = []
         for entry in series:
             edges = sorted(entry["edges"] + [entry["end"]])
@@ -934,7 +1059,7 @@ def _laps_with_inserted_crossings(
     except ValueError:
         base = []
     if base:
-        edges = sorted({*(lap.start_time for lap in base), base[-1].end_time, *times})
+        edges = _merge_crossings([lap.start_time for lap in base] + [base[-1].end_time], times)
     elif len(times) >= 2:
         edges = times
     else:

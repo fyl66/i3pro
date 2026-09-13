@@ -495,6 +495,21 @@ HTTP 端到端（同一份配置提交，走真实 `PUT /api/session/<场次>/la
 界面：点信标名就地编辑，`回车` 保存、`Esc` 取消（取消时一个字节都不会写进边车）。
 快照模式下输入框只读，并提示改用 `serve` 模式。
 
+**两轴评审后补做的三件（都是"改名"这件事本身的语义漏洞）**
+
+1. **删信标曾经被当成改名。** 界面提交的是**整份配置**，原先按位置配对 old/new，于是删掉中间
+   一个信标时，它后面那位的 `trusted` 标记会被搬到"滑进这个位置"的信标上，并写进边车——
+   #4 要的是"标记跟着改名迁移、不会丢"，这里给的是**错的序列**。现在：长度不变 → 按位置配对
+   （改名改的是那个物理信标）；长度变了 → 先按名字配对（插入 / 删除时，名字才是活下来的东西），
+   剩下的只有在一对一时才按位置补。
+   回归用例：`test_deleting_a_beacon_does_not_move_its_marks`（删掉中间一个 →
+   `{"左环 1": false, "右环 1": true}` 原样不动）、`test_a_rename_in_place_still_carries_the_marks`。
+2. **边车里已经越界的穿越改得了名了。** `check_new_crossings` 原先按 `(名字, 时刻)` 判断
+   "是不是本次新增"，于是给一条越界穿越改名会被当成新条目 → 400，用户只能删不能改；
+   现在按时刻判断。用例：`test_renaming_a_stale_crossing_is_not_treated_as_a_new_one`。
+3. **快照模式下输入框只读、打字毫无反应**——现在聚焦即提示改用 `serve` 模式；删空再回车也明确
+   提示"名字不能为空，仍然是「X」"，而不是静默。
+
 ---
 
 ## A27 · 在光标处插入一次穿越（ticket #5）
@@ -518,7 +533,28 @@ i2 Pro 的 **Missed Beacons**：车确实穿过了起终点，但没被检出，
 | UI：没有光标时**不插入**（不会插到 0 秒）；插入的条目在信标列表里是虚线药丸 + `t = 123.456 s`；`✕` 能单独删掉它、圈速表复原 | `tools/smoke_viewer.js` 第 21 组 |
 | 距离轴上的光标是**米**，先换算成秒再插入；双圈对比的距离轴对应两条圈，**明确拒绝**并提示切到时间轴 | 同上 |
 | 快照模式（没有服务端）提示改用 `serve` 模式，而不是点了没反应 | 同上 |
+| 距离轴的换算**精确到采样**，且答案是"**首次到达**该距离的时刻"（车停着时同一距离会持续几分钟） | `TestDistanceAxisLookup` |
+| 落在已有边界上的穿越**不制造幽灵圈**（不再留下 0.4 ms 的圈） | `TestBeaconEditing::test_a_crossing_on_a_boundary_that_is_already_there_changes_nothing` |
+| 一条边界都切不出来时，响应里带 `notice`，界面把它显示出来 | `TestBeaconEditing::test_a_crossing_that_split_nothing_says_so` + HTTP 用例 |
 | 两份金标准数据实跑通过 | `20260908-cjh 高避5圈` / `20260524-耐久正赛` 两个快照的 `smoke_viewer.js` 均 `PASS` |
+
+**两轴评审后补做的四件（时刻精度 + "点了没反应"）**
+
+1. **距离轴换成精确换算。** 新增 `/api/session/<场次>/at?distance=<米>`，由
+   `laps.time_at_distance` 在距离序列上**定位**（不是插值）。语义上最要紧的一条：车停着不动时
+   同一个距离会持续几分钟，所以答案是**首次到达该距离的时刻**。耐久赛实测：`d = 9878.9 m`
+   处车停了 **127.5 s**（922.94 s 到、1050.44 s 走），返回 **922.94 s**。精度：在 200 个
+   "正在走"的采样点上最大误差 **0.000 s**（一个采样 = 0.01 s），而 900 桶的全程概览桶宽是
+   **2.16 s**——这正是评审指出的"全场视图下差可达 ±1 s，而且放大也不会变准"。
+2. **幽灵圈**：与已有边界相差 ≤ `laps.CROSSING_SNAP`（0.05 s）的穿越视为同一条。此前对着
+   i2 Pro 自己检出的边界点一下，会留下一个 0.4 ms 的圈（边车里的时刻是四舍五入过的，
+   两者永远不会逐位相等）。
+3. **"没切出新圈"要说出来。** 一条新穿越总是会增加一条边界，所以当圈数没变时（时刻与已有边界
+   重合、或本场没有任何可插入的边界），响应里带 `notice`，界面直接提示"这次穿越没有切出新圈 …"。
+   本场的两份金标准数据都测不到"没有基线"这条路径（7 圈 / 26 段），所以它由纯函数单测覆盖。
+4. **无头断言补上两段。** 此前第 21 组只断言 `fetch` **之前**的本地状态（`saveLaps` 是先改
+   `state` 再发请求），等于没验界面。现在断言请求体（`Enter` 必须只发一个 `PUT`、名字已去空格；
+   `Esc` 一个请求都不发），以及"响应 → 界面"（界面必须吃下服务端返回的新名字与新圈速行）。
 
 ---
 
@@ -647,7 +683,7 @@ python -m unittest tests.test_i3pro.TestChannelGroups -v
 python -m unittest discover -s tests -v
 ```
 
-**通过判据**：`Ran 54 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）。
+**通过判据**：`Ran 63 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）。
 
 测试覆盖：
 
@@ -658,8 +694,9 @@ python -m unittest discover -s tests -v
 | `TestDerived` | 距离单调性、GPS 轨迹尺度合理 |
 | `TestLaps` | 两种赛道的切圈、距离轴重叠、Δ 收敛 |
 | `TestLapModes` | 切分方式（auto / run / figure8）、一个信标一条序列、旧侧车四种结构仍能读 |
-| `TestBeaconEditing` | 信标改名的四条规则、可信标记迁移、插入的穿越只加边界不换集合、越界时刻被拒 |
-| `TestBeaconEditingOverHttp` | 改名 / 插入穿越走真实 `PUT .../laps`：规范化、标记迁移、落盘、越界 400 |
+| `TestBeaconEditing` | 信标改名的四条规则、可信标记迁移（含"删除 ≠ 改名"与"改名到已存在的名字"两种配对）、插入的穿越只加边界不换集合、落在已有边界上不造幽灵圈、越界时刻被拒、没切出新圈要有 `notice` |
+| `TestBeaconEditingOverHttp` | 改名 / 插入穿越走真实 `PUT .../laps`：规范化、标记迁移、落盘、越界 400、`/at` 距离换算、`notice` |
+| `TestDistanceAxisLookup` | 距离 → 时刻：停在原地的距离返回**首次到达**的时刻、精确到采样（不受 900 桶概览限制）、没开到的距离与 NaN 一律拒绝、映射不倒退 |
 | `TestStore` | Parquet 往返、列式裁剪、SQL 查询 |
 | `TestCsvReader` | i2 Pro CSV 导出结构解析 |
 | `TestChannelGroups` | 通道按单位分组：不重不漏、单位一致、状态通道识别 |
@@ -667,5 +704,5 @@ python -m unittest discover -s tests -v
 | `TestRender` | 静态/服务两种 payload、自包含性 |
 | `TestServer` | HTTP 端到端：场次列表、工作台页、通道、时间窗、散点、概览、对比圈、赛道、404 |
 | `TestIndependentParsers` | 第二套实现交叉验证、213 通道 CSV 全量对照 |
-| `TestViewerScript` | 无头驱动前端：**97 条断言**（22 组交互）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
+| `TestViewerScript` | 无头驱动前端：脚本里 **107 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
 | `TestLaunchers` | 一键启动：快照批量导出 + 索引页、缺数据目录的报错、端口占用自动换端口 |

@@ -97,12 +97,32 @@ def cmd_convert(args: argparse.Namespace) -> int:
 
 def cmd_laps(args: argparse.Namespace) -> int:
     with ldmod.LogFile.read(args.file) as log:
+        if args.mode or args.gate:
+            config = lapsmod.load_config(args.file)
+            if args.mode:
+                config.mode = args.mode
+            for spec in args.gate or []:
+                parsed = _parse_gate(spec)
+                if parsed is None:
+                    print(f"# 忽略无法解析的信标: {spec!r}（格式 lat,lon[:名字]）")
+                    continue
+                config.gates.append(parsed)
+            if args.save:
+                path = lapsmod.save_config(args.file, config)
+                print(f"# 已保存 {path.name}")
+        else:
+            config = lapsmod.load_config(args.file)
         try:
-            laps = lapsmod.detect_laps(log)
+            laps = lapsmod.detect_from_config(log, config)
         except ValueError as exc:
             print(f"# {exc}")
             return 1
-        _print_table(lapsmod.lap_table(log, laps), ["lap", "lap_time", "delta_to_best", "distance", "start_time", "end_time"])
+        _print_table(lapsmod.lap_table(log, laps),
+                     ["lap", "turn", "lap_time", "delta_to_best", "distance", "start_time", "end_time"])
+        if config.gates:
+            print(f"\n{len(config.gates)} 个信标: "
+                  + ", ".join(f"{n}({lat:.6f}, {lon:.6f})" for n, lat, lon in config.gates))
+        print(f"切分方式: {config.mode}")
         if args.json:
             Path(args.json).write_text(
                 json.dumps([l.as_row() for l in laps], ensure_ascii=False, indent=2),
@@ -110,6 +130,21 @@ def cmd_laps(args: argparse.Namespace) -> int:
             )
             print(f"\nwrote {args.json}")
     return 0
+
+
+def _parse_gate(spec: str) -> tuple[str, float, float] | None:
+    """``lat,lon`` or ``lat,lon:名称`` -> (name, lat, lon)."""
+    name = ""
+    if ":" in spec:
+        spec, name = spec.rsplit(":", 1)
+    parts = [p.strip() for p in spec.split(",")]
+    if len(parts) != 2:
+        return None
+    try:
+        lat, lon = float(parts[0]), float(parts[1])
+    except ValueError:
+        return None
+    return (name.strip() or f"信标{lat:.5f}", lat, lon)
 
 
 def cmd_delta(args: argparse.Namespace) -> int:
@@ -461,6 +496,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("laps", help="圈速表")
     p.add_argument("file")
     p.add_argument("--json", help="同时写出 JSON")
+    p.add_argument("--mode", choices=["auto", "run", "figure8", "beacons"],
+                   help="切分方式: auto=GPS 自动挑门, run=按起步/停车分段, "
+                        "figure8=八字按环分段, beacons=只用信标")
+    p.add_argument("--gate", action="append", default=[],
+                   help="手工信标 lat,lon[:名字]，可重复；给两个就得到两条独立圈速序列")
+    p.add_argument("--save", action="store_true",
+                   help="把 --mode/--gate 写进 <场次>.laps.json")
     p.set_defaults(func=cmd_laps)
 
     p = sub.add_parser("delta", help="距离轴双圈对比")

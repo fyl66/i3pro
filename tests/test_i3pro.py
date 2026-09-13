@@ -355,6 +355,90 @@ class TestServer(unittest.TestCase):
             library.close()
 
 
+class TestLapModes(unittest.TestCase):
+    """Lap segmentation modes: auto, run, per-beacon, and the sidecar config."""
+
+    def test_turn_direction_reads_a_loop(self):
+        """A closed loop winds once; a there-and-back path does not."""
+        angles = np.linspace(0.0, 2 * np.pi, 200)
+        ccw_x, ccw_y = np.cos(angles), np.sin(angles)
+        cw_x, cw_y = np.cos(-angles), np.sin(-angles)
+        self.assertEqual(lapsmod.turn_direction(ccw_x, ccw_y), 1)
+        self.assertEqual(lapsmod.turn_direction(cw_x, cw_y), -1)
+        out_and_back = np.concatenate([angles, angles[::-1]])
+        self.assertEqual(
+            lapsmod.turn_direction(np.cos(out_and_back), np.sin(out_and_back)), 0
+        )
+
+    @_needs(HILL)
+    def test_run_mode_splits_on_standstill(self):
+        """`run` must return whole attempts, not laps - it is never shorter."""
+        with ld.LogFile.read(HILL) as log:
+            runs = lapsmod.detect_laps(log, method="run")
+            laps = lapsmod.detect_laps(log, method="auto")
+        self.assertTrue(runs, "run mode found nothing in a session that drove")
+        self.assertLessEqual(len(runs), len(laps))
+        for run in runs:
+            self.assertGreater(run.lap_time, 20.0)
+            self.assertGreater(run.start_distance, -1.0)
+        # runs are contiguous in time and sorted
+        for a, b in zip(runs, runs[1:]):
+            self.assertLessEqual(a.start_time, b.start_time)
+
+    @_needs(HILL)
+    def test_figure8_mode_labels_turns(self):
+        with ld.LogFile.read(HILL) as log:
+            laps = lapsmod.detect_laps(log, method="figure8")
+        self.assertTrue(laps)
+        self.assertTrue(any(lap.turn in ("left", "right") for lap in laps),
+                        "figure8 mode did not label any turn direction")
+
+    @_needs(ENDURANCE)
+    def test_two_gates_give_two_independent_series(self):
+        """One beacon per loop is how a figure-of-eight is split per loop."""
+        with ld.LogFile.read(ENDURANCE) as log:
+            track = derive.gps_track(log)
+            i_left = int(np.argmin(track["x"]))
+            i_right = int(np.argmax(track["x"]))
+            config = lapsmod.LapConfig(
+                mode="beacons",
+                gates=[
+                    ("左环", float(track["lat"][i_left]), float(track["lon"][i_left])),
+                    ("右环", float(track["lat"][i_right]), float(track["lon"][i_right])),
+                ],
+            )
+            laps = lapsmod.detect_from_config(log, config)
+        names = {lap.label.split()[0] for lap in laps}
+        self.assertEqual(names, {"左环", "右环"})
+        for name in names:
+            series = [l for l in laps if l.label.startswith(name)]
+            self.assertTrue(series, f"{name} produced no laps")
+            for lap in series:
+                self.assertGreater(lap.end_time, lap.start_time)
+
+    def test_lap_config_round_trips_through_the_sidecar(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "20260101-test.ld"
+            config = lapsmod.LapConfig(
+                mode="beacons",
+                gate=(34.123456, 113.654321),
+                gates=[("左环", 34.1, 113.6), ("右环", 34.2, 113.7)],
+                beacons=[12.5, 33.25],
+                trusted={"左环 1": False},
+            )
+            path = lapsmod.save_config(log_path, config)
+            self.assertEqual(path.name, "20260101-test.laps.json")
+            back = lapsmod.load_config(log_path)
+        self.assertEqual(back.mode, "beacons")
+        self.assertEqual(back.gates[0], ("左环", 34.1, 113.6))
+        self.assertEqual(back.beacons, [12.5, 33.25])
+        self.assertFalse(back.trusted["左环 1"])
+        # a missing sidecar means "no manual edits", never an exception
+        self.assertEqual(lapsmod.load_config(Path(tmp) / "nope.ld").mode, "auto")
+
+
 class TestChannelGroups(unittest.TestCase):
     """i2 Pro groups channels that share a unit so they can share one axis."""
 

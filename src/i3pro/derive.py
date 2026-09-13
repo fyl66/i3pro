@@ -128,4 +128,7 @@ def gps_track(log: ldmod.LogFile, sats_channel: str = "GPS Sats Used") -> dict:
         "y": y,
         "rate": rate,
         "channels": (lat_ch, lon_ch),
+        # the local frame's origin, so a lat/lon picked in the UI can be mapped
+        # back into the same x/y coordinates
+        "origin": (float(lat[0]), float(lon[0])),
     }

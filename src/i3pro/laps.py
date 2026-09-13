@@ -18,7 +18,9 @@ shared *distance* axis so they can be compared corner by corner.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Iterable
 
 import numpy as np
@@ -28,12 +30,24 @@ from . import ld as ldmod
 
 __all__ = [
     "Lap",
+    "LapConfig",
     "detect_laps",
+    "detect_from_config",
+    "load_config",
+    "save_config",
+    "config_path",
     "lap_table",
     "overlay",
     "time_delta",
     "gps_laps",
+    "run_laps",
+    "figure8_laps",
+    "turn_direction",
 ]
+
+#: Sidecar written next to the ``.ld`` file. The ``.ld`` itself stays read-only
+#: (see AGENTS.md); everything the user edits about laps lives here.
+CONFIG_SUFFIX = ".laps.json"
 
 LAP_NUMBER_CHANNELS = ("Lap Number", "Lap counter", "Lap No")
 BEACON_CHANNELS = ("Beacon", "Beacon Number")
@@ -48,6 +62,7 @@ class Lap:
     start_distance: float
     end_distance: float
     complete: bool = True
+    turn: str | None = None   # "left" / "right" for figure-of-eight loops
 
     @property
     def lap_time(self) -> float:
@@ -60,6 +75,7 @@ class Lap:
     def as_row(self) -> dict:
         return {
             "lap": self.label,
+            "turn": self.turn,
             "lap_time": round(self.lap_time, 3),
             "delta_to_best": None,
             "distance": round(self.distance, 1),
@@ -278,8 +294,13 @@ def gps_laps(
     min_lap_time: float = 8.0,
     speed_threshold: float = 8.0,
     heading_tolerance: float = math.radians(75.0),
+    gate: tuple[float, float] | None = None,
 ) -> list[tuple[float, float, str, bool]]:
-    """Start/finish gate crossing detection on the GPS trajectory."""
+    """Start/finish gate crossing detection on the GPS trajectory.
+
+    ``gate`` is an explicit (lat, lon) start/finish point - the manual beacon the
+    user drops on the track map. Without it the gate is chosen automatically.
+    """
     track = derive.gps_track(log)
     t = track["time"]
     x, y = track["x"], track["y"]
@@ -322,12 +343,18 @@ def gps_laps(
     # circuit stops 30 m from swallowing a whole 200 m figure-of-eight.
     diagonal = float(np.hypot(np.ptp(x), np.ptp(y)))
     gate_radius = max(6.0, min(gate_radius, 0.15 * diagonal))
-    candidates = _gate_candidates(x, y, speed, speed_threshold)
-    gate = next((c for c in candidates if c[3] >= 3), None)
     if gate is not None:
-        i0, px, py, _passes = gate
+        lat0, lon0 = track.get("origin", (float(track["lat"][0]), float(track["lon"][0])))
+        px = (float(gate[1]) - lon0) * 111_320.0 * math.cos(math.radians(lat0))
+        py = (float(gate[0]) - lat0) * 110_540.0
+        i0 = int(np.argmin(np.hypot(x - px, y - py)))
     else:
-        i0, px, py = first_moving, float(x[first_moving]), float(y[first_moving])
+        candidates = _gate_candidates(x, y, speed, speed_threshold)
+        chosen = next((c for c in candidates if c[3] >= 3), None)
+        if chosen is not None:
+            i0, px, py, _passes = chosen
+        else:
+            i0, px, py = first_moving, float(x[first_moving]), float(y[first_moving])
 
     crossings = _crossings_for_gate(
         t,
@@ -383,8 +410,79 @@ def winding_laps(log: ldmod.LogFile, min_lap_time: float = 8.0) -> list[tuple[fl
 
 
 # ------------------------------------------------------------------- API
-def detect_laps(log: ldmod.LogFile, method: str = "auto", **kwargs) -> list[Lap]:
-    """Split a log into laps and attach cumulative distance to each one."""
+def turn_direction(x: np.ndarray, y: np.ndarray) -> int:
+    """+1 for a predominantly left (counter-clockwise) loop, -1 right, 0 neither.
+
+    The path is measured by how far it winds around its own centroid: a closed
+    loop sweeps ±2π, a there-and-back path sweeps ~0. In the local projection
+    (x east, y north) a positive sweep is a left-hand loop, which is what we need
+    to label the two halves of a figure-of-eight.
+    """
+    if x.size < 8:
+        return 0
+    cx, cy = float(np.mean(x)), float(np.mean(y))
+    angle = np.unwrap(np.arctan2(y - cy, x - cx))
+    sweep = float(angle[-1] - angle[0])
+    if abs(sweep) < 2.0 * math.pi * 0.6:
+        return 0
+    return 1 if sweep > 0 else -1
+
+
+def run_laps(
+    log: ldmod.LogFile,
+    stop_speed: float = 3.0,
+    gap: float = 3.0,
+    min_run: float = 4.0,
+) -> list[tuple[float, float, str, bool]]:
+    """Split by *run*: sustained movement separated by sustained standstill.
+
+    Figure-of-eight, acceleration and skidpad tests have no laps at all - the
+    meaningful unit is one attempt, i.e. from when the car pulls away to when it
+    stops again.
+    """
+    time = _master_time(log)
+    speed = derive.speed_series(log) / 3.6      # km/h -> m/s
+    moving = speed > max(0.0, stop_speed / 3.6)
+    index = np.flatnonzero(moving)
+    if index.size < 2:
+        return []
+    edges = np.flatnonzero(np.diff(index) > gap * log.sample_rate)
+    bounds: list[tuple[float, float, str, bool]] = []
+    for run in np.split(index, edges + 1):
+        if run.size < 2:
+            continue
+        start, end = float(time[run[0]]), float(time[run[-1]])
+        if end - start < min_run:
+            continue
+        bounds.append((start, end, str(len(bounds) + 1), True))
+    return bounds
+
+
+def figure8_laps(log: ldmod.LogFile, **kwargs) -> list[tuple[float, float, str, bool]]:
+    """Split a figure-of-eight into one segment per loop (left / right).
+
+    On a figure-of-eight the trajectory crosses itself, so a gate placed on a
+    loop is met twice per cycle - the plain GPS detector already returns
+    roughly one segment per loop on the team's real 八字 log. What it cannot do
+    is say which loop a segment is, so ``detect_laps`` labels each one by its
+    turn direction.
+    """
+    return gps_laps(log, **kwargs)
+
+
+def detect_laps(
+    log: ldmod.LogFile,
+    method: str = "auto",
+    gate: tuple[float, float] | None = None,
+    beacons: list[float] | None = None,
+    **kwargs,
+) -> list[Lap]:
+    """Split a log into laps and attach cumulative distance to each one.
+
+    ``gate`` is an explicit start/finish point as (lat, lon) - it replaces the
+    automatically chosen one. ``beacons`` is an explicit list of crossing times
+    in seconds, which wins over everything else.
+    """
     try:
         distance = derive.distance_series(log)
     except ValueError:
@@ -395,15 +493,23 @@ def detect_laps(log: ldmod.LogFile, method: str = "auto", **kwargs) -> list[Lap]
         gps_speed = np.gradient(track["x"]), np.gradient(track["y"])
         gps_speed = np.hypot(*gps_speed) * track["rate"]  # m/s on the GPS grid
         distance = np.interp(time, track["time"], np.cumsum(gps_speed) / track["rate"])
-    if method in ("auto", "beacon"):
+    time = _master_time(log)
+    if beacons:
+        edges = sorted(float(b) for b in beacons)
+        bounds = [
+            (start, end, str(n), True)
+            for n, (start, end) in enumerate(zip(edges, edges[1:]), start=1)
+            if end > start
+        ]
+    elif gate is not None:
+        bounds = gps_laps(log, gate=gate, **kwargs)
+    elif method in ("auto", "beacon"):
         label_channel = _counter_channel(log, LAP_NUMBER_CHANNELS)
         if label_channel:
-            time = _master_time(log)
             bounds = _bounds_from_labels(time, derive.hold_to_master(log, label_channel))
         else:
             beacon_channel = _counter_channel(log, BEACON_CHANNELS)
             if beacon_channel:
-                time = _master_time(log)
                 bounds = _bounds_from_beacon(time, derive.hold_to_master(log, beacon_channel))
             elif method == "beacon":
                 raise ValueError(f"{log.path.name}: no live beacon/lap channel")
@@ -413,11 +519,26 @@ def detect_laps(log: ldmod.LogFile, method: str = "auto", **kwargs) -> list[Lap]
         bounds = gps_laps(log, **kwargs)
     elif method == "winding":
         bounds = winding_laps(log, **kwargs)
+    elif method == "run":
+        bounds = run_laps(log, **kwargs)
+    elif method == "figure8":
+        bounds = figure8_laps(log, **kwargs)
     else:
         raise ValueError(f"unknown lap detection method: {method!r}")
     min_time = kwargs.get("min_lap_time", 8.0)
-    bounds = [b for b in bounds if b[1] - b[0] >= min_time]
+    if method != "run":
+        bounds = [b for b in bounds if b[1] - b[0] >= min_time]
     laps = _lap_from_bounds(log, distance, bounds)
+    if method == "figure8":
+        try:
+            track = derive.gps_track(log)
+        except ValueError:
+            track = None
+        if track is not None:
+            for lap in laps:
+                inside = ((track["time"] >= lap.start_time) & (track["time"] <= lap.end_time))
+                turn = turn_direction(track["x"][inside], track["y"][inside])
+                lap.turn = {1: "left", -1: "right"}.get(turn)
     return _flag_implausible(laps)
 
 
@@ -506,3 +627,129 @@ def time_delta(ref: dict, cmp: dict, distance: np.ndarray | None = None) -> tupl
     delta[np.isnan(np.asarray(cmp["time"], dtype=np.float64))
           | np.isnan(np.asarray(ref["time"], dtype=np.float64))] = np.nan
     return distance, delta
+
+
+# --------------------------------------------------------------- sidecar
+@dataclass
+class LapConfig:
+    """Everything the user has decided about this session's laps.
+
+    Stored as ``<session>.laps.json`` next to the log. Keeping it out of the
+    ``.ld``/``.ldx`` preserves the "logs are read-only" rule and lets the file
+    travel with the data folder, be diffed in git, and ride along a share link.
+    """
+
+    mode: str = "auto"                       # auto | run | figure8 | beacons
+    gate: tuple[float, float] | None = None  # manual start/finish as (lat, lon)
+    #: Named beacons. One gate = one lap series, so a figure-of-eight gets two
+    #: (left loop + right loop) and each is timed independently - which is the
+    #: only reliable way to tell the two loops apart on a self-crossing course.
+    gates: list[tuple[str, float, float]] = field(default_factory=list)
+    beacons: list[float] = field(default_factory=list)   # explicit crossing times
+    trusted: dict[str, bool] = field(default_factory=dict)
+
+    def as_dict(self) -> dict:
+        return {
+            "mode": self.mode,
+            "gate": list(self.gate) if self.gate else None,
+            "gates": [{"name": n, "lat": lat, "lon": lon} for n, lat, lon in self.gates],
+            "beacons": [round(float(b), 4) for b in self.beacons],
+            "trusted": dict(self.trusted),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "LapConfig":
+        gate = data.get("gate")
+        gates = [
+            (str(g.get("name") or f"信标{i + 1}"), float(g["lat"]), float(g["lon"]))
+            for i, g in enumerate(data.get("gates") or [])
+            if g.get("lat") is not None and g.get("lon") is not None
+        ]
+        return cls(
+            mode=str(data.get("mode") or "auto"),
+            gate=(float(gate[0]), float(gate[1])) if gate else None,
+            gates=gates,
+            beacons=[float(b) for b in (data.get("beacons") or [])],
+            trusted={str(k): bool(v) for k, v in (data.get("trusted") or {}).items()},
+        )
+
+
+def config_path(ld_path: str | Path) -> Path:
+    """``<session>.ld`` -> ``<session>.laps.json``."""
+    return Path(ld_path).with_suffix(CONFIG_SUFFIX)
+
+
+def load_config(ld_path: str | Path) -> LapConfig:
+    """Never raises: an unreadable sidecar just means "no manual edits yet"."""
+    path = config_path(ld_path)
+    if not path.exists():
+        return LapConfig()
+    try:
+        return LapConfig.from_dict(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError, TypeError):
+        return LapConfig()
+
+
+def save_config(ld_path: str | Path, config: LapConfig) -> Path:
+    path = config_path(ld_path)
+    path.write_text(
+        json.dumps(config.as_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return path
+
+
+def detect_from_config(log: ldmod.LogFile, config: LapConfig | None = None) -> list[Lap]:
+    """Run detection using whatever the user configured for this session."""
+    config = config if config is not None else load_config(log.path)
+    if config.gates:
+        return _laps_for_gates(log, config)
+    mode = config.mode
+    if mode == "beacons" and not config.beacons:
+        mode = "auto"                     # nothing hand-placed yet
+    laps = detect_laps(
+        log,
+        method=mode,
+        gate=config.gate,
+        beacons=config.beacons or None,
+    )
+    for lap in laps:
+        if lap.label in config.trusted:
+            lap.complete = config.trusted[lap.label]
+    return laps
+
+
+def _laps_for_gates(log: ldmod.LogFile, config: LapConfig) -> list[Lap]:
+    """One independent lap series per named beacon.
+
+    This is how a figure-of-eight gets split per loop: put one beacon on each
+    loop and each loop is timed on its own, so there is nothing to guess. It is
+    also i2 Pro's model - laps are created between beacon crossings, and a
+    session may have several beacons (sector splits).
+    """
+    distance = _distance_series(log)
+    laps: list[Lap] = []
+    for name, lat, lon in config.gates:
+        bounds = gps_laps(log, gate=(lat, lon))
+        bounds = [b for b in bounds if b[1] - b[0] >= 4.0]
+        labelled = [
+            (start, end, f"{name} {n}", complete)
+            for n, (start, end, _label, complete) in enumerate(bounds, start=1)
+        ]
+        laps.extend(_lap_from_bounds(log, distance, labelled))
+    laps.sort(key=lambda lap: lap.start_time)
+    for index, lap in enumerate(laps):
+        lap.index = index
+        if lap.label in config.trusted:
+            lap.complete = config.trusted[lap.label]
+    return laps
+
+
+def _distance_series(log: ldmod.LogFile) -> np.ndarray:
+    """Cumulative distance on the master time base, with the GPS fallback."""
+    try:
+        return derive.distance_series(log)
+    except ValueError:
+        track = derive.gps_track(log)
+        time = _master_time(log)
+        speed = np.hypot(np.gradient(track["x"]), np.gradient(track["y"])) * track["rate"]
+        return np.interp(time, track["time"], np.cumsum(speed) / track["rate"])

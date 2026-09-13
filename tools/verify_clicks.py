@@ -24,6 +24,7 @@ import argparse
 import base64
 import http.client
 import json
+import math
 import os
 import shutil
 import socket
@@ -43,6 +44,42 @@ DEFAULT_EDGE = [
     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
     r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
 ]
+
+# 与 viewer.html 里的 TIME_STEPS 一字不差：断言"刻度落在钟表档位上"必须用同一张表，
+# 两边各写一份就是为了**不一致时会红**，而不是为了复用。
+TIME_STEPS = [0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5,
+              1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600]
+
+
+def _clock_ladder(step):
+    """步长是不是 1/2/5/10/15/30 秒、1/2/5/10/15/30 分…… 里的那一档。"""
+    return any(abs(step - s) <= 1e-9 * max(1.0, s) for s in TIME_STEPS)
+
+
+def _generic_ladder(step):
+    """距离轴 / 数值轴用的是通用档位 1/2/5×10ⁿ。"""
+    if not (step > 0) or not math.isfinite(step):
+        return False
+    exponent = math.floor(math.log10(step))
+    mantissa = step / (10 ** exponent)
+    return any(abs(mantissa - want) < 1e-6 for want in (1, 2, 5, 10))
+
+
+def _label_value(text):
+    """把画出来的刻度文字读回数值：'2:05' -> 125.0，'231.80' -> 231.8，读不出 None。"""
+    text = str(text).strip()
+    if not text:
+        return None
+    if ":" in text:
+        sign = -1.0 if text.startswith("-") else 1.0
+        minutes, _, seconds = text.lstrip("+-").partition(":")
+        if not minutes.isdigit() or not seconds.isdigit():
+            return None
+        return sign * (int(minutes) * 60 + int(seconds))
+    try:
+        return float(text)
+    except ValueError:
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -184,13 +221,19 @@ class Browser:
                 self.events.append(got)
         raise TimeoutError("%s 超时（%.0fs）" % (method, timeout))
 
-    def open(self, url, wait=0.0):
-        target = self.call("Target.createTarget", {"url": url})
+    def open(self, url, wait=0.0, init_script=None):
+        """开一个标签页。``init_script`` 在页面自己的脚本**之前**跑（CDP 的
+        addScriptToEvaluateOnNewDocument），所以能截住页面第一次绘制。"""
+        target = self.call("Target.createTarget", {"url": "about:blank"})
         session = self.call(
             "Target.attachToTarget", {"targetId": target["targetId"], "flatten": True}
         )["sessionId"]
         self.call("Page.enable", session=session)
         self.call("Runtime.enable", session=session)
+        if init_script:
+            self.call("Page.addScriptToEvaluateOnNewDocument",
+                      {"source": init_script}, session=session)
+        self.call("Page.navigate", {"url": url}, session=session)
         if wait:
             time.sleep(wait)
         return session
@@ -367,6 +410,25 @@ window.__fetchLog = [];
       window.__fetchLog.push({url: String(url), method: method, status: "error: " + err});
       throw err;
     });
+  };
+})();
+"""
+
+
+# 真画布上没有文字节点：把每次 fillText 截下来，才能知道**画出来的**横轴刻度是什么。
+# 钩子只活在"这一条验收"开的浏览器里，不进口到产品代码里（页面也没被改）。
+# WeakMap 给每块 canvas 一个号，免得把散点图、直方图那几行的标签混进主图的横轴。
+AXIS_HOOK = """
+window.__fills = [];
+(function () {
+  var raw = CanvasRenderingContext2D.prototype.fillText, ids = new WeakMap(), next = 1;
+  CanvasRenderingContext2D.prototype.fillText = function (text, x, y) {
+    if (window.__fills.length < 40000) {
+      var id = ids.get(this);
+      if (!id) { id = next++; ids.set(this, id); }
+      window.__fills.push({t: String(text), x: x, y: y, align: this.textAlign, c: id});
+    }
+    return raw.apply(this, arguments);
   };
 })();
 """
@@ -830,6 +892,146 @@ class Checker:
             self.check("#10 切纵轴（dB/线性）不该重新问服务端：那是同一份功率谱的写法",
                        False, "没有纵轴下拉")
 
+    def axis(self):
+        """横轴随缩放换档（A36）：读真画布**画出来的**刻度文字。
+
+        为什么非要这一道：canvas 里没有文字节点，`smoke_viewer.js` 又跑在假 canvas
+        上（`drawGrid` 那几行在它那里根本没被调用），所以"整场印 0:00/1:00/…、缩到
+        1 s 印 231.80"这句话此前只有截图能证明，而截图下次改坏了不会报红。
+
+        断言的是**画出来的字符串**：按 (canvas, y) 还原出一条条横轴，再读回数值。
+        """
+
+        def fills():
+            raw = self.js("JSON.stringify(window.__fills)")
+            return json.loads(raw) if raw and raw != "null" else []
+
+        def axis_rows():
+            """同一个 y 上 >= 3 个居中的、能读成数字的标签 = 一条横轴。"""
+            groups = {}
+            for fill in fills():
+                if fill.get("align") != "center":
+                    continue
+                if _label_value(fill.get("t")) is None:
+                    continue
+                key = (fill.get("c"), round(float(fill["y"]), 3))
+                groups.setdefault(key, []).append(fill)
+            rows = []
+            for (canvas, y), items in groups.items():
+                if len(items) < 3:
+                    continue
+                items.sort(key=lambda f: float(f["x"]))
+                xs = [float(f["x"]) for f in items]
+                values = [_label_value(f["t"]) for f in items]
+                steps = [round(values[i + 1] - values[i], 9) for i in range(len(values) - 1)]
+                rows.append({
+                    "canvas": canvas, "y": y,
+                    "labels": [f["t"] for f in items], "values": values,
+                    "step": steps[0] if steps else 0.0,
+                    "even_steps": len(set(steps)) == 1,
+                    "gaps": [round(xs[i + 1] - xs[i], 3) for i in range(len(xs) - 1)],
+                    "span": xs[-1] - xs[0],
+                })
+            return rows
+
+        def shoot(a, b, wait=1.0):
+            """换一段视图并重画，再把刚画出来的横轴读回来。
+
+            一定要换一段**不同的**区间：绘图区有离屏缓存，区间没变就不会重画，
+            `fillText` 一次都不会被调用，读回来的会是上一轮的残留。
+            """
+            self.js("window.__fills=[];i3pro.state.view=[%r,%r];i3pro.renderAll();true" % (a, b))
+            time.sleep(wait)
+            return axis_rows()
+
+        def text_of(row):
+            return "%s（步长 %s，%d 条：%s）" % (row["labels"][0], row["step"],
+                                                 len(row["labels"]), " ".join(row["labels"]))
+
+        def clean(row, on_clock):
+            """一条横轴读不读得出来：步长一致、落在档位上、标签之间留得下字。"""
+            ladder_ok = _clock_ladder(row["step"]) if on_clock else _generic_ladder(row["step"])
+            return (row["even_steps"] and ladder_ok and min(row["gaps"]) >= 40
+                    and max(row["gaps"]) - min(row["gaps"]) <= 1.5 and len(row["labels"]) <= 13)
+
+        def aligned(row):
+            """刻度落在整齐的数上（231.8 配 0.2 的档位，不是 231.83）。"""
+            return all(abs(v / row["step"] - round(v / row["step"])) < 1e-6
+                       for v in row["values"])
+
+        duration = float(self.js("i3pro.data.meta.duration") or 0.0)
+        self.js("i3pro.state.mode='time';i3pro.state.view=null;i3pro.renderAll();true")
+        time.sleep(0.4)
+
+        # 一路缩下去，每一档都把**画出来的**横轴读回来。第一屏里印钟点的那几块画布
+        # 就是"时间/距离图"；后面几屏只认它们，免得把散点图、直方图的行混进来。
+        windows = [("整场", 0.0, duration), ("1/4 场", 0.0, duration / 4.0),
+                   ("20 s", 100.0, 120.0), ("1 s", 231.7, 232.7)]
+        shots, graph_ids = [], set()
+        for label, a, b in windows:
+            rows = shoot(a, b)
+            if not graph_ids:
+                graph_ids = {r["canvas"] for r in rows
+                             if all(":" in lab for lab in r["labels"])}
+            shots.append((label, rows))
+
+        def graph_rows(rows):
+            picked = [r for r in rows if r["canvas"] in graph_ids]
+            return picked or rows
+
+        # 1) 整场：走钟表档位（高避 464 s -> 60 s），标签是 0:00 / 1:00 / …
+        whole = [r for r in graph_rows(shots[0][1]) if all(":" in lab for lab in r["labels"])]
+        self.check("#36 整场的时间轴印钟点标签（0:00 / 1:00 / …）",
+                   bool(whole) and all(clean(r, True) and aligned(r) for r in whole),
+                   " | ".join(text_of(r) for r in whole) or "一条横轴都没读到")
+
+        # 2) 缩得越窄步长只许越小，且每一档都还读得出来（标签不重叠、落在档位上）
+        steps, problems, seen = [], [], []
+        for label, rows in shots:
+            picked = graph_rows(rows)
+            clock = [r for r in picked if all(":" in lab for lab in r["labels"])]
+            if not picked:
+                problems.append("%s：一条横轴都没读到" % label)
+                continue
+            steps.append(picked[0]["step"])
+            seen.append("%s -> %ss" % (label, [r["step"] for r in picked]))
+            for row in picked:
+                if not (clean(row, True) and aligned(row)):
+                    problems.append("%s：%s" % (label, text_of(row)))
+            if label != "1 s" and not clock:
+                problems.append("%s：时间轴没有印钟点标签，读到的是 %s"
+                                % (label, picked[0]["labels"]))
+        self.check("#36 缩得越窄，时间轴的档位只降不升（%s）"
+                   % " -> ".join(str(s) for s in steps),
+                   len(steps) == len(windows) and not problems
+                   and all(steps[i + 1] <= steps[i] + 1e-9 for i in range(len(steps) - 1)),
+                   "；".join(problems) if problems else "；".join(seen))
+        tiny = [r for r in graph_rows(shots[-1][1])
+                if all(("." in lab and ":" not in lab) for lab in r["labels"])]
+        self.check("#36 缩到 1 s 时改成亚秒档（标签带小数、不再是钟点）",
+                   bool(tiny) and all(r["step"] < 1.0 for r in tiny)
+                   and steps[0] >= 1.0,
+                   "整场 %s s -> 1 s 窗口：%s"
+                   % (steps[0] if steps else "?",
+                      " | ".join(text_of(r) for r in tiny) or "没读到亚秒标签"))
+
+        # 3) 距离轴不该出现钟点标签（这就是"别从标签里猜是不是时间轴"的理由）
+        span = json.loads(self.js(
+            "(function(){i3pro.state.mode='distance';i3pro.state.view=null;i3pro.renderAll();"
+            "return JSON.stringify(lane());})()"))
+        rows = shoot(span[0] + (span[1] - span[0]) * 0.3, span[1])
+        clock = [r for r in rows if any(":" in lab for lab in r["labels"])]
+        widest = max(rows, key=lambda r: r["span"]) if rows else None
+        self.check("#36 距离轴不印钟点标签，且步长落在 1/2/5 档上",
+                   not clock and widest is not None
+                   and clean(widest, False) and aligned(widest),
+                   ("距离轴读到钟点标签：%s" % " ".join(clock[0]["labels"])) if clock
+                   else (text_of(widest) if widest else "一条横轴都没读到"))
+        self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-axis-zoom.png"), self.session)
+
+        self.js("i3pro.state.mode='time';i3pro.state.view=[0,%r];i3pro.renderAll();true" % duration)
+        time.sleep(0.4)
+
     def rename(self, sidecar):
         """#4 / #6：就地改名（回车存、Esc 撤）+ 撤销。
 
@@ -956,7 +1158,7 @@ def main(argv=None):
             edge, args.cdp_port, profile
         )
         url = "http://127.0.0.1:%d/session/%s" % (args.port, urllib.parse.quote(args.session))
-        session = browser.open(url, wait=1.0)
+        session = browser.open(url, wait=1.0, init_script=AXIS_HOOK)
         ready = browser.wait_for(
             "!!(window.i3pro && i3pro.state && i3pro.data && i3pro.data.channels"
             " && i3pro.data.channels.length && document.querySelectorAll('canvas').length)",
@@ -978,6 +1180,7 @@ def main(argv=None):
             checker.crossings(sidecar)
             checker.rename(sidecar)
             checker.histogram()
+            checker.axis()
             errors = browser.page_errors()
             checker.check("整场没有页面级报错", not errors, errors[:3])
         bad = [name for name, ok in checker.results if not ok]

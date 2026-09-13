@@ -1447,6 +1447,25 @@ tolerance`）；两份金标准快照 `smoke_viewer.js` 均 PASS（7 圈 / 26 �
 `axisTickLabel(125, 5, 0, true) == "2:05"`、`3661 s` 配 60 s 档得 `"61:01"`（不许静默进位成小时）、
 亚秒档印 `"231.80"`、距离轴不印时钟标签；最后断言画布上真的换了档。
 
+**第四道回归（真 Edge 真画布，`tools\verify_clicks.py` 的 `#36` 组）**：canvas 里没有文字节点，
+上面那张表此前**只有截图能证明**。这一组在真浏览器里截住每一次 `fillText`（钩子只装在这条
+验收开的那个浏览器里，`addScriptToEvaluateOnNewDocument` 注入，页面本身没有被改），按
+`(canvas, y)` 还原出一条条横轴，再把标签读回数值——断言的是**画出来的字符串**：
+
+| 视图 | 画出来的步长 | 判据 |
+| --- | --- | --- |
+| 整场 463.99 s | 60 s | 全是钟点标签、落在钟表档位、相邻标签 ≥ 40 px、是步长的整数倍 |
+| 1/4 场 | 15 s | 同上 |
+| 20 s（100–120） | 2 s | 同上 |
+| 1 s（231.7–232.7） | 0.1 s | 标签带小数、**不**印钟点 |
+
+实测输出：`#36 缩得越窄，时间轴的档位只降不升（60.0 -> 15.0 -> 2.0 -> 0.1）`；距离轴那一组
+读回 `1500 2000 2500 3000 3500 4000 4500`（步长 500，落在 1/2/5 档上），并且**不印钟点标签**。
+
+顺带修掉一处脆的写法：`drawGrid` 原先靠"标签里含不含字母 `s`"猜这是不是时间轴，现在由调用方
+显式传（`state.mode === "time"`）——距离轴的标签是 `m`，可横向通道名里带个 `s` 就会猜错，
+那时候距离轴会印出 `0:50` 这种钟点。
+
 ---
 
 ## 全量回归
@@ -1460,7 +1479,7 @@ python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘�
 
 **通过判据**：`Ran 174 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）；
 `PASS - 0 channel(s) outside tolerance`；`PASS - workbench ran headless ... interactions verified`；
-`28 项检查：28 通过，0 失败`。**四条全绿才算改完**（AGENTS.md 规则 7）。
+`32 项检查：32 通过，0 失败`。**四条全绿才算改完**（AGENTS.md 规则 7）。
 
 测试覆盖：
 
@@ -1491,5 +1510,5 @@ python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘�
 | `TestIndependentParsers` | 第二套实现交叉验证、213 通道 CSV 全量对照 |
 | `TestBeaconUndo` | 撤销的纯函数层：什么是"同一版"、什么时候没有可撤销的一步、交回去的是上一版本身 |
 | `TestBeaconUndoOverHttp` | 撤销走真实 `PUT`：改名 / 插入 / 删除各自一步回到原样、`trusted` 迁移、落盘、一次无改动的保存不吃掉上一步、没有可撤销的一步时 400 并说明下一步、页面注入的 `laps_can_undo` 三态 |
-| `TestViewerScript` | 无头驱动前端：脚本里 **308 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
+| `TestViewerScript` | 无头驱动前端：脚本里 **323 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
 | `TestLaunchers` | 一键启动：快照批量导出 + 索引页、缺数据目录的报错、端口占用自动换端口 |

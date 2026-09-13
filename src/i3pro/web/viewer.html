@@ -1174,7 +1174,12 @@ function axisTickLabel(value, step, digits, onTimeAxis) {
   return value.toFixed(Math.max(2, digits));
 }
 
-function drawGrid(ctx, pad, plotW, plotH, y0, y1, x0, x1, xLabel, ticks) {
+/** 横轴该画几条：按画布宽度定，3~12 条，保证相邻标签之间留得下字。 */
+function tickTarget(plotW) {
+  return Math.max(3, Math.min(12, Math.round(plotW / 110)));
+}
+
+function drawGrid(ctx, pad, plotW, plotH, y0, y1, x0, x1, xLabel, ticks, onTimeAxis) {
   ctx.strokeStyle = GRID;
   ctx.lineWidth = 1;
   ctx.beginPath();
@@ -1191,10 +1196,10 @@ function drawGrid(ctx, pad, plotW, plotH, y0, y1, x0, x1, xLabel, ticks) {
     ctx.fillText(fmt(y1 - ((y1 - y0) * i) / 4), pad.l - 5, pad.t + (plotH * i) / 4 + 4);
   }
   ctx.textAlign = "center";
-  // 横轴随缩放换档：刻度条数按画布宽度定，步长取 1/2/5×10ⁿ 里最合适的那一档
-  const onTimeAxis = !xLabel || xLabel.indexOf("s") >= 0;
-  const ladder = niceTicks(x0, x1, Math.max(3, Math.min(12, Math.round(plotW / 110))),
-                           onTimeAxis);
+  // 横轴随缩放换档：刻度条数按画布宽度定，步长取 1/2/5×10ⁿ 里最合适的那一档。
+  // 是不是时间轴由**调用方明说**，不从 xLabel 猜——距离轴的标签是 "m"，可是往
+  // 横向通道名（"Speed ..."）里塞个 s 就会猜错，到时候横轴会印出 0:50 这种钟点。
+  const ladder = niceTicks(x0, x1, tickTarget(plotW), onTimeAxis === true);
   ctx.strokeStyle = GRID;
   ctx.beginPath();
   for (const value of ladder.values) {
@@ -2015,7 +2020,8 @@ function renderGraphComponent(comp, b) {
       const scale = groupScaleFor(group, comp);
       drawSectionBands(octx, pad, plotW, plotH, r[0], r[1], gi === 0);
       drawGrid(octx, pad, plotW, plotH,
-               scale[0], scale[1], r[0], r[1], gi === groups.length - 1 ? axisUnit() : "", ticks);
+               scale[0], scale[1], r[0], r[1], gi === groups.length - 1 ? axisUnit() : "",
+               ticks, state.mode === "time");
       drawTraces(octx, pad, plotW, plotH,
                  r[0], r[1], scale[0], scale[1], group.channels.map((name) => ({
         x: traceX(traceOf(name)), values: (traceOf(name) || {}).value,
@@ -3012,7 +3018,7 @@ function renderDeltaComponent(comp, b) {
   const y0 = s[0], y1 = s[1];
   const sx = (v) => pad.l + ((v - x0) / (x1 - x0 || 1)) * plotW;
   const sy = (v) => pad.t + plotH - ((v - y0) / (y1 - y0 || 1)) * plotH;
-  drawGrid(ctx, pad, plotW, plotH, y0, y1, x0, x1, "m");
+  drawGrid(ctx, pad, plotW, plotH, y0, y1, x0, x1, "m", null, false);
   const zero = sy(0);
   for (let i = 1; i < dist.length; i++) {
     if (dist[i] < x0 || dist[i - 1] > x1) continue;

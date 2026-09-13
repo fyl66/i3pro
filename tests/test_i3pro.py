@@ -31,7 +31,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from i3pro import (  # noqa: E402
     channels, csvlog, derive, gpsfix, laps as lapsmod, ld, maths as mathsmod, motec_csv,
     notes as notesmod, render, report as reportmod, sections as sectionsmod,
-    server, store, timebase,
+    server, sidecar, store, timebase,
 )
 
 DATA = ROOT / "i2pro_data"
@@ -1706,6 +1706,170 @@ class TestComponentRegistry(unittest.TestCase):
         driver = self.DRIVER.read_text(encoding="utf-8")
         self.assertIn("__I3PRO_SELFTEST__: true", driver,
                       "无头驱动没设自检标记，第 32 组断言就等于没跑")
+
+
+class TestSidecar(unittest.TestCase):
+    """ticket #16：六种侧车只经一个接口读写，失败策略只有一套。
+
+    六种：信标 / 赛道区段 / GPS 校正 / 注释 / 数学通道 / CSV 列映射。
+    这里钉四件事：六个领域模块里不再有文件读写；缺了=空、读坏=报错且不删文件、
+    写=原子替换；新加一种只要在 `sidecar.KINDS` 里加一条；快照 / serve / 命令行
+    三条路读到的同一份侧车逐字节一致。
+    """
+
+    #: 六种侧车分别住在哪个领域模块里（用来扫"还有没有自己读写文件"）。
+    OWNERS = {
+        "laps": "laps.py",
+        "sections": "sections.py",
+        "gps": "gpsfix.py",
+        "notes": "notes.py",
+        "maths": "maths.py",
+        "csvmap": "csvlog.py",
+    }
+
+    def test_六个领域模块里不再有文件读写(self):
+        """「拼路径 + 读文件 + 写文件」只该出现在 sidecar.py 里。"""
+        offenders = []
+        for name, filename in self.OWNERS.items():
+            text = (ROOT / "src" / "i3pro" / filename).read_text(encoding="utf-8")
+            for needle in ("read_text(", "write_text(", "json.load(", "json.dump("):
+                if needle in text:
+                    offenders.append(f"{filename}: {needle}")
+        self.assertEqual(
+            offenders, [],
+            "这些文件还在自己碰侧车文件（该走 `sidecar`）：" + repr(offenders),
+        )
+
+    def test_六种侧车都在同一个接口上登记(self):
+        expected = {
+            "laps": ".laps.json", "sections": ".sections.json", "gps": ".gps.json",
+            "notes": ".notes.json", "maths": ".maths.json", "csvmap": ".map.json",
+        }
+        self.assertEqual({name: sidecar.kind_of(name).suffix for name in expected}, expected)
+        # 路径也由它算：`.ld` / `.csv` / 名字里带点的场次都得对
+        self.assertEqual(sidecar.path_of("laps", "场次.ld").name, "场次.laps.json")
+        self.assertEqual(sidecar.path_of("csvmap", "a.b.csv").name, "a.b.map.json")
+        self.assertEqual(
+            sidecar.path_of("notes", Path("目录") / "x.ld").name, "x.notes.json")
+
+    def test_缺失等于空(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "场次.ld"
+            self.assertFalse(sidecar.path_of("laps", session).exists())
+            for name, kind in sidecar.KINDS.items():
+                self.assertEqual(sidecar.read(name, session), kind.blank(),
+                                 f"{name} 缺失时该给出它的空值")
+            # 领域层看到的是"还没设过"，不是错误
+            self.assertEqual(lapsmod.load_config(session).as_dict(), lapsmod.LapConfig().as_dict())
+            self.assertIsNone(sectionsmod.load_config(session))
+            self.assertIsNone(gpsfix.load_config(session))
+            self.assertEqual(notesmod.load_notes(session), [])
+            self.assertEqual(csvlog.load_map(session), {"renames": {}, "units": {}})
+            self.assertEqual(mathsmod.load_local(session).definitions, [])
+
+    def test_读坏要报错且不删文件(self):
+        import tempfile
+
+        kinds = {"laps": dict, "sections": dict, "gps": dict,
+                 "notes": (list, dict), "maths": dict, "csvmap": dict}
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, shape in kinds.items():
+                session = Path(tmp) / f"{name}.ld"
+                path = sidecar.path_of(name, session)
+                # 坏 JSON：报错、说下一步、文件原样留着
+                path.write_text("{ 这不是 JSON", encoding="utf-8")
+                with self.assertRaises(sidecar.SidecarError) as caught:
+                    sidecar.read(name, session)
+                self.assertIn("修好这个 JSON", str(caught.exception), name)
+                self.assertTrue(path.exists(), f"{name} 的坏文件被删掉了")
+                self.assertEqual(path.read_text(encoding="utf-8"), "{ 这不是 JSON")
+                # 顶层形状不对：也要吵，并说清该是什么
+                wrong = 3 if list in (shape if isinstance(shape, tuple) else (shape,)) else []
+                path.write_text(json.dumps(wrong), encoding="utf-8")
+                with self.assertRaises(sidecar.SidecarError) as caught:
+                    sidecar.read(name, session)
+                self.assertIn("顶层", str(caught.exception), name)
+
+    def test_写是原子的_不留临时文件(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "场次.ld"
+            path = sidecar.write("laps", session, {"mode": "auto", "beacons": []})
+            self.assertEqual(path.read_text(encoding="utf-8")[-1], "\n",
+                             "写出来的 JSON 该以换行收尾")
+            leftovers = [p.name for p in Path(tmp).iterdir() if p.name.endswith(".tmp")]
+            self.assertEqual(leftovers, [], "原子写留下的临时文件没清掉")
+
+    def test_新加一种侧车只要一处登记(self):
+        """加一条 `KINDS` 就够了：连后缀、缺省值、报错文案都从它来。"""
+        import tempfile
+
+        name = "_自检侧车"
+        sidecar.register(name, sidecar.Kind("._selftest.json", dict, "自检侧车回到空"))
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                session = Path(tmp) / "场次.ld"
+                self.assertEqual(sidecar.path_of(name, session).name, "场次._selftest.json")
+                self.assertEqual(sidecar.read(name, session), {})
+                path = sidecar.write(name, session, {"a": 1})
+                self.assertEqual(sidecar.read(name, session), {"a": 1})
+                path.write_text("[1, 2]", encoding="utf-8")
+                with self.assertRaises(sidecar.SidecarError) as caught:
+                    sidecar.read(name, session)
+                self.assertIn("自检侧车回到空", str(caught.exception))
+        finally:
+            sidecar.KINDS.pop(name, None)
+
+    @_needs(HILL)
+    def test_三条路径读到的侧车逐字节一致(self):
+        """快照（`render.build_payload`）/ serve（HTTP）/ 命令行读的是同一份。"""
+        import tempfile
+        from http.server import ThreadingHTTPServer
+
+        # 服务端的会话缓存把 `.ld` 映射在内存里，删临时目录前它得先放掉；
+        # `ignore_cleanup_errors` 让这个平台差异不至于把测试判红。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            copy = root / HILL.name
+            copy.write_bytes(HILL.read_bytes())
+            config = lapsmod.LapConfig(
+                mode="manual",
+                beacons=[lapsmod.Beacon(name="起跑线", time=12.5),
+                         lapsmod.Beacon(name="终点线", time=41.0)],
+            )
+            lapsmod.save_config(copy, config)
+
+            # ① 命令行那条：直接读侧车
+            cli_view = lapsmod.load_config(copy).as_dict()
+
+            # ② 快照那条：页面上注入的 payload
+            with ld.LogFile.read(copy) as log:
+                payload = render.build_payload(log, channels=["Vx KF"])
+            snapshot_view = payload["laps_config"]
+
+            # ③ serve 那条：HTTP 拿到的
+            library = server.SessionLibrary([root], cache_size=1)
+            httpd = ThreadingHTTPServer(
+                ("127.0.0.1", 0), server.make_handler(library, buckets=200))
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{httpd.server_address[1]}"
+            try:
+                quoted = urllib.parse.quote(copy.stem)
+                with urllib.request.urlopen(
+                        f"{base}/api/session/{quoted}/laps", timeout=30) as response:
+                    serve_view = json.loads(response.read().decode("utf-8"))["config"]
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+
+            same = json.dumps(cli_view, sort_keys=True, ensure_ascii=False)
+            self.assertEqual(same, json.dumps(snapshot_view, sort_keys=True, ensure_ascii=False))
+            self.assertEqual(same, json.dumps(serve_view, sort_keys=True, ensure_ascii=False))
+            self.assertEqual(len(cli_view["beacons"]), 2)
 
 
 class TestTimebase(unittest.TestCase):
@@ -3474,7 +3638,12 @@ class TestNotes(unittest.TestCase):
         far = notesmod.marks([notesmod.Note(60.0, "界外")], track)
         self.assertIsNone(far[0]["x"])
 
-    def test_侧车往返_坏文件不炸(self):
+    def test_侧车往返_坏文件要吵且不删(self):
+        """读坏了要报错、要能照做、**不能把文件删掉**（ticket #16 统一的失败策略）。
+
+        以前这里悄悄给空表——那会让"图上看不见注释"和"文件坏了"长得一模一样，
+        用户补一条再保存就把旧的覆盖掉了。
+        """
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -3484,7 +3653,11 @@ class TestNotes(unittest.TestCase):
             back = notesmod.load_notes(session)
             self.assertEqual([(n.time, n.text) for n in back], [(12.5, "这里换了刹车点")])
             path.write_text("{ 这不是 JSON", encoding="utf-8")
-            self.assertEqual(notesmod.load_notes(session), [])
+            with self.assertRaises(sidecar.SidecarError) as caught:
+                notesmod.load_notes(session)
+            self.assertIn("修好这个 JSON", str(caught.exception))
+            self.assertTrue(path.exists(), "坏掉的侧车不能被自动删掉：那是用户的东西")
+            self.assertEqual(path.read_text(encoding="utf-8"), "{ 这不是 JSON")
             self.assertFalse(session.exists())          # 侧车永远不会去写 .ld
 
     def test_注释不参与切圈也不改报表(self):

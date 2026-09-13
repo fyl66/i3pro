@@ -33,12 +33,13 @@ FSS_jhy_endu                6                621.3 m / 105 s
 
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
+
+from . import sidecar
 
 __all__ = [
     "DEFAULT_GAP_S",
@@ -57,7 +58,8 @@ __all__ = [
     "summary",
 ]
 
-SIDE_SUFFIX = ".gps.json"
+#: 侧车后缀由 ``sidecar.KINDS["gps"]`` 说了算；这个名字留着给报错文案引用。
+SIDE_SUFFIX = sidecar.kind_of("gps").suffix
 
 #: 缺省跳点阈值：200 km/h。这批日志里最快的车是 78.7 km/h，而错位定位跳出来的
 #: 隐含速度最低也有 800 km/h——两头都留了足够余量，不用看数据就能定这一条。
@@ -383,34 +385,17 @@ def path_distance(
 
 def config_path(session_path: str | Path) -> Path:
     """``<场次>.ld`` / ``<场次>.csv`` -> ``<场次>.gps.json``。"""
-    return Path(session_path).with_suffix(SIDE_SUFFIX)
+    return sidecar.path_of("gps", session_path)
 
 
 def load_config(session_path: str | Path) -> FixConfig | None:
     """读侧车；没存过给 ``None``（"还没设过"，不是错误）。"""
-    path = config_path(session_path)
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise ValueError(
-            f"{path.name} 读不出来（{type(exc).__name__}: {exc}）。"
-            f"修好这个 JSON，或者删掉它让 GPS 回到不校正。"
-        ) from exc
-    if not isinstance(data, dict):
-        raise ValueError(f"{path.name} 的顶层应该是一个 JSON 对象。")
-    return FixConfig.from_dict(data)
+    data = sidecar.read("gps", session_path)
+    return None if data is None else FixConfig.from_dict(data)
 
 
 def save_config(session_path: str | Path, config: FixConfig) -> Path:
-    path = config_path(session_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(config.as_dict(), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    return path
+    return sidecar.write("gps", session_path, config.as_dict())
 
 
 def for_log(log, *, strict: bool = False) -> FixConfig:

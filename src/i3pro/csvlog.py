@@ -27,14 +27,15 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import derive, ld as ldmod, render
+from . import derive, ld as ldmod, render, sidecar
 
 __all__ = ["CsvSession", "read_csv_session", "canonical_names", "ALIASES", "scan_rows",
            "load_map", "save_map", "MAP_SUFFIX", "open_session"]
 
 #: Column-mapping sidecar written next to a CSV the user corrected by hand.
 #: Same principle as the lap sidecar (ADR-0001): the data file stays untouched.
-MAP_SUFFIX = ".map.json"
+#: 侧车后缀由 ``sidecar.KINDS["csvmap"]`` 说了算；这个名字留着给文档引用。
+MAP_SUFFIX = sidecar.kind_of("csvmap").suffix
 
 #: Column names that mean "this is the time axis".
 TIME_NAMES = frozenset({"time", "t", "timestamp", "times", "time s"})
@@ -67,35 +68,21 @@ def _metadata(rows: list[list[str]], head: int) -> dict[str, str]:
 
 
 def _map_path(path: str | Path) -> Path:
-    return Path(path).with_suffix(MAP_SUFFIX)
+    return sidecar.path_of("csvmap", path)
 
 
 def load_map(path: str | Path) -> dict:
     """Manual column corrections for this CSV, or empty when there are none."""
-    sidecar = _map_path(path)
-    if not sidecar.exists():
-        return {"renames": {}, "units": {}}
-    try:
-        import json
-
-        data = json.loads(sidecar.read_text(encoding="utf-8"))
-        return {"renames": dict(data.get("renames") or {}),
-                "units": dict(data.get("units") or {})}
-    except (OSError, ValueError, TypeError):
-        return {"renames": {}, "units": {}}
+    data = sidecar.read("csvmap", path)
+    return {"renames": dict(data.get("renames") or {}),
+            "units": dict(data.get("units") or {})}
 
 
 def save_map(path: str | Path, renames: dict[str, str], units: dict[str, str]) -> Path:
-    import json
-
-    sidecar = _map_path(path)
     merged = load_map(path)
     merged["renames"].update(renames)
     merged["units"].update(units)
-    sidecar.write_text(
-        json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    return sidecar
+    return sidecar.write("csvmap", path, merged)
 
 #: Names our analysis asks for by name. Derived from the constants that already
 #: look channels up, so this list cannot drift from them.

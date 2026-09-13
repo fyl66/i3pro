@@ -18,7 +18,6 @@ shared *distance* axis so they can be compared corner by corner.
 from __future__ import annotations
 
 import math
-import json
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable
@@ -28,6 +27,7 @@ import numpy as np
 from . import derive
 from . import gpsfix
 from . import ld as ldmod
+from . import sidecar
 from . import timebase
 
 __all__ = [
@@ -57,7 +57,8 @@ __all__ = [
 
 #: Sidecar written next to the ``.ld`` file. The ``.ld`` itself stays read-only
 #: (see AGENTS.md); everything the user edits about laps lives here.
-CONFIG_SUFFIX = ".laps.json"
+#: 侧车后缀由 ``sidecar.KINDS["laps"]`` 说了算；这个名字留着给老代码与文档引用。
+CONFIG_SUFFIX = sidecar.kind_of("laps").suffix
 
 #: A beacon name becomes the prefix of every lap label in its series
 #: (``左环 3``), so it stays short enough for the side panel and a share link.
@@ -1001,26 +1002,20 @@ def _migrate_trusted(trusted: dict[str, bool], old: str, new: str) -> dict[str, 
 
 def config_path(ld_path: str | Path) -> Path:
     """``<session>.ld`` -> ``<session>.laps.json``."""
-    return Path(ld_path).with_suffix(CONFIG_SUFFIX)
+    return sidecar.path_of("laps", ld_path)
 
 
 def load_config(ld_path: str | Path) -> LapConfig:
-    """Never raises: an unreadable sidecar just means "no manual edits yet"."""
-    path = config_path(ld_path)
-    if not path.exists():
-        return LapConfig()
-    try:
-        return LapConfig.from_dict(json.loads(path.read_text(encoding="utf-8")))
-    except (OSError, ValueError, TypeError):
-        return LapConfig()
+    """读信标侧车：没存过 = 空配置；**读坏了要报错**（见 ``sidecar``，文件不会被删）。
+
+    以前这里把坏文件悄悄当空——那正是"用户以为没编辑过、一保存就把旧的覆盖掉"的
+    由来。现在坏文件会带一句"修好它或删掉它"抛出来。
+    """
+    return LapConfig.from_dict(sidecar.read("laps", ld_path))
 
 
 def save_config(ld_path: str | Path, config: LapConfig) -> Path:
-    path = config_path(ld_path)
-    path.write_text(
-        json.dumps(config.as_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    return path
+    return sidecar.write("laps", ld_path, config.as_dict())
 
 
 def detect_from_config(

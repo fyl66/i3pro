@@ -10,14 +10,16 @@ i2 Pro 的 Notes 是"在数据上放一条带文字的标记"，复盘时一眼�
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
+from . import sidecar
+
 #: 侧车文件后缀：``<场次>.ld`` -> ``<场次>.notes.json``。
-SIDE_SUFFIX = ".notes.json"
+#: 真身是 ``sidecar.KINDS["notes"]``；这个名字留着给文档与报错文案引用。
+SIDE_SUFFIX = sidecar.kind_of("notes").suffix
 #: 一条注释最多这么多字。再长就截断——它不是备注本，是要在图上看得见的一行字。
 MAX_TEXT = 200
 #: 一场最多这么多条。真到这个数，先删几条旧注释比让侧车无限长更合理。
@@ -185,16 +187,17 @@ def marks(
 # ------------------------------------------------------------------ sidecar
 def config_path(session_path: str | Path) -> Path:
     """``<场次>.ld`` -> ``<场次>.notes.json``（和圈、区段两个侧车挨着放）。"""
-    return Path(session_path).with_suffix(SIDE_SUFFIX)
+    return sidecar.path_of("notes", session_path)
 
 
 def load_notes(session_path: str | Path) -> list[Note]:
-    """读侧车。**永不抛**：读不出来就当这场没有注释，工作台照样打得开。"""
-    path = config_path(session_path)
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
+    """读侧车。
+
+    没存过 = 这场没有注释（不是错误）；**读坏了要报错**（``sidecar.SidecarError``，
+    文件不会被删）。以前这里悄悄给空表——那会让"图上看不见注释"和"文件坏了"长得
+    一模一样，用户补一条再保存就把旧的覆盖掉了。
+    """
+    raw = sidecar.read("notes", session_path)
     if isinstance(raw, dict):
         raw = raw.get("notes")
     if not isinstance(raw, list):
@@ -216,9 +219,5 @@ def load_notes(session_path: str | Path) -> list[Note]:
 
 def save_notes(session_path: str | Path, notes: list[Note]) -> Path:
     """写侧车。``.ld`` 一个字节都不动（ADR 0001）。"""
-    path = config_path(session_path)
-    payload = {"notes": [note.as_dict() for note in notes]}
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    return path
+    return sidecar.write("notes", session_path,
+                         {"notes": [note.as_dict() for note in notes]})

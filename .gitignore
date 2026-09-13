@@ -12,6 +12,9 @@ out/
 *.sections.json
 *.notes.json
 *.gps.json
+*.map.json
+# 侧车写盘时先落的临时文件（sidecar.py 原子替换用），正常情况下瞬间就没了。
+*.json.tmp
 .tmp_deps/
 .venv/
 venv/

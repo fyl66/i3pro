@@ -1871,7 +1871,7 @@ python -m unittest tests.test_i3pro.TestTimebase -v
 #    test_rate_换的是同一个答案 ... ok（50 Hz 时 Parquet 的 time 列 = timebase.axis(log, 50.0)）
 
 # 3. 四道回归
-python -m unittest discover -s tests -v                  # -> Ran 225 tests / OK
+python -m unittest discover -s tests -v                  # -> Ran 232 tests / OK
 python tools\verify_ld_vs_csv.py                         # -> PASS - 0 channel(s) outside tolerance
 node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
 node tools\smoke_viewer.js "out\20260524-耐久正赛.html"  # -> 两条都 PASS
@@ -1886,6 +1886,63 @@ python tools\verify_clicks.py                            # -> 51 项检查：51 
 
 ---
 
+## A44 · 侧车文件：六遍写成一遍（ticket #16）
+
+**做了什么**：新增 `src/i3pro/sidecar.py`。信标（`.laps.json`）、赛道区段
+（`.sections.json`）、GPS 校正（`.gps.json`）、注释（`.notes.json`）、数学通道
+（`.maths.json` + 仓库里的 `maths/global.json`）、CSV 列映射（`.map.json`）六种侧车
+原先各自实现了一遍"文件放哪、缺了算什么、读坏了怎么办、写坏了算不算成功"——六份
+接口、**四种**失败策略。现在这六件事只在一处回答：
+
+| 情形 | 现在只有这一套做法 |
+| --- | --- |
+| 文件不在 | 返回该 kind 的空值（"还没设过"，不是错误） |
+| 读不出来 | 抛 `sidecar.SidecarError`（带"修好它或删掉它"的下一步），**绝不删那个文件** |
+| 顶层不是 JSON 对象/数组 | 同上，并说清该是什么 |
+| 写 | 先落同目录临时文件再 `os.replace` 原子替换，写完以换行收尾 |
+
+**一处行为改动（如实说明）**：`<场次>.notes.json` 原来"读坏了当空表"，现在和别的
+侧车一样报错。理由是原来那个做法会让"图上看不见注释"和"文件坏了"长得一模一样——
+用户补一条再一保存，旧的就永远没了。`.laps.json` 与 `.map.json` 同理。
+`sections` / `gps` / `maths` 本来就是报错的，没变。
+
+**可复制命令与通过判据**：
+
+```powershell
+# 1. 六个领域模块里不再有文件读写（拼路径 / 读 / 写只该出现在 sidecar.py）
+python -m unittest tests.test_i3pro.TestSidecar -v
+# -> Ran 7 tests / OK
+
+# 2. 失败策略一套：缺了=空、读坏=报错且文件不动、写=原子
+python -m unittest tests.test_i3pro.TestSidecar.test_读坏要报错且不删文件 -v
+python -m unittest tests.test_i3pro.TestSidecar.test_写是原子的_不留临时文件 -v
+
+# 3. 新加一种侧车只要一处登记（用一个只存在于测试里的 kind 证明）
+python -m unittest tests.test_i3pro.TestSidecar.test_新加一种侧车只要一处登记 -v
+
+# 4. 快照 / serve / 命令行三条路径读到的同一份侧车逐字节一致
+python -m unittest tests.test_i3pro.TestSidecar.test_三条路径读到的侧车逐字节一致 -v
+
+# 5. 四道回归
+python -m unittest discover -s tests -v                  # -> Ran 232 tests / OK
+python tools\verify_ld_vs_csv.py                         # -> PASS - 0 channel(s) outside tolerance
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
+node tools\smoke_viewer.js "out\20260524-耐久正赛.html"  # -> 两条都 PASS
+python tools\verify_clicks.py                            # -> 51 项检查：51 通过，0 失败
+```
+
+**实测数字**：
+
+| 事项 | 改动前 | 改动后 |
+| --- | --- | --- |
+| 实现了"路径 + 读 + 写"的模块 | 6 个 | **1 个**（`sidecar.py`） |
+| 失败策略 | 4 种（信标/注释/CSV 映射沉默，区段/GPS/数学通道报错） | **1 种** |
+| 六个模块里的 `read_text` / `write_text` / `json.load` / `json.dump` | 各若干 | **0 处** |
+| 登记一种新侧车要动的文件 | 1 个模块（+ `.gitignore`） | **`sidecar.KINDS` 一条** |
+| 单测 | 225 | **232** |
+
+---
+
 ## 全量回归
 
 ```powershell
@@ -1895,7 +1952,7 @@ node tools\smoke_viewer.js out\<场次>.html   # 3. 无头驱动前端：PASS
 python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘：全过（没有 Edge 的机器打印 SKIP，不算通过）
 ```
 
-**通过判据**：`Ran 225 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）；
+**通过判据**：`Ran 232 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）；
 `PASS - 0 channel(s) outside tolerance`；`PASS - workbench ran headless ... interactions verified`；
 `51 项检查：51 通过，0 失败`。**四条全绿才算改完**（AGENTS.md 规则 7）。
 
@@ -1935,3 +1992,4 @@ python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘�
 | `TestGpsFix` / `TestGpsFixOverHttp` | GPS 校正（#14，15 项）：`(0,0)` 只计数不进轨迹、跳点与空档各自断开、跳变两端都算坏点、**关掉校正逐点不变**、按秒与按更新周期两种偏移、分段插值绝不跨空档、路径里程跳过跳变、距离轴作用域的开关、抽稀后断点必须落在**跨着跳变的那一段**上、参数校验的中文下一步、侧车往返与坏文件、金标准（耐久 1 个 214.5 m 跳点且断的就是那 214 m 幽灵线 / 高避 0 跳点 638 个空定位）；HTTP 的 GET / PUT / 落盘 / 400 不动侧车 / `.ld` 字节不变 |
 | `TestLaunchers` | 一键启动：快照批量导出 + 索引页、缺数据目录的报错、端口占用自动换端口 |
 | `TestTimebase` | 主时间基（#22，5 项）：那条公式在 `src` 里只剩 `timebase.py` 一处、`tests` 里 0 处、两份金标准的轴与改动前逐点相同（长度 / 首末点 / 和）、Parquet 与报表取的是同一条轴、`--rate` 换的是同一个答案 |
+| `TestSidecar` | 侧车文件（#16，7 项）：六个领域模块里不再有 `read_text`/`write_text`/`json.load`/`json.dump`、六种侧车都在一处登记（含 `.ld`/`.csv`/名字带点的场次）、缺失=空、读坏=报错且**文件原样留着**（坏 JSON 与顶层形状两种）、写=原子替换且不留临时文件、新加一种侧车只要一条登记、快照/serve/命令行三条路径读到的侧车逐字节一致 |

@@ -22,13 +22,12 @@ worked.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
 
-from . import derive, laps as lapsmod, timebase
+from . import derive, laps as lapsmod, sidecar, timebase
 
 __all__ = [
     "BASIS_LABELS",
@@ -74,7 +73,8 @@ CORNER_FRACTION = 0.35
 CORNER_PERCENTILE = 90.0
 STRAIGHT_PERCENTILE = 10.0
 
-SIDE_SUFFIX = ".sections.json"
+#: 侧车后缀由 ``sidecar.KINDS["sections"]`` 说了算；这个名字留着给报错文案引用。
+SIDE_SUFFIX = sidecar.kind_of("sections").suffix
 
 
 @dataclass(frozen=True)
@@ -628,33 +628,21 @@ def _boundary_times(log, lap, distance: np.ndarray, config: SectionConfig) -> li
 
 def config_path(session_path: str | Path) -> Path:
     """``<场次>.ld`` / ``<场次>.csv`` -> ``<场次>.sections.json``。"""
-    return Path(session_path).with_suffix(SIDE_SUFFIX)
+    return sidecar.path_of("sections", session_path)
 
 
 def load_config(session_path: str | Path) -> SectionConfig | None:
-    """读侧车；没存过就给 ``None``（"还没切过"，不是错误）。"""
-    path = config_path(session_path)
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise ValueError(
-            f"{path.name} 读不出来（{type(exc).__name__}: {exc}）。"
-            f"修好这个 JSON，或者直接删掉它让区段回到自动切分。"
-        ) from exc
-    if not isinstance(data, dict):
-        raise ValueError(f"{path.name} 的顶层应该是一个 JSON 对象。")
-    return SectionConfig.from_dict(data)
+    """读侧车；没存过就给 ``None``（"还没切过"，不是错误）。
+
+    读坏了抛 ``sidecar.SidecarError``（是 ``ValueError``，HTTP 层已有的 400 分支
+    能直接用），文件不会被删。
+    """
+    data = sidecar.read("sections", session_path)
+    return None if data is None else SectionConfig.from_dict(data)
 
 
 def save_config(session_path: str | Path, config: SectionConfig) -> Path:
-    path = config_path(session_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(config.as_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    return path
+    return sidecar.write("sections", session_path, config.as_dict())
 
 
 def effective_config(log, laps) -> tuple[SectionConfig | None, str | None]:

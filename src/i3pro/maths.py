@@ -19,7 +19,6 @@
 
 from __future__ import annotations
 
-import json
 import math as _math
 import difflib
 import re
@@ -29,6 +28,7 @@ from pathlib import Path
 import numpy as np
 
 from . import derive
+from . import sidecar
 from . import timebase
 
 __all__ = [
@@ -1024,7 +1024,8 @@ _CONSTANTS: dict[str, float] = {"pi": _math.pi, "e": _math.e}
 # ------------------------------------------------------------------ 作用域
 
 #: 本地定义跟着场次走：``<场次>.ld`` -> ``<场次>.maths.json``。
-MATH_SUFFIX = ".maths.json"
+#: 侧车后缀由 ``sidecar.KINDS["maths"]`` 说了算；这个名字留着给文档引用。
+MATH_SUFFIX = sidecar.kind_of("maths").suffix
 
 
 @dataclass
@@ -1062,7 +1063,7 @@ class Definition:
 
 def config_path(session_path: str | Path) -> Path:
     """``<场次>.ld`` / ``<场次>.csv`` -> ``<场次>.maths.json``。"""
-    return Path(session_path).with_suffix(MATH_SUFFIX)
+    return sidecar.path_of("maths", session_path)
 
 
 def global_path(root: str | Path | None = None) -> Path:
@@ -1108,27 +1109,20 @@ class MathSet:
     def load(cls, path: str | Path, scope: str = "local") -> "MathSet":
         """读一份定义；文件不在就是空集合（不是错误）。"""
         path = Path(path)
-        if not path.exists():
-            return cls(origin=path)
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise MathError(
-                f"{path.name} 读不出来（{type(exc).__name__}: {exc}）。"
-                f"修好这个 JSON，或者直接删掉它重来。"
-            ) from exc
-        if not isinstance(data, dict):
-            raise MathError(f"{path.name} 的顶层应该是一个 JSON 对象。")
+            data = sidecar.read_path("maths", path)
+        except sidecar.SidecarError as exc:
+            # 读文件这件事归 sidecar（一套失败策略）；这里只把异常类型换成本模块
+            # 对外的那个（调用方原先 catch 的是 MathError）。
+            raise MathError(str(exc)) from exc
+        if not data:
+            return cls(origin=path)
         return cls.from_dict(data, scope=scope, origin=path)
 
     def save(self, path: str | Path) -> Path:
         path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(self.as_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        self.origin = path
-        return path
+        self.origin = sidecar.write_path("maths", path, self.as_dict())
+        return self.origin
 
 
 def _is_number(value) -> bool:

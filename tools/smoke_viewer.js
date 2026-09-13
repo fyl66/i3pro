@@ -935,6 +935,78 @@ if (api) {
       "an empty definition list does not explain how to add one");
     api.data.api = apiBase;
   }
+
+  // 23. undo: one step back, and a button that is grey rather than silent
+  const undoBtn = registry.get("undoLaps");
+  check(!!undoBtn, "the undo button is missing");
+  if (undoBtn) {
+    const apiBase = api.data.api;
+    // A snapshot has no server, so there is no "previous version" to go back to:
+    // the button must be grey, and clicking it anyway (keyboard, script) must say
+    // why instead of swallowing the click.
+    if (!apiBase) {
+      api.renderLapControls();
+      check(undoBtn.disabled === true,
+        "in snapshot mode the undo button must be disabled, not clickable");
+      check(String(undoBtn.title).indexOf("serve") >= 0,
+        "the disabled undo button does not say why it is disabled");
+      const quiet = httpCalls.length;
+      undoBtn.click();
+      check(httpCalls.length === quiet, "a snapshot must not send an undo request");
+      check(String(registry.get("toast").textContent).indexOf("serve") >= 0,
+        "in snapshot mode undo must tell the user to run serve mode");
+    }
+
+    api.data.api = "/api";
+    state.canUndo = false;
+    api.renderLapControls();
+    check(undoBtn.disabled === true,
+      "with nothing to undo the button must be disabled, not silently useless");
+    check(String(undoBtn.title).indexOf("先改一次信标") >= 0,
+      "the disabled undo button does not say what to do next");
+    // A grey button is still reachable from the keyboard / a script; that click
+    // has to say what happened rather than do nothing at all.
+    let beforeUndo = httpCalls.length;
+    undoBtn.click();
+    check(httpCalls.length === beforeUndo, "with nothing to undo no request may be sent");
+    check(String(registry.get("toast").textContent).indexOf("没有可撤销的一步") >= 0,
+      "clicking a disabled undo button failed silently");
+
+    // The server's can_undo is the only judge of whether the button is live -
+    // the front end must not guess from "I edited something a moment ago".
+    api.applyLapsResponse({
+      config: { mode: "auto", beacons: [{ name: "左环A", lat: 34.1, lon: 113.6 }],
+                trusted: { "左环A 1": false } },
+      laps: (api.data.laps || []).slice(),
+      can_undo: true,
+    });
+    check(state.canUndo === true, "the UI ignored can_undo from the server");
+    check(undoBtn.disabled === false, "after an edit the undo button must be live");
+
+    beforeUndo = httpCalls.length;
+    undoBtn.click();
+    const undos = httpCalls.slice(beforeUndo).filter(
+      (call) => call.method === "PUT" && call.url.indexOf("/laps") >= 0);
+    check(undos.length === 1, "undo must save through exactly one PUT, got " + undos.length);
+    if (undos.length === 1) {
+      check(undos[0].body === '{"undo":true}',
+        "undo must not resend a whole config: " + undos[0].body);
+    }
+
+    // One level only: the server answers can_undo=false, so the button goes grey.
+    api.applyLapsResponse({
+      config: { mode: "auto", beacons: [{ name: "左环", lat: 34.1, lon: 113.6 }],
+                trusted: { "左环 1": false } },
+      laps: (api.data.laps || []).slice(),
+      can_undo: false,
+      notice: "已撤销上一步信标编辑",
+    });
+    check(state.canUndo === false && undoBtn.disabled === true,
+      "after undoing the one step the button must go grey again");
+    check(String(registry.get("toast").textContent).indexOf("已撤销") >= 0,
+      "the user was not told that the undo happened");
+    api.data.api = apiBase;
+  }
 }
 
 /* --------------------------------------------------------------- DOM checks */

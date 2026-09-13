@@ -857,6 +857,36 @@ def insertion_notice(
     )
 
 
+def same_config(current: LapConfig, other: LapConfig | None) -> bool:
+    """是不是同一版配置。
+
+    「撤销」按钮的判据就在这里：上一版和当前这一版一模一样时，撤销没有东西可撤，
+    控件应当是灰的，而不是点下去什么都不发生。比较用 :meth:`LapConfig.as_dict`
+    ——那正是落盘与过线的形状，所以"同一版"指的是**边车里同一版**：经纬度比到
+    小数第 7 位、时刻比到小数第 4 位（``as_dict`` 的舍入），再细的差别本来也存不下去。
+    """
+    if other is None:
+        return False
+    return current.as_dict() == other.as_dict()
+
+
+def undo_config(current: LapConfig, previous: LapConfig | None) -> LapConfig | None:
+    """撤销上一步：把**上一版配置原样交回来**；没有可撤销的一步时给 ``None``。
+
+    撤销不是"反向编辑"，而是"把上一版再提交一次"。**原样**是关键：改名撤销之后
+    「可信 / 不可信」标记回来的原因是它们本来就挂在旧名字上（上一版就是这么存的），
+    不是有人又迁移了一遍；插入撤销之后那条边界不在上一版里；删掉的信标还在列表里。
+    所以调用方拿到它之后只需要落盘，不必再跑 ``reconcile_edits``——上一版正是那些
+    规则自己的输出。
+
+    调用方负责保管 ``previous``——按 ticket 的约定只留一版（一个槽，落在服务内存里），
+    所以这里是**一级撤销**，撤销完就把它清掉，不做重做。
+    """
+    if previous is None or same_config(current, previous):
+        return None
+    return previous
+
+
 def _crossing_times(config: LapConfig) -> set[float]:
     """The moments of every hand-entered crossing, at sidecar precision."""
     return {

@@ -78,6 +78,10 @@ class SessionLibrary:
         #: 场次文件 -> (会话对象身份, 定义指纹)。定义或数据一改就重算。
         self._maths_attached: dict[str, tuple] = {}
         self._maths_errors: dict[str, list[dict]] = {}
+        #: 场次文件 -> 上一次信标编辑之前的那一版配置，供"撤销上一步"用。
+        #: 按 ticket #6 的约定**只留一版**（一个槽），而且只在内存里：服务一重启
+        #: 就没了，撤的是"这个进程里刚才那一步"，不是历史。
+        self._laps_undo: dict[str, lapsmod.LapConfig] = {}
 
     # ------------------------------------------------------------- discovery
     def _paths(self) -> dict[str, Path]:
@@ -176,11 +180,27 @@ class SessionLibrary:
                 out.append({"name": name, "error": str(exc)})
         return out
 
+    # -------------------------------------------------------------- lap edits
+    def remember_laps(self, path: str | Path, config: lapsmod.LapConfig) -> None:
+        """记下这次编辑**之前**的那一版，撤销时把它原样交回去。"""
+        with self._lock:
+            self._laps_undo[str(path)] = config
+
+    def laps_undo_slot(self, path: str | Path) -> lapsmod.LapConfig | None:
+        with self._lock:
+            return self._laps_undo.get(str(path))
+
+    def forget_laps_undo(self, path: str | Path) -> None:
+        """一级撤销：用掉就清空这个槽，不做重做。"""
+        with self._lock:
+            self._laps_undo.pop(str(path), None)
+
     def close(self) -> None:
         with self._lock:
             for log in self._cache.values():
                 log.close()
             self._cache.clear()
+            self._laps_undo.clear()
 
     def upload_dir(self) -> Path:
         """Where an uploaded log goes: the first configured data root."""
@@ -297,6 +317,8 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                 step=_float_arg(query, "step", 1.0),
             )
             payload["session"] = name
+            # 撤销的上一版只在这个进程的内存里，页面自己算不出来，只能由服务告诉它
+            payload["laps_can_undo"] = self._can_undo(log, lapsmod.load_config(log.path))
             self._html(render.render_page(payload))
 
         def api(self, parts: list[str], query: dict, method: str = "GET") -> None:
@@ -411,6 +433,7 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                     {
                         "config": config.as_dict(),
                         "laps": lapsmod.lap_table(log, laps),
+                        "can_undo": self._can_undo(log, config),
                     }
                 )
 
@@ -443,7 +466,12 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
 
         # --------------------------------------------------------- lap editing
         def save_laps(self, log) -> None:
-            """PUT /api/session/<name>/laps with the beacon / mode config."""
+            """PUT /api/session/<name>/laps：整份信标 / 切分方式配置，或 ``{"undo": true}``。
+
+            #4 的改名、#5 的插入穿越、以及"✕"删信标都从这里过，所以"上一步"也在这里
+            记：一次真的改动了配置的保存，会把**保存之前**的那一版放进内存里的槽。
+            撤销就是把那一版再提交一次，走的是同一条落盘路径。
+            """
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b""
             if not body:
@@ -454,26 +482,66 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                 return self._error(400, f"JSON 解析失败: {exc}")
             if not isinstance(data, dict):
                 return self._error(400, "需要一个 JSON 对象")
+            previous = lapsmod.load_config(log.path)
+            if data.get("undo"):
+                return self.undo_laps(log, previous)
             # The client sends the whole config, so the name rules (trim, empty
             # falls back, duplicate suffix, truncation) and the trusted-mark
             # migration are applied here - one implementation, every caller.
-            previous = lapsmod.load_config(log.path)
             config = lapsmod.reconcile_edits(previous, lapsmod.LapConfig.from_dict(data))
             problem = lapsmod.check_new_crossings(previous, config, log.duration)
             if problem:
                 return self._error(400, problem)
+            self._commit_laps(log, config, previous)
+
+        def undo_laps(self, log, current) -> None:
+            """撤销上一步信标编辑：把内存里那一版按同一条保存路径再提交一次。
+
+            不再跑 ``check_new_crossings``——要交回去的那一版本来就存在过、也被接受过。
+            重跑一次反而有害：那条规则会放过边车里**已经存在**的越界穿越，于是用户删掉
+            一条旧侧车里的越界穿越之后，就再也撤不回来了。
+            """
+            slot = library.laps_undo_slot(log.path)
+            if slot is None:
+                return self._error(
+                    400,
+                    "没有可撤销的一步了：上一版配置只留在内存里，服务重启过、或还没在这个"
+                    "页面上改过信标都会是空的。先改一次信标（改名 / ＋ 穿越 / ✕），再来撤销。",
+                )
+            config = lapsmod.undo_config(current, slot)
+            if config is None:
+                return self._error(
+                    400,
+                    "当前这一版已经和上一版一样了，没有可撤销的一步；改一次信标再来撤销。",
+                )
+            self._commit_laps(log, config, current, notice="已撤销上一步信标编辑",
+                              forget_undo=True)
+
+        def _commit_laps(self, log, config, previous, notice=None, forget_undo=False) -> None:
+            """落盘 → 重算圈速表 → 记下"上一步"，三条编辑路径共用这一段。"""
             before = render.detect(log)              # laps as they are right now
             path = lapsmod.save_config(log.path, config)
             laps = render.detect(log)
-            notice = lapsmod.insertion_notice(previous, config, len(before), len(laps))
+            if notice is None:
+                notice = lapsmod.insertion_notice(previous, config, len(before), len(laps))
+            if forget_undo:
+                library.forget_laps_undo(log.path)   # 一级撤销，用掉就没有了
+            elif not lapsmod.same_config(config, previous):
+                # 只有真的改出一版新的才更新槽：一次没改动的保存不该把上一步冲掉
+                library.remember_laps(log.path, previous)
             self._json(
                 {
                     "saved": path.name,
                     "config": config.as_dict(),
                     "laps": lapsmod.lap_table(log, laps),
                     "notice": notice,
+                    "can_undo": self._can_undo(log, config),
                 }
             )
+
+        def _can_undo(self, log, current) -> bool:
+            """撤销按钮该不该亮：槽里那一版和当前这一版确实不一样才算数。"""
+            return lapsmod.undo_config(current, library.laps_undo_slot(log.path)) is not None
 
         # ------------------------------------------------------------ upload
         # ------------------------------------------------------ maths editing

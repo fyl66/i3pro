@@ -190,6 +190,7 @@
         <select id="lapMode" title="切分方式"></select>
         <button id="addBeacon" title="点一下赛道图上的位置放一个信标">＋ 信标</button>
         <button id="addCrossing" title="在光标处插入一次漏掉的穿越（i2 Pro 的 Missed Beacon）">＋ 穿越</button>
+        <button id="undoLaps" title="撤销上一步信标编辑（改名 / 插入穿越 / 删信标）">↶ 撤销</button>
       </div>
       <div class="hint">点信标名可以就地改名（<kbd>回车</kbd> 保存 · <kbd>Esc</kbd> 取消）</div>
       <div class="beacons" id="beaconList"></div>
@@ -516,6 +517,8 @@ const state = {
   track: (DATA && DATA.track) || null,
   points: null,
   lapsConfig: { mode: "auto", beacons: [], trusted: {} },
+  //: 服务内存里还留着一版可以撤销的配置？由服务的响应说了算，界面不猜。
+  canUndo: false,
   placeBeacon: false,
   pending: 0,
   windowKey: "",
@@ -2326,6 +2329,13 @@ function renderLapControls() {
   }
   $("addBeacon").classList.toggle("on", !!state.placeBeacon);
   $("addBeacon").disabled = !DATA.api;
+  const undo = $("undoLaps");
+  undo.disabled = !DATA.api || !state.canUndo;
+  undo.title = !DATA.api
+    ? "快照模式（没有 serve）改不了信标，也就没有可撤销的一步"
+    : (state.canUndo
+      ? "撤销上一步信标编辑（改名 / 插入穿越 / 删信标）"
+      : "没有可撤销的一步了：先改一次信标");
 }
 
 /**
@@ -2383,6 +2393,7 @@ async function insertCrossing() {
 function applyLapsResponse(data) {
   state.lapsConfig = data.config;
   DATA.laps = data.laps;
+  state.canUndo = !!data.can_undo;
   renderLapControls();
   renderLapTable();
   if (data.notice) toast(data.notice);
@@ -2391,20 +2402,40 @@ function applyLapsResponse(data) {
   renderAll();
 }
 
-async function saveLaps(config) {
-  state.lapsConfig = config;
-  if (!DATA.api) { toast("快照模式不能改信标，用 serve 模式"); return; }
+/**
+ * 一次保存（或一次撤销）加上"响应 → 界面"的映射。改名 / 插入穿越 / 删信标 / 撤销
+ * 四条路都走这里，所以报错文案与状态刷新只有一份实现。
+ */
+async function putLaps(payload) {
   try {
     const res = await fetch(DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/laps", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(config),
+      body: JSON.stringify(payload),
     });
     if (!res.ok) throw new Error("HTTP " + res.status);
     applyLapsResponse(await res.json());
   } catch (err) {
     toast("信标保存失败: " + err.message);
   }
+}
+
+async function saveLaps(config) {
+  state.lapsConfig = config;
+  if (!DATA.api) { toast("快照模式不能改信标，用 serve 模式"); return; }
+  await putLaps(config);
+}
+
+/**
+ * 撤销上一步信标编辑。撤销不是"反向编辑"，而是把**上一版**原样再交回去，所以
+ * trusted 标记会跟着名字回到旧名字、插入的边界会消失、删掉的信标会回到列表里。
+ * 上一版只留在服务的内存里（一个槽），所以服务重启过、或还没在这个页面上改过
+ * 信标时按钮是灰的；真的点到灰按钮（键盘 / 脚本）也要说清原因，而不是静默。
+ */
+async function undoBeaconEdit() {
+  if (!DATA.api) { toast("快照模式不能撤销，用 serve 模式"); return; }
+  if (!state.canUndo) { toast("没有可撤销的一步了：先改一次信标再来撤销"); return; }
+  await putLaps({ undo: true });
 }
 
 function onTrackClick(event, comp, bundle) {
@@ -3483,6 +3514,8 @@ function init() {
   $("addCrossing").addEventListener("click", () => { insertCrossing(); });
   state.lapsConfig = Object.assign({ mode: "auto", beacons: [], trusted: {} },
                                    DATA.laps_config || {});
+  state.canUndo = !!DATA.laps_can_undo;
+  $("undoLaps").addEventListener("click", () => { undoBeaconEdit(); });
   renderLapControls();
   $("mathsNew").addEventListener("click", () => openMathsEditor(null));
   $("mathsCancel").addEventListener("click", closeMathsEditor);

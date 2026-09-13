@@ -906,6 +906,191 @@ class TestBeaconEditingOverHttp(unittest.TestCase):
             library.close()
 
 
+class TestBeaconUndo(unittest.TestCase):
+    """Ticket #6, the part that can be judged without a server.
+
+    "撤销" is not an inverse edit: it is "submit the previous version again".
+    Whether there *is* a previous version worth submitting is a pure question,
+    so the button's enabled state is decided by a function rather than guessed
+    by the front end.
+    """
+
+    def test_same_config_compares_what_the_sidecar_stores(self):
+        base = lapsmod.LapConfig(
+            mode="auto",
+            beacons=[lapsmod.Beacon("左环", 34.1, 113.6),
+                     lapsmod.Beacon("手工穿越", time=12.5)],
+            trusted={"左环 1": False},
+        )
+        self.assertTrue(lapsmod.same_config(base, lapsmod.LapConfig.from_dict(base.as_dict())))
+        # every field the sidecar carries counts as part of "this version"
+        for changed in (
+            lapsmod.LapConfig(beacons=[lapsmod.Beacon("左环A", 34.1, 113.6),
+                                       lapsmod.Beacon("手工穿越", time=12.5)],
+                              trusted=dict(base.trusted)),
+            lapsmod.LapConfig(beacons=[base.beacons[0],
+                                       lapsmod.Beacon("手工穿越", time=12.6)],
+                              trusted=dict(base.trusted)),
+            lapsmod.LapConfig(beacons=list(base.beacons), trusted={"左环 1": True}),
+            lapsmod.LapConfig(mode="run", beacons=list(base.beacons),
+                              trusted=dict(base.trusted)),
+        ):
+            self.assertFalse(lapsmod.same_config(base, changed))
+        self.assertFalse(lapsmod.same_config(base, None), "没有上一版，就谈不上同一版")
+        # as_dict rounds (7 decimals of position, 4 of time), so "the same
+        # version" means "the same bytes in the sidecar": a difference finer
+        # than that could never be stored, so it must not make the button lie.
+        finer = lapsmod.LapConfig(
+            beacons=[lapsmod.Beacon("左环", 34.1 + 1e-9, 113.6), base.beacons[1]],
+            trusted=dict(base.trusted),
+        )
+        self.assertTrue(lapsmod.same_config(base, finer))
+
+    def test_nothing_to_undo_is_said_out_loud(self):
+        base = lapsmod.LapConfig(beacons=[lapsmod.Beacon("左环", 34.1, 113.6)])
+        self.assertIsNone(lapsmod.undo_config(base, None))
+        twin = lapsmod.LapConfig.from_dict(base.as_dict())
+        self.assertIsNone(lapsmod.undo_config(base, twin),
+                          "上一版和当前版一样时，撤销没有东西可撤")
+
+    def test_undo_hands_the_previous_version_back_untouched(self):
+        current = lapsmod.LapConfig(beacons=[lapsmod.Beacon("左环A", 34.1, 113.6)],
+                                    trusted={"左环A 1": False})
+        previous = lapsmod.LapConfig(beacons=[lapsmod.Beacon("左环", 34.1, 113.6)],
+                                     trusted={"左环 1": False})
+        back = lapsmod.undo_config(current, previous)
+        self.assertIs(back, previous, "撤销要交回去的是上一版本身，不是一份重算过的近似")
+        self.assertEqual([b.name for b in back.beacons], ["左环"])
+        self.assertEqual(back.trusted, {"左环 1": False})
+
+
+class TestBeaconUndoOverHttp(unittest.TestCase):
+    """Ticket #6 as the UI reaches it: ``PUT {"undo": true}`` on the laps route."""
+
+    @_needs(HILL)
+    def test_rename_insert_and_delete_are_each_one_step_back(self):
+        from http.server import ThreadingHTTPServer
+
+        library = server.SessionLibrary([DATA], cache_size=1)
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(library, buckets=200))
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        quoted = urllib.parse.quote(HILL.stem)
+        sidecar = HILL.parent / f"{HILL.stem}.laps.json"
+        self.assertFalse(sidecar.exists(), "a stale sidecar would poison this test")
+
+        def get_json(path):
+            with urllib.request.urlopen(base + path, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8"))
+
+        def put_json(path, payload):
+            request = urllib.request.Request(
+                base + path, data=json.dumps(payload).encode("utf-8"), method="PUT",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8"))
+
+        def page_payload():
+            """页面注入的那份 payload：刷新之后界面就是靠它知道按钮该不该亮。"""
+            with urllib.request.urlopen(base + "/session/" + quoted, timeout=60) as response:
+                html = response.read().decode("utf-8")
+            start = html.index("const DATA = ") + len("const DATA = ")
+            payload, _end = json.JSONDecoder().raw_decode(html[start:])
+            return payload
+
+        def on_disk():
+            return json.loads(sidecar.read_text(encoding="utf-8"))
+
+        try:
+            start = get_json(f"/api/session/{quoted}/laps")
+            self.assertFalse(start["can_undo"],
+                             "一个刚起的服务不该声称有可撤销的一步")
+            first_page = page_payload()
+            self.assertIn("laps_can_undo", first_page,
+                          "页面没有把撤销状态告诉界面（刷新之后按钮就说不准了）")
+            self.assertFalse(first_page["laps_can_undo"])
+
+            with ld.LogFile.read(HILL) as log:
+                track = derive.gps_track(log)
+                auto = lapsmod.detect_laps(log)
+            launch = int(np.searchsorted(track["time"], auto[0].start_time))
+            gate = {"lat": float(track["lat"][launch]), "lon": float(track["lon"][launch])}
+
+            # ---- 第 1 步：放一个信标 ----
+            placed = put_json(f"/api/session/{quoted}/laps", {
+                "mode": "auto", "beacons": [dict(gate, name="左环")],
+                "trusted": {"左环 1": False},
+            })
+            self.assertTrue(placed["can_undo"], "做了一步就没有可撤销的一步？")
+            self.assertTrue(page_payload()["laps_can_undo"],
+                            "改了一步之后刷新页面，撤销按钮就该亮了")
+
+            # ---- 第 2 步：改名；撤销要连可信标记一起回到旧名字上 ----
+            renamed = put_json(f"/api/session/{quoted}/laps", {
+                "mode": "auto", "beacons": [dict(gate, name="左环A")],
+                "trusted": placed["config"]["trusted"],
+            })
+            self.assertEqual(renamed["config"]["trusted"], {"左环A 1": False})
+
+            back = put_json(f"/api/session/{quoted}/laps", {"undo": True})
+            self.assertEqual([b["name"] for b in back["config"]["beacons"]], ["左环"])
+            self.assertEqual(back["config"]["trusted"], {"左环 1": False},
+                             "撤销改名没有把可信标记迁回旧名字")
+            self.assertTrue(all(row["lap"].startswith("左环 ") for row in back["laps"]),
+                            "撤销改名之后圈速表的标签还挂着新名字")
+            self.assertFalse(back["can_undo"], "一级撤销用掉之后不该还有下一步")
+            self.assertEqual(on_disk()["trusted"], {"左环 1": False},
+                             "撤销只改了内存，没有落盘")
+
+            # ---- 第 2 步：插一次穿越；撤销后圈速表复原 ----
+            rows = get_json(f"/api/session/{quoted}/laps")["laps"]
+            when = (rows[0]["start_time"] + rows[0]["end_time"]) / 2.0
+            inserted = put_json(f"/api/session/{quoted}/laps", {
+                "mode": "auto",
+                "beacons": [dict(gate, name="左环"), {"name": "手工穿越", "time": when}],
+            })
+            self.assertEqual(len(inserted["laps"]), len(rows) + 1)
+            self.assertTrue(inserted["can_undo"])
+
+            # 一次什么都没改的保存不该把上一步吃掉（否则用户"顺手保存一下"就撤不回来了）
+            noop = put_json(f"/api/session/{quoted}/laps", inserted["config"])
+            self.assertTrue(noop["can_undo"], "一次没改动的保存把上一步吃掉了")
+
+            undone = put_json(f"/api/session/{quoted}/laps", {"undo": True})
+            self.assertEqual(len(undone["laps"]), len(rows), "撤销插入没有还原圈速表")
+            self.assertEqual([b["name"] for b in undone["config"]["beacons"]], ["左环"])
+            self.assertFalse(undone["can_undo"])
+            self.assertEqual([b["name"] for b in on_disk()["beacons"]], ["左环"],
+                             "撤销插入没有落盘")
+
+            # ---- 第 2 步：删掉信标；撤销把它放回来 ----
+            deleted = put_json(f"/api/session/{quoted}/laps", {"mode": "auto", "beacons": []})
+            self.assertEqual(deleted["config"]["beacons"], [])
+            self.assertTrue(deleted["can_undo"])
+            restored = put_json(f"/api/session/{quoted}/laps", {"undo": True})
+            self.assertEqual([b["name"] for b in restored["config"]["beacons"]], ["左环"],
+                             "撤销删除没有把信标放回来")
+            self.assertEqual([b["name"] for b in on_disk()["beacons"]], ["左环"])
+            self.assertFalse(restored["can_undo"])
+
+            # ---- 没有可撤销的一步：明确报错，并说下一步做什么 ----
+            with self.assertRaises(urllib.error.HTTPError) as refused:
+                put_json(f"/api/session/{quoted}/laps", {"undo": True})
+            self.assertEqual(refused.exception.code, 400)
+            message = json.loads(refused.exception.read().decode("utf-8"))["error"]
+            self.assertIn("没有可撤销的一步", message)
+            self.assertIn("改一次信标", message, "报错没有告诉用户下一步做什么")
+            self.assertEqual([b["name"] for b in on_disk()["beacons"]], ["左环"],
+                             "被拒绝的撤销动了边车")
+        finally:
+            # never leave a sidecar behind: it would change every later test
+            sidecar.unlink(missing_ok=True)
+            httpd.shutdown()
+            httpd.server_close()
+            library.close()
+
+
 class TestDistanceAxisLookup(unittest.TestCase):
     """On the distance axis the cursor is metres, but a crossing is a moment."""
 

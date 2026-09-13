@@ -74,7 +74,7 @@ MoTeC 自己导出的两个 CSV（182 MB / 425 MB）。
 | **切分方式** | 自动挑门 / 按运行分段（八字、直线加速、skidpad 的正确单位）/ 八字按环；一刀切不出圈的场次也能手工给信标 |
 | **缩放不丢细节（serve 模式）** | 快照是预先抽稀的；`serve` 模式每次缩放按可见区间重新取样：1 秒窗口返回 100 个原始样本，单次请求 3 ms |
 | **数学通道** | 白名单表达式（53 个函数，**不用 `eval`**）造派生通道，效果与原生通道一样：可画图、可进散点、可切圈、可进报表。两种作用域——**本地**跟着场次（`<场次>.maths.json`），**全局**在仓库里（`maths/global.json`），同名时本地赢，界面上用角标写明谁生效。坏式子不进侧车，一条坏了不拖累其它条 |
-| **工程化** | 96 项单测全绿（真实数据回归 + HTTP 端到端 + 无头驱动前端 129 个断言点），零第三方运行期依赖；改这个仓库的硬性规则见 [AGENTS.md](AGENTS.md) |
+| **工程化** | 100 项单测全绿（真实数据回归 + HTTP 端到端 + 无头驱动前端 144 个断言点），零第三方运行期依赖；改这个仓库的硬性规则见 [AGENTS.md](AGENTS.md) |
 
 完整验收清单与复现命令见 **[`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md)**；
 规划、里程碑与风险见 **[`docs/PLAN.md`](docs/PLAN.md)**。
@@ -136,7 +136,7 @@ MoTeC 自己导出的两个 CSV（182 MB / 425 MB）。
 i3pro.cmd           命令行入口（自动探测 Python），两个 bat 都调它
 docs/               PLAN.md 规划 · ACCEPTANCE.md 验收清单 · ld-format.md 格式逆向记录
 tools/              verify_ld_vs_csv.py 解析对照 · smoke_viewer.js 无头驱动前端
-tests/              96 项单测
+tests/              100 项单测
 maths/              全局数学通道定义（global.json，跨场次复用）
 out/                生成物（快照 HTML / Parquet），已在 .gitignore 里
 i2pro_data/         试车数据（.ld/.ldx/.csv），不进仓库
@@ -176,9 +176,9 @@ src/i3pro/
 ## 开发
 
 ```powershell
-python -m unittest discover -s tests -v      # 96 项，无数据文件时自动 skip
+python -m unittest discover -s tests -v      # 100 项，无数据文件时自动 skip
 python tools\verify_ld_vs_csv.py             # 与 i2 Pro CSV 逐通道对照
-node tools\smoke_viewer.js out\demo.html     # 无头驱动前端：缩放/光标/分组/信标编辑/数学通道等 129 个断言点
+node tools\smoke_viewer.js out\demo.html     # 无头驱动前端：缩放/光标/分组/信标编辑/数学通道/撤销等 144 个断言点
 ```
 
 算法层（`derive` / `laps` / `render`）是不依赖框架的纯函数，改动请优先补单测——

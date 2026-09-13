@@ -1693,7 +1693,7 @@ python tools\verify_clicks.py                               # 51 项检查：51 
 **通过判据**（可复制，在本机跑出来的）：
 
 ```powershell
-python -m unittest discover -s tests -v      # Ran 215 tests + OK
+python -m unittest discover -s tests -v      # Ran 217 tests + OK
 python tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"   # PASS（第 32 组）
 python tools\smoke_viewer.js "out\20260524-耐久正赛.html"      # PASS（第 32 组）
 rg -o 'type === "' src\i3pro\web\viewer.html | Measure-Object  # 73（这一票之前 88）
@@ -1742,6 +1742,10 @@ rg -o 'type === "' src\i3pro\web\viewer.html | Measure-Object  # 73（这一票�
   第 32 组会把它加进工作表、读出它的标题与默认配置、走一遍分享链接往返，再拿掉。
 * 这一票**不碰** Python，也不动任何界面上看得见的东西：验收里关于外观的部分
   （时间轴、圈速表、报表）仍然是它们自己那几条。
+* 声明里的**字段名会继续演进**（#19 / #20 / #21 会把"缩放后要不要重新取数"这类
+  字段收成统一的 `data`）。上面那张字段表记的是 #17 交付时的形状；单测与第 32 组
+  断言只钉"结构"（每个类型都声明了 `render`、取数在它自己的声明块里说了），
+  所以 #21 换写法时该改的是它，不该因为这条守卫变红。
 
 ---
 

@@ -2275,12 +2275,15 @@ if (embeddedSpec && embeddedSpec.series) {
     const types = api.componentTypes;
     check(!!(types.delta && types.delta.render && types.delta.label),
       "Δ 的声明不完整（至少要 label 与 render）");
-    check(!!(types.status && types.status.render && types.status.needs && types.status.hotkey),
-      "状态与故障的声明不完整（render / needs / hotkey）");
+    // 取数那件事认 `needs` 或 `data` 两种写法：#21 会把它们收成一个 seam，
+    // 那时候该改的是它，不该让这条断言红。
+    check(!!(types.status && types.status.render
+      && (types.status.needs || types.status.data) && types.status.hotkey),
+      "状态与故障的声明不完整（render / 取数 / hotkey）");
     check(!!(types.track && types.track.defaults && types.track.controls && types.track.hooks
-      && types.track.refreshWindow && types.track.encode && types.track.decode
-      && types.track.render),
-      "赛道轨迹的声明不完整（默认配置 / 控件 / 事件 / 缩放重取 / 分享链接 / 画）");
+      && (types.track.data || types.track.refreshWindow) && types.track.encode
+      && types.track.decode && types.track.render),
+      "赛道轨迹的声明不完整（默认配置 / 控件 / 事件 / 取数 / 分享链接 / 画）");
     check(api.componentSpec({ type: "没这个类型" }) === null,
       "没声明过的类型该给 null，而不是猜一个");
     check(api.componentTypeWithHotkey("e") === "status",

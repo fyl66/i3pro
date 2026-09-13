@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import dataclasses
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1600,21 +1601,37 @@ class TestComponentRegistry(unittest.TestCase):
                     "要么把漏掉的那处也交给声明，要么把状态改回未迁移。",
                 )
 
-    def test_注册表里三类形式各自声明了该声明的东西(self):
+    def _spec_block(self, name):
+        """注册表里某个类型的声明块（`name: { … },`）。"""
         source = self.VIEWER.read_text(encoding="utf-8")
-        declared = {
-            'render: renderDeltaComponent,': "Δ 的 render",
-            'render: renderStatusComponent,': "状态与故障的 render",
-            "needs: (comp, add) => (DATA.status || []).forEach(add),": "状态通道的取数需求",
-            'hotkey: "e",': "E 键归谁管",
-            'defaults: () => ({ channel: null, window: "all" }),': "轨迹的默认配置",
-            "controls: trackControls,": "轨迹的控件条",
-            'hooks: (comp, b) => b.canvas.addEventListener("click"': "轨迹的点击事件",
-            "refreshWindow:": "缩放后要不要重新取数",
-            "render: renderTrackComponent,": "轨迹的 render",
-        }
-        for needle, what in declared.items():
-            self.assertIn(needle, source, f"注册表里少了{what}")
+        match = re.search(rf"\n  {name}: \{{(.*?)\n  \}},", source, re.S)
+        self.assertIsNotNone(match, f"注册表里没有 {name} 的声明块")
+        return match.group(1)
+
+    def test_三类形式各自声明了怎么画与怎么取数(self):
+        """钉的是**结构**，不是字段清单。
+
+        #19 / #20 / #21 要把 `refreshWindow` 这类字段收成统一的 `data`——那是
+        注册表自己的演进，不该让这条守卫变红。所以这里只要求：三类形式都声明了
+        `render`，而且"怎么取数"在它自己的声明块里说了（`needs` 或 `data` 都算）。
+        """
+        for name, render_fn in (("delta", "renderDeltaComponent"),
+                                ("status", "renderStatusComponent"),
+                                ("track", "renderTrackComponent")):
+            block = self._spec_block(name)
+            self.assertIn("render:", block, f"{name} 的声明里没有 render")
+            self.assertIn(render_fn, block, f"{name} 的 render 该是 {render_fn}")
+
+        status = self._spec_block("status")
+        self.assertTrue("needs:" in status or "data:" in status,
+                        "状态组件的取数该由它自己的声明说了算（needs 或 data）")
+        self.assertIn("hotkey", status, "状态组件占着 E 键，这也得它自己声明")
+
+        track = self._spec_block("track")
+        self.assertTrue("data:" in track or "refreshWindow:" in track,
+                        "轨迹要声明自己怎么取数（data 或 refreshWindow）")
+        for field in ("defaults:", "controls:", "hooks:", "encode:", "decode:"):
+            self.assertIn(field, track, f"轨迹的声明里少了 {field}")
 
     def test_自检用的形式只在无头驱动里注册(self):
         """队员的浏览器里不许出现「只有标题（自检）」这种东西。"""

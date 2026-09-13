@@ -1018,6 +1018,72 @@ if (api) {
             "a channel cannot be picked into a function call (got "
             + registry.get("mathsExpr").value + ")");
         }
+
+        // 运算符键盘：整个表达式要能用鼠标点出来。用户卡住的从来不是数学，
+        // 是"通道名里的空格 / 短横线什么时候要加单引号"——所以通道、函数、
+        // 运算符三样都能点，表达式就不必手写。
+        const ops = registry.get("mathsOps");
+        check(!!ops, "the maths editor has no operator keypad");
+        check(html.indexOf('data-ins="*"') >= 0 && html.indexOf('data-ins="/"') >= 0
+              && html.indexOf('data-ins="("') >= 0 && html.indexOf('data-ins=")"') >= 0,
+          "the operator keypad markup is missing some of + - * / ( )");
+        if (ops) {
+          const expr = registry.get("mathsExpr");
+          const press = (sym) => {
+            const btn = new Element("button");
+            btn.dataset.ins = sym;
+            ops.dispatch("click", { target: btn });
+          };
+          expr.value = "";
+          press("*");
+          check(expr.value === "* ",
+            "pressing × on an empty expression should insert just the symbol (got " + expr.value + ")");
+          expr.value = "'" + wanted + "'";
+          press("*");
+          check(expr.value === "'" + wanted + "' * ",
+            "× after a picked channel should pad both sides (got " + expr.value + ")");
+          // 键盘和通道下拉接着用：点 ×、挑通道，拼出来得是一条能算的表达式
+          pick.value = wanted;
+          pick.dispatch("change", { target: pick });
+          check(expr.value === "'" + wanted + "' * '" + wanted + "'",
+            "the keypad and the channel picker do not compose (got " + expr.value + ")");
+          press("+");
+          check(expr.value === "'" + wanted + "' * '" + wanted + "' + ",
+            "the keypad does not append at the caret (got " + expr.value + ")");
+          const back = new Element("button");
+          back.id = "mathsBack";
+          ops.dispatch("click", { target: back });
+          check(expr.value === "'" + wanted + "' * '" + wanted + "' +",
+            "⌫ should drop one character (got " + expr.value + ")");
+          const wipe = new Element("button");
+          wipe.id = "mathsExprClear";
+          ops.dispatch("click", { target: wipe });
+          check(expr.value === "", "清空 should empty the expression (got " + expr.value + ")");
+        }
+
+        // 「筛选通道」：按单位分组之后 400 多条还是要滚很久，打几个字就缩到几条
+        const find = registry.get("mathsFindChannel");
+        check(!!find, "the maths editor has no channel filter box");
+        if (find) {
+          const needle = String(wanted).slice(0, 3).toLowerCase();
+          const expected = (api.data.channels || [])
+            .filter((c) => String(c.name).toLowerCase().indexOf(needle) >= 0).length;
+          check(expected < (api.data.channels || []).length,
+            "the filter test needs a needle that actually narrows the list: " + needle);
+          find.value = needle;
+          find.dispatch("input", { target: find });
+          check(String(pick._html).indexOf("匹配 " + expected + " 条") >= 0,
+            "the filter does not report how many channels matched " + needle + ": "
+            + String(pick._html).slice(0, 80));
+          find.value = "zzz没有这条通道zzz";
+          find.dispatch("input", { target: find });
+          check(String(pick._html).indexOf("没有名字含") >= 0,
+            "an empty filter result does not say so: " + String(pick._html).slice(0, 80));
+          find.value = "";
+          find.dispatch("input", { target: find });
+          check(String(pick._html).indexOf("<optgroup") >= 0,
+            "clearing the filter should bring the grouped list back");
+        }
         api.closeMathsEditor();
       }
     }

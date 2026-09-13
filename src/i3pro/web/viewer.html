@@ -157,6 +157,11 @@
   .mdef:hover .mdel { color:var(--bad); }
   .medit { display:flex; flex-direction:column; gap:4px; margin-top:5px; }
   .medit input, .medit select { width:100%; }
+  /* 运算符键盘：整个表达式要能用鼠标点出来。以前只能手打，用户打错一个空格
+     就报"两个运算数挨在一起"——他不是不会写公式，是不知道通道名要怎么转义。 */
+  .medit .mops { display:flex; flex-wrap:wrap; gap:3px; }
+  .medit .mops button { min-width:24px; padding:2px 5px; font-size:12px; }
+  .mfind { font-size:11px; }
   .mfuncs { max-height:190px; overflow:auto; margin-top:4px; font-size:11px; }
   .mfuncs .mfunc { padding:2px 4px; border-bottom:1px solid #1d222b; }
   .mfuncs .mfunc b { color:var(--accent); }
@@ -243,7 +248,19 @@
       </div>
       <div class="medit" id="mathsEdit" hidden>
         <input type="text" id="mathsName" placeholder="名字，例如 滑移率">
-        <input type="text" id="mathsExpr" placeholder="表达式，例如 (车轮速度 - 车速) / max(车速, 1)——通道名可以直接打">
+        <div class="mops" id="mathsOps">
+          <button type="button" data-ins="+" title="加">＋</button>
+          <button type="button" data-ins="-" title="减">－</button>
+          <button type="button" data-ins="*" title="乘">×</button>
+          <button type="button" data-ins="/" title="除">÷</button>
+          <button type="button" data-ins="(" title="左括号">(</button>
+          <button type="button" data-ins=")" title="右括号">)</button>
+          <button type="button" data-ins="," title="参数之间的逗号">,</button>
+          <button type="button" id="mathsBack" title="删掉光标前一个字符">退格</button>
+          <button type="button" id="mathsExprClear" title="清空表达式，重新选">清空</button>
+        </div>
+        <input type="text" id="mathsExpr" placeholder="表达式——用上面的运算符拼，通道和函数从下面两个下拉里选（也可以直接打字）">
+        <input type="text" class="mfind" id="mathsFindChannel" placeholder="筛选通道…（打几个字缩小下面下拉里的选项）">
         <select id="mathsPickChannel" title="把通道名插到表达式的光标处（含空格 / 括号 / 短横线的名字会自动加单引号）">
           <option value="">插入通道…</option>
         </select>
@@ -2657,20 +2674,31 @@ function renderMathsList() {
  * `Distance (2)` 看起来像函数调用、`FSD-Distance1` 看起来像减法。让用户
  * **不靠打字**就能引用任意通道，比要求他记住"什么时候要加单引号"更靠谱。
  * 一律写成 `'名字'`——单引号对简单名字同样合法，也省得前后端两套规则。
+ *
+ * 上面的「筛选通道」输入框只影响这个下拉列什么，不碰表达式：一场 400 多条通道，
+ * 按单位分组之后还是要滚很久，打三个字就能把选项缩到几条。
  */
 function renderMathsChannelPicker() {
   const pick = $("mathsPickChannel");
   const names = CHANNELS ? Array.from(CHANNELS.keys()) : [];
+  const find = $("mathsFindChannel");
+  const needle = String((find && find.value) || "").trim().toLowerCase();
   if (pick) {
     const keep = pick.value;
+    const shown = needle
+      ? names.filter((n) => String(n).toLowerCase().indexOf(needle) >= 0)
+      : names;
     // 按单位分组：这个车队一场 400 多条通道，平铺一列没法找
     const byUnit = new Map();
-    for (const name of names) {
+    for (const name of shown) {
       const unit = String(((CHANNELS.get(name) || {}).unit) || "");
       if (!byUnit.has(unit)) byUnit.set(unit, []);
       byUnit.get(unit).push(name);
     }
-    let html = '<option value="">插入通道…</option>';
+    const head = needle
+      ? (shown.length ? "匹配 " + shown.length + " 条，点一条插进表达式" : "没有名字含「" + needle + "」的通道")
+      : "插入通道…";
+    let html = '<option value="">' + esc(head) + "</option>";
     for (const unit of Array.from(byUnit.keys()).sort()) {
       html += '<optgroup label="' + esc(unit || "无单位") + '">'
         + byUnit.get(unit).slice().sort().map((name) => '<option value="' + esc(name) + '">'
@@ -2678,7 +2706,7 @@ function renderMathsChannelPicker() {
         + "</optgroup>";
     }
     pick.innerHTML = html;
-    pick.value = names.indexOf(keep) >= 0 ? keep : "";
+    pick.value = shown.indexOf(keep) >= 0 ? keep : "";
   }
   const funcs = $("mathsPickFunc");
   if (funcs) {
@@ -2703,6 +2731,12 @@ function insertMathsChannel(name) {
   if (!name) return;
   insertMathsText("'" + String(name).replace(/'/g, "") + "'");
   mathsPickReset("mathsPickChannel");
+  // 选完就把筛选清掉，下一次挑通道从头开始，而不是接着上次那几个字找
+  const find = $("mathsFindChannel");
+  if (find && find.value) {
+    find.value = "";
+    renderMathsChannelPicker();
+  }
 }
 
 /** 函数模板：插 `名字(` 并把光标留在括号里，参数接着从通道下拉里挑。 */
@@ -2710,6 +2744,52 @@ function insertMathsFunction(name) {
   if (!name) return;
   insertMathsText(String(name) + "(");
   mathsPickReset("mathsPickFunc");
+}
+
+/**
+ * 运算符按钮：加减乘除在左右各补一个空格（`A * B` 比 `A*B` 好读），
+ * 但挨着空白 / 左括号 / 右括号时不重复补，插完光标停在符号后面，
+ * 接着就能从通道下拉里挑下一个运算数。括号和逗号原样插。
+ */
+function insertMathsOperator(sym) {
+  const expr = $("mathsExpr");
+  if (!expr || !sym) return;
+  if (!/^[+\-*/]$/.test(String(sym))) {
+    insertMathsText(String(sym));
+    return;
+  }
+  const start = typeof expr.selectionStart === "number" ? expr.selectionStart : expr.value.length;
+  const end = typeof expr.selectionEnd === "number" ? expr.selectionEnd : expr.value.length;
+  const before = expr.value.slice(0, start);
+  const after = expr.value.slice(end);
+  const lead = (before === "" || /\s$/.test(before) || /\($/.test(before)) ? "" : " ";
+  const tail = (/^\s/.test(after) || /^\)/.test(after)) ? "" : " ";
+  insertMathsText(lead + String(sym) + tail);
+}
+
+/** 退格按钮：删掉光标前一个字符（选中了东西就删选中的那段）。 */
+function mathsBackspace() {
+  const expr = $("mathsExpr");
+  if (!expr) return;
+  const start = typeof expr.selectionStart === "number" ? expr.selectionStart : expr.value.length;
+  const end = typeof expr.selectionEnd === "number" ? expr.selectionEnd : expr.value.length;
+  const cut = start === end ? Math.max(0, start - 1) : start;
+  if (start === end && start === 0) return;
+  expr.value = expr.value.slice(0, cut) + expr.value.slice(end);
+  placeMathsCaret(expr, cut);
+}
+
+/** 清空表达式：换个算法重来比在长表达式里改更快。 */
+function mathsClearExpr() {
+  const expr = $("mathsExpr");
+  if (!expr) return;
+  expr.value = "";
+  placeMathsCaret(expr, 0);
+  if (typeof expr.focus === "function") expr.focus();
+}
+
+function placeMathsCaret(expr, caret) {
+  if (expr && typeof expr.setSelectionRange === "function") expr.setSelectionRange(caret, caret);
 }
 
 /** 往表达式光标处插一段文本；前面该有空格就补一个，插完光标停在文本后面。 */
@@ -2720,13 +2800,11 @@ function insertMathsText(text) {
   const end = typeof expr.selectionEnd === "number" ? expr.selectionEnd : expr.value.length;
   const before = expr.value.slice(0, start);
   const after = expr.value.slice(end);
-  const needsSpace = before && !/\s$/.test(before) && !/[(+\-*/,]$/.test(before);
+  // 自己已经带了前导空格就别再补一个（运算符按钮左右都补，会补成两个）
+  const needsSpace = before && !/\s$/.test(before) && !/[(+\-*/,]$/.test(before) && !/^\s/.test(text);
   const lead = needsSpace ? " " : "";
   expr.value = before + lead + text + after;
-  if (typeof expr.setSelectionRange === "function") {
-    const caret = (before + lead + text).length;
-    expr.setSelectionRange(caret, caret);
-  }
+  placeMathsCaret(expr, (before + lead + text).length);
   if (typeof expr.focus === "function") expr.focus();
 }
 
@@ -2767,10 +2845,11 @@ function closeMathsEditor() {
   const box = $("mathsEdit");
   if (box) box.hidden = true;
   // 清空输入框，这样「新建」从一个干净的表单开始，而不是接着上一条改
-  ["mathsName", "mathsExpr", "mathsUnit"].forEach((id) => {
+  ["mathsName", "mathsExpr", "mathsUnit", "mathsFindChannel"].forEach((id) => {
     const input = $(id);
     if (input) input.value = "";
   });
+  renderMathsChannelPicker();
   const out = $("mathsPreview");
   if (out) out.textContent = "";
 }
@@ -3854,6 +3933,23 @@ function init() {
   $("mathsPickFunc").addEventListener("change", (event) => {
     insertMathsFunction(event.target.value);
   });
+  // 运算符按钮用事件委托：键盘是 markup 里写死的，不用一个个接线，
+  // 以后加新按钮只改 HTML 里的 data-ins。
+  const mathsOps = $("mathsOps");
+  if (mathsOps) {
+    mathsOps.addEventListener("click", (event) => {
+      const target = event && event.target ? event.target : {};
+      const ins = target.dataset ? target.dataset.ins : undefined;
+      if (ins !== undefined) { insertMathsOperator(ins); return; }
+      if (target.id === "mathsBack") mathsBackspace();
+      else if (target.id === "mathsExprClear") mathsClearExpr();
+    });
+  }
+  const mathsFind = $("mathsFindChannel");
+  if (mathsFind) {
+    mathsFind.addEventListener("input", renderMathsChannelPicker);
+    mathsFind.addEventListener("change", renderMathsChannelPicker);
+  }
   $("mathsFuncs").addEventListener("click", () => {
     const box = $("mathsFuncList");
     box.hidden = !box.hidden;
@@ -3958,6 +4054,8 @@ window.i3pro = {
   mathsState: mathsState, escapeText: escapeText,
   insertMathsChannel: insertMathsChannel, renderMathsChannelPicker: renderMathsChannelPicker,
   insertMathsFunction: insertMathsFunction,
+  insertMathsOperator: insertMathsOperator, mathsBackspace: mathsBackspace,
+  mathsClearExpr: mathsClearExpr,
   sectionsState: sectionsState, renderSections: renderSections,
   sectionsManualPayload: sectionsManualPayload, saveSections: saveSections,
   applySectionsResponse: applySectionsResponse, loadSections: loadSections,

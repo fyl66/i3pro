@@ -158,6 +158,18 @@ class SessionLibrary:
             "functions": maths.function_catalogue(),
         }
 
+    def maths_names(self, log) -> tuple[str, ...]:
+        """这个场次现在生效的数学通道名（本地 + 全局），坏定义就当没有。
+
+        保存时要判断"用户写的名字算不算存在"：本地定义引用全局定义完全合法，
+        所以不能只看正在提交的那一份。
+        """
+        try:
+            effective = maths.load_effective(log.path, self.maths_root)
+        except maths.MathError:
+            return ()
+        return tuple(definition.name for definition in effective.definitions)
+
     def summary(self, name: str) -> dict:
         log = self.get(name)
         laps = render.detect(log)
@@ -570,11 +582,18 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                 incoming = maths.MathSet.from_dict(data, scope=scope)
             except maths.MathError as exc:
                 return self._error(400, str(exc))
-            # 语法在这一步就挡掉：坏式子不进侧车，省得下次打开场次才发现
-            known = maths.known_names(log, incoming.definitions)
+            # 语法在这一步就挡掉：坏式子不进侧车，省得下次打开场次才发现。
+            # 本地定义还能引用另一份作用域里的定义，所以"哪些名字算存在"要把现在
+            # 生效的那一份也算上，否则存本地定义时会误报"本场次没有这个通道"。
+            known = maths.known_names(
+                log, [*incoming.definitions, *library.maths_names(log)]
+            )
+            strict = scope == "local"
             for definition in incoming.definitions:
                 try:
-                    maths.compile_expr(definition.expr, known=known)
+                    maths.compile_expr(
+                        definition.expr, known=known, strict_channels=strict
+                    )
                 except maths.MathError as exc:
                     return self._error(
                         400, f"数学通道 `{definition.name}` 的表达式有问题：{exc}"
@@ -613,7 +632,9 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
             if not expr:
                 return self._error(400, "需要 {\"expr\": \"...\"} 这样的请求体")
             try:
-                plan = maths.compile_expr(expr, known=maths.known_names(log))
+                plan = maths.compile_expr(
+                    expr, known=maths.known_names(log), strict_channels=True
+                )
             except maths.MathError as exc:
                 return self._error(400, str(exc))
             try:

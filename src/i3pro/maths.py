@@ -99,30 +99,99 @@ _IDENT_RE = re.compile(r"[^\W\d]\w*", re.UNICODE)
 _MULTI_OPS = ("<=", ">=", "==", "!=", "&&", "||")
 _SINGLE_OPS = set("+-*/%^<>=!~&|")
 
+#: 认通道名时"不算数"的字符。名字里的空格／短横线／下划线，在表达式里可以省掉
+#: 或者换成另一个分隔符——``FSD13 Distance1`` 写成 ``FSD13Distance1`` 也得认。
+_SEPARATOR_CHARS = " -_"
 
-def _longest_name_at(text: str, i: int, known: Iterable[str] | None) -> str | None:
-    """``text[i:]`` 开头处最长的那个**真实通道名**，没有就给 ``None``。
+
+def _squash(text: str) -> str:
+    """比名字"长相"用的规范形：大小写、空格、短横线、下划线都不参与比较。"""
+    return "".join(ch for ch in text.lower() if ch not in _SEPARATOR_CHARS)
+
+
+def _match_name_at(name: str, text: str, i: int) -> int | None:
+    """``name`` 能不能从 ``text[i:]`` 认出来；能就给结束下标，不能给 ``None``。
+
+    名字里的分隔符在文本里可有可无（可以省掉，也可以换成另一个分隔符），大小写
+    也不计较。名字里的字母数字必须逐个对上——所以 ``FSD 13 Distance1`` 不会被
+    认成 ``FSD13 Distance1``（数字前面凭空多一个空格，说明用户写的不是它）。
+    """
+    j = i
+    length = len(text)
+    for ch in name:
+        if ch in _SEPARATOR_CHARS:
+            while j < length and text[j] in _SEPARATOR_CHARS:
+                j += 1
+            continue
+        if j >= length or text[j].lower() != ch.lower():
+            return None
+        j += 1
+    return j
+
+
+def _longest_name_at(text: str, i: int, known: Iterable[str] | None) -> tuple[str, int] | None:
+    """``text[i:]`` 开头处最长的那个**真实通道名**，连同它占到的结束下标。
 
     通道名里有空格、括号、短横线（``Vx KF``、``Distance (2)``、``FSD-Distance1``），
     其中一多半**打不出来**：``Vx KF`` 看起来像两个运算数挨在一起，``FSD-Distance1``
     看起来像减法。调用方把"本场次有哪些通道"告诉编译器，就能在词法阶段认出最长
     的那个名字，用户按自然写法打出来即可，不必知道要加单引号。
 
+    只认"一模一样"是不够的（实测：``FSD13Distance1`` 漏一个空格、``vx kf`` 小了
+    两个字母就全都不认）。所以空格／短横线／下划线可以互换或省略，大小写也不计较；
+    **精确写法永远优先**，同一个位置认出多条名字（本场次真有两条只差大小写的通道）
+    就不猜，直接报错让用户把名字写全。
+
+    返回的结束下标是**文本里的位置**，不是名字的长度——名字少写了空格时两者差一个
+    字符，词法器只能按文本位置往前走。
+
     边界要卡死：名字后面紧跟字母数字或下划线就不算命中（``FSD13 Distance1`` 不能
     匹配掉 ``FSD13 Distance12`` 的前缀）。
     """
     if not known:
         return None
-    best: str | None = None
+    ends: dict[int, list[str]] = {}
     for name in known:
-        if not name or not text.startswith(name, i):
+        if not name:
             continue
-        end = i + len(name)
+        end = _match_name_at(name, text, i)
+        if end is None:
+            continue
         if end < len(text) and (text[end].isalnum() or text[end] == "_"):
             continue
-        if best is None or len(name) > len(best):
-            best = name
-    return best
+        ends.setdefault(end, []).append(name)
+    if not ends:
+        return None
+    end = max(ends)
+    names = ends[end]
+    exact = [item for item in names if text[i:end] == item]
+    if exact:
+        return exact[0], end
+    if len(names) == 1:
+        return names[0], end
+    shown = "、".join(f"`{item}`" for item in sorted(names))
+    raise MathError(
+        f"`{text[i:end]}` 在本场次对上不止一条通道：{shown}。"
+        f"把名字写全再算一次（含空格／短横线的用单引号写成 `'{sorted(names)[0]}'`）。"
+    )
+
+
+def _canonical_name(name: str, known: Iterable[str] | None) -> str:
+    """把用户写的名字对到本场次真实的那一条上；对不上就原样返回。
+
+    单引号里的名字按说应当逐字一致，但用户是从别处复制来的、或者照着自己记的
+    写法打的，同样只差一个空格或大小写——那就和没加引号时一个待遇，别逼他改三次。
+    对不上（或者对上好几条）就原样返回，交给"本场次没有这个通道"那条报错去解释。
+    """
+    if not known:
+        return name
+    if name in known:
+        return name
+    squashed = _squash(name)
+    if not squashed:
+        return name
+    hits = [item for item in known if _squash(item) == squashed]
+    return hits[0] if len(hits) == 1 else name
 
 
 def _tokenize(
@@ -133,6 +202,7 @@ def _tokenize(
     ``known`` 是**已知通道名**（本场次的通道 + 已定义的数学通道）。给了它，
     含空格／括号／短横线的名字可以不写单引号直接打。
     """
+    known = tuple(known) if known else ()
     tokens: list[tuple[str, str, object]] = []
     units: list[str] = []
     i = 0
@@ -151,6 +221,7 @@ def _tokenize(
             name = text[i + 1 : end].strip()
             if not name:
                 raise MathError("有一对空单引号。通道名要写在引号里面，例如 `'Vx KF'`。")
+            name = _canonical_name(name, known)
             tokens.append(("chan", name, name))
             i = end + 1
             # '通道'[单位] —— 单位标注接受但不换算
@@ -178,19 +249,21 @@ def _tokenize(
             j = ident.end()
             while j < n and text[j].isspace():
                 j += 1
+            # 常数（pi / e）优先：它们就是被当成数字用的，别被同名的通道抢走
+            known_here = () if word in _CONSTANTS else known
             if j < n and text[j] == "(":
-                longer = _longest_name_at(text, i, known)
-                if longer is not None and longer != word and longer.endswith((")", "]")):
+                hit = _longest_name_at(text, i, known_here)
+                if hit is not None and hit[0] != word and hit[0].endswith((")", "]")):
                     # `Distance (2)` 这种带括号的通道名，别被当成函数调用
-                    tokens.append(("chan", longer, longer))
-                    i += len(longer)
+                    tokens.append(("chan", hit[0], hit[0]))
+                    i = hit[1]
                     continue
                 tokens.append(("func", word, word))
             else:
-                longer = _longest_name_at(text, i, known)
-                if longer is not None and longer != word:
-                    tokens.append(("chan", longer, longer))
-                    i += len(longer)
+                hit = _longest_name_at(text, i, known_here)
+                if hit is not None and hit[0] != word:
+                    tokens.append(("chan", hit[0], hit[0]))
+                    i = hit[1]
                     continue
                 tokens.append(("ident", word, word))
             i = ident.end()
@@ -277,12 +350,21 @@ class Plan:
         }
 
 
-def compile_expr(text: str, known: Iterable[str] | None = None) -> Plan:
+def compile_expr(
+    text: str,
+    known: Iterable[str] | None = None,
+    strict_channels: bool = False,
+) -> Plan:
     """把表达式文本编译成 :class:`Plan`；出错时抛 :class:`MathError`。
 
     ``known`` 是已知通道名（本场次的通道 + 已定义的数学通道）。给了它，``Vx KF``、
     ``Distance (2)``、``FSD-Distance1`` 这些名字就能直接打，不必套单引号；
     没给也能编译，只是这些名字得写成 ``'Vx KF'``。
+
+    ``strict_channels`` 打开时，表达式里用到的通道必须都在 ``known`` 里，否则
+    在这里就报错（"本场次没有这个通道" + 该改成什么）。界面上的「试算」和本地
+    定义的保存都打开它——用户不该等到画图时才发现名字打错了。**全局定义不开**：
+    它本来就是跨场次复用的，某一场缺那条通道是正常情况，不该拦着不让存。
     """
     if not isinstance(text, str) or not text.strip():
         raise MathError("表达式是空的。至少写一个通道名或数字。")
@@ -294,6 +376,8 @@ def compile_expr(text: str, known: Iterable[str] | None = None) -> Plan:
     channels: list[str] = []
     functions: list[str] = []
     expecting_operand = True
+    #: 上一个写出来的运算数（文本），只为在"两个运算数挨在一起"时给出更好的提示。
+    previous_operand: str | None = None
 
     def flush_operators(precedence: int | None) -> None:
         """把栈上优先级更高的运算符搬到输出（shunting-yard 的核心一步）。"""
@@ -311,18 +395,24 @@ def compile_expr(text: str, known: Iterable[str] | None = None) -> Plan:
     for kind, token_text, value in tokens:
         if kind == "num":
             if not expecting_operand:
-                raise MathError(f"`{text}` 里两个运算数挨在一起了（`{token_text}`）。中间补一个运算符。")
+                raise MathError(
+                    _two_operands_message(text, token_text, previous_operand, known)
+                )
             rpn.append((kind, token_text, value))
             expecting_operand = False
+            previous_operand = token_text
         elif kind in ("chan", "ident"):
             if not expecting_operand:
-                raise MathError(f"`{text}` 里两个运算数挨在一起了（`{token_text}`）。中间补一个运算符。")
+                raise MathError(
+                    _two_operands_message(text, token_text, previous_operand, known)
+                )
             if kind == "ident" and token_text in _CONSTANTS:
                 rpn.append(("num", token_text, _CONSTANTS[token_text]))
             else:
                 channels.append(str(value))
                 rpn.append(("chan", token_text, value))
             expecting_operand = False
+            previous_operand = str(value)
         elif kind == "func":
             name = str(value)
             if name not in FUNCTIONS:
@@ -342,9 +432,11 @@ def compile_expr(text: str, known: Iterable[str] | None = None) -> Plan:
             functions.append(name)
             stack.append(["func", name, 0])
             expecting_operand = True
+            previous_operand = None
         elif kind == "lparen":
             stack.append(["lparen", token_text, token_text, len(rpn)])
             expecting_operand = True
+            previous_operand = None
         elif kind == "rparen":
             flush_operators(None)
             if not stack:
@@ -357,6 +449,7 @@ def compile_expr(text: str, known: Iterable[str] | None = None) -> Plan:
                 _check_arity(str(entry[1]), argc, text)
                 rpn.append(("call", str(argc), entry[1]))
             expecting_operand = False
+            previous_operand = None
         elif kind == "comma":
             flush_operators(None)
             if not stack or stack[-1][0] != "lparen":
@@ -365,16 +458,19 @@ def compile_expr(text: str, known: Iterable[str] | None = None) -> Plan:
                 raise MathError(f"`{text}` 里有一个逗号不在函数调用里面。把它放进 `函数(参数, 参数)` 里。")
             stack[-2][2] = int(stack[-2][2]) + 1
             expecting_operand = True
+            previous_operand = None
         else:  # op
             op = str(value)
             if expecting_operand:
                 if op not in _UNARY:
                     raise MathError(f"`{text}` 里运算符 `{op}` 少了一个运算数。在它后面补一个通道名或数字。")
                 stack.append(["op", _UNARY[op], _UNARY[op]])
+                previous_operand = None
                 continue
             flush_operators(_BINARY[op][0])
             stack.append(["op", op, op])
             expecting_operand = True
+            previous_operand = None
     if expecting_operand:
         raise MathError(f"`{text}` 结尾还缺一个运算数。补一个通道名或数字。")
     while stack:
@@ -387,13 +483,26 @@ def compile_expr(text: str, known: Iterable[str] | None = None) -> Plan:
     for unit in units:
         if unit:
             notes.append(f"单位标注 [{unit}] 被忽略：i3pro 目前不做单位换算。")
-    return Plan(
+    plan = Plan(
         source=text,
         rpn=rpn,
         channels=tuple(used),
         functions=tuple(dict.fromkeys(functions)),
         notes=tuple(notes),
     )
+    if strict_channels:
+        check_channels(plan, known)
+    return plan
+
+
+def check_channels(plan: Plan, known: Iterable[str] | None) -> None:
+    """表达式用到的通道，本场次是不是都有；缺哪条就说清那条该改成什么。"""
+    if not known:
+        return
+    have = set(known)
+    for name in plan.channels:
+        if name not in have:
+            raise MathError(_unknown_channel_message(name, known))
 
 
 def _suggest(name: str, table) -> str:
@@ -436,9 +545,6 @@ def _closest_channel(name: str, known: Iterable[str] | None) -> str | None:
     if not known:
         return None
 
-    def squash(text: str) -> str:
-        return (text.replace(" ", "").replace("-", "").replace("_", "")).lower()
-
     best, best_score = None, 0.0
     matcher = difflib.SequenceMatcher()
 
@@ -448,10 +554,10 @@ def _closest_channel(name: str, known: Iterable[str] | None) -> str | None:
 
     for candidate in known:
         score = max(ratio(name.lower(), candidate.lower()),
-                    ratio(squash(name), squash(candidate)))
+                    ratio(_squash(name), _squash(candidate)))
         # "像"要有下限：开头就对不上、整体也不太像的，不给建议反而更诚实
         # （`notachannel` 与 `Channel 9` 只因为都含 channel 就会被算成"最接近"）。
-        if _prefix_len(squash(name), squash(candidate)) < 2 and score < 0.85:
+        if _prefix_len(_squash(name), _squash(candidate)) < 2 and score < 0.85:
             continue
         if score > best_score:
             best, best_score = candidate, score
@@ -464,6 +570,72 @@ def _prefix_len(a: str, b: str) -> int:
         if left != right:
             return index
     return min(len(a), len(b))
+
+
+def _unknown_channel_message(name: str, known: Iterable[str] | None) -> str:
+    """“本场次没有这个通道”到底该怎么办：把像的名字端出来，而不是只说不认识。
+
+    实测过的难处：用户把 ``FSD13 Distance1`` 记成 ``FSD-Distance1``，表达式会被
+    切成 ``FSD`` 减 ``Distance1``，报错只说 ``FSD`` 不存在——他还是不知道那条叫
+    什么。所以先列"以他打的字开头的通道"（这一条最贴近本意），再退到"最像的一条"。
+    """
+    names = [str(item) for item in (known or ())]
+    family = _name_family(name, names)
+    closest = _closest_channel(name, names)
+    if family:
+        shown = "、".join(f"`{item}`" for item in family[:3])
+        hint = f"本场次以 `{name}` 开头的通道有：{shown}。"
+    elif closest:
+        hint = f"最接近的是 `{closest}`。"
+    else:
+        hint = "检查拼写（区分大小写和空格）。"
+    return (
+        f"表达式里用到通道 `{name}`，本场次没有这个通道。{hint}"
+        f"含空格／括号／短横线的名字可以直接打（例如 `Vx KF`），也可以写成 `'Vx KF'`，"
+        f"或者从编辑器里的「插入通道」直接选。"
+    )
+
+
+def _name_family(name: str, known: Iterable[str] | None) -> list[str]:
+    """以 ``name`` 开头的通道名（短的排前面）。
+
+    多词的名字打错中间一个字母，表达式就会被切成"两个运算数挨在一起"：用户打
+    ``G Force Late``（真名是 ``G Force Lat``），报错说的是 ``Force``。这时候把
+    "以 ``G Force`` 开头的那几条"列出来，他就知道该点哪一条了。
+    """
+    squashed = _squash(name)
+    if not squashed:
+        return []
+    return sorted(
+        (
+            item for item in (known or ())
+            if _squash(item) != squashed and _squash(item).startswith(squashed)
+        ),
+        key=lambda item: (len(item), item),
+    )
+
+
+def _two_operands_message(
+    text: str, token_text: str, previous: str | None, known: Iterable[str] | None
+) -> str:
+    """两个运算数挨在一起：先按语法说，再猜"是不是通道名打错了"。"""
+    message = f"`{text}` 里两个运算数挨在一起了（`{token_text}`）。中间补一个运算符。"
+    if not known or not previous:
+        return message
+    joined = f"{previous} {token_text}"
+    family = _name_family(joined, known)
+    if family:
+        shown = "、".join(f"`{item}`" for item in family[:3])
+        hint = f"本场次以 `{joined}` 开头的通道有：{shown}。"
+    else:
+        closest = _closest_channel(joined, known)
+        if closest is None:
+            return message
+        hint = f"最接近的是 `{closest}`。"
+    return (
+        f"{message}如果这是通道名写错了（多词的名字少一个字母就会变成这样），"
+        f"{hint}通道名可以直接打，也可以从编辑器里的「插入通道」选。"
+    )
 
 
 # ------------------------------------------------------------------- 求值
@@ -1120,18 +1292,7 @@ def known_names(session, definitions: Iterable = ()) -> tuple[str, ...]:
 def _session_series(session, name: str, size: int) -> np.ndarray:
     """取一个源通道在主时间基上的序列。"""
     if not session.has(name):
-        known = _session_names(session)
-        guess = _closest_channel(name, known)
-        hint = (
-            f"最接近的是 `{guess}`；含空格／括号／短横线的名字要用单引号写成 "
-            f"`'{guess}'`，或者从编辑器里的「插入通道」直接选。"
-            if guess else
-            "检查拼写（区分大小写），含空格／括号／短横线的名字要用单引号括起来"
-            "（`'Vx KF'`），或者从编辑器里的「插入通道」直接选。"
-        )
-        raise MathError(
-            f"表达式里用到通道 `{name}`，本场次没有这个通道。{hint}"
-        )
+        raise MathError(_unknown_channel_message(name, _session_names(session)))
     values = derive.hold_to_master(session, name)
     if values.size >= size:
         return values[:size].astype(np.float64)

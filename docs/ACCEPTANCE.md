@@ -655,8 +655,8 @@ i2 Pro 的 **Missed Beacons**：车确实穿过了起终点，但没被检出，
    | 写法 | 现在 |
    | --- | --- |
    | `Vx KF * 2` / `Distance (2) * 2` / `FSD-Distance1 * 2` | 直接算（旧写法 `'Vx KF' * 2` 一如既往地能用） |
-   | `FSD13Distance1 * 2`（漏了空格） | 400/报错里给出 `最接近的是 'FSD13 Distance1'`，并说明要加单引号 |
-   | `VxKF * 2` | 同上，指向 `Vx KF` |
+   | `FSD13Distance1 * 2`（漏了空格） | 报错里给出 `最接近的是 'FSD13 Distance1'`（**第四轮改成直接算**） |
+   | `VxKF * 2` | 同上，指向 `Vx KF`（**第四轮改成直接算**） |
    | `notachannel * 2` | **不硬凑**建议（只用共有字符比相似度时它会被认成 `Channel 9`，比不给更糟；现在用 `difflib` 且要求开头能对上） |
 
    界面同时加了「插入通道」下拉：**不用打字**，选中即把 `'名字'` 插到表达式光标处，
@@ -672,8 +672,80 @@ i2 Pro 的 **Missed Beacons**：车确实穿过了起终点，但没被检出，
    而"报表"这一条当时没有任何证据——**仓库里还没有报表**（它是 ticket #11）。切圈（46 段）与
    比圈（`build_overlay` 用派生通道出 164 点曲线）是实测过的；报表留到 #11 走同一套访问器继承。
 
-**这一轮的实测数字**：单测 **107 项** OK（`TestMaths` 37 项、`TestMathsOverHttp` 2 项）；
-`verify_ld_vs_csv` PASS；两份金标准快照 smoke 均 PASS；无头断言点 **151** 个。
+**这一轮当时的实测数字**：单测 107 项 OK（`TestMaths` 37 项、`TestMathsOverHttp` 2 项）；
+`verify_ld_vs_csv` PASS；两份金标准快照 smoke 均 PASS；无头断言点 151 个。第四轮之后是
+**112 / 155**（见 A28 末尾）。
+
+**第四轮（用户复查原话："输入通道，不是能很好识别，比如 `FSD-Distance1` 通道，对他做不了运算"）**
+
+第三轮把已知通道名交给了编译器，但只认**逐字相同**的名字——用户那条路还是不通。先把
+`FSD-Distance1` 查清是谁：本仓库 15 个场次（`out/probe_names.py` 逐个列出通道名）**没有
+任何一条通道名带短横线**；真身是 `FSD13 Distance1`，只出现在 `20260912-TV0` 与
+`20260912-雨胎TV1` 两条新场次里（`FSD13 Distance2` 是它的兄弟）。也就是说用户记的是
+**同一条通道的另一种写法**：漏了空格、还把空格记成了短横线。
+
+| 用户打的 | 第三轮（旧） | 现在 |
+| --- | --- | --- |
+| `FSD13Distance1 * 2`（漏空格） | 报"本场次没有这个通道" | 认成 `FSD13 Distance1`：133 × 2 = **266** 起步、143800 点，与 `'FSD13 Distance1' * 2` 逐点相同 |
+| `vx kf * 2`（小写几个字母） | 报"两个运算数挨在一起了（`kf`）" | 认成 `Vx KF` |
+| `Distance(2) * 2`（少打一个空格） | 报"`Distance` 不是函数" | 认成 `Distance (2)` |
+| `FSD-Distance1 * 2`（这条真没有） | 只说 `FSD` 不存在，用户还是不知道那条叫什么 | 在 TV0 上给出"本场次以 `FSD` 开头的通道有：`FSD13 Distance1`、`FSD13 Distance2`"；在高避（真没有 FSD 系）上老实说"检查拼写" |
+| `G Force Late * 2`（多词的名字打错） | "两个运算数挨在一起了（`Force`）" | 同一句话 + "本场次以 `G Force` 开头的通道有：`G Force Lat`、`G Force Long`、`G Force Vert`"（实在不像才退到 `最接近的是`） |
+
+规则一句话：**名字里的空格／短横线／下划线可以省掉或互换，大小写不计较；逐字相同的
+写法永远优先；同一个位置认出多条（本场次真有两条只差一个分隔符的通道）就不猜**，报错
+让用户写全。字母数字必须逐个对上——`FSD13 Distance12` 不会被认成 `FSD13 Distance1`
+的前缀 `FSD13 Distance1`，`FSD 13 Distance1`（数字前凭空多一个空格）也不算同一条。
+
+**顺带修掉的三处**：
+
+1. **词法器按"名字长度"往前跳，不是按"文本位置"。** 名字里少一个空格时两者差一个字符：
+   `FSD13Distance1*2` 会多吃一格、把 `*` 吞掉，然后报一个跟通道名毫无关系的语法错。
+   现在 `_longest_name_at` 把结束下标一起交回，`TestMaths::test_a_name_typed_without_its_space_is_still_that_channel`
+   里的 `FSD13Distance1*2` 就是这个回归的钉子。
+2. **试算与本地保存先检查通道名。** 以前名字打错要等画图时才报；现在「试算」
+   （`POST /api/session/<n>/maths`）与本地定义保存（`PUT ...?scope=local`）都在编译阶段
+   报 400 并说清该改成哪条，坏定义**不进侧车**。**全局定义保持宽松**：它本来就是跨场次
+   复用的，某一场缺那条通道是正常情况（仓库自带的 `速度kmh = 'Vx KF'` 在高避场次里就
+   没有），照旧存下来、显示成红字。保存时"哪些名字算存在"**含另一份作用域的定义名**
+   （`SessionLibrary.maths_names()`），否则本地定义引用全局定义会被误判成"没有这个通道"。
+3. **试算结果念出认到的通道**（"；用到通道 `FSD13 Distance1`"）。不然用户不知道自己那串
+   算成了谁——这正是他上一次报错时缺的那句话。
+
+**通过判据**：
+
+| 断言 | 命令 / 位置 |
+| --- | --- |
+| `FSD13Distance1 * 2` / `FSD13Distance1*2` / `fsd13distance1 * 2` / `FSD13-Distance1 * 2` / `FSD13_Distance1 * 2` 都算成同一条 `FSD13 Distance1`（数值与带引号的写法逐点相同） | `TestMaths::test_a_name_typed_without_its_space_is_still_that_channel` |
+| 名字后面接着数字就是另一条通道，不许往前凑 | 同上（`FSD13 Distance12 * 2` 仍报错） |
+| `vx kf` / `VXKF` / `Vx_KF` / `'vx kf'` 都算成 `Vx KF` | `TestMaths::test_case_and_separators_are_interchangeable` |
+| 逐字相同的写法优先；两种写法都对得上时不猜，报错里把两条名字都列出来 | `TestMaths::test_exact_spelling_wins_over_a_lookalike` |
+| `Distance(2) * 2` 认成 `Distance (2)`，不再报"未知函数 `Distance`" | `TestMaths::test_a_channel_called_with_brackets_can_skip_the_space` |
+| 真的没有的名字：列出"以它开头的通道" + 「插入通道」提示；完全不像的名字**不硬凑**建议 | `TestMaths::test_a_typo_gets_the_right_name_back` |
+| 严格检查只在要求时生效（不打开时编译旧行为不变） | `TestMaths::test_strict_channel_check_happens_before_anything_is_computed` |
+| 试算 `VXKF * 2` 返回 200 且 `channels == ["Vx KF"]`（服务端把认到的真名说出来） | `TestMathsOverHttp::test_a_bare_channel_name_with_a_space_saves_and_computes` |
+| 漏空格的名字存档后能真的算出曲线（`trace` 里有样本） | 同上 |
+| 试算不存在的通道 → 400，报错含 `本场次没有这个通道` 与 `插入通道` | 同上、`TestMathsOverHttp::test_saving_a_definition_reaches_the_viewer` |
+| 本地保存坏名字 → 400，且 `<场次>.maths.json` 里**没有**这条坏定义 | 同上 |
+| 全局保存缺通道的定义 → 200，并在 `errors` 里报出来（跨场次复用不受影响） | 同上 |
+| UI：试算文案里带"用到通道 `FSD13 Distance1`"，失败时原样显示服务端那句话 | `tools/smoke_viewer.js` 第 22 组 |
+
+**这一轮的实测数字**：单测 **112 项** OK（`TestMaths` 42 项、`TestMathsOverHttp` 2 项）；
+`verify_ld_vs_csv` PASS（`0 channel(s) outside tolerance`）；两份金标准快照 smoke 均 PASS
+（7 圈 / 26 段）；无头断言点 **155** 个。
+
+**真场次再走一遍（临时探针，`out\probe_maths_http.py`：把 `20260912-TV0.ld` 复制到临时
+目录后起真服务、走真 HTTP 接口；`out\probe_names.py` 用来列各场次的通道名）**：
+
+| 请求 | 结果 |
+| --- | --- |
+| 试算 `FSD13Distance1 * 2` | 200，`channels = ["FSD13 Distance1"]`，最小 -0.002 / 最大 **563.0** m |
+| 试算 `vx kf * 2` | 200，`channels = ["Vx KF"]`，最小 -0.26 / 最大 81.92 km/h |
+| 试算 `Distance(2) * 2` | 200，`channels = ["Distance (2)"]` |
+| 试算 `FSD-Distance1 * 2` | 400，"本场次以 `FSD` 开头的通道有：`FSD13 Distance1`、`FSD13 Distance2`" |
+| 试算 `G Force Late * 2` | 400，"本场次以 `G Force` 开头的通道有：`G Force Lat`、`G Force Long`、`G Force Vert`" |
+| 存本地定义 `两倍FSD距离 = FSD13Distance1 * 2` | 200，`errors: []`；`trace` 拉回 40 个抽稀样本（最大 563.0） |
+| 15 个场次的通道名逐条列出 | **0 条**带短横线；`FSD13 Distance1` / `FSD13 Distance2` 只出现在 TV0 与雨胎TV1 |
 
 ---
 

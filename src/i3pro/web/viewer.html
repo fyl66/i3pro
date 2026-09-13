@@ -222,7 +222,7 @@
       </div>
       <div class="medit" id="mathsEdit" hidden>
         <input type="text" id="mathsName" placeholder="名字，例如 滑移率">
-        <input type="text" id="mathsExpr" placeholder="表达式，例如 ('车轮速度' - '车速') / max('车速', 1)">
+        <input type="text" id="mathsExpr" placeholder="表达式，例如 (车轮速度 - 车速) / max(车速, 1)——通道名可以直接打">
         <select id="mathsPickChannel" title="把通道名插到表达式的光标处（含空格 / 括号 / 短横线的名字会自动加单引号）">
           <option value="">插入通道…</option>
         </select>
@@ -2734,18 +2734,32 @@ async function mathsTest() {
       body: JSON.stringify({ expr: draft.expr }),
     });
     const data = await res.json();
-    if (!res.ok || !data.ok) {
-      out.textContent = "算不出来：" + (data.error || ("HTTP " + res.status));
-      return;
-    }
-    out.textContent = "算出来了：" + data.samples + " 点，"
-      + (data.finite ? ("最小 " + fmt(data.min, 3) + " · 最大 " + fmt(data.max, 3)
-                        + " · 平均 " + fmt(data.mean, 3))
-                     : "这一列全是无效值")
-      + (data.notes && data.notes.length ? ("。" + data.notes.join(" ")) : "");
+    out.textContent = formatMathsTrial(data, res.ok ? "" : ("HTTP " + res.status));
   } catch (err) {
     out.textContent = "试算失败：" + err.message;
   }
+}
+
+/**
+ * 试算的结果怎么写给人看。
+ *
+ * **用到的通道一定要念出来**：用户打的 `FSD13Distance1` / `vx kf` 会被服务端
+ * 认成 `FSD13 Distance1` / `Vx KF`（少一个空格、大小写不同都算同一条通道）。
+ * 不把认到的名字显示出来，用户就不知道自己那串到底算成了谁——这正是他上一次
+ * 报"输入通道识别不了"时缺的那句话。
+ */
+function formatMathsTrial(data, fallback) {
+  if (!data || !data.ok) {
+    return "算不出来：" + ((data && data.error) || fallback || "服务端没有说原因");
+  }
+  const used = (data.channels || []).length
+    ? ("；用到通道 " + data.channels.join("、")) : "";
+  return "算出来了：" + data.samples + " 点，"
+    + (data.finite ? ("最小 " + fmt(data.min, 3) + " · 最大 " + fmt(data.max, 3)
+                      + " · 平均 " + fmt(data.mean, 3))
+                   : "这一列全是无效值")
+    + used
+    + (data.notes && data.notes.length ? ("。" + data.notes.join(" ")) : "");
 }
 
 async function mathsCommit() {
@@ -3643,6 +3657,7 @@ window.i3pro = {
   mathsSaveList: mathsSaveList, applyMathsResponse: applyMathsResponse,
   saveMathsDefinitions: saveMathsDefinitions, mathsDelete: mathsDelete,
   mathsCommit: mathsCommit, mathsTest: mathsTest, loadMaths: loadMaths,
+  formatMathsTrial: formatMathsTrial,
   reindexChannels: reindexChannels, selectChannel: selectChannel,
   mathsState: mathsState, escapeText: escapeText,
   insertMathsChannel: insertMathsChannel, renderMathsChannelPicker: renderMathsChannelPicker,

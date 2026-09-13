@@ -934,6 +934,26 @@ if (api) {
     check(mathsHost._html.indexOf("还没有数学通道") >= 0,
       "an empty definition list does not explain how to add one");
 
+    // 试算结果必须把**认到的通道**念出来。用户打的 `FSD13Distance1` 会被服务端
+    // 认成 `FSD13 Distance1`（少一个空格算同一条通道）；不显示认到的名字，他就
+    // 不知道自己那串算成了谁——这正是他报"输入通道识别不了"时缺的那句话。
+    check(typeof api.formatMathsTrial === "function", "the viewer does not expose the trial text");
+    if (typeof api.formatMathsTrial === "function") {
+      const good = api.formatMathsTrial({
+        ok: true, samples: 143800, finite: 143800, min: 266, max: 266, mean: 266,
+        channels: ["FSD13 Distance1"], functions: [], notes: [],
+      });
+      check(good.indexOf("FSD13 Distance1") >= 0,
+        "the trial result does not say which channel the name was matched to: " + good);
+      check(good.indexOf("143800") >= 0 && good.indexOf("266") >= 0,
+        "the trial result lost the sample count or the statistics: " + good);
+      const bad = api.formatMathsTrial({
+        ok: false, error: "表达式里用到通道 `FSD`，本场次没有这个通道。", channels: ["FSD"],
+      });
+      check(bad.indexOf("本场次没有这个通道") >= 0 && bad.indexOf("算不出来") === 0,
+        "a failed trial does not show the reason the server gave: " + bad);
+    }
+
     // The expression box must not require typing a name that cannot be typed:
     // `Vx KF` looks like two operands, `Distance (2)` looks like a call and
     // `FSD-Distance1` looks like a subtraction. The picker inserts the quoted

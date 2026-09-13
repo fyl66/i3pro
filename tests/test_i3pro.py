@@ -2007,18 +2007,93 @@ class TestMaths(unittest.TestCase):
         self.assertAlmostEqual(float(values[0]), 24.0)
 
     def test_a_typo_gets_the_right_name_back(self):
-        """用户把 `FSD13 Distance1` 打成 `FSD13Distance1` 时要说人话。"""
+        """名字真的是场次里没有的：报错要说清该换成哪一条。"""
         session = _MathSession({"FSD13 Distance1": np.full(11, 1.0),
                                 "Aceinna Roll": np.full(11, 2.0)})
         with self.assertRaises(mathsmod.MathError) as caught:
-            mathsmod.evaluate("FSD13Distance1 * 2", session)
+            mathsmod.evaluate("FSD * 2", session)
         message = str(caught.exception)
-        self.assertIn("FSD13 Distance1", message)
-        self.assertIn("单引号", message)
+        self.assertIn("本场次没有这个通道", message)
+        self.assertIn("FSD13 Distance1", message)   # 以 `FSD` 开头的那几条
+        self.assertIn("插入通道", message)
         # 完全不像的名字不要硬凑一个"最接近的"出来
         with self.assertRaises(mathsmod.MathError) as caught:
             mathsmod.evaluate("notachannel * 2", session)
         self.assertNotIn("最接近的是", str(caught.exception))
+
+    def test_a_name_typed_without_its_space_is_still_that_channel(self):
+        """用户反馈的原话：`FSD-Distance1`/`FSD13Distance1` 对不上 `FSD13 Distance1`。
+
+        少一个空格、多一个短横线、大小写不同，都只该算"同一个名字的另一种写法"。
+        下标要按**文本位置**往前走：`FSD13Distance1*2` 这种连空格都不留的写法，
+        少走一格就会把 `*` 吃掉，然后报一个完全无关的语法错。
+        """
+        session = _MathSession({"FSD13 Distance1": np.linspace(0, 10, 11),
+                                "FSD13 Distance2": np.full(11, 2.0)})
+        known = mathsmod.known_names(session)
+        raw = np.asarray(session.columns["FSD13 Distance1"])
+        for text in ("FSD13Distance1 * 2", "FSD13Distance1*2", "fsd13distance1 * 2",
+                     "FSD13-Distance1 * 2", "FSD13_Distance1 * 2"):
+            with self.subTest(text=text):
+                self.assertTrue(
+                    np.allclose(mathsmod.evaluate(text, session), raw * 2), f"{text} 算错了"
+                )
+                self.assertEqual(
+                    mathsmod.compile_expr(text, known=known).channels,
+                    ("FSD13 Distance1",),
+                )
+        # 函数参数里、后面还跟着别的通道时也要按文本位置往前走
+        self.assertTrue(np.allclose(
+            mathsmod.evaluate("max(FSD13Distance1, 0) + FSD13Distance2", session),
+            raw + 2.0,
+        ))
+        # 数字对不上就还是别的名字，不许往前凑
+        self.assertNotIn("FSD13 Distance12", mathsmod.known_names(session))
+        with self.assertRaises(mathsmod.MathError):
+            mathsmod.evaluate("FSD13 Distance12 * 2", session)
+
+    def test_case_and_separators_are_interchangeable(self):
+        """`vx kf` / `VXKF` / `Vx_KF` 都是同一条 `Vx KF`。"""
+        session = _MathSession({"Vx KF": np.full(11, 30.0)})
+        known = mathsmod.known_names(session)
+        for text in ("Vx KF * 2", "vx kf * 2", "VXKF*2", "Vx_KF * 2", "'vx kf' * 2"):
+            with self.subTest(text=text):
+                self.assertAlmostEqual(float(mathsmod.evaluate(text, session)[0]), 60.0)
+                self.assertEqual(
+                    mathsmod.compile_expr(text, known=known).channels, ("Vx KF",)
+                )
+
+    def test_exact_spelling_wins_over_a_lookalike(self):
+        """两条通道只差一个分隔符时，写对哪条就是哪条。"""
+        session = _MathSession({"Vx KF": np.full(11, 1.0), "Vx-KF": np.full(11, 9.0)})
+        known = mathsmod.known_names(session)
+        self.assertEqual(mathsmod.compile_expr("Vx-KF * 2", known=known).channels, ("Vx-KF",))
+        self.assertEqual(mathsmod.compile_expr("Vx KF * 2", known=known).channels, ("Vx KF",))
+        # 写法两种都对得上、又不是逐字相同：不猜，报错让用户写全
+        with self.assertRaises(mathsmod.MathError) as caught:
+            mathsmod.compile_expr("vxkf * 2", known=known)
+        message = str(caught.exception)
+        self.assertIn("Vx KF", message)
+        self.assertIn("Vx-KF", message)
+
+    def test_a_channel_called_with_brackets_can_skip_the_space(self):
+        """`Distance(2) * 2` 也要认成通道 `Distance (2)`，不能报"未知函数"。"""
+        session = _MathSession({"Distance (2)": np.full(11, 7.0)})
+        known = mathsmod.known_names(session)
+        self.assertAlmostEqual(float(mathsmod.evaluate("Distance(2) * 2", session)[0]), 14.0)
+        self.assertEqual(
+            mathsmod.compile_expr("Distance(2) * 2", known=known).channels, ("Distance (2)",)
+        )
+
+    def test_strict_channel_check_happens_before_anything_is_computed(self):
+        """试算／保存想让编译器先说话时，缺的通道在这里就报出来。"""
+        known = ("Vx KF",)
+        # 不给名字表 / 不打开检查：语法过得去就先编译（旧行为不能变）
+        self.assertEqual(mathsmod.compile_expr("VxKF * 2", known=known).channels, ("Vx KF",))
+        self.assertEqual(mathsmod.compile_expr("Encoder9 * 2").channels, ("Encoder9",))
+        with self.assertRaises(mathsmod.MathError) as caught:
+            mathsmod.compile_expr("Encoder9 * 2", known=known, strict_channels=True)
+        self.assertIn("本场次没有这个通道", str(caught.exception))
 
     def test_definition_names_are_known_too(self):
         """一条定义引用另一条时，名字同样可以不写引号。"""
@@ -2124,7 +2199,7 @@ class TestMathsOverHttp(unittest.TestCase):
                 entry = next(c for c in info["channels"] if c["name"] == "总G")
                 self.assertTrue(entry["derived"])
 
-                # 试算：好式子给统计，坏式子给原因，语法错误直接 400
+                # 试算：好式子给统计与**用到哪条通道**；语法／通道名不对直接 400
                 status, preview = request(
                     f"/api/session/{quoted}/maths", "POST",
                     {"expr": "'G Force Lat' * 2"},
@@ -2135,9 +2210,9 @@ class TestMathsOverHttp(unittest.TestCase):
                 status, preview = request(
                     f"/api/session/{quoted}/maths", "POST", {"expr": "'没有的通道' + 1"}
                 )
-                self.assertEqual(status, 200)
-                self.assertFalse(preview["ok"])
+                self.assertEqual(status, 400)
                 self.assertIn("本场次没有这个通道", preview["error"])
+                self.assertIn("插入通道", preview["error"])
                 status, preview = request(
                     f"/api/session/{quoted}/maths", "POST", {"expr": "foo(1)"}
                 )
@@ -2256,23 +2331,46 @@ class TestMathsOverHttp(unittest.TestCase):
                 self.assertTrue(values, "派生列没有样本")
                 self.assertLessEqual(max(values), 2 * 200.0)
 
-                # 拼错的名字：保存能过（语法合法），但**报错要说清怎么办**
+                # 少一个空格、小写几个字母：还是同一条通道，存下来要能算
                 status, body = request(
                     f"/api/session/{quoted}/maths", "PUT",
-                    {"definitions": [{"name": "打错的", "expr": "VxKF * 2"}]},
+                    {"definitions": [{"name": "漏空格的", "expr": "vx kf * 2"}]},
                 )
                 self.assertEqual(status, 200, body)
-                errors = {e["name"]: e["error"] for e in body["errors"]}
-                self.assertIn("打错的", errors)
-                self.assertIn("Vx KF", errors["打错的"])
-                self.assertIn("单引号", errors["打错的"])
-
-                # 试算走的是同一条编译路径，也要给出这句建议
+                self.assertEqual(body["errors"], [], "少写一个空格不该算'没有这个通道'")
                 status, trial = request(f"/api/session/{quoted}/maths/test", "POST",
-                                        {"expr": "VxKF * 2"})
+                                        {"expr": "VXKF * 2"})
                 self.assertEqual(status, 200, trial)
-                self.assertFalse(trial["ok"])
-                self.assertIn("Vx KF", trial["error"])
+                self.assertTrue(trial["ok"], trial)
+                self.assertEqual(trial["channels"], ["Vx KF"], "试算没把认到的通道说出来")
+
+                # 真的是另一个名字：试算要说清该改成哪一条，且坏定义不进侧车
+                status, trial = request(f"/api/session/{quoted}/maths/test", "POST",
+                                        {"expr": "G Force Longg * 2"})
+                self.assertEqual(status, 400, trial)
+                self.assertIn("G Force Long", trial["error"])
+                status, body = request(
+                    f"/api/session/{quoted}/maths", "PUT",
+                    {"definitions": [{"name": "打错的", "expr": "没有这条通道 * 2"}]},
+                )
+                self.assertEqual(status, 400, body)
+                self.assertIn("本场次没有这个通道", body["error"])
+                names = [
+                    d["name"] for d in json.loads(
+                        (root / f"{copy.stem}.maths.json").read_text("utf-8")
+                    )["definitions"]
+                ]
+                self.assertNotIn("打错的", names, "通道名不对的定义不该写进侧车")
+
+                # 全局定义是跨场次复用的：某一场缺那条通道不算"存不下"，只报出来
+                status, state = request(
+                    f"/api/session/{quoted}/maths?scope=global", "PUT",
+                    {"definitions": [{"name": "别场才有的", "expr": "本场没有的通道 * 2"}]},
+                )
+                self.assertEqual(status, 200, state)
+                errors = {e["name"]: e["error"] for e in state["errors"]}
+                self.assertIn("别场才有的", errors)
+                self.assertIn("本场次没有这个通道", errors["别场才有的"])
             finally:
                 httpd.shutdown()
                 library.close()

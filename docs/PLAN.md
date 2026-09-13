@@ -216,6 +216,9 @@ i2 Pro 的结构是 `Project → Workbook → Worksheet → Component`。我们�
   自动重切不会悄悄覆盖**；时间轴上画弯/直带子。它同时给后面的「双击区段名放大到该弯/直道」
   （i2 Pro 的 `To Zoom to a Range: double-click on the range band`）、区段报表与 Eclectic
   理论最快圈留好了接口——区段是按距离定义的，报表按段统计直接用它。
+  这个接口已经用上了一件：**双击区段放大**（ticket #8，验收 A31）——双击左边表里的
+  一行、或时间轴顶上那条色条，横轴就缩到这一段；带子的淡色铺满绘图区，所以"算不算
+  双击区段"只认那条色条，绘图区里的双击仍然是原地放大。
 4. Histogram / Suspension Histogram / FFT（按 M6 的组件系统直接加类型即可）
 5. Channel Report / Time Report（表格化统计 + Eclectic）
 6. Gauges 动画播放（表盘已做完）+ Alarms 告警（对三电安全预警有用）
@@ -265,7 +268,7 @@ Lap Editor 存在的理由。顺带还暴露一个更根本的问题：八字（
 > 谁也不用猜。这也正是 i2 Pro 的模型（laps are created between beacon crossings，
 > 且允许存在多个信标做分段计时）。
 
-### M8 — 圈速体系：切分方式与信标（算法部分已完成，UI 待做）
+### M8 — 圈速体系：切分方式与信标（已完成，ticket #4/#5/#6）
 
 | 交付物 | 状态 |
 | --- | --- |

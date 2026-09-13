@@ -75,7 +75,7 @@ MoTeC 自己导出的两个 CSV（182 MB / 425 MB）。
 | **缩放不丢细节（serve 模式）** | 快照是预先抽稀的；`serve` 模式每次缩放按可见区间重新取样：1 秒窗口返回 100 个原始样本，单次请求 3 ms |
 | **数学通道** | 白名单表达式（53 个函数，**不用 `eval`**）造派生通道，效果与原生通道一样：可画图、可进散点、可切圈、可进报表。两种作用域——**本地**跟着场次（`<场次>.maths.json`），**全局**在仓库里（`maths/global.json`），同名时本地赢，界面上用角标写明谁生效。通道名**直接打**即可：空格／短横线／下划线可以省掉或互换、大小写不计较（`FSD13Distance1` 与 `FSD13 Distance1` 是同一条），认不准时报错会列出"以你打的字开头的那些通道"，也可以从「插入通道」下拉直接选；试算结果会念出**认到的通道名**。本地坏式子不进侧车，一条坏了不拖累其它条 |
 | **赛道区段** | 按**曲率（GPS 轨迹算的，与速度无关）**或**横向加速度**把一圈自动切成弯道与直道，灵敏度可调、单调可预测；区段沿距离定义、套在每条圈上，时间轴上画成弯/直带子。边界与名字都能手改，**改过之后自动重切不会悄悄覆盖**（先拦一次并说清后果，确认了才覆盖）。存在 `<场次>.sections.json` 侧车，`.ld` 永远只读 |
-| **工程化** | 129 项单测全绿（真实数据回归 + HTTP 端到端 + 无头驱动前端 201 个断言点），零第三方运行期依赖；改这个仓库的硬性规则见 [AGENTS.md](AGENTS.md) |
+| **工程化** | 132 项单测全绿（真实数据回归 + HTTP 端到端 + 无头驱动前端 223 个断言点），零第三方运行期依赖；改这个仓库的硬性规则见 [AGENTS.md](AGENTS.md) |
 
 完整验收清单与复现命令见 **[`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md)**；
 规划、里程碑与风险见 **[`docs/PLAN.md`](docs/PLAN.md)**。
@@ -137,7 +137,7 @@ MoTeC 自己导出的两个 CSV（182 MB / 425 MB）。
 i3pro.cmd           命令行入口（自动探测 Python），两个 bat 都调它
 docs/               PLAN.md 规划 · ACCEPTANCE.md 验收清单 · ld-format.md 格式逆向记录
 tools/              verify_ld_vs_csv.py 解析对照 · smoke_viewer.js 无头驱动前端
-tests/              129 项单测
+tests/              132 项单测
 maths/              全局数学通道定义（global.json，跨场次复用）
 out/                生成物（快照 HTML / Parquet），已在 .gitignore 里
 i2pro_data/         试车数据（.ld/.ldx/.csv），不进仓库
@@ -177,9 +177,9 @@ src/i3pro/
 ## 开发
 
 ```powershell
-python -m unittest discover -s tests -v      # 129 项，无数据文件时自动 skip
+python -m unittest discover -s tests -v      # 132 项，无数据文件时自动 skip
 python tools\verify_ld_vs_csv.py             # 与 i2 Pro CSV 逐通道对照
-node tools\smoke_viewer.js out\demo.html     # 无头驱动前端：缩放/光标/分组/信标编辑/数学通道/撤销等 201 个断言点
+node tools\smoke_viewer.js out\demo.html     # 无头驱动前端：缩放/光标/分组/信标编辑/数学通道/撤销等 223 个断言点
 ```
 
 算法层（`derive` / `laps` / `render`）是不依赖框架的纯函数，改动请优先补单测——

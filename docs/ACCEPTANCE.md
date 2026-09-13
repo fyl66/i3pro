@@ -926,6 +926,58 @@ node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"     # 第 23 组�
 * 参考圈换了（信标挪了、切分方式变了）不会自动把边界"搬"到新圈上：只提醒，重切由用户点。
 * 不做 i2 Pro 那种带计时意义的 S1/S2/S3 计时段——那是另一个概念（`CONTEXT.md` 里也标了）。
 
+## A31 · 双击区段放大到该区段（ticket #8）
+
+i2 Pro 的 `To Zoom to a Range: double-click on the range band`：双击一条区段，
+横轴就缩到这一段。我们的做法是**两个入口、同一件事**——双击左边区段表里的一行，
+或者双击时间轴顶上那条色条。
+
+**为什么要单独画一条色条**（这条是跑完整回归才发现的）：带子的淡色原本铺满整个
+绘图区当背景，第一版就把"绘图区里的双击"整个当成了"双击区段"——结果**原来的
+"双击原地放大 2 倍"在时间轴模式下几乎点不到了**（绘图区基本被带子盖满）。
+`out\20260524-耐久正赛.html` 的无头驱动直接把这条抓了出来
+（`zoom moved away from the clicked position`）。现在只有顶端那条
+`SECTION_STRIP_PX = 9` 像素的实心色条算数，别处照旧是"原地放大 2 倍"。
+
+语义定义不在浏览器里独此一份：`sections.band_at_time()`（谁属于哪一段）与
+`sections.band_window()`（一段的时间窗口）是纯函数，前端那两个 JS 函数是**薄移植**
+——快照必须能离线回答，不能回头问服务端。两边用同一批边界情况钉住。
+
+**通过判据**：
+
+| 断言 | 命令 / 位置 |
+| --- | --- |
+| 时间点落在哪一段：起点属于它自己、**边界归后一段**、圈与圈之间的空档**不属于任何一段** | `TestSections::test_which_section_a_time_falls_in` |
+| 最后一条圈的最后一段**包含终点那一瞬间**（否则双击终点线没有任何反应） | 同上（`band_at_time(marks, 60.0)` 命中、`60.1` 落空） |
+| 坏输入不猜：空表 / `None` / NaN / 只有起点没有终点的圈，一律返回 `None` | 同上 |
+| 一段的时间窗口：正常给出 `(起, 止)`；**零宽度的一段不给窗口**（界面要说"没有能用的时间范围"，而不是把视图缩成一个点）；下标越界也返回 `None` | `TestSections::test_the_window_of_one_section_row` |
+| 真数据钉子：金标准里**每条圈、每一段**的起点拿去问，都要问回它自己（≥10 段） | `TestSections::test_double_clicking_every_band_finds_that_same_band` |
+| 缩过去之后横轴真的变成那一段，光标跟着进去，并且**说出缩到了哪一段** | `tools/smoke_viewer.js` 第 23 组 |
+| 双击左边表里的一行 = 同一件事；**双击边界输入框不跳视图**（那是"选词"） | 同上 |
+| 距离轴上双击区段：先切回时间轴再缩，并且提示里写出"切回时间轴"——不许静默换轴 | 同上 |
+| **只有顶端色条算"双击区段"**：同一列落在绘图区里的双击仍然是原地放大 2 倍 | 同上（这一条就是耐久快照抓出来的那个回归） |
+| 每段两笔填充（淡色背景 + 色条）、一笔描边；`strip=false` 时只剩一笔填充 | 同上 |
+| 无头断言点 **201 → 223** | `rg -o "check\(" tools/smoke_viewer.js \| Measure-Object` |
+
+```powershell
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"   # 7 圈
+node tools\smoke_viewer.js "out\20260524-耐久正赛.html"       # 26 段 / 23 圈
+```
+
+真 Edge 渲染的观感验证（脚手架 `out/shot_sections.py`，`out/` 已 gitignore）：
+`out/shots/sections-strip.png` 与放大图 `sections-strip-zoom.png`——第一个绘图区
+顶端那条橙/蓝实心色条就是双击的落点；下面几个绘图区只有淡色背景，没有色条。
+
+**边界（说清代价）**：
+
+* 色条只画在**第一个绘图区**顶上（横轴是整张图共用的，画一条就够）；双击第二个
+  绘图区顶上的同类位置**不算**——那里没有画色条，不给看不见的落点。
+* 距离轴模式下不画带子（各圈走线长度不同，见 A30），所以那儿的双击是切回时间轴再缩，
+  不是"在距离轴上缩到某一段"。
+
+**当前结果**：`TestSections` 19 项、全套 **132 项单测 OK**；`verify_ld_vs_csv` PASS；
+两份金标准快照 smoke 均 PASS。
+
 ---
 
 ## A9 · 缩放模型（对齐 i2 Pro）
@@ -1053,7 +1105,7 @@ python -m unittest tests.test_i3pro.TestChannelGroups -v
 python -m unittest discover -s tests -v
 ```
 
-**通过判据**：`Ran 129 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）。
+**通过判据**：`Ran 132 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）。
 
 测试覆盖：
 
@@ -1072,7 +1124,7 @@ python -m unittest discover -s tests -v
 | `TestChannelGroups` | 通道按单位分组：不重不漏、单位一致、状态通道识别 |
 | `TestPoints` | 散点原始样本、时间窗裁剪、超窗口自动 stride |
 | `TestMaths` | 数学通道引擎（42 项）：白名单与 AST 断言、函数集、区间统计的条件与复位、微分积分、平滑与低通、成环与前向引用、一条坏了不拖累其它、本地覆盖全局、缓存命中与失效、派生列在下游等价于原生通道、通道名的识别（少空格/换分隔符/大小写/歧义不猜） |
-| `TestSections` | 赛道区段（16 项）：切分覆盖整圈不重不漏、弯切在该在的位置、灵敏度单调、测度整条平线时不造弯、最短段长决定"尖峰算不算弯"、手工编辑的排序/夹紧/补齐、名字去重、同一份不算改过、侧车往返与坏文件、真数据的份数与里程、每条圈的边界时刻（含"换了参考圈要提醒"） |
+| `TestSections` | 赛道区段（19 项）：切分覆盖整圈不重不漏、弯切在该在的位置、灵敏度单调、测度整条平线时不造弯、最短段长决定"尖峰算不算弯"、手工编辑的排序/夹紧/补齐、名字去重、同一份不算改过、侧车往返与坏文件、真数据的份数与里程、每条圈的边界时刻（含"换了参考圈要提醒"）、**落在哪一段**（边界归后一段、空档不算、最后一段含终点、坏输入不猜）与**一段的时间窗口**（零宽度不给窗口） |
 | `TestSectionsOverHttp` | 赛道区段走到 HTTP：GET 不落盘、重切落盘、手工改名字与边界、`edited` 立起来、被挡住的重切 400 + `needs_force` 且侧车不动、带 `force` 才覆盖、坏请求的下一步、`.ld` 字节不变 |
 | `TestMathsOverHttp` | 数学通道走到 HTTP：存本地 / 全局、侧车落盘、坏表达式 400 且不动已存侧车、同名拦截、`shadowed`、试算接口、函数表 |
 | `TestRender` | 静态/服务两种 payload、自包含性 |
@@ -1080,5 +1132,5 @@ python -m unittest discover -s tests -v
 | `TestIndependentParsers` | 第二套实现交叉验证、213 通道 CSV 全量对照 |
 | `TestBeaconUndo` | 撤销的纯函数层：什么是"同一版"、什么时候没有可撤销的一步、交回去的是上一版本身 |
 | `TestBeaconUndoOverHttp` | 撤销走真实 `PUT`：改名 / 插入 / 删除各自一步回到原样、`trusted` 迁移、落盘、一次无改动的保存不吃掉上一步、没有可撤销的一步时 400 并说明下一步、页面注入的 `laps_can_undo` 三态 |
-| `TestViewerScript` | 无头驱动前端：脚本里 **201 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
+| `TestViewerScript` | 无头驱动前端：脚本里 **223 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
 | `TestLaunchers` | 一键启动：快照批量导出 + 索引页、缺数据目录的报错、端口占用自动换端口 |

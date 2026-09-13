@@ -546,6 +546,57 @@ def lap_marks(log, laps, config: SectionConfig) -> list[dict]:
     return out
 
 
+def band_at_time(marks: list[dict], time_s: float) -> dict | None:
+    """时间轴上的一点落在哪一段里（ticket #8 的语义定义）。
+
+    ``marks`` 是 :func:`lap_marks` 的输出：每条圈自己的边界**绝对时刻**。每条圈的
+    速度不一样，所以必须按各圈自己的时刻找，**不能拿参考圈的秒数平移**。
+
+    返回 ``{"lap", "index", "start_time", "end_time", "duration"}``；落在圈与圈之间的
+    空档、或者那条圈的时刻不全时返回 ``None``——界面拿到 ``None`` 就照旧做"原地放大
+    2 倍"，而不是猜一个段给用户。最后一条圈的最后一段**包含终点那一瞬间**，否则双击
+    终点线没有任何反应。
+
+    界面里的 ``sectionAtTime()`` 是同一套规则的薄移植（浏览器要能在快照里离线回答，
+    不能回头问服务端）；两边用同一批边界情况钉住：``TestSections`` 与
+    ``tools/smoke_viewer.js`` 第 23 组。
+    """
+    if not marks or time_s is None or not np.isfinite(time_s):
+        return None
+    last_lap = len(marks) - 1
+    for position, mark in enumerate(marks):
+        times = list(mark.get("times") or [])
+        for index in range(len(times) - 1):
+            start, end = float(times[index]), float(times[index + 1])
+            if not end > start:
+                continue
+            closes = position == last_lap and index + 2 == len(times)
+            if time_s >= start and (time_s <= end if closes else time_s < end):
+                return {
+                    "lap": mark.get("label"),
+                    "index": index,
+                    "start_time": start,
+                    "end_time": end,
+                    "duration": end - start,
+                }
+    return None
+
+
+def band_window(rows: list[dict], index: int) -> tuple[float, float] | None:
+    """区段表（:func:`bands` 的输出）里第 ``index`` 段的 ``(起, 止)`` 时刻，单位秒。
+
+    越界、或者这一段的时刻不成立（止 ≤ 起）时返回 ``None``：界面拿到 ``None`` 会说
+    清"这一段没有能用的时间范围"，而不是把视图缩成一个点。
+    """
+    if index is None or index < 0 or index >= len(rows):
+        return None
+    row = rows[int(index)]
+    start, end = float(row["start_time"]), float(row["end_time"])
+    if not end > start:
+        return None
+    return start, end
+
+
 def _boundary_times(log, lap, distance: np.ndarray, config: SectionConfig) -> list[float]:
     """一条圈上每个边界的**绝对时刻**。
 

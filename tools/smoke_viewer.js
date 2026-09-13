@@ -1181,8 +1181,16 @@ if (api) {
     const drawn = api.drawSectionBands(recorder, pad, 400, 100, info.laps[0].times[0],
                                        info.laps[0].times[info.laps[0].times.length - 1]);
     check(drawn >= 2, "no section band was drawn in time mode: " + drawn);
-    check(recorder.fills === drawn && recorder.strokes === drawn,
-      "a band was counted but not filled/stroked: " + JSON.stringify(recorder));
+    // 每段两笔填充：铺满绘图区的淡色 + 顶端那条可双击的实心色条
+    check(recorder.fills === drawn * 2 && recorder.strokes === drawn,
+      "each band needs its wash plus the clickable strip: " + JSON.stringify(recorder));
+    const withoutStrip = { fills: 0, strokes: 0, fillRect() { this.fills += 1; },
+                           beginPath() {}, moveTo() {}, lineTo() {}, stroke() { this.strokes += 1; } };
+    const bare = api.drawSectionBands(withoutStrip, pad, 400, 100,
+                                      info.laps[0].times[0],
+                                      info.laps[0].times[info.laps[0].times.length - 1], false);
+    check(withoutStrip.fills === bare && bare === drawn,
+      "without the strip each band is exactly one fill: " + JSON.stringify(withoutStrip));
     api.state.showSections = false;
     check(api.drawSectionBands(recorder, pad, 400, 100, 0, 1e9) === 0,
       "hiding the sections still drew bands");
@@ -1201,6 +1209,111 @@ if (api) {
         "clicking the section toggle did not hide the bands");
       toggle.dispatch("click", { target: toggle });
       check(api.state.showSections, "clicking the section toggle again did not bring them back");
+    }
+
+    // 双击区段放大（ticket #8）：带子上双击 = 缩到那一段，空档上双击 = 老行为。
+    // 区段按距离定义、每条圈速度不同，所以"这一点属于哪一段"必须按各圈自己的
+    // 边界时刻找——和 Python 里的 sections.band_at_time() 是同一套规则。
+    const marks = info.laps || [];
+    check(marks.length >= 2, "the snapshot must carry per-lap section marks: " + marks.length);
+    if (marks.length >= 2) {
+      const startOf = api.sectionAtTime(marks[0].times[0]);
+      check(!!startOf && String(startOf.lap) === String(marks[0].label) && startOf.index === 0,
+        "the first instant of a lap must land in that lap's first section: " + JSON.stringify(startOf));
+      const onEdge = api.sectionAtTime(marks[0].times[1]);
+      check(!!onEdge && onEdge.index === 1,
+        "a section boundary belongs to the section that starts there: " + JSON.stringify(onEdge));
+      const tail = marks[0].times[marks[0].times.length - 1];
+      if (marks[1].times[0] > tail) {
+        check(api.sectionAtTime((tail + marks[1].times[0]) / 2) === null,
+          "the gap between two laps must not be inside any section");
+      }
+      const row = (info.bands || [])[1];
+      const win = api.sectionWindow(1, null);
+      check(!!win && win.start === row.start_time && win.end === row.end_time,
+        "the section table must hand back the reference lap's own row: " + JSON.stringify(win));
+      check(api.sectionWindow((info.bands || []).length, null) === null,
+        "an out-of-range section index must give nothing rather than a guess");
+
+      api.state.mode = "time";
+      api.state.view = null;
+      const applied = api.zoomToSection(win);
+      check(Array.isArray(applied) && Math.abs(applied[0] - win.start) < 1e-6
+            && Math.abs(applied[1] - win.end) < 1e-6,
+        "zooming to a section must set the view to that section: " + JSON.stringify(applied));
+      check(Math.abs(api.state.cursor - win.start) < 1e-6,
+        "the cursor should follow into the section you just zoomed to");
+      const said = String(registry.get("toast").textContent);
+      check(said.indexOf(win.label) >= 0 && said.indexOf("–") >= 0,
+        "the user was not told which section they zoomed to: " + said);
+
+      // 双击左边表里的一行 = 同一件事；双击边界输入框是"选词"，不该跳视图
+      api.state.view = null;
+      const rowEl = new Element("div");
+      rowEl.dataset.sectionRow = "1";
+      registry.get("sectionsList").dispatch("dblclick", { target: rowEl });
+      check(api.state.view && Math.abs(api.state.view[0] - win.start) < 1e-6
+            && Math.abs(api.state.view[1] - win.end) < 1e-6,
+        "double-clicking a section row did not zoom to it: " + JSON.stringify(api.state.view));
+      const inputEl = new Element("input");
+      inputEl.dataset.sectionEdge = "1";
+      check(api.sectionRowIndexOf(inputEl) === null,
+        "double-clicking a boundary input must not zoom the view");
+
+      // 距离轴上带子不画，所以先切回时间轴再缩——但必须把"切了轴"说出来
+      api.state.mode = "distance";
+      api.state.view = [0, 100];
+      api.zoomToSection(win);
+      check(api.state.mode === "time" && api.state.view
+            && Math.abs(api.state.view[0] - win.start) < 1e-6,
+        "zooming to a section from the distance axis must switch back to time: " + api.state.mode);
+      check(String(registry.get("toast").textContent).indexOf("切回时间轴") >= 0,
+        "switching the axis silently is exactly what confuses people");
+
+      // 带子的淡色铺满整个绘图区（那是背景），所以"双击区段"只认顶端那条实心色条：
+      // 否则原来的"双击原地放大 2 倍"就再也点不到了（这条是跑耐久快照才发现的）。
+      api.state.mode = "time";
+      api.state.view = null;
+      let stripX = null;
+      for (let x = 80; x <= 880 && stripX === null; x += 5) {
+        if (api.sectionStripAt({ clientX: x, clientY: 8 }, chartCanvas)) stripX = x;
+      }
+      check(stripX !== null, "no pixel along the strip maps into a section band");
+      check(api.SECTION_STRIP_PX > 0, "the clickable strip has no height");
+      if (stripX !== null) {
+        check(api.sectionStripAt({ clientX: stripX, clientY: 60 }, chartCanvas) === null,
+          "only the strip may count as a section double-click, not the whole plot");
+      }
+      const beforeStrip = api.lane().slice();
+      charts.dispatch("mousedown", { detail: 2, clientX: stripX, clientY: 8,
+        altKey: false, ctrlKey: false, preventDefault() {}, target: chartCanvas });
+      window.dispatch("mouseup", { clientX: stripX + 1, clientY: 9 });
+      const afterStrip = api.lane();
+      check(afterStrip[1] - afterStrip[0] < (beforeStrip[1] - beforeStrip[0]) * 0.95,
+        "double-clicking the section strip did not zoom in: " + JSON.stringify(afterStrip));
+      check(api.sectionAtTime((afterStrip[0] + afterStrip[1]) / 2) !== null,
+        "the strip double-click must land on the section it points at");
+      // 同一列、但落在绘图区里：仍然是原来的"原地放大 2 倍"
+      api.state.view = null;
+      const beforePlot = api.lane().slice();
+      charts.dispatch("mousedown", { detail: 2, clientX: stripX, clientY: 60,
+        altKey: false, ctrlKey: false, preventDefault() {}, target: chartCanvas });
+      window.dispatch("mouseup", { clientX: stripX + 1, clientY: 61 });
+      const afterPlot = api.lane();
+      check(Math.abs((afterPlot[1] - afterPlot[0]) - (beforePlot[1] - beforePlot[0]) * 0.5) < 1e-6,
+        "double-clicking the plot area must still be the plain 2x zoom: " + JSON.stringify(afterPlot));
+
+      // 没有时间范围的一段：说清楚，并且一个像素都不动
+      const kept = api.state.view ? api.state.view.slice() : null;
+      check(api.zoomToSection({ label: "坏段", start: 5, end: 5 }) === null,
+        "a zero-width section must not be applied");
+      check(String(api.state.view) === String(kept),
+        "a zero-width section must leave the view alone: " + JSON.stringify(api.state.view)
+        + " vs " + JSON.stringify(kept));
+
+      api.state.mode = mode;
+      api.state.view = null;
+      api.renderAll();
     }
     api.data.api = apiBase;
   }

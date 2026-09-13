@@ -2282,6 +2282,44 @@ class TestSections(unittest.TestCase):
             self.assertIn("basis", message)
             self.assertIn("删掉这个文件", message)
 
+    # ------------------------------------------------- 落在哪一段（ticket #8）
+
+    def test_which_section_a_time_falls_in(self):
+        """双击带子问的就是这一句：这一点属于哪一段？空档不算，边界归下一段。"""
+        marks = [
+            {"label": "1", "times": [10.0, 20.0, 30.0]},
+            {"label": "2", "times": [40.0, 50.0, 60.0]},
+        ]
+        self.assertEqual(sectionsmod.band_at_time(marks, 10.0)["index"], 0)
+        self.assertEqual(sectionsmod.band_at_time(marks, 19.999)["index"], 0)
+        # 边界那一瞬间归**后**一段，和"这一段从哪儿开始"是同一件事
+        self.assertEqual(sectionsmod.band_at_time(marks, 20.0)["index"], 1)
+        self.assertEqual(sectionsmod.band_at_time(marks, 29.9)["index"], 1)
+        # 第 1 圈的最后一段到 30.0 为止，但 30.0 已经不属于任何带子（后面还有第 2 圈）
+        self.assertIsNone(sectionsmod.band_at_time(marks, 30.0))
+        self.assertIsNone(sectionsmod.band_at_time(marks, 35.0))      # 圈与圈之间的空档
+        hit = sectionsmod.band_at_time(marks, 40.0)
+        self.assertEqual((hit["lap"], hit["index"]), ("2", 0))
+        self.assertAlmostEqual(hit["duration"], 10.0)
+        # 最后一条圈的最后一段**含终点**，否则双击终点线没有任何反应
+        self.assertEqual(sectionsmod.band_at_time(marks, 60.0)["index"], 1)
+        self.assertIsNone(sectionsmod.band_at_time(marks, 60.1))
+        # 坏输入不猜：空表 / 没有时刻 / 非有限数 / 只有起点没有终点的圈
+        self.assertIsNone(sectionsmod.band_at_time([], 5.0))
+        self.assertIsNone(sectionsmod.band_at_time(marks, None))
+        self.assertIsNone(sectionsmod.band_at_time(marks, float("nan")))
+        self.assertIsNone(sectionsmod.band_at_time([{"label": "x", "times": [1.0]}], 1.0))
+
+    def test_the_window_of_one_section_row(self):
+        rows = [{"start_time": 3.0, "end_time": 7.5}, {"start_time": 7.5, "end_time": 7.5}]
+        self.assertEqual(sectionsmod.band_window(rows, 0), (3.0, 7.5))
+        # 零宽度的一段不给出窗口：界面要说"这一段没有能用的时间范围"，
+        # 而不是把视图缩成一个点（缩了也看不出来）
+        self.assertIsNone(sectionsmod.band_window(rows, 1))
+        self.assertIsNone(sectionsmod.band_window(rows, 2))
+        self.assertIsNone(sectionsmod.band_window(rows, -1))
+        self.assertIsNone(sectionsmod.band_window([], 0))
+
     # ------------------------------------------------------------ 真数据
     @_needs(HILL)
     def test_the_golden_hill_lap_splits_into_corners_and_straights(self):
@@ -2361,6 +2399,28 @@ class TestSections(unittest.TestCase):
             self.assertIn("第 1 圈", notice or "")
             self.assertIn("第 5 圈", notice or "")
             self.assertIn("重切", notice or "")
+
+    @_needs(HILL)
+    def test_double_clicking_every_band_finds_that_same_band(self):
+        """#8 的真数据钉子：每条圈、每一段，拿它的起点去问，要问回它自己。"""
+        with ld.LogFile.read(HILL) as log:
+            laps = render.detect(log)
+            config = sectionsmod.auto_for_log(log, sectionsmod.reference_lap(laps), "curvature", 1.0)
+            marks = sectionsmod.lap_marks(log, laps, config)
+            checked = 0
+            for mark in marks:
+                times = mark["times"]
+                for index in range(len(times) - 1):
+                    hit = sectionsmod.band_at_time(marks, times[index])
+                    self.assertIsNotNone(hit, f"第 {mark['label']} 圈第 {index} 段落在空档里")
+                    self.assertEqual(hit["lap"], mark["label"])
+                    self.assertEqual(hit["index"], index)
+                    checked += 1
+            self.assertGreater(checked, 10)
+            # 圈与圈之间的空档确实不属于任何一段（两条圈首尾相连时没有空档，跳过）
+            tail, head = marks[0]["times"][-1], marks[1]["times"][0]
+            if head > tail:
+                self.assertIsNone(sectionsmod.band_at_time(marks, (tail + head) / 2))
 
     @_needs(HILL)
     def test_the_curvature_basis_is_not_the_dead_Curvature_channel(self):

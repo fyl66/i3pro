@@ -930,6 +930,12 @@ function defaultRange() {
 /* ---------------------------------------------------------------- drawing */
 function axisPad() { return { l: 64, r: 18, t: 6, b: 18 }; }
 
+// 区段带子顶端那条实心色条的高度。它同时是**双击的落点**：带子的淡色铺满整个
+// 绘图区（那是背景），如果整片都算"双击区段"，原来的"双击原地放大 2 倍"就再也
+// 点不到了。所以只有这一条色条上的双击才算"缩到这一段"——i2 Pro 的 range band
+// 也是画成一条单独的色条，不是铺满背景。
+const SECTION_STRIP_PX = 9;
+
 function drawGrid(ctx, pad, plotW, plotH, y0, y1, x0, x1, xLabel, ticks) {
   ctx.strokeStyle = GRID;
   ctx.lineWidth = 1;
@@ -974,7 +980,7 @@ function drawGrid(ctx, pad, plotW, plotH, y0, y1, x0, x1, xLabel, ticks) {
  * 得用服务端算好的"每条圈自己的边界时刻"（`sections.laps[].times`）——拿参考圈
  * 的秒数平移会画到隔壁圈去。距离轴模式下每条圈的走线长度不同，宁可不画。
  */
-function drawSectionBands(ctx, pad, plotW, plotH, x0, x1) {
+function drawSectionBands(ctx, pad, plotW, plotH, x0, x1, strip) {
   const info = sectionsState();
   if (!info || !state.showSections || state.mode !== "time" || !info.laps) return 0;
   const kinds = (info.config || {}).kinds || [];
@@ -990,6 +996,10 @@ function drawSectionBands(ctx, pad, plotW, plotH, x0, x1) {
       if (right - left < 0.5) continue;
       ctx.fillStyle = kinds[i] === "corner" ? "rgba(255,158,64,.10)" : "rgba(96,164,255,.055)";
       ctx.fillRect(left, pad.t, right - left, plotH);
+      if (strip !== false) {                   // 顶端的实心色条：双击它就是缩到这一段
+        ctx.fillStyle = kinds[i] === "corner" ? "rgba(255,158,64,.85)" : "rgba(96,164,255,.75)";
+        ctx.fillRect(left, pad.t, right - left, SECTION_STRIP_PX);
+      }
       ctx.strokeStyle = "rgba(160,175,200,.16)";
       ctx.lineWidth = 1;
       ctx.beginPath();
@@ -1515,7 +1525,7 @@ function renderGraphComponent(comp, b) {
       const plotH = panel.panelH - padBase.t - padBase.b;
       const plotW = off.w - pad.l - pad.r;
       const scale = groupScaleFor(group, comp);
-      drawSectionBands(octx, pad, plotW, plotH, r[0], r[1]);
+      drawSectionBands(octx, pad, plotW, plotH, r[0], r[1], gi === 0);
       drawGrid(octx, pad, plotW, plotH,
                scale[0], scale[1], r[0], r[1], gi === groups.length - 1 ? axisUnit() : "", ticks);
       drawTraces(octx, pad, plotW, plotH,
@@ -2988,6 +2998,129 @@ function mathsDelete(index) {
 /** 区段的当前载荷：改过就用服务端刚回来的那份，否则用注入的（快照）。 */
 function sectionsState() { return state.sections || (DATA && DATA.sections) || null; }
 
+/** 区段的名字：`config.names` 里那个；没名字就叫"区段 n"。提示与图例都用它。 */
+function sectionLabel(info, index) {
+  const names = ((info || {}).config || {}).names || [];
+  const name = names[index];
+  return name && String(name).trim() ? String(name).trim() : "区段 " + (index + 1);
+}
+
+/**
+ * 时间轴上的一点落在哪一段里？双击带子问的就是这一句。
+ *
+ * 每条圈有自己的边界时刻（同一条赛道，每圈速度不一样），所以是**按圈找**，
+ * 不是拿参考圈的秒数平移。圈与圈之间的空档不属于任何一段——返回 `null`，
+ * 调用方照旧做原来的"双击放大 2 倍"。
+ */
+function sectionAtTime(time) {
+  const info = sectionsState();
+  if (!info || !state.showSections || state.mode !== "time") return null;
+  if (!Number.isFinite(time)) return null;
+  const laps = info.laps || [];
+  for (let li = 0; li < laps.length; li++) {
+    const times = laps[li].times || [];
+    for (let i = 0; i + 1 < times.length; i++) {
+      // 最后一条圈的最后一段：终点线那一瞬间也算它，否则双击终点线没反应
+      const last = li === laps.length - 1 && i + 2 === times.length;
+      const inside = time >= times[i] && (last ? time <= times[i + 1] : time < times[i + 1]);
+      if (inside) {
+        return { index: i, lap: laps[li].label, start: times[i], end: times[i + 1],
+                 label: sectionLabel(info, i) };
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * 一段的时间窗口（秒）。`lapLabel` 给了就用那条圈自己的边界时刻，没给就用参考圈
+ * ——左边那张区段表本来就是按参考圈算的。
+ */
+function sectionWindow(index, lapLabel) {
+  const info = sectionsState();
+  if (!info) return null;
+  const rows = info.bands || [];
+  if (!(index >= 0) || index >= rows.length) return null;
+  const label = sectionLabel(info, index);
+  if (lapLabel !== undefined && lapLabel !== null) {
+    const lap = (info.laps || []).find((item) => String(item.label) === String(lapLabel));
+    const times = (lap || {}).times || [];
+    if (!(index + 1 < times.length)) return null;
+    return { index: index, lap: lap.label, start: times[index], end: times[index + 1], label: label };
+  }
+  const row = rows[index];
+  return { index: index, lap: info.lap, start: row.start_time, end: row.end_time, label: label };
+}
+
+/**
+ * 双击区段（时间轴上的带子，或左边表里的一行）→ 把横轴缩到这一段。
+ *
+ * 距离轴模式下带子不画（区段是按距离定义的，各圈走线长度不同），所以先切回时间轴
+ * 再缩，**并且把"切了轴"这件事说出来**——不说的话用户会以为自己点错了。
+ */
+function zoomToSection(hit) {
+  if (!hit || !Number.isFinite(hit.start) || !Number.isFinite(hit.end) || !(hit.end > hit.start)) {
+    toast("这一段没有能用的时间范围（边界不全），先确认参考圈和边界");
+    return null;
+  }
+  // 和 zoomTo 的最小跨度同一条线：先自己判一次，才能把"太短了"说出口，
+  // 而不是让 zoomTo 静静返回、界面上看着像点坏了。
+  const full = fullRange();
+  const span = full[1] - full[0] || 1;
+  if (!(hit.end - hit.start > span * 1e-4)) {
+    toast(hit.label + " 只有 " + fmt(hit.end - hit.start, 3) + " s，太短了，缩不过去");
+    return null;
+  }
+  let switched = false;
+  if (state.mode !== "time") {
+    state.mode = "time";
+    state.view = null;
+    state.panelZoom = {};
+    switched = true;
+  }
+  state.cursor = hit.start;
+  zoomTo(hit.start, hit.end);
+  toast((switched ? "已切回时间轴 · " : "") + hit.label
+    + "：" + fmt(hit.start, 2) + "–" + fmt(hit.end, 2) + " s");
+  return state.view;
+}
+
+/**
+ * 双击落在带子顶端那条实心色条上吗？是的话回一段，否则回 `null`（调用方照旧
+ * 做"双击原地放大 2 倍"）。色条画在每个绘图区的顶边往下 `SECTION_STRIP_PX` 像素，
+ * 只有第一个绘图区画——横轴是整张图共用的，一条就够。
+ */
+function sectionStripAt(event, canvas) {
+  const info = sectionsState();
+  if (!info || !state.showSections || state.mode !== "time") return null;
+  if (!canvas || typeof canvas.getBoundingClientRect !== "function") return null;
+  const rect = canvas.getBoundingClientRect();
+  const top = axisPad().t;
+  const y = event.clientY - rect.top;
+  if (!(y >= top && y <= top + SECTION_STRIP_PX)) return null;
+  return sectionAtTime(xAt(event, canvas));
+}
+
+/** 双击落在哪一行区段上；双击输入框是"选词"，不该跳视图。 */
+function sectionRowIndexOf(target) {
+  if (!target) return null;
+  if (String(target.tagName || "").toUpperCase() === "INPUT") return null;
+  let raw = target.dataset ? target.dataset.sectionRow : undefined;
+  if (raw === undefined && typeof target.closest === "function") {
+    const row = target.closest(".srow");
+    raw = row && row.dataset ? row.dataset.sectionRow : undefined;
+  }
+  if (raw === undefined || raw === null || raw === "") return null;
+  const index = Number(raw);
+  return Number.isFinite(index) ? index : null;
+}
+
+function onSectionRowDoubleClick(event) {
+  const index = sectionRowIndexOf(event && event.target ? event.target : null);
+  if (index === null) return;
+  zoomToSection(sectionWindow(index, null));
+}
+
 /**
  * 左侧的区段表：每行 = 一条区段（种类 / 名字 / 起点距离 / 长度）。
  *
@@ -3046,6 +3179,7 @@ function renderSections() {
       if ((info.config || {}).edited) parts.push("边界被手工改过");
     }
     if (info.notice) parts.push(info.notice);
+    if (rows.length) parts.push("双击一行、或时间轴顶上那条色条，放大到该区段");
     if (!DATA || !DATA.api) parts.push("快照模式：区段能看，改不了（这是快照，改了也带不走）");
     note.textContent = parts.join(" · ");
   }
@@ -3398,8 +3532,13 @@ function finishBand(event) {
   bandOverlay().style.display = "none";
   const dx = Math.abs(info.x1 - info.x0);
   const dy = Math.abs(info.y1 - info.y0);
-  if (dx < 4 && dy < 4) {                      // plain double click = zoom in 2x
-    zoomFactor(0.5, xAt(event, info.canvas));
+  if (dx < 4 && dy < 4) {                      // plain double click
+    const at = xAt(event, info.canvas);
+    // 落在带子顶端那条色条上 = 缩到那一段（i2 Pro 的 Zoom to a Range）；别处
+    // （绘图区、圈与圈之间的空档、带子没打开）照旧是"原地放大 2 倍"。
+    const section = sectionStripAt(event, info.canvas);
+    if (section) { zoomToSection(section); return; }
+    zoomFactor(0.5, at);
     return;
   }
   const a = xAt({ clientX: info.x0, clientY: info.y0 }, info.canvas);
@@ -3969,6 +4108,8 @@ function init() {
       const kindIndex = target.dataset ? target.dataset.sectionKind : undefined;
       if (kindIndex !== undefined) toggleSectionKind(Number(kindIndex));
     });
+    // 双击一行 = 放大到那一段（和双击时间轴上的带子是同一件事）
+    sectionsList.addEventListener("dblclick", onSectionRowDoubleClick);
   }
   if ($("sectionsAuto")) $("sectionsAuto").addEventListener("click", sectionsAuto);
   if ($("toggleSections")) {
@@ -4062,6 +4203,10 @@ window.i3pro = {
   sectionsAuto: sectionsAuto, setSectionName: setSectionName,
   setSectionEdge: setSectionEdge, toggleSectionKind: toggleSectionKind,
   drawSectionBands: drawSectionBands,
+  sectionAtTime: sectionAtTime, sectionWindow: sectionWindow,
+  zoomToSection: zoomToSection, onSectionRowDoubleClick: onSectionRowDoubleClick,
+  sectionRowIndexOf: sectionRowIndexOf,
+  sectionStripAt: sectionStripAt, SECTION_STRIP_PX: SECTION_STRIP_PX,
 };
 </script>
 </body>

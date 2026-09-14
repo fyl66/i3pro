@@ -78,6 +78,9 @@ FLOAT_FORMAT = "%.10g"
 #: 这样"预计文件大小"与真文件一般在一个量级内（数字见 ACCEPTANCE A45）。
 _EST_BYTES_PER_CELL = 4
 _EST_BYTES_PER_LONG_ROW = 28
+#: 估体积时先真写这么多行，再按比例外推。200 行足够让"每行多少字节"稳定下来，
+#: 又不至于为了一个预估把整份数据算两遍。
+_EST_SAMPLE_ROWS = 200
 
 
 class ExportError(ValueError):
@@ -662,16 +665,17 @@ def plan(log: ldmod.LogFile, req: Request) -> dict:
             "或者换成「全部日志」再导出。"
         )
     columns = len(_header(log, req))
-    if req.layout == "long":
-        bytes_est = int(rows * _EST_BYTES_PER_LONG_ROW)
-    else:
-        bytes_est = int(rows * (columns * _EST_BYTES_PER_CELL + 2))
+    bytes_est = _estimate_bytes(log, req, index, rows)
     sheets = 0
     if req.fmt == "xlsx":
         sheets = max(1, math.ceil((rows + 1) / xlsx.MAX_ROWS))
     if req.bundle:
         bytes_est += 1024
     warnings: list[str] = []
+    if req.fmt == "xlsx":
+        warnings.append(
+            "Excel 是压缩包，实际文件通常明显小于这里的预估（预估算的是同等内容的文本体积）。"
+        )
     master = float(log.sample_rate) or 1.0
     if req.rate is None and req.layout == "wide" and len(req.channels) > 1:
         slow = [
@@ -778,6 +782,46 @@ def _empty_range() -> ExportError:
         "当前范围无数据：这个窗口里一条样本都没有。把范围放宽一点，"
         "或者换成「全部日志」再导出。"
     )
+
+
+def _estimate_bytes(log: ldmod.LogFile, req: Request, index: np.ndarray, rows: int) -> int:
+    """按**真的行内容**估体积：先按同一套格式写前 200 行，再按行数比例外推。
+
+    原先用「行数 × 列数 × 每格 4 字节」：原始采样模式下大部分格子是空的（比主时间基慢的
+    通道只在少数行上有值），于是高避5圈那个 46400 行 × 438 列的窗口被估成 **1755754 B**，
+    实际文件是 **949409 B**——面板上显示的数字比真实大了一倍，用户会以为导不出来。
+    """
+    if rows <= 0 or index.size == 0:
+        return 0
+    import io
+
+    import pandas as pd
+
+    sample = index[:_EST_SAMPLE_ROWS]
+    header = _header(log, req)
+    buffer = io.StringIO()
+    sampled_rows = 0
+    if req.layout == "wide":
+        for matrix in _wide_chunks(log, req, sample):
+            frame = pd.DataFrame(matrix, columns=header)
+            if req.index == "timestamp":
+                frame[header[0]] = _stamp_texts(log, req, matrix[:, 0])
+            frame.to_csv(
+                buffer, header=sampled_rows == 0, index=False,
+                na_rep="", float_format=FLOAT_FORMAT,
+            )
+            sampled_rows += int(matrix.shape[0])
+    else:
+        for frame in _long_frames(log, req, sample):
+            frame.to_csv(
+                buffer, header=sampled_rows == 0, index=False,
+                na_rep="", float_format=FLOAT_FORMAT,
+            )
+            sampled_rows += int(frame.shape[0])
+    if sampled_rows == 0:
+        return 0
+    measured = len(buffer.getvalue().encode("utf-8"))
+    return int(3 + measured * (rows / sampled_rows))       # + BOM
 
 
 def _write_csv(log: ldmod.LogFile, req: Request, path: Path, progress) -> dict:

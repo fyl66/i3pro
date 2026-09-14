@@ -99,12 +99,44 @@ class Body:
         return self._data
 
 
+#: 导出用的临时目录前缀。服务每次启动会把**过时的**这类目录扫掉：上一次服务被强杀时
+#: 留下的空壳会一直堆在临时目录里（本机实测撞到两个，让真浏览器验收里"临时目录没残留"
+#: 那两条永远报红——一条永远红的断言等于没有断言）。
+EXPORT_TMP_PREFIX = "i3pro-export-"
+
+
+def sweep_temp_exports(
+    max_age_s: float = 3600.0, root: str | Path | None = None
+) -> list[str]:
+    """删掉超过 ``max_age_s`` 没动过的导出临时目录，返回删掉的那些路径。
+
+    ``root`` 只是为了测试能指到自己的临时目录（默认是系统的临时目录）。
+    """
+    import time
+
+    removed: list[str] = []
+    now = time.time()
+    where = Path(root) if root is not None else Path(tempfile.gettempdir())
+    for path in where.glob(EXPORT_TMP_PREFIX + "*"):
+        try:
+            if now - path.stat().st_mtime < max_age_s:
+                continue
+        except OSError:
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        removed.append(str(path))
+    return removed
+
+
 class Api:
     """一个服务进程里只有一个；每个请求造一个 ``_Call``。"""
 
     def __init__(self, library, buckets: int = render.DEFAULT_BUCKETS):
         self.library = library
         self.buckets = buckets
+        # 这个模块拥有导出临时目录，也由它负责收尾：上一次服务被强杀会留下空壳，
+        # 攒在临时目录里会让"临时文件不残留"那条验收永远报红。只清一小时没动过的。
+        sweep_temp_exports()
 
     def handle(self, parts, query, method: str = "GET", body=None) -> Response:
         """把一个请求变成 ``Response``；**不起 socket 也能调**（单测就这么用）。"""
@@ -459,7 +491,7 @@ class _Call:
             if request.fmt == "csv"
             else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-        directory = Path(tempfile.mkdtemp(prefix="i3pro-export-"))
+        directory = Path(tempfile.mkdtemp(prefix=EXPORT_TMP_PREFIX))
         target = directory / filename
         alive = getattr(self.body_source, "alive", None)
 

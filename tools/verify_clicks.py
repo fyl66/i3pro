@@ -1260,6 +1260,8 @@ class Checker:
         假 DOM 验不了这一段：``fetch`` 在那里永远失败、``URL.createObjectURL`` 也
         不存在。这里用真实的下载行为，连"临时文件不许残留"一起钉住。
         """
+        # 开工前先记下机器上已有的导出临时目录：本机的判断只针对"这次跑出来的"那些。
+        exports_before = set(glob.glob(os.path.join(tempfile.gettempdir(), "i3pro-export-*")))
         point = json.loads(self.js(
             "(function(){var b=document.getElementById('dataBtn');"
             "b.scrollIntoView({block:'nearest'});"
@@ -1370,7 +1372,10 @@ class Checker:
             self.check("下载没落盘时改验接口：200 + 首行表头",
                        str(probe).startswith("200|time_s,"), str(probe)[:120])
 
-        leftovers = glob.glob(os.path.join(tempfile.gettempdir(), "i3pro-export-*"))
+        # 只对**这次跑出来的**临时目录下结论：这台机器上可能有别的进程（或被杀掉的旧服务）
+        # 留下的空目录，拿它们报红等于让一条永远红着的断言教人忽略它。
+        leftovers = [p for p in glob.glob(os.path.join(tempfile.gettempdir(), "i3pro-export-*"))
+                     if p not in exports_before]
         self.check("导出临时目录没残留（成功路径也要删）", not leftovers, leftovers[:3])
         self.check("导出过程没有页面级报错",
                    len(self.browser.page_errors()) == before_errors,
@@ -1409,7 +1414,8 @@ class Checker:
                    set(os.listdir(download_dir)) == before_files,
                    sorted(os.listdir(download_dir)))
         for _ in range(40):            # 服务端清理临时目录是异步的，等它一下
-            leftovers = glob.glob(os.path.join(tempfile.gettempdir(), "i3pro-export-*"))
+            leftovers = [p for p in glob.glob(
+                os.path.join(tempfile.gettempdir(), "i3pro-export-*")) if p not in exports_before]
             if not leftovers:
                 break
             time.sleep(0.25)

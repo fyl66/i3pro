@@ -27,6 +27,13 @@ i2pro-help/
 *.ld
 *.ldx
 
+# 车队数据的其它形态：本地导出的 CSV / Excel，以及 MoTeC 的索引文件（.idx / .id）。
+# 这些都在 `i2pro_data/` 里，但万一手滑复制到仓库根目录，也别让它们进仓库。
+*.csv
+*.xlsx
+*.idx
+*.id
+
 # 代理干活时的临时草稿（提交信息、给票的验收草稿）：不是项目资产，别进仓库。
 # `_commit_msg.txt` 曾经被误提交进 06e31dd，这里补上规则免得再来一次。
 _commit_msg.txt

@@ -4323,6 +4323,34 @@ class TestExportFiles(_ExportBase):
         self.assertIn("通道来源", keys)
 
 
+class TestExportTempSweep(unittest.TestCase):
+    """服务启动时清掉陈旧的导出临时目录。
+
+    上一次服务被强杀会在系统临时目录里留下一个空的 `i3pro-export-*`；真浏览器验收里
+    "临时目录没残留" 那两条因此会永远报红——一条永远红的断言等于没有断言。
+    """
+
+    def test_只清过时的那些(self):
+        import time
+
+        from i3pro import api as apimod
+
+        with tempfile.TemporaryDirectory(prefix="i3pro-sweep-") as tmp:
+            root = Path(tmp)
+            old = root / (apimod.EXPORT_TMP_PREFIX + "old")
+            fresh = root / (apimod.EXPORT_TMP_PREFIX + "fresh")
+            old.mkdir()
+            fresh.mkdir()
+            (old / "half.csv").write_text("x", encoding="utf-8")
+            stamped = time.time() - 7200
+            os.utime(old, (stamped, stamped))
+            removed = apimod.sweep_temp_exports(max_age_s=3600, root=root)
+            # 断言要在临时目录还活着的时候做（退出 with 时整套都被删了）
+            self.assertEqual([Path(p).name for p in removed], [old.name])
+            self.assertFalse(old.exists(), "过时的导出临时目录没被清掉")
+            self.assertTrue(fresh.exists(), "刚建的导出临时目录被误删了")
+
+
 class TestExportErrors(_ExportBase):
     """坏输入说人话：每条报错都要带上"下一步改什么"（ticket #23）。"""
 
@@ -4366,9 +4394,10 @@ class TestExportErrors(_ExportBase):
 class TestExportEstimate(_ExportBase):
     """「预计行数和文件大小」要对得上真文件（需求 §5）。
 
-    标定过的常数在 ``export._EST_BYTES_PER_CELL`` / ``_EST_BYTES_PER_LONG_ROW``
-    （它们的出处是 ACCEPTANCE A45 里那张实测表）。这里真写一次文件，把
-    「预估 ÷ 实际」锁在 0.5×–2× 之间——常数哪天被改坏，这条会红。
+    预估不再靠「行数 × 列数 × 每格常数」那种一把尺子量到底的算法，而是**先按同一套格式
+    真写前 200 行再外推**：原始采样模式下大部分格子是空的（比主时间基慢的通道只在少数行上
+    有值），一把尺子会把 46400 行 × 438 列的表估成实际的两倍。这里真写一次文件，把
+    「预估 ÷ 实际」锁在 0.75×–1.35× 之间——估算哪天被改坏，这条会红。
     """
 
     def test_预估与真文件在一个量级内(self):
@@ -4382,8 +4411,24 @@ class TestExportEstimate(_ExportBase):
         self.assertEqual(planned["rows"], stats["rows"], "预估行数必须与真导出一致")
         ratio = planned["bytes"] / max(1, stats["bytes"])
         self.assertTrue(
-            0.5 <= ratio <= 2.0,
+            0.75 <= ratio <= 1.35,
             f"体积预估偏了 {ratio:.2f}×：预估 {planned['bytes']} B，实际 {stats['bytes']} B",
+        )
+
+    def test_原始采样这种稀疏表也要估得准(self):
+        """全部通道 + 原始采样：大部分格子空着——这正是旧算法估成两倍的那种形状。"""
+        request = exportmod.parse_request(self.log, {
+            "channels": "all", "maths": "0", "from": "0", "to": "10",
+            "rate": "auto", "format": "csv", "layout": "wide",
+        })
+        planned = exportmod.plan(self.log, request)
+        stats = exportmod.write(self.log, request, self.tmp() / "sparse.csv")
+        self.assertEqual(planned["rows"], stats["rows"])
+        ratio = planned["bytes"] / max(1, stats["bytes"])
+        self.assertTrue(
+            0.75 <= ratio <= 1.35,
+            f"稀疏宽表的体积预估偏了 {ratio:.2f}×："
+            f"预估 {planned['bytes']} B，实际 {stats['bytes']} B",
         )
 
 

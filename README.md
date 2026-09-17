@@ -146,7 +146,7 @@ MoTeC 自己导出的两个 CSV（182 MB / 425 MB）。
 i3pro.cmd           命令行入口（自动探测 Python），两个 bat 都调它
 docs/               PLAN.md 规划 · ACCEPTANCE.md 验收清单 · ld-format.md 格式逆向记录
 tools/              verify_ld_vs_csv.py 解析对照 · smoke_viewer.js 无头驱动前端
-tests/              286 项单测
+tests/              300 项单测
 maths/              全局数学通道定义（global.json，跨场次复用）
 out/                生成物（快照 HTML / Parquet），已在 .gitignore 里
 i2pro_data/         试车数据（.ld/.ldx/.csv），不进仓库

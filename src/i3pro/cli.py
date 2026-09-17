@@ -365,7 +365,8 @@ def cmd_render(args: argparse.Namespace) -> int:
         for item in maths_errors:
             print(f"# 数学通道 {item['name'] or '(定义文件)'} 算不出来: {item['error']}")
         out = rendermod.render_html(
-            log, out, channels=channels, ref=args.ref, cmp=args.cmp, buckets=args.buckets
+            log, out, channels=channels, ref=args.ref, cmp=args.cmp, buckets=args.buckets,
+            worksheets_dir=args.worksheets,
         )
         try:
             laps = lapsmod.detect_laps(log)
@@ -395,6 +396,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         cache_size=args.cache,
         open_browser=args.open,
         maths_root=args.maths,
+        worksheets_root=args.worksheets,
     )
     return 0
 
@@ -423,7 +425,10 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
                     laps = lapsmod.detect_laps(log)
                 except ValueError:
                     pass
-                rendermod.render_html(log, target, channels=None, buckets=args.buckets)
+                rendermod.render_html(
+                    log, target, channels=None, buckets=args.buckets,
+                    worksheets_dir=args.worksheets,
+                )
                 meta = log.metadata()
             complete = [l for l in laps if l.complete]
             best = min((l.lap_time for l in complete), default=None)
@@ -744,6 +749,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="每通道下采样像素列数")
     p.add_argument("--maths", default=None,
                    help="全局数学定义的根目录 (默认: 仓库根目录，读 maths/global.json)")
+    p.add_argument("--worksheets", default=None,
+                   help="工作表的根目录 (默认: 仓库根目录，读 worksheets/*.json)")
     p.set_defaults(func=cmd_render)
 
     p = sub.add_parser("serve", help="启动本地 Web 工作台 (局域网可共享链接)")
@@ -758,6 +765,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="全局数学定义的根目录 (默认: 仓库根目录，读 maths/global.json)",
     )
+    p.add_argument("--worksheets", default=None,
+                   help="工作表的根目录 (默认: 仓库根目录，读 worksheets/*.json)")
     p.set_defaults(func=cmd_serve)
 
     p = sub.add_parser("snapshot", help="把每个场次导出成离线 HTML 快照")
@@ -768,6 +777,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--open", action="store_true", help="生成后打开索引页")
     p.add_argument("--maths", default=None,
                    help="全局数学定义的根目录 (默认: 仓库根目录，读 maths/global.json)")
+    p.add_argument("--worksheets", default=None,
+                   help="工作表的根目录 (默认: 仓库根目录，读 worksheets/*.json)")
     p.set_defaults(func=cmd_snapshot)
 
     p = sub.add_parser("import", help="把 .ld/.ldx/.csv 导入数据目录（可拖拽到 导入数据.bat 上）")

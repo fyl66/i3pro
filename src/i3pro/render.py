@@ -26,6 +26,7 @@ from . import notes as notesmod, report as reportmod, sections as sectionsmod
 from . import ld as ldmod
 from . import spectrum as spectrummod
 from . import timebase
+from . import worksheets as worksheetsmod
 
 __all__ = [
     "render_html",
@@ -906,9 +907,11 @@ def build_payload(
     with_report: bool = False,
     with_histograms: bool = False,
     with_spectra: bool = False,
+    worksheets_dir: str | Path | None = None,
 ) -> dict:
     """Everything the workbench needs. Traces are only embedded in static mode."""
     time = timebase.axis(log)
+    sheets, sheet_problems = worksheetsmod.load_dir(worksheets_dir)
     try:
         distance = derive.distance_series(log)[: time.size]
     except ValueError:
@@ -984,6 +987,10 @@ def build_payload(
         "api": api_base,
         "buckets": buckets,
         "session": log.path.stem,
+        # 工作表（ticket #30）：界面顶上那排按钮全来自 worksheets/*.json，
+        # 快照与服务两种模式都带上，所以离线打开照样能切。
+        "worksheets": sheets,
+        "worksheet_problems": sheet_problems,
     }
 
 
@@ -1014,6 +1021,7 @@ def render_html(
     with_report: bool = True,
     with_histograms: bool = True,
     with_spectra: bool = True,
+    worksheets_dir: str | Path | None = None,
 ) -> Path:
     """Write a self-contained workbench snapshot and return its path."""
     payload = build_payload(
@@ -1026,6 +1034,7 @@ def render_html(
         with_report=with_report,
         with_histograms=with_histograms,
         with_spectra=with_spectra,
+        worksheets_dir=worksheets_dir,
     )
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)

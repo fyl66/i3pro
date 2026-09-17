@@ -62,11 +62,14 @@ class SessionLibrary:
         roots: list[str | Path],
         cache_size: int = 3,
         maths_root: str | Path | None = None,
+        worksheets_root: str | Path | None = None,
     ):
         self.roots = [Path(r) for r in roots]
         self.cache_size = max(1, cache_size)
         #: 全局数学定义（``<仓库>/maths/global.json``）的根目录。
         self.maths_root = maths_root
+        #: 工作表（``<仓库>/worksheets/*.json``）的根目录（ticket #30）。
+        self.worksheets_root = worksheets_root
         self._lock = threading.Lock()
         self._cache: OrderedDict[str, ldmod.LogFile] = OrderedDict()
         self._maths_cache = maths.DerivedCache()

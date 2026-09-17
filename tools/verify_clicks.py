@@ -1114,6 +1114,58 @@ class Checker:
             self.check("#10 切纵轴（dB/线性）不该重新问服务端：那是同一份功率谱的写法",
                        False, "没有纵轴下拉")
 
+    def worksheets(self):
+        """ticket #30：顶上那排按钮真的点得到、真的换布局，而且按场次记。
+
+        为什么非要真鼠标：那些按钮的宽度由文字撑开、间距由 flex 给，假 DOM 里没有
+        面积也没有遮挡——"点了没反应"和"点到了旁边那个"只有真命中测试说得清。
+        顺带把"工作表那一栏没有报错"这条也读出来（仓库里那几份文件本来就不该有问题）。
+        """
+        names = json.loads(self.js(
+            "JSON.stringify(Array.prototype.map.call("
+            "document.querySelectorAll('#presetRow button'), function(b){return b.textContent;}))"))
+        self.check("#30 工作表按钮 = 仓库里的 worksheets/*.json",
+                   len(names) >= 5 and "分析" in names, names)
+        note = self.js("(document.getElementById('sheetNote')||{}).textContent||''")
+        self.check("#30 仓库里那几份工作表没有问题（这一栏不该有字）", not note.strip(), note)
+
+        def click_sheet(index):
+            box = json.loads(self.js(
+                "(function(){var b=document.querySelectorAll('#presetRow button')[%d];"
+                "return b?JSON.stringify(__center(b)):null;})()" % index))
+            self.browser.click(box["x"], box["y"], self.session)
+            time.sleep(0.8)
+            return json.loads(self.js(
+                "JSON.stringify({preset:i3pro.state.preset,"
+                "comps:i3pro.state.components.length,"
+                "types:i3pro.state.components.map(function(c){return c.type;})})"))
+
+        first = click_sheet(0)
+        last = click_sheet(len(names) - 1)
+        self.check("#30 真点最后一套 -> 换成那一套的组件",
+                   last["preset"] == names[-1] and last["comps"] > 0
+                   and last["comps"] != first["comps"],
+                   "%s -> %s" % (first, last))
+        stored = json.loads(self.js(
+            "(function(){var s=i3pro.data.session||'session';var k='i3pro.worksheet.v2:'+s;"
+            "return JSON.stringify({session:s,key:k,raw:localStorage.getItem(k),"
+            "legacy:localStorage.getItem('i3pro.components.v1')});})()"))
+        self.check("#30 布局记忆按场次存下来（键 = 前缀 + 场次名）",
+                   bool(stored["session"]) and stored["session"] != "session"
+                   and stored["key"] == "i3pro.worksheet.v2:" + stored["session"],
+                   stored["key"])
+        self.check("#30 记下来的是刚切过去的那一套",
+                   bool(stored["raw"]) and json.loads(stored["raw"])["preset"] == names[-1],
+                   "raw=%r" % (stored["raw"],))
+        self.check("#30 不再往那一格「全场共用」的旧键里写（换场次才不串味）",
+                   stored["legacy"] is None, stored["legacy"])
+
+        # 切回第一套：后面的检查按缺省布局来（别把页面留在最后一套上）
+        back = click_sheet(0)
+        self.check("#30 切回第一套还是它自己的组件",
+                   back["preset"] == names[0] and back["comps"] == first["comps"],
+                   "%s vs %s" % (back, first))
+
     def axis(self):
         """横轴随缩放换档（A36）：读真画布**画出来的**刻度文字。
 
@@ -1579,6 +1631,7 @@ def main(argv=None):
             checker.export(work_dir)
             checker.histogram()
             checker.axis()
+            checker.worksheets()
             checker.notes(work_dir, args.session)
             checker.gps(work_dir, args.session)
             errors = browser.page_errors()

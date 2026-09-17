@@ -2186,6 +2186,119 @@ python -m unittest tests.test_i3pro.TestStructureOfTheSplit -v      # -> Ran 11 
 
 ---
 
+## A48 · 数学通道的说明（`note`）不被面板保存抹掉（ticket #29）
+
+`maths/global.json` 里的 `note` 是**手写在文件里的说明**（这条通道为什么这么算），
+界面上没有编辑入口。面板保存走的是"整份替换"——前端把当前生效的定义收集成一个数组
+PUT 上去。原先那次收集只带 `{name, expr, unit}`，于是**在面板里存一次，仓库里手写的
+说明就永久没了**：真发生过，工作区那份 `global.json` 的 4 条说明全被抹掉。
+
+规则只有两条，都住在 `viewer.html` 的 `mathsSaveList(draft)` 里：
+
+| 存的是 | `note` 怎么办 |
+| --- | --- |
+| **正在编辑的那一条** | 带上它**原来**的说明（改表达式不该顺手删掉说明） |
+| **别的定义** | 原样带走，一个字节都不动 |
+
+**可复制命令与通过判据**：
+
+```powershell
+# 1. 渲染快照：快照里内嵌的就是这一步要验的那份 viewer.html
+python -m i3pro snapshot --data i2pro_data --out out
+
+# 2. 两份金标准快照都必须 PASS
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
+node tools\smoke_viewer.js "out\20260524-耐久正赛.html"
+
+# 3. 变异检查：把那两处"带上 note"删掉，断言必须立刻变红
+#    （一条永远不会红的断言等于没有断言）
+$t = Get-Content -Raw "out\20260908-cjh 高避5圈.html"
+$m = $t -replace 'unit: d\.unit \|\| "", note: d\.note \|\| ""', 'unit: d.unit || ""'
+$m = $m -replace 'unit: draft\.unit,\s+note: \(original && original\.note\) \|\| draft\.note \|\| ""', 'unit: draft.unit'
+Set-Content "out\_mut_note.html" -Value $m -NoNewline -Encoding UTF8
+node tools\smoke_viewer.js out\_mut_note.html     # 期望：退出码 1，两条断言都红
+```
+
+**实测（2026-09-17，源码取 `baa9447`、快照由这一版渲染）**：
+
+| 检查 | 结果 |
+| --- | --- |
+| 高避5圈 | `PASS`（1000083 线段 / 762112 点矩形 / 7 圈 / 471 通道行） |
+| 耐久正赛 | `PASS`（1047584 线段 / 772137 点矩形 / 26 圈 / 377 通道行） |
+| 变异检查 | 退出码 **1**，两条都红：`saving wiped the note of the definition being edited`、`saving another definition wiped a neighbour's note`；失败信息里打出的载荷只剩 `{"name":…,"expr":…,"unit":…}`，正好是"说明被抹掉"的那一份 |
+
+断言在 `tools/smoke_viewer.js`（数学编辑器那一段，"说明文字（`note`）…"注释下面）：
+先用 `{甲(带说明), 乙}` 验"改自己那条"，再用 `{甲, 乙}` → `{丙}` 验"存别人那条"，
+两次都检查载荷里 `甲` 的说明还在。
+
+---
+
+## A49 · 工作表是一个文件：`worksheets/*.json`（ticket #30）
+
+那 7 套工作表（分析 / 对比 / 动力 / 底盘 / 车手 / 仪表台 / 报表）原先硬编码在
+`viewer.html` 里的一段 `presetDefinitions()`：加一套要改前端，**没人能把自己拖好的
+布局存下来**，也发不给队友。现在一个 `.json` 一套，随仓库走。
+
+规矩只有三条，都写进了 [`worksheets/README.md`](../worksheets/README.md)：
+
+| 规矩 | 为什么 |
+| --- | --- |
+| **文件名是身份**（`analysis.json`）、`name` 是按钮上的字（`分析`） | 身份要能进 URL（#33 的增删改要用），按钮上的字要能是中文 |
+| **挑通道一律走 `pick`**，不写死通道名 | 换一个场次通道可能叫别的名字或干脆没有。`pick` 是"我要这几类通道"，用本场次真实存在的通道去填；`{"limit": 5, "index": 4}` = 先收 5 条取第 5 条，一串规则 = 兜底链，找不到就是 `null`（**不乱指一条**） |
+| **读不出来的文件只跳过它自己**，并且说清是哪个文件、下一步做什么 | 一份文件写坏不该让整个工作台空白 |
+
+`src/i3pro/worksheets.py` 只管文件（找 / 读 / 校验 / 排序），**一个组件类型名都不写死**
+——那张表在前端 `COMPONENT_TYPES` 里，是全仓库唯一的一份。所以"文件里写了一个不存在的
+显示形式"这件事由前端在装配时报出来（`#sheetNote` 那一行字），不是在这里猜。
+
+布局记忆也跟着改了：**按场次存**（`i3pro.worksheet.v2:<场次>`）。以前是一格全场共用，
+在耐久赛里拖好的布局会跟着你走进高避。老键（`i3pro.components.v1`）只在某个场次还没有
+自己那一份时当缺省读一次，**不再往里写**。
+
+**可复制命令与通过判据**：
+
+```powershell
+# 1. 文件这一层（不需要数据文件）
+python -m unittest tests.test_i3pro.TestWorksheets -v      # -> Ran 12 tests / OK
+
+# 2. 界面这一层：两份金标准快照都必须 PASS
+python -m i3pro render "i2pro_data\20260908-cjh 高避5圈.ld"
+python -m i3pro render "i2pro_data\20260524-耐久正赛.ld"
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
+node tools\smoke_viewer.js "out\20260524-耐久正赛.html"
+
+# 3. 真浏览器：按钮真的点得到（这一组 6 条）
+python tools\verify_clicks.py
+
+# 4. 想自己看一份工作表被解析成了什么（迁移时就是靠它比对搬前搬后的）
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html" --dump-worksheets
+```
+
+**实测（2026-09-17）**：
+
+| 检查 | 结果 |
+| --- | --- |
+| 七份文件 | `analysis 分析 / compare 对比 / powertrain 动力 / chassis 底盘 / driver 车手 / dash 仪表台 / report 报表`，`order` 10…70，`problems = []` |
+| **搬前搬后逐字段一致** | 高避那一场上 7 套工作表的**切过去之后的完整状态**（每个组件的类型 / 位置 / 尺寸 / config）与硬编码那版**逐个字段相同**——夹具 `tests/fixtures/worksheets_before.json` 是搬之前用 `--dump-worksheets` 倒出来的 |
+| 高避5圈快照 | `PASS`（1083954 线段 / 894545 点矩形 / 7 圈 / 471 通道行） |
+| 耐久正赛快照 | `PASS`（1142204 线段 / 942681 点矩形 / 26 圈 / 377 通道行） |
+| 真浏览器（#30 六条） | 按钮 = 文件（7 个、顺序一致）· 工作表那一栏没有字 · 真点最后一套 → 换成那 3 个组件 · 记忆键 = `i3pro.worksheet.v2:20260908-cjh 高避5圈` · 记下来的是刚切过去的那套 · **不再往旧的全场共用键里写** · 切回第一套组件数不变 |
+| 全量回归 | `Ran 300 tests` + `OK`；`verify_ld_vs_csv` PASS；两份 smoke PASS；`verify_clicks` **75 项检查：75 通过，0 失败** |
+
+**一处要说明的数字变化**：无头驱动最后那行"线段 / 点矩形"是**从打开页面起累加**的计数器，
+而 #30 的断言组会把这 7 套工作表逐个切一遍（这正是"每份文件都装得出来"的证据），所以
+高避那行从 1000118 涨到 1083954。**行为没变**这件事由上面那条"搬前搬后逐字段一致"钉住，
+不是由这行计数钉住的。
+
+断言落在两处：文件层在 `tests/test_i3pro.py` 的 `TestWorksheets`（12 项），界面层在
+`tools/smoke_viewer.js` 的「工作表（ticket #30）」那一组；"点得到"这件事在
+`tools/verify_clicks.py` 的 `Checker.worksheets()`（真鼠标点按钮、真读 `localStorage`）。
+
+顺手加的一个开发工具：`node tools/smoke_viewer.js <快照> --dump-worksheets` 把每套工作表
+切过去之后的状态倒成 JSON——迁移时用它比对，以后改工作表格式也能用它看"到底变成了什么"。
+
+---
+
 ## 全量回归
 
 ```powershell
@@ -2195,9 +2308,9 @@ node tools\smoke_viewer.js out\<场次>.html   # 3. 无头驱动前端：PASS
 python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘：全过（没有 Edge 的机器打印 SKIP，不算通过）
 ```
 
-**通过判据**：`Ran 286 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）；
+**通过判据**：`Ran 300 tests` + `OK`（无数据文件时相关用例自动 skip，不算失败）；
 `PASS - 0 channel(s) outside tolerance`；`PASS - workbench ran headless ... interactions verified`；
-`68 项检查：68 通过，0 失败`。**四条全绿才算改完**（AGENTS.md 规则 7）。
+`75 项检查：75 通过，0 失败`。**四条全绿才算改完**（AGENTS.md 规则 7）。
 
 上面各条验收里出现的"当时的结果"（`Ran 232 tests` / `51 项检查` 之类）是**那一轮**的
 实测记录，不是当前的数字；当前的数字只认这一节。每加一条验收条目就把这一节改一次。
@@ -2205,7 +2318,7 @@ python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘�
 **别并行跑两个测试进程**：`out/_test_data/` 是固定的，两边同时写同一份副本时
 `shutil.copy2` 会撞上 `WinError 1224`（目标文件正被映射着）。实测过：两条
 `python -m unittest` 同时起，第二条在导入阶段就报这个错；串行跑两次都是
-`Ran 286 tests / OK`。这不是用例的错，是"副本目录只有一份"的代价。
+`Ran 300 tests / OK`。这不是用例的错，是"副本目录只有一份"的代价。
 
 **金标准场次先复制再读**：`tests/test_i3pro.py` 在导入时把两份金标准场次复制到
 `out/_test_data/`（实测各 1 份、共 148.2 MB，复制 0.08 s；该目录每轮先清空），
@@ -2245,7 +2358,8 @@ python tools\verify_clicks.py                # 4. 真 Edge 发真鼠标/键盘�
 | `TestIndependentParsers` | 第二套实现交叉验证、213 通道 CSV 全量对照 |
 | `TestBeaconUndo` | 撤销的纯函数层：什么是"同一版"、什么时候没有可撤销的一步、交回去的是上一版本身 |
 | `TestBeaconUndoOverHttp` | 撤销走真实 `PUT`：改名 / 插入 / 删除各自一步回到原样、`trusted` 迁移、落盘、一次无改动的保存不吃掉上一步、没有可撤销的一步时 400 并说明下一步、页面注入的 `laps_can_undo` 三态 |
-| `TestViewerScript` | 无头驱动前端：脚本里 **442 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
+| `TestViewerScript` | 无头驱动前端：脚本里 **468 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
+| `TestWorksheets` | 工作表（#30，12 项）：仓库里那七份文件全都读得出来（名字 / 身份 / 顺序 / 组件类型）、随版本发布的那几份**不写死通道名**（挑通道一律走 `pick`）、坏文件不连累别人、七种坏法各自的下一步（坏 JSON / schema 不认 / 键打错 / 尺寸非法 / 空组件列 / 空规则 / 规则键打错）、重名被挡、目录不存在与目录为空、载荷在快照与本地服务两条路上都带工作表（含 `--worksheets` 换目录只影响那一个载荷）、**搬进文件之后与搬之前逐字段一致**（夹具是硬编码那版倒出来的） |
 | `TestExportRangeResolution` | 导出的范围解析（#23，4 项）：裸时钟沿用场次那天、范围左闭右闭、颠倒/越界各自说下一步、距离段填的是米而 `t_start` 才是秒 |
 | `TestExportRanges` / `TestExportSampling` / `TestExportFiles` / `TestExportErrors` / `TestExportPerformance` | 导出的数据面（#23，17 项）：auto 保留原始采样点且含起止点、绝对时间与相对秒逐字节相同、距离轴不倒退、统一采样率不留空格、`linear`/`hold`/`mean` 各给各的数、`plan` 行数 = 实际行数、CSV 带 BOM、zip 里的 `metadata.json`、长表只写有值的格子、xlsx 的 openpyxl 往返、五类坏输入的下一步、分块写的峰值内存守门 |
 | `TestExportEstimate` | 预估对得上真文件（#23，1 项）：真写一次 CSV，把"预估 ÷ 实际"锁在 0.5×–2×，并断言预估行数 = 实际行数（标定常数被改坏就红） |

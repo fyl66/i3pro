@@ -290,7 +290,11 @@ function run(hash) {
     },
   };
   vm.runInNewContext(script, sandbox);
-  return { window, registry, document, api: window.i3pro, httpCalls: httpCalls };
+  return {
+    window, registry, document, api: window.i3pro, httpCalls: httpCalls,
+    //: 页面里的 localStorage 是沙箱里的那个（不是 window 上的），断言要能看见它。
+    storage: sandbox.localStorage,
+  };
 }
 
 /* ------------------------------------------------------------------- drive */
@@ -311,6 +315,25 @@ try {
 const window = ctx.window;
 const registry = ctx.registry;
 const api = ctx.api;
+
+/** --dump-worksheets：把页面上的工作表一个个切过去，倒成 JSON，供人比对。
+ *
+ * 迁移用（ticket #30）：把硬编码的 7 套预设搬进 worksheets/*.json 时，用它把
+ * "搬之前"的行为存下来（那时还没有 worksheets 文件），搬完再倒一次逐字段对比。
+ * 走的是按钮 + applyPreset 这条路，所以新旧两版页面都能倒。组件 id 是每次运行
+ * 现编的（makeComponent 里 ++compSeq），倒出来之前去掉。 */
+if (process.argv.indexOf("--dump-worksheets") >= 0) {
+  const row = registry.get("presetRow");
+  const dumped = {};
+  for (const btn of (row ? row._children : [])) {
+    api.applyPreset(btn.textContent);
+    dumped[btn.textContent] = api.state.components.map((c) => ({
+      type: c.type, x: c.x, y: c.y, w: c.w, h: c.h, config: c.config,
+    }));
+  }
+  console.log(JSON.stringify(dumped, null, 1));
+  process.exit(0);
+}
 
 /** Find the component element the app created for a component id. */
 function SHEETEl(root, id) {
@@ -2736,6 +2759,124 @@ if (api && exportDlg) {
   check(api.exportFilename('attachment; filename="plain.csv"') === "plain.csv",
     "没有解出普通 filename=");
   api.data.api = savedApi;
+}
+
+/* ----------------------------------------------- 工作表（ticket #30）
+ * 顶上那排按钮现在来自仓库里的 worksheets/*.json（服务端读出来塞进 DATA.worksheets，
+ * 快照内嵌一份）。这一组钉三件事：按钮与文件一一对应；pick 规则挑得到通道、挑不到
+ * 就留空而不是乱指；坏文件与不认得的组件类型都要**说出来**，不能静默少画。
+ * 另外把"布局记忆按场次"这条也钉住——那是同一票的另一半。 */
+{
+  const injected = api.data.worksheets || [];
+  const buttons = registry.get("presetRow")._children;
+  check(injected.length >= 5, "这份页面没带工作表文件（DATA.worksheets 是空的）");
+  check(buttons.length === injected.length,
+    "工作表按钮数与文件数对不上：" + buttons.length + " vs " + injected.length);
+  check(buttons.map((b) => b.textContent).join("|") === injected.map((s) => s.name).join("|"),
+    "按钮顺序与文件顺序不一致：" + buttons.map((b) => b.textContent).join("|"));
+  check(registry.get("presetRow")._children.length === injected.length
+    && injected.every((s) => s.components.length > 0),
+    "每份工作表都得至少有一个组件");
+
+  // 切过去要真的有那套组件，而且类型都认得出（认不出的类型在这里会被剔掉并报出来）
+  const catalogue = api.worksheetCatalogue();
+  check(catalogue.problems.length === 0,
+    "仓库里那几份工作表不该有问题：" + catalogue.problems.join(" / "));
+  let switched = 0;
+  for (const sheet of catalogue.sheets) {
+    api.applyPreset(sheet.name);
+    if (api.state.preset === sheet.name && api.state.components.length === sheet.components.length) {
+      switched += 1;
+    }
+  }
+  check(switched === catalogue.sheets.length,
+    "有几套工作表切过去没生效：" + switched + "/" + catalogue.sheets.length);
+
+  // pick：按 hints 找到本场次真实存在的通道（不是照抄文件里的名字）
+  const graphSheet = catalogue.sheets.filter((s) => s.components.some(
+    (c) => c.type === "graph" && c.pick && c.pick.channels))[0];
+  check(!!graphSheet, "没有哪套工作表的图是靠 pick 挑通道的");
+  const graphComp = api.componentsOfWorksheet(graphSheet).filter((c) => c.type === "graph")[0];
+  check((graphComp.config.channels || []).length > 0,
+    "pick 没有给图挑到通道：" + JSON.stringify(graphComp.config.channels));
+  check((graphComp.config.channels || []).every((n) => api.data.channels.some(
+    (c) => c.name === n)),
+    "pick 挑出了本场次没有的通道：" + JSON.stringify(graphComp.config.channels));
+
+  // pick 的语义：取第几条、越界给空、兜底链、special
+  const hints = api.data.channels.slice(0, 4).map((c) => c.name);
+  const all = api.resolvePickValue({ patterns: hints, limit: 4 }, hints);
+  check(Array.isArray(all) && all.length === 4, "limit 没有收满：" + JSON.stringify(all));
+  check(api.resolvePickValue({ patterns: hints, index: 2 }, hints) === hints[2],
+    "index 没有取到第 3 条");
+  check(api.resolvePickValue({ patterns: hints, index: 9 }, hints) === null,
+    "越界该给 null，不能乱指一条");
+  check(api.resolvePickValue([{ patterns: hints, index: 9 }, { patterns: hints, index: 1 }], hints)
+    === hints[1], "兜底链没有落到后面那条规则上");
+  check(Array.isArray(api.resolvePickValue({ patterns: hints })), "没写 index 就该给一整排");
+  check(Array.isArray(api.resolvePickValue({ special: "report", limit: 2 }, hints))
+    || api.resolvePickValue({ special: "report", limit: 2 }, hints) === null,
+    "special=report 这条规则没实现");
+
+  // 文件里写了不认得的类型：那一个组件被跳过，别的照画，而且要说出来
+  const savedSheets = api.data.worksheets;
+  const savedProblems = api.data.worksheet_problems;
+  api.data.worksheets = [{
+    id: "probe", name: "探针", order: 1, hints: [],
+    components: [{ type: "graph" }, { type: "没有这种显示形式" }],
+  }];
+  api.data.worksheet_problems = [];
+  api.resetWorksheetCache();
+  const probe = api.worksheetCatalogue();
+  check(probe.sheets.length === 1 && probe.sheets[0].components.length === 1,
+    "不认得的组件类型没有被跳过：" + JSON.stringify(probe.sheets));
+  check(probe.problems.join(" ").indexOf("没有这种显示形式") >= 0
+    && probe.problems.join(" ").indexOf("升级 i3pro") >= 0,
+    "跳过了一个组件却没说出来：" + probe.problems.join(" / "));
+  api.renderWorksheetNote();
+  check(String(registry.get("sheetNote").textContent).indexOf("升级 i3pro") >= 0,
+    "工作表那一栏没有把问题显示出来");
+
+  // 服务端报的坏文件也要出现在同一行字里
+  api.data.worksheets = savedSheets;
+  api.data.worksheet_problems = [{ file: "坏的.json", error: "坏的.json 不是合法的 JSON（第 1 行）。" }];
+  api.resetWorksheetCache();
+  api.renderWorksheetNote();
+  check(String(registry.get("sheetNote").textContent).indexOf("坏的.json") >= 0,
+    "服务端报出来的坏文件没有显示给用户");
+
+  // 一份文件都没有（旧快照 / 目录被删）：给兜底工作表，并说清为什么
+  api.data.worksheets = [];
+  api.data.worksheet_problems = [];
+  api.resetWorksheetCache();
+  const empty = api.worksheetCatalogue();
+  check(empty.sheets.length === 1 && empty.sheets[0].name === "默认",
+    "没有工作表文件时应当退到「默认」那套：" + JSON.stringify(empty.sheets.map((s) => s.name)));
+  check(empty.problems.join(" ").indexOf("重新生成") >= 0,
+    "没有工作表文件时没说下一步：" + empty.problems.join(" / "));
+  check(api.componentsOfWorksheet(empty.sheets[0]).length > 0,
+    "兜底工作表一个组件都没有，页面会是空白的");
+
+  // 布局记忆：键里带场次名（以前是全场共用一格，换场次也带着上一场的布局走）
+  api.data.worksheets = savedSheets;
+  api.data.worksheet_problems = savedProblems;
+  api.resetWorksheetCache();
+  api.applyPreset(catalogue.sheets[catalogue.sheets.length - 1].name);
+  api.saveLayout();
+  const keys = Object.keys(ctx.storage._v);
+  check(keys.some((k) => k.indexOf("i3pro.worksheet.v2") === 0
+    && k.indexOf(api.data.session) >= 0),
+    "布局记忆没有按场次分开存：" + keys.join(", "));
+  const remembered = JSON.parse(ctx.storage.getItem(
+    "i3pro.worksheet.v2:" + api.data.session));
+  check(remembered.preset === catalogue.sheets[catalogue.sheets.length - 1].name,
+    "记下来的不是刚切过去的那套：" + JSON.stringify(remembered.preset));
+
+  // 收尾：切回第一套，别把页面停在最后一套上（后面那几条 DOM 断言看的是当前布局）。
+  // 注意最后那行画布统计是**从打开页面起累加**的，这一组切了 7 套工作表，数字会比
+  // 没有这一组时大——那不是回归，"搬前搬后逐字段一致"由单测里的夹具那条钉住。
+  api.resetWorksheetCache();
+  api.applyPreset(catalogue.sheets[0].name);
 }
 
 /* --------------------------------------------------------------- DOM checks */

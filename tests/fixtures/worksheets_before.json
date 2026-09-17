@@ -1,0 +1,544 @@
+{
+ "分析": [
+  {
+   "type": "graph",
+   "x": 0,
+   "y": 0,
+   "w": 12,
+   "h": 9,
+   "config": {
+    "channels": [
+     "Vx KF",
+     "Vx KF Init",
+     "GPS Speed",
+     "Brake Signal",
+     "TH",
+     "month MTI",
+     "tenthms MTI",
+     "G Force Lat",
+     "G Force Long",
+     "G Force Vert",
+     "SW Angle",
+     "AMKFR ActualTorqueValue"
+    ],
+    "mode": "tiled"
+   }
+  },
+  {
+   "type": "track",
+   "x": 0,
+   "y": 9,
+   "w": 4,
+   "h": 13,
+   "config": {
+    "channel": null,
+    "window": "all"
+   }
+  },
+  {
+   "type": "scatter",
+   "x": 4,
+   "y": 9,
+   "w": 4,
+   "h": 13,
+   "config": {
+    "x": "G Force Lat",
+    "y": [
+     "G Force Long"
+    ],
+    "colour": null,
+    "style": "points"
+   }
+  },
+  {
+   "type": "gauge",
+   "x": 8,
+   "y": 9,
+   "w": 4,
+   "h": 13,
+   "config": {
+    "subtype": "numeric",
+    "channels": [
+     "Vx KF"
+    ]
+   }
+  },
+  {
+   "type": "histogram",
+   "x": 0,
+   "y": 22,
+   "w": 6,
+   "h": 13,
+   "config": {
+    "channel": "Vx KF",
+    "bins": 40,
+    "style": "bars",
+    "colour": "TH",
+    "gate": "",
+    "window": "all"
+   }
+  },
+  {
+   "type": "gauge",
+   "x": 6,
+   "y": 22,
+   "w": 6,
+   "h": 13,
+   "config": {
+    "subtype": "list",
+    "channels": [
+     "Vx KF"
+    ]
+   }
+  }
+ ],
+ "对比": [
+  {
+   "type": "delta",
+   "x": 0,
+   "y": 0,
+   "w": 12,
+   "h": 8,
+   "config": {}
+  },
+  {
+   "type": "graph",
+   "x": 0,
+   "y": 8,
+   "w": 12,
+   "h": 9,
+   "config": {
+    "channels": [
+     "Vx KF",
+     "Vx KF Init",
+     "Brake Signal",
+     "TH",
+     "month MTI",
+     "tenthms MTI"
+    ],
+    "mode": "tiled"
+   }
+  },
+  {
+   "type": "track",
+   "x": 0,
+   "y": 17,
+   "w": 4,
+   "h": 13,
+   "config": {
+    "channel": null,
+    "window": "all"
+   }
+  },
+  {
+   "type": "scatter",
+   "x": 4,
+   "y": 17,
+   "w": 4,
+   "h": 13,
+   "config": {
+    "x": "Vx KF",
+    "y": [
+     "Vx KF Init"
+    ],
+    "colour": null,
+    "style": "points"
+   }
+  },
+  {
+   "type": "gauge",
+   "x": 8,
+   "y": 17,
+   "w": 4,
+   "h": 13,
+   "config": {
+    "subtype": "list",
+    "channels": [
+     "Vx KF"
+    ]
+   }
+  }
+ ],
+ "动力": [
+  {
+   "type": "graph",
+   "x": 0,
+   "y": 0,
+   "w": 12,
+   "h": 10,
+   "config": {
+    "channels": [
+     "AMKFR ActualTorqueValue",
+     "Battery Power",
+     "MCU1 FR TempMotor",
+     "AMKFR DCBusVolt",
+     "Pack Inst Voltage",
+     "power real",
+     "Total Motor Power",
+     "MCU1 FR TempIGBT"
+    ],
+    "mode": "tiled"
+   }
+  },
+  {
+   "type": "status",
+   "x": 0,
+   "y": 10,
+   "w": 12,
+   "h": 4,
+   "config": {}
+  },
+  {
+   "type": "gauge",
+   "x": 0,
+   "y": 14,
+   "w": 4,
+   "h": 13,
+   "config": {
+    "subtype": "dial",
+    "channels": [
+     "AMKFR ActualTorqueValue"
+    ]
+   }
+  },
+  {
+   "type": "gauge",
+   "x": 4,
+   "y": 14,
+   "w": 4,
+   "h": 13,
+   "config": {
+    "subtype": "bar",
+    "channels": [
+     "AMKFR ActualTorqueValue"
+    ]
+   }
+  },
+  {
+   "type": "gauge",
+   "x": 8,
+   "y": 14,
+   "w": 4,
+   "h": 13,
+   "config": {
+    "subtype": "numeric",
+    "channels": [
+     "AMKFR ActualTorqueValue"
+    ]
+   }
+  },
+  {
+   "type": "histogram",
+   "x": 0,
+   "y": 27,
+   "w": 6,
+   "h": 13,
+   "config": {
+    "channel": "Battery Power",
+    "bins": 40,
+    "style": "bars",
+    "colour": "MCU1 FR TempMotor",
+    "gate": "",
+    "window": "all"
+   }
+  },
+  {
+   "type": "histogram",
+   "x": 6,
+   "y": 27,
+   "w": 6,
+   "h": 13,
+   "config": {
+    "channel": "AMKFR DCBusVolt",
+    "bins": 40,
+    "style": "line",
+    "colour": null,
+    "gate": "",
+    "window": "all"
+   }
+  }
+ ],
+ "底盘": [
+  {
+   "type": "graph",
+   "x": 0,
+   "y": 0,
+   "w": 12,
+   "h": 10,
+   "config": {
+    "channels": [
+     "SW Angle",
+     "G Force Lat",
+     "G Force Long",
+     "Susp Pos FR (LoRes)",
+     "Susp Pos RL (LoRes)",
+     "Brake Signal"
+    ],
+    "mode": "tiled"
+   }
+  },
+  {
+   "type": "track",
+   "x": 0,
+   "y": 10,
+   "w": 4,
+   "h": 13,
+   "config": {
+    "channel": null,
+    "window": "all"
+   }
+  },
+  {
+   "type": "scatter",
+   "x": 4,
+   "y": 10,
+   "w": 4,
+   "h": 13,
+   "config": {
+    "x": "G Force Lat",
+    "y": [
+     "G Force Long"
+    ],
+    "colour": null,
+    "style": "points"
+   }
+  },
+  {
+   "type": "gauge",
+   "x": 8,
+   "y": 10,
+   "w": 4,
+   "h": 13,
+   "config": {
+    "subtype": "wheel",
+    "channels": [
+     "SW Angle"
+    ]
+   }
+  },
+  {
+   "type": "spectrum",
+   "x": 0,
+   "y": 23,
+   "w": 6,
+   "h": 13,
+   "config": {
+    "channel": "SW Angle",
+    "against": null,
+    "points": 1024,
+    "win": "hann",
+    "overlap": 0.5,
+    "smooth": 1,
+    "scale": "psd",
+    "axis": "log",
+    "span": "all"
+   }
+  },
+  {
+   "type": "histogram",
+   "x": 6,
+   "y": 23,
+   "w": 6,
+   "h": 13,
+   "config": {
+    "channel": "Brake Signal",
+    "bins": 40,
+    "style": "bars",
+    "colour": null,
+    "gate": "",
+    "window": "all"
+   }
+  }
+ ],
+ "车手": [
+  {
+   "type": "graph",
+   "x": 0,
+   "y": 0,
+   "w": 8,
+   "h": 10,
+   "config": {
+    "channels": [
+     "Vx KF",
+     "Vx KF Init",
+     "Brake Signal",
+     "TH",
+     "month MTI",
+     "tenthms MTI",
+     "SW Angle",
+     "G Force Long"
+    ],
+    "mode": "tiled"
+   }
+  },
+  {
+   "type": "gauge",
+   "x": 8,
+   "y": 0,
+   "w": 4,
+   "h": 10,
+   "config": {
+    "subtype": "wheel",
+    "channels": [
+     "SW Angle"
+    ]
+   }
+  },
+  {
+   "type": "track",
+   "x": 0,
+   "y": 10,
+   "w": 4,
+   "h": 13,
+   "config": {
+    "channel": null,
+    "window": "all"
+   }
+  },
+  {
+   "type": "scatter",
+   "x": 4,
+   "y": 10,
+   "w": 4,
+   "h": 13,
+   "config": {
+    "x": "Vx KF",
+    "y": [
+     "G Force Long"
+    ],
+    "colour": null,
+    "style": "points"
+   }
+  },
+  {
+   "type": "gauge",
+   "x": 8,
+   "y": 10,
+   "w": 4,
+   "h": 13,
+   "config": {
+    "subtype": "list",
+    "channels": [
+     "Vx KF"
+    ]
+   }
+  }
+ ],
+ "仪表台": [
+  {
+   "type": "gauge",
+   "x": 0,
+   "y": 0,
+   "w": 4,
+   "h": 13,
+   "config": {
+    "subtype": "dial",
+    "channels": []
+   }
+  },
+  {
+   "type": "gauge",
+   "x": 4,
+   "y": 0,
+   "w": 4,
+   "h": 13,
+   "config": {
+    "subtype": "wheel",
+    "channels": []
+   }
+  },
+  {
+   "type": "gauge",
+   "x": 8,
+   "y": 0,
+   "w": 4,
+   "h": 13,
+   "config": {
+    "subtype": "numeric",
+    "channels": []
+   }
+  },
+  {
+   "type": "gauge",
+   "x": 0,
+   "y": 13,
+   "w": 6,
+   "h": 11,
+   "config": {
+    "subtype": "bar",
+    "channels": []
+   }
+  },
+  {
+   "type": "gauge",
+   "x": 6,
+   "y": 13,
+   "w": 6,
+   "h": 11,
+   "config": {
+    "subtype": "bar",
+    "channels": []
+   }
+  },
+  {
+   "type": "gauge",
+   "x": 0,
+   "y": 24,
+   "w": 12,
+   "h": 13,
+   "config": {
+    "subtype": "list",
+    "channels": []
+   }
+  }
+ ],
+ "报表": [
+  {
+   "type": "graph",
+   "x": 0,
+   "y": 0,
+   "w": 12,
+   "h": 9,
+   "config": {
+    "channels": [
+     "Vx KF",
+     "Vx KF Init",
+     "GPS Speed",
+     "Brake Signal",
+     "TH",
+     "month MTI",
+     "tenthms MTI",
+     "G Force Lat"
+    ],
+    "mode": "tiled"
+   }
+  },
+  {
+   "type": "report",
+   "x": 0,
+   "y": 9,
+   "w": 12,
+   "h": 11,
+   "config": {
+    "filter": "all"
+   }
+  },
+  {
+   "type": "chreport",
+   "x": 0,
+   "y": 20,
+   "w": 12,
+   "h": 12,
+   "config": {
+    "channels": [
+     "Vx KF",
+     "GPS Speed",
+     "Brake Signal"
+    ],
+    "by": "lap",
+    "lap": null,
+    "filter": "all"
+   }
+  }
+ ]
+}

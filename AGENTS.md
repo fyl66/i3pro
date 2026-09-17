@@ -55,7 +55,7 @@
 python -m unittest discover -s tests -v      # 全部通过
 python tools\verify_ld_vs_csv.py             # PASS，0 channel(s) outside tolerance
 node tools\smoke_viewer.js out\<场次>.html   # 交互断言全过
-python tools\verify_clicks.py                # 真浏览器真鼠标：62 项全过（需要 Edge）
+python tools\verify_clicks.py                # 真浏览器真鼠标：75 项全过（需要 Edge）
 ```
 
 四条全绿才算改完。缺数据的机器上相关用例会自动 skip，这不算通过——要在有数据的机器上跑。
@@ -90,6 +90,7 @@ tools/              开发工具（解析对照 verify_ld_vs_csv.py、无头前�
 tests/              单测；依赖 i2pro_data/ 的用例在缺数据时自动 skip
 docs/               PLAN.md 规划 · ACCEPTANCE.md 验收清单 · ld-format.md 格式逆向记录
 maths/              全局数学通道定义（global.json，跨场次复用，可以进 git）
+worksheets/         工作表（一个 .json 一套；文件名是身份，name 是按钮上的字，可以进 git）
 out/                生成物（快照 HTML / Parquet），已 gitignore
 ```
 

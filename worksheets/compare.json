@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "name": "对比",
+  "order": 20,
+  "hints": ["Vx KF", "Brake Signal", "TH", "G Force Long", "SpeedFR", "SW Angle"],
+  "components": [
+    {"type": "delta", "x": 0, "y": 0, "w": 12, "h": 8},
+    {"type": "graph", "x": 0, "y": 8, "w": 12, "h": 9,
+     "pick": {"channels": {"limit": 6}}},
+    {"type": "track", "x": 0, "y": 17, "w": 4, "h": 13},
+    {"type": "scatter", "x": 4, "y": 17, "w": 4, "h": 13},
+    {"type": "gauge", "x": 8, "y": 17, "w": 4, "h": 13,
+     "config": {"subtype": "list"}}
+  ]
+}

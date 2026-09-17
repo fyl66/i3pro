@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "name": "分析",
+  "order": 10,
+  "hints": ["Vx KF", "GPS Speed", "Brake Signal", "TH", "G Force Lat",
+            "G Force Long", "G Force Vert", "SW Angle", "AMKFR ActualTorqueValue",
+            "Battery Power", "MCU1 FR TempMotor", "GPS Heading"],
+  "components": [
+    {"type": "graph", "x": 0, "y": 0, "w": 12, "h": 9,
+     "pick": {"channels": {"limit": 12}}},
+    {"type": "track", "x": 0, "y": 9, "w": 4, "h": 13},
+    {"type": "scatter", "x": 4, "y": 9, "w": 4, "h": 13},
+    {"type": "gauge", "x": 8, "y": 9, "w": 4, "h": 13,
+     "config": {"subtype": "numeric"}},
+    {"type": "histogram", "x": 0, "y": 22, "w": 6, "h": 13,
+     "pick": {"channel": {"limit": 1, "index": 0}, "colour": {"limit": 5, "index": 4}}},
+    {"type": "gauge", "x": 6, "y": 22, "w": 6, "h": 13,
+     "config": {"subtype": "list"}}
+  ]
+}

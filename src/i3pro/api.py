@@ -259,6 +259,7 @@ class _Call:
             api_base="/api",
             step=float_arg(query, "step", 1.0),
             with_track=False,
+            worksheets_dir=self.library.worksheets_root,
         )
         payload["session"] = name
         return self._json(payload)

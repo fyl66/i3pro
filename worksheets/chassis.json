@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "name": "底盘",
+  "order": 40,
+  "hints": ["SpeedFR", "SpeedFL", "SpeedRR", "SpeedRL", "SW Angle", "G Force Lat",
+            "G Force Long", "Susp Pos FR", "Susp Pos RL", "Brake Signal"],
+  "components": [
+    {"type": "graph", "x": 0, "y": 0, "w": 12, "h": 10,
+     "pick": {"channels": {"limit": 10}}},
+    {"type": "track", "x": 0, "y": 10, "w": 4, "h": 13},
+    {"type": "scatter", "x": 4, "y": 10, "w": 4, "h": 13},
+    {"type": "gauge", "x": 8, "y": 10, "w": 4, "h": 13, "config": {"subtype": "wheel"}},
+    {"type": "spectrum", "x": 0, "y": 23, "w": 6, "h": 13,
+     "pick": {"channel": [{"limit": 8, "index": 7}, {"limit": 1, "index": 0}],
+              "against": {"limit": 7, "index": 6}}},
+    {"type": "histogram", "x": 6, "y": 23, "w": 6, "h": 13,
+     "pick": {"channel": [{"limit": 6, "index": 5}, {"limit": 1, "index": 0}]}}
+  ]
+}

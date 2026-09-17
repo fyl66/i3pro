@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "仪表台",
+  "order": 60,
+  "components": [
+    {"type": "gauge", "x": 0, "y": 0, "w": 4, "h": 13, "config": {"subtype": "dial"}},
+    {"type": "gauge", "x": 4, "y": 0, "w": 4, "h": 13, "config": {"subtype": "wheel"}},
+    {"type": "gauge", "x": 8, "y": 0, "w": 4, "h": 13, "config": {"subtype": "numeric"}},
+    {"type": "gauge", "x": 0, "y": 13, "w": 6, "h": 11, "config": {"subtype": "bar"}},
+    {"type": "gauge", "x": 6, "y": 13, "w": 6, "h": 11, "config": {"subtype": "bar"}},
+    {"type": "gauge", "x": 0, "y": 24, "w": 12, "h": 13, "config": {"subtype": "list"}}
+  ]
+}

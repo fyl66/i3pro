@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "name": "车手",
+  "order": 50,
+  "hints": ["Vx KF", "Brake Signal", "TH", "SW Angle", "G Force Long",
+            "GPS Heading", "G Force Lat", "Vx trqlimit"],
+  "components": [
+    {"type": "graph", "x": 0, "y": 0, "w": 8, "h": 10,
+     "pick": {"channels": {"limit": 8}}},
+    {"type": "gauge", "x": 8, "y": 0, "w": 4, "h": 10, "config": {"subtype": "wheel"}},
+    {"type": "track", "x": 0, "y": 10, "w": 4, "h": 13},
+    {"type": "scatter", "x": 4, "y": 10, "w": 4, "h": 13},
+    {"type": "gauge", "x": 8, "y": 10, "w": 4, "h": 13, "config": {"subtype": "list"}}
+  ]
+}

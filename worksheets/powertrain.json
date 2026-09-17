@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "name": "动力",
+  "order": 30,
+  "hints": ["AMKFR ActualTorqueValue", "Battery Power", "MCU1 FR TempMotor",
+            "AMKFR DCBusVolt", "Pack Inst Voltage", "power real",
+            "Total Motor Power", "MCU1 FR TempIGBT"],
+  "components": [
+    {"type": "graph", "x": 0, "y": 0, "w": 12, "h": 10,
+     "pick": {"channels": {"limit": 10}}},
+    {"type": "status", "x": 0, "y": 10, "w": 12, "h": 4},
+    {"type": "gauge", "x": 0, "y": 14, "w": 4, "h": 13, "config": {"subtype": "dial"}},
+    {"type": "gauge", "x": 4, "y": 14, "w": 4, "h": 13, "config": {"subtype": "bar"}},
+    {"type": "gauge", "x": 8, "y": 14, "w": 4, "h": 13, "config": {"subtype": "numeric"}},
+    {"type": "histogram", "x": 0, "y": 27, "w": 6, "h": 13,
+     "pick": {"channel": {"limit": 2, "index": 1}, "colour": {"limit": 3, "index": 2}}},
+    {"type": "histogram", "x": 6, "y": 27, "w": 6, "h": 13,
+     "config": {"style": "line"},
+     "pick": {"channel": {"limit": 4, "index": 3}}}
+  ]
+}

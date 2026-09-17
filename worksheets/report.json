@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "报表",
+  "order": 70,
+  "hints": ["Vx KF", "GPS Speed", "Brake Signal", "TH", "G Force Lat",
+            "G Force Long", "G Force Vert", "SW Angle"],
+  "components": [
+    {"type": "graph", "x": 0, "y": 0, "w": 12, "h": 9,
+     "pick": {"channels": {"limit": 8}}},
+    {"type": "report", "x": 0, "y": 9, "w": 12, "h": 11},
+    {"type": "chreport", "x": 0, "y": 20, "w": 12, "h": 12,
+     "pick": {"channels": {"special": "report", "limit": 3}}}
+  ]
+}

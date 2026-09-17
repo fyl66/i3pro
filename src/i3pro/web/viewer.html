@@ -257,6 +257,7 @@
     <div class="group" id="sheetGroup">
       <h2>工作表 <span class="count" id="sheetName"></span></h2>
       <div class="row" id="presetRow"></div>
+      <div class="hint warn" id="sheetNote"></div>
       <div class="row">
         <select id="addType" title="选择要添加的组件"></select>
         <button id="addBtn">＋ 添加组件</button>
@@ -1186,21 +1187,6 @@ const GAUGE_SUBTYPES = {
   wheel:   "方向盘",
 };
 
-// Channel hints for the built-in worksheets, matched as substrings.
-const PRESET_PICKS = {
-  分析: ["Vx KF", "GPS Speed", "Brake Signal", "TH", "G Force Lat", "G Force Long",
-         "G Force Vert", "SW Angle", "AMKFR ActualTorqueValue", "Battery Power",
-         "MCU1 FR TempMotor", "GPS Heading"],
-  对比: ["Vx KF", "Brake Signal", "TH", "G Force Long", "SpeedFR", "SW Angle"],
-  动力: ["AMKFR ActualTorqueValue", "Battery Power", "MCU1 FR TempMotor",
-         "AMKFR DCBusVolt", "Pack Inst Voltage", "power real", "Total Motor Power",
-         "MCU1 FR TempIGBT"],
-  底盘: ["SpeedFR", "SpeedFL", "SpeedRR", "SpeedRL", "SW Angle", "G Force Lat",
-         "G Force Long", "Susp Pos FR", "Susp Pos RL", "Brake Signal"],
-  车手: ["Vx KF", "Brake Signal", "TH", "SW Angle", "G Force Long", "GPS Heading",
-         "G Force Lat", "Vx trqlimit"],
-};
-
 let compSeq = 0;
 
 /** 报表默认报告哪几条通道：优先挑快照**真的带了**的那几条。
@@ -1255,80 +1241,121 @@ function makeComponent(type, overrides) {
   return comp;
 }
 
-function placed(comp, x, y, w, h) {
-  comp.x = x; comp.y = y; comp.w = w; comp.h = h;
-  return comp;
-}
+/* ------------------------------------------- 工作表（ticket #30）
+ * 顶上那排按钮 = 仓库里 worksheets/*.json 里的文件，一个文件一个按钮：服务端读出来
+ * 塞进 DATA.worksheets，快照也内嵌一份（所以离线打开照样能切）。这里只做三件事——
+ * 把文件里的组件变成真组件、把 pick 规则落成本场次真实存在的通道、把坏文件说出来。
+ * 文件格式见 worksheets/README.md；这份代码只认格式，不认具体是哪几套工作表。 */
 
-function presetDefinitions() {
-  const pick = (key, limit) => channelsMatching(PRESET_PICKS[key], limit);
+let worksheetCatalogueCache = null;
+
+/** 一份 worksheets/*.json 都没读到时的兜底工作表。
+ *
+ * 旧快照、目录被删干净、打包时漏了文件——这三种情况都会让顶上那排按钮空掉。
+ * 与其给一张空白页（用户看不出是坏了还是本来就没东西），不如照旧能看数据，并把
+ * 原因写在工作表那一栏。 */
+function fallbackWorksheet() {
+  const picks = ((DATA && DATA.selected) || []).slice(0, 8);
   return {
-    分析: [
-      placed(makeComponent("graph", { config: { channels: pick("分析", 12) } }), 0, 0, 12, 9),
-      placed(makeComponent("track"), 0, 9, 4, 13),
-      placed(makeComponent("scatter"), 4, 9, 4, 13),
-      placed(makeComponent("gauge", { subtype: "numeric" }), 8, 9, 4, 13),
-      placed(makeComponent("histogram", {
-        config: { channel: pick("分析", 1)[0] || null, colour: pick("分析", 5)[4] || null },
-      }), 0, 22, 6, 13),
-      placed(makeComponent("gauge", { subtype: "list" }), 6, 22, 6, 13),
-    ],
-    对比: [
-      placed(makeComponent("delta"), 0, 0, 12, 8),
-      placed(makeComponent("graph", { config: { channels: pick("对比", 6) } }), 0, 8, 12, 9),
-      placed(makeComponent("track"), 0, 17, 4, 13),
-      placed(makeComponent("scatter"), 4, 17, 4, 13),
-      placed(makeComponent("gauge", { subtype: "list" }), 8, 17, 4, 13),
-    ],
-    动力: [
-      placed(makeComponent("graph", { config: { channels: pick("动力", 10) } }), 0, 0, 12, 10),
-      placed(makeComponent("status"), 0, 10, 12, 4),
-      placed(makeComponent("gauge", { subtype: "dial" }), 0, 14, 4, 13),
-      placed(makeComponent("gauge", { subtype: "bar" }), 4, 14, 4, 13),
-      placed(makeComponent("gauge", { subtype: "numeric" }), 8, 14, 4, 13),
-      placed(makeComponent("histogram", {
-        config: { channel: pick("动力", 2)[1] || null, colour: pick("动力", 3)[2] || null },
-      }), 0, 27, 6, 13),
-      placed(makeComponent("histogram", {
-        config: { channel: pick("动力", 4)[3] || null, style: "line" },
-      }), 6, 27, 6, 13),
-    ],
-    底盘: [
-      placed(makeComponent("graph", { config: { channels: pick("底盘", 10) } }), 0, 0, 12, 10),
-      placed(makeComponent("track"), 0, 10, 4, 13),
-      placed(makeComponent("scatter"), 4, 10, 4, 13),
-      placed(makeComponent("gauge", { subtype: "wheel" }), 8, 10, 4, 13),
-      placed(makeComponent("spectrum", {
-        config: { channel: pick("底盘", 8)[7] || pick("底盘", 1)[0] || null,
-                  against: pick("底盘", 7)[6] || null },
-      }), 0, 23, 6, 13),
-      placed(makeComponent("histogram", {
-        config: { channel: pick("底盘", 6)[5] || pick("底盘", 1)[0] || null },
-      }), 6, 23, 6, 13),
-    ],
-    车手: [
-      placed(makeComponent("graph", { config: { channels: pick("车手", 8) } }), 0, 0, 8, 10),
-      placed(makeComponent("gauge", { subtype: "wheel" }), 8, 0, 4, 10),
-      placed(makeComponent("track"), 0, 10, 4, 13),
-      placed(makeComponent("scatter"), 4, 10, 4, 13),
-      placed(makeComponent("gauge", { subtype: "list" }), 8, 10, 4, 13),
-    ],
-    仪表台: [
-      placed(makeComponent("gauge", { subtype: "dial" }), 0, 0, 4, 13),
-      placed(makeComponent("gauge", { subtype: "wheel" }), 4, 0, 4, 13),
-      placed(makeComponent("gauge", { subtype: "numeric" }), 8, 0, 4, 13),
-      placed(makeComponent("gauge", { subtype: "bar" }), 0, 13, 6, 11),
-      placed(makeComponent("gauge", { subtype: "bar" }), 6, 13, 6, 11),
-      placed(makeComponent("gauge", { subtype: "list" }), 0, 24, 12, 13),
-    ],
-    报表: [
-      placed(makeComponent("graph", { config: { channels: pick("分析", 8) } }), 0, 0, 12, 9),
-      placed(makeComponent("report"), 0, 9, 12, 11),
-      placed(makeComponent("chreport", {
-        config: { channels: defaultReportChannels(3) },
-      }), 0, 20, 12, 12),
+    id: "__fallback__",
+    name: "默认",
+    order: 0,
+    hints: picks,
+    components: [
+      { type: "graph", x: 0, y: 0, w: 12, h: 10, pick: { channels: { limit: 8 } } },
+      { type: "gauge", x: 0, y: 10, w: 4, h: 13, config: { subtype: "list" },
+        pick: { channels: { limit: 4 } } },
+      { type: "track", x: 4, y: 10, w: 4, h: 13 },
+      { type: "scatter", x: 8, y: 10, w: 4, h: 13 },
     ],
   };
+}
+
+/** 工作表清单：注入的文件 + 读不出来的那些要说的话。
+ *
+ * 组件类型认不认识**只有这里知道**（那张表在 COMPONENT_TYPES 里，全仓库一份），
+ * 所以"文件里写了一个不存在的显示形式"在这里报出来，而不是静默少画一个组件。 */
+function worksheetCatalogue() {
+  if (worksheetCatalogueCache) return worksheetCatalogueCache;
+  const injected = (DATA && DATA.worksheets) || [];
+  const problems = ((DATA && DATA.worksheet_problems) || [])
+    .map((item) => String((item && item.error) || item));
+  const sheets = [];
+  for (const raw of injected) {
+    if (!raw || !raw.name) continue;
+    const known = [];
+    for (const comp of (raw.components || [])) {
+      if (COMPONENT_TYPES[comp && comp.type]) known.push(comp);
+      else problems.push("工作表「" + raw.name + "」里的 " + ((comp && comp.type) || "(没写 type)")
+        + " 这一版不认识，已跳过这一个组件；升级 i3pro，或把它改成认得的显示形式。");
+    }
+    if (known.length) sheets.push(Object.assign({}, raw, { components: known }));
+    else problems.push("工作表「" + raw.name + "」里没有一个组件能画，所以没上按钮。");
+  }
+  if (!sheets.length) {
+    sheets.push(fallbackWorksheet());
+    problems.push("这个页面没有带到工作表文件（旧快照，或 worksheets/ 目录空了）；"
+      + "先用这份「默认」，要回原来那几套就用最新版本重新生成快照／重启 启动.bat。");
+  }
+  worksheetCatalogueCache = { sheets: sheets, problems: problems };
+  return worksheetCatalogueCache;
+}
+
+/** 按提示词找通道：找几条、取第几条由规则说（worksheets/README.md）。 */
+function resolvePickSpec(spec, hints) {
+  if (spec.special === "report") return defaultReportChannels(spec.limit || 3);
+  const patterns = spec.patterns || hints || [];
+  const index = spec.index === undefined ? null : spec.index;
+  const want = Math.max(spec.limit || 0, index === null ? 0 : index + 1, 1);
+  const found = channelsMatching(patterns, want);
+  if (index === null) return found;
+  return found[index] === undefined ? null : found[index];
+}
+
+/** 规则可以是一串（兜底链）：前面挑不到就用后面的，第一个有结果的赢。 */
+function resolvePickValue(spec, hints) {
+  const chain = Array.isArray(spec) ? spec : [spec];
+  let empty = null;
+  for (const one of chain) {
+    const value = resolvePickSpec(one, hints);
+    const isBlank = value === null || (Array.isArray(value) && !value.length);
+    if (!isBlank) return value;
+    if (empty === null) empty = value;
+  }
+  return empty;
+}
+
+/** 工作表只填**还没写**的配置键：文件里 config 显式写了的永远优先。 */
+function applyPicks(comp, pick, hints) {
+  if (!pick) return;
+  for (const key of Object.keys(pick)) {
+    const now = comp.config[key];
+    const filled = Array.isArray(now)
+      ? now.length > 0
+      : (now !== null && now !== undefined && now !== "");
+    if (filled) continue;
+    comp.config[key] = resolvePickValue(pick[key], hints);
+  }
+}
+
+/** 一份工作表 -> 一批真组件（id 现编，尺寸缺省交给这一类的声明）。 */
+function componentsOfWorksheet(sheet) {
+  return (sheet.components || []).map((raw) => {
+    const comp = makeComponent(raw.type, {
+      x: raw.x, y: raw.y, w: raw.w, h: raw.h, config: raw.config,
+    });
+    applyPicks(comp, raw.pick, sheet.hints || []);
+    return comp;
+  });
+}
+
+/** 名字 -> 组件。每次调用都现造一批（和以前一样，id 由 makeComponent 发）。 */
+function presetDefinitions() {
+  const out = {};
+  for (const sheet of worksheetCatalogue().sheets) {
+    out[sheet.name] = componentsOfWorksheet(sheet);
+  }
+  return out;
 }
 
 function copyComponents(list) {
@@ -1336,7 +1363,7 @@ function copyComponents(list) {
 }
 
 function defaultComponents() {
-  return copyComponents(presetDefinitions()["分析"]);
+  return componentsOfWorksheet(worksheetCatalogue().sheets[0]);
 }
 
 /** A component's config in the compact wire form a share link carries.
@@ -1379,30 +1406,44 @@ function decodeLayout(text) {
   }
 }
 
-const LAYOUT_STORE = "i3pro.components.v1";
+/* 布局记忆：**按场次**记（ticket #30）。
+ *
+ * 以前是全场共用一格，所以在耐久赛里拖好的布局会跟着你走进高避——"这个场次上次用
+ * 哪套"这句话就没法成立。v2 的键带场次名；v1 是老键，只在某个场次还没有自己那一份
+ * 的时候当缺省读一次（不删，别人还有可能用着），一改动就写下这个场次自己的一份。
+ * 换句话说：老记忆不会丢，新记忆不再串场。 */
+const LAYOUT_STORE = "i3pro.worksheet.v2";
+const LAYOUT_STORE_V1 = "i3pro.components.v1";
+
+function layoutKey() {
+  return LAYOUT_STORE + ":" + ((DATA && DATA.session) || "session");
+}
 
 function saveLayout() {
   try {
-    localStorage.setItem(LAYOUT_STORE, JSON.stringify({ preset: state.preset, components: state.components }));
+    localStorage.setItem(
+      layoutKey(), JSON.stringify({ preset: state.preset, components: state.components }));
   } catch (err) { /* private mode: the worksheet simply will not persist */ }
 }
 
 function loadSavedLayout() {
-  try {
-    const raw = localStorage.getItem(LAYOUT_STORE);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (!parsed || !Array.isArray(parsed.components) || !parsed.components.length) return null;
-    return parsed;
-  } catch (err) {
-    return null;
+  for (const key of [layoutKey(), LAYOUT_STORE_V1]) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw);
+      if (!parsed || !Array.isArray(parsed.components) || !parsed.components.length) continue;
+      return parsed;
+    } catch (err) { /* 坏掉的记忆当没有：下一次保存会把它盖掉 */ }
   }
+  return null;
 }
 
 const state = {
   mode: "time",
   components: [],
-  preset: "分析",
+  //: 当前工作表的名字；由 restoreWorksheet() 按布局记忆/工作表文件定下来。
+  preset: "",
   focusId: null,
   traces: Object.assign({}, (DATA && DATA.traces) || {}),
   overview: (DATA && DATA.overview) || null,
@@ -6398,13 +6439,28 @@ function restoreWorksheet() {
   const saved = loadSavedLayout();
   if (saved) {
     state.components = saved.components;
-    state.preset = saved.preset || "分析";
+    state.preset = saved.preset || defaultWorksheetName();
     adoptComponentIds(state.components);
     return;
   }
   state.components = defaultComponents();
-  state.preset = "分析";
+  state.preset = defaultWorksheetName();
   adoptComponentIds(state.components);
+}
+
+/** 一进来先用哪套：文件里 order 最小的那套（没有文件时是兜底的「默认」）。 */
+function defaultWorksheetName() {
+  const first = worksheetCatalogue().sheets[0];
+  return (first && first.name) || "默认";
+}
+
+/** 工作表那一栏下面那行字：坏文件、认不出的组件类型都要说出来，而且要能照做。 */
+function renderWorksheetNote() {
+  const el = $("sheetNote");
+  if (!el) return;
+  const problems = worksheetCatalogue().problems;
+  el.textContent = problems.join(" ");
+  el.style.display = problems.length ? "" : "none";
 }
 
 function readHashState() {
@@ -6422,15 +6478,16 @@ function renderPresetButtons() {
   const row = $("presetRow");
   if (!row) return;
   row.innerHTML = "";
-  const presets = presetDefinitions();
-  for (const name of Object.keys(presets)) {
+  for (const sheet of worksheetCatalogue().sheets) {
     const btn = document.createElement("button");
-    btn.textContent = name;
-    if (state.preset === name) btn.className = "on";
-    btn.addEventListener("click", () => applyPreset(name));
+    btn.textContent = sheet.name;
+    btn.title = "工作计划表 " + sheet.id + ".json（" + sheet.components.length + " 个组件）";
+    if (state.preset === sheet.name) btn.className = "on";
+    btn.addEventListener("click", () => applyPreset(sheet.name));
     row.appendChild(btn);
   }
   $("sheetName").textContent = state.preset;
+  renderWorksheetNote();
 }
 
 function applyPreset(name) {
@@ -6735,6 +6792,12 @@ window.i3pro = {
   encodeLayout: encodeLayout, decodeLayout: decodeLayout, saveLayout: saveLayout,
   componentTypes: COMPONENT_TYPES, componentSpec: specOf,
   componentTypeWithHotkey: componentTypeWithHotkey,
+  worksheets: presetDefinitions,
+  worksheetCatalogue: worksheetCatalogue,
+  resetWorksheetCache: () => { worksheetCatalogueCache = null; },
+  componentsOfWorksheet: componentsOfWorksheet,
+  resolvePickValue: resolvePickValue,
+  renderWorksheetNote: renderWorksheetNote,
   encodeComponentConfig: encodeComponentConfig,
   buildWorksheet: buildWorksheet, syncScatterSelectors: syncScatterSelectors,
   apiUrl: apiUrl, apiGet: apiGet,

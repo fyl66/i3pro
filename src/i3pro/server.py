@@ -376,9 +376,11 @@ def serve(
     ready: threading.Event | None = None,
     port_attempts: int = 10,
     maths_root: str | Path | None = None,
+    worksheets_root: str | Path | None = None,
 ) -> None:
     """Run the workbench server until Ctrl-C."""
-    library = SessionLibrary(roots, cache_size=cache_size, maths_root=maths_root)
+    library = SessionLibrary(roots, cache_size=cache_size, maths_root=maths_root,
+                             worksheets_root=worksheets_root)
     handler = make_handler(library, buckets)
     try:
         httpd = bind(host, port, handler, port_attempts)

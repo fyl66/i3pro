@@ -40,6 +40,7 @@ from i3pro import (  # noqa: E402
     channels, csvlog, derive, gpsfix, laps as lapsmod, ld, maths as mathsmod, motec_csv,
     notes as notesmod, render, report as reportmod, sections as sectionsmod,
     server, sidecar, store, timebase,
+    worksheets as worksheetsmod,
     export as exportmod, xlsx as xlsxmod,
 )
 
@@ -5417,6 +5418,205 @@ class TestSpectrumOverHttp(unittest.TestCase):
                 self.assertIn("hann", body["error"])
             finally:
                 http.close()
+
+class TestWorksheets(unittest.TestCase):
+    """ticket #30：顶上那排按钮 = 仓库里 `worksheets/*.json` 里的文件。
+
+    这一票之前那 7 套是 `viewer.html` 里的一段硬编码。现在它们是普通文件，所以
+    这里钉的是**文件这一层的规矩**：读得出来、排得对、坏文件不连累别人、每种坏法
+    都说清楚下一步做什么。至于"文件里的组件画出来长什么样"，归无头驱动
+    （`tools/smoke_viewer.js` 第 38 组）——那是界面的事。
+
+    「搬前搬后行为一字不差」也在这里钉一条：搬之前那 7 套在**高避**上的解析结果
+    存成了夹具 `tests/fixtures/worksheets_before.json`（用
+    `smoke_viewer.js --dump-worksheets` 倒出来的，那个模式就是为这次迁移加的），
+    搬完再倒一次要逐字段对得上。
+    """
+
+    def _mkdir(self, files: dict[str, object]) -> Path:
+        """造一个临时的**仓库根**（里面是 `worksheets/`），返回那个根。"""
+        tmp = tempfile.mkdtemp(prefix="i3pro-worksheets-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        root = Path(tmp)
+        (root / "worksheets").mkdir()
+        for name, payload in files.items():
+            text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+            (root / "worksheets" / name).write_text(text, encoding="utf-8")
+        return root
+
+    # ------------------------------------------------------------- 仓库里那几份
+    def test_默认目录就是仓库根下的_worksheets(self):
+        self.assertEqual(worksheetsmod.worksheets_dir(), ROOT / "worksheets")
+        self.assertEqual(worksheetsmod.worksheets_dir("/tmp/x"), Path("/tmp/x") / "worksheets")
+
+    def test_仓库里那七套工作表都能读出来(self):
+        sheets, problems = worksheetsmod.load_dir()
+        self.assertEqual(problems, [], "仓库里的工作表必须全部读得出来")
+        self.assertEqual(
+            [s["name"] for s in sheets],
+            ["分析", "对比", "动力", "底盘", "车手", "仪表台", "报表"],
+        )
+        # 文件名是身份（ASCII，将来要进 URL），显示名是按钮上的字
+        self.assertEqual(
+            [s["id"] for s in sheets],
+            ["analysis", "compare", "powertrain", "chassis", "driver", "dash", "report"],
+        )
+        self.assertEqual([s["order"] for s in sheets], sorted(s["order"] for s in sheets))
+        for sheet in sheets:
+            self.assertTrue(sheet["components"], f"{sheet['name']} 一个组件都没有")
+            for comp in sheet["components"]:
+                self.assertTrue(comp["type"], f"{sheet['name']} 里有组件没写 type")
+
+    def test_工作表里不会写死本场次的通道名(self):
+        """挑通道要经 `pick`：写死通道名的话，换一个场次就整片空。
+
+        `config` 里允许写死（那是用户存的配置，`worksheet` 文件是声明），但仓库里
+        随版本发布的那 7 套必须靠 `pick` 挑——这条挡住"顺手把解析出来的通道名存回去"。
+        """
+        sheets, _ = worksheetsmod.load_dir()
+        selectors = {"channels", "channel", "colour", "x", "y", "against"}
+        for sheet in sheets:
+            for comp in sheet["components"]:
+                for key in selectors & set(comp.get("config", {})):
+                    self.fail(
+                        f"工作表 {sheet['id']} 的 {comp['type']} 把 {key} 写死在 config 里了；"
+                        "要挑通道请用 pick（见 worksheets/README.md）"
+                    )
+
+    def test_搬进文件之后和搬之前的解析结果一致(self):
+        """搬前搬后逐字段相同：夹具是硬编码那版的 dump。"""
+        fixture = ROOT / "tests" / "fixtures" / "worksheets_before.json"
+        self.assertTrue(fixture.exists(), f"缺少夹具 {fixture}")
+        before = json.loads(fixture.read_text(encoding="utf-8"))
+        after = self._resolved_on(HILL) if HILL.exists() else None
+        if after is None:
+            self.skipTest("没有金标准数据，跑不了这条（要在有数据的机器上跑）")
+        self.assertEqual(sorted(after), sorted(before), "工作表的名字变了")
+        for name in before:
+            self.assertEqual(after[name], before[name], f"{name} 这套搬完不一样了")
+
+    def _resolved_on(self, session: Path) -> dict | None:
+        """用无头驱动把这一场的每套工作表倒出来（--dump-worksheets）。
+
+        倒的是**切过去之后**的状态（`applyPreset` + 各组件自己的缺省化），不是文件里
+        那一份原样——这正是用户看得见的那一层：散点自动带上前两条通道、直方图在快照
+        里把窗口落成"整场"，都是这一步做的。
+        """
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed")
+        out = ROOT / "out" / f"_worksheets_{session.stem}.html"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with ld.LogFile.read(session) as log:
+            render.render_html(log, out, with_report=True)
+        result = subprocess.run(
+            [node, str(ROOT / "tools" / "smoke_viewer.js"), str(out), "--dump-worksheets"],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+        )
+        if result.returncode != 0:
+            self.fail(f"无头驱动倒不出工作表：{result.stderr[:400]}")
+        return json.loads(result.stdout)
+
+    # ---------------------------------------------------------------- 坏文件
+    def test_坏文件不连累别的工作表(self):
+        root = self._mkdir({
+            "good.json": {"schema": 1, "name": "好", "components": [{"type": "graph"}]},
+            "broken.json": "{ 这不是 JSON",
+            "future.json": {"schema": 99, "name": "未来", "components": [{"type": "graph"}]},
+            "typo.json": {"schema": 1, "name": "打错了", "component": [{"type": "graph"}]},
+            "empty.json": {"schema": 1, "name": "空的", "components": []},
+        })
+        sheets, problems = worksheetsmod.load_dir(root)
+        self.assertEqual([s["name"] for s in sheets], ["好"], "好文件必须照常加载")
+        self.assertEqual(len(problems), 4, problems)
+        for item in problems:
+            self.assertTrue(item["file"], "每条问题都要说是哪个文件")
+            self.assertTrue(item["error"].endswith("。"), item["error"])
+
+    def test_每种坏法都说清了下一步做什么(self):
+        root = self._mkdir({
+            "broken.json": "{",
+            "future.json": {"schema": 2, "name": "未来", "components": [{"type": "graph"}]},
+            "typo.json": {"schema": 1, "name": "打错了", "component": [{"type": "graph"}]},
+            "weight.json": {"schema": 1, "name": "尺寸", "components": [
+                {"type": "graph", "w": -1}]},
+            "empty.json": {"schema": 1, "name": "空的", "components": []},
+            "pickempty.json": {"schema": 1, "name": "空规则", "components": [
+                {"type": "graph", "pick": {"channels": {}}}]},
+            "picktypo.json": {"schema": 1, "name": "规则打错", "components": [
+                {"type": "graph", "pick": {"channels": {"pattern": ["Vx"]}}}]},
+        })
+        _sheets, problems = worksheetsmod.load_dir(root)
+        errors = {item["file"]: item["error"] for item in problems}
+        self.assertEqual(len(errors), 7, errors)
+        self.assertIn("worksheets/", errors["broken.json"])
+        self.assertIn("schema 改回 1", errors["future.json"])
+        self.assertIn("component", errors["typo.json"])
+        self.assertIn("大于 0", errors["weight.json"])
+        self.assertIn("至少一个", errors["empty.json"])
+        self.assertIn("空规则", errors["pickempty.json"])
+        self.assertIn("认不出来的键", errors["picktypo.json"])
+
+    def test_重名会被挡下来(self):
+        root = self._mkdir({
+            "a.json": {"schema": 1, "name": "同一套", "components": [{"type": "graph"}]},
+            "b.json": {"schema": 1, "name": "同一套", "components": [{"type": "graph"}]},
+        })
+        sheets, problems = worksheetsmod.load_dir(root)
+        self.assertEqual(len(sheets), 1)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("重名", problems[0]["error"])
+
+    def test_目录不存在也有话说(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sheets, problems = worksheetsmod.load_dir(Path(tmp) / "没有这个目录")
+        self.assertEqual(sheets, [])
+        self.assertEqual(len(problems), 1)
+        self.assertIn("--worksheets", problems[0]["error"], "要告诉用户怎么换一个目录")
+
+    def test_目录是空的也算一件事(self):
+        root = self._mkdir({})
+        sheets, problems = worksheetsmod.load_dir(root)
+        self.assertEqual(sheets, [])
+        self.assertEqual(len(problems), 1)
+        self.assertIn("没有 *.json", problems[0]["error"])
+
+    # ------------------------------------------------------------ 装进载荷
+    @_needs(HILL)
+    def test_快照与本地服务都带上工作表(self):
+        with ld.LogFile.read(HILL) as log:
+            payload = render.build_payload(log, channels=["Vx KF"], buckets=50)
+            out = ROOT / "out" / "_worksheets_payload.html"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            render.render_html(log, out, channels=["Vx KF"], buckets=50)
+        self.assertEqual([s["name"] for s in payload["worksheets"]][:3], ["分析", "对比", "动力"])
+        self.assertEqual(payload["worksheet_problems"], [])
+        html = out.read_text(encoding="utf-8")
+        self.assertIn("worksheets", html)
+        for name in ("分析", "仪表台", "报表"):
+            self.assertIn(name, html, "快照里必须内嵌工作表，离线打开才能切")
+
+    @_needs(HILL)
+    def test_换一个工作表目录只影响那一个载荷(self):
+        root = self._mkdir({
+            "only.json": {"schema": 1, "name": "只有这一套", "order": 7,
+                          "components": [{"type": "graph"}]},
+        })
+        with ld.LogFile.read(HILL) as log:
+            payload = render.build_payload(log, channels=["Vx KF"], buckets=50,
+                                           worksheets_dir=root)
+        self.assertEqual([s["name"] for s in payload["worksheets"]], ["只有这一套"])
+        self.assertEqual(payload["worksheets"][0]["order"], 7)
+        self.assertEqual(payload["worksheet_problems"], [])
+
+    @_needs(HILL)
+    def test_本地服务的_info_带上工作表(self):
+        with http_session(HILL, buckets=50) as http:
+            status, info = http.json(f"/api/session/{http.quoted}/info")
+            self.assertEqual(status, 200)
+            self.assertEqual(len(info["worksheets"]), 7, info.get("worksheet_problems"))
+            self.assertEqual(info["worksheet_problems"], [])
+            self.assertEqual(info["worksheets"][0]["name"], "分析")
 
 
 class TestMathsOverHttp(unittest.TestCase):

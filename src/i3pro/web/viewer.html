@@ -4963,8 +4963,13 @@ function mathsSaveList(draft) {
   const drop = original ? original.name : draft.name;
   return (info.definitions || [])
     .filter((d) => d.scope === draft.scope && d.name !== drop)
-    .map((d) => ({ name: d.name, expr: d.expr, unit: d.unit || "" }))
-    .concat([{ name: draft.name, expr: draft.expr, unit: draft.unit }]);
+    // `note` 要原样带上：它是**手写在 `maths/global.json` 里的说明**，界面上暂时没有
+    // 编辑入口。原先这里只发 {name, expr, unit}，于是"在面板里存一次"就会把仓库里
+    // 那几条说明永久抹掉（真发生过：`global.json` 的 4 条 note 全没了，HEAD 里还在）。
+    .map((d) => ({ name: d.name, expr: d.expr, unit: d.unit || "", note: d.note || "" }))
+    // 正在改的那一条要保留它**原来**的说明（界面上没有 note 输入框，改表达式不该顺手把它删掉）
+    .concat([{ name: draft.name, expr: draft.expr, unit: draft.unit,
+               note: (original && original.note) || draft.note || "" }]);
 }
 
 /** 服务端算完一次之后，把列表、报错、函数表一起换掉。 */

@@ -23,6 +23,16 @@
       "expr": "smooth('G Force Long', 0.1)",
       "unit": "g",
       "note": "0.1 秒滑动平均，看纵向加速度的趋势而不是毛刺。"
+    },
+    {
+      "name": "Left Ride height",
+      "expr": "abs('FSD13 Distance1'-200 )+200-193.5",
+      "unit": ""
+    },
+    {
+      "name": "Right Ride Height",
+      "expr": "abs('FSD13 Distance2'-200 )+200-197",
+      "unit": ""
     }
   ]
 }

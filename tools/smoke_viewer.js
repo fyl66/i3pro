@@ -1152,6 +1152,30 @@ if (api) {
         api.closeMathsEditor();
       }
     }
+
+    // 说明文字（`note`）是手写在 maths/global.json 里的（界面暂时没有编辑入口），
+    // 保存一次就把它抹掉是真发生过的数据损坏：仓库里那 4 条说明全没了，HEAD 里还在。
+    if (api.data.api) {
+      api.applyMathsResponse({
+        definitions: [
+          { name: "甲", expr: "1", unit: "", note: "这段说明必须留着", scope: "local" },
+          { name: "乙", expr: "2", unit: "", scope: "local" },
+        ],
+        shadowed: [], errors: [], functions: [],
+      });
+      state.mathsEdit = { index: 0 };
+      const edited = api.mathsSaveList({ name: "甲", expr: "3", unit: "", scope: "local" });
+      const editedKept = edited.find((d) => d.name === "甲");
+      check(!!editedKept && editedKept.note === "这段说明必须留着",
+        "saving wiped the note of the definition being edited: " + JSON.stringify(edited));
+      state.mathsEdit = { index: null };
+      const added = api.mathsSaveList({ name: "丙", expr: "4", unit: "", scope: "local" });
+      const kept = added.find((d) => d.name === "甲");
+      check(!!kept && kept.note === "这段说明必须留着",
+        "saving another definition wiped a neighbour's note: " + JSON.stringify(added));
+      api.closeMathsEditor();
+      api.applyMathsResponse({ definitions: [], shadowed: [], errors: [], functions: [] });
+    }
     api.data.api = apiBase;
   }
 

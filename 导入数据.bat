@@ -1,6 +1,9 @@
 @echo off
 rem ===========================================================================
-rem  i3pro data import  --  drag .ld / .ldx files (or a folder) onto this file.
+rem  i3pro data import  --  drag .ld / .ldx / .csv files (or a folder) onto this file.
+rem
+rem  .csv covers both i2 Pro exports and raw CAN frame logs.  A frame log is
+rem  decoded with the DBCs in i2pro_data\dbc -- nothing to configure.
 rem
 rem  Copies them into i2pro_data so they show up in the workbench.  Nothing is
 rem  uploaded anywhere: it is a local file copy, and an existing file with the
@@ -18,10 +21,13 @@ if "%~1"=="" (
   echo   ==============================================================
   echo     i3pro  -  import logs
   echo   ==============================================================
-  echo     Drag one or more .ld / .ldx files (or a whole folder)
+  echo     Drag one or more .ld / .ldx / .csv files (or a whole folder)
   echo     onto this file to copy them into:
   echo.
   echo       %~dp0i2pro_data
+  echo.
+  echo     Raw CAN frame logs (the .csv with a "CAN" column) work too --
+  echo     they are decoded with the DBCs in %~dp0i2pro_data\dbc
   echo.
   echo     Command line equivalent:
   echo       i3pro.cmd import "D:\logs\2026-09-xx.ld" --data i2pro_data

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import contextlib
+import atexit
 import dataclasses
 import os
 import re
@@ -83,14 +84,31 @@ def _class_body(text: str, name: str) -> str:
 
 #: 测试只碰这份副本，不碰 ``i2pro_data`` 里的金标准场次本身。
 #:
+def scratch(name: str) -> Path:
+    """``out/`` 下的临时路径，名字带**进程号**。
+
+    两个人同时跑这套测试（或者以后并行化）时，同名目录会被对方 ``rmtree`` 掉。
+    实测过一次：两个进程同跑 CAN 那条用例，一边正在读 ``out/_can_library``，
+    另一边刚把它删了重建，于是"第二次列表"少了一半场次（23 → 16）——
+    同一份代码单独跑永远是对的，所以这条一开始被当成随机失败。
+
+    进程号插在**扩展名之前**（``_can_plain_1234.csv``），不能接在末尾：后缀是
+    分流依据（``csvlog.open_session`` 按 ``.csv`` 走 CSV 那条路），接在末尾会把它
+    变成一个没有扩展名的文件——实测就是"一个 25 字节的表被当成 .ld 去解"。
+    """
+    path = Path(name)
+    return ROOT / "out" / f"{path.stem}_{os.getpid()}{path.suffix}"
+
+
 #: 侧车（信标 / 区段 / 注释 / GPS / 数学通道 / CSV 列映射）是**用户资产**，就躺在场次
 #: 旁边。队员在浏览器里给金标准场次改一次信标，读原目录的用例就会红——实测过：
 #: ``20260908-cjh 高避5圈.laps.json`` 里多一个 GPS 信标之后，下面两条当场变红
 #: （``TestSections.test_the_golden_hill_lap_splits_into_corners_and_straights``、
 #: ``TestServer.test_http_api_end_to_end``，后者是 ``/overlay`` 报 500）。所以每轮
 #: 开始先清掉这份副本目录、再复制一次（实测两份共 148.2 MB、0.08 s），写侧车的用例
-#: 也就写在副本里，车队数据一个字节都不动。
-STAGE = ROOT / "out" / "_test_data"
+#: 也就写在副本里，车队数据一个字节都不动。目录名带进程号，两份测试可以同时跑；
+#: 跑完就删（否则每跑一次留 148 MB 副本）。
+STAGE = scratch("_test_data")
 
 
 def _stage(name: str) -> Path:
@@ -107,6 +125,7 @@ def _stage(name: str) -> Path:
 
 shutil.rmtree(STAGE, ignore_errors=True)
 STAGE.mkdir(parents=True, exist_ok=True)
+atexit.register(shutil.rmtree, STAGE, ignore_errors=True)
 ENDURANCE = _stage("20260524-耐久正赛.ld")
 HILL = _stage("20260908-cjh 高避5圈.ld")
 
@@ -1603,7 +1622,9 @@ class TestLaunchers(unittest.TestCase):
             page = produced.read_text(encoding="utf-8")
             self.assertIn('"channels"', page)
             index = (target / "index.html").read_text(encoding="utf-8")
-            self.assertIn(HILL.name, index)
+            # 索引里的"场次"列写的是侧边栏那一套名字（不带扩展名），
+            # 并起来的 CAN 记录才带 +1——两种场次同一处发现逻辑。
+            self.assertIn(HILL.stem, index)
             self.assertIn("启动.bat", index)   # tells the reader how to get full detail
 
     def test_snapshot_reports_missing_data_dir(self):
@@ -1620,6 +1641,69 @@ class TestLaunchers(unittest.TestCase):
                      "--out", str(Path(tmp) / "out")]
                 )
         self.assertEqual(code, 1)
+
+    def test_snapshot_covers_a_raw_can_frame_table(self):
+        """原始 CAN 帧表也是场次，所以 `导出快照.bat` 必须把它导出来。
+
+        这条挡的是"场次列表里有、快照里没有"：快照那份清单以前是
+        ``data.glob("*.ld")``，帧表（.csv）一个都进不去，而命令照样退出 0。
+        """
+        import contextlib
+        import io
+        import tempfile
+
+        from i3pro import cli
+
+        frames = CAN_DATA / "2026_10_03_201147_ID0001.csv"
+        if not frames.exists() or not DBC_DIR.exists():
+            self.skipTest("缺 can_data/ 或 i2pro_data/dbc/")
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "data"
+            target = Path(tmp) / "out"
+            source.mkdir()
+            shutil.copytree(DBC_DIR, source / "dbc")      # DBC 挨着场次放，跟仓库一样
+            shutil.copy2(frames, source / frames.name)
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = cli.main(["snapshot", "--data", str(source), "--out", str(target)])
+            self.assertEqual(code, 0)
+            produced = target / f"{frames.stem}.html"
+            self.assertTrue(produced.exists(), sorted(p.name for p in target.iterdir()))
+            self.assertGreater(produced.stat().st_size, 100_000)
+            index = (target / "index.html").read_text(encoding="utf-8")
+            self.assertIn(frames.stem, index)
+            self.assertIn("CAN", index)                    # 设备列写的是 CAN
+
+    def test_snapshot_of_contiguous_recordings_is_one_session(self):
+        """9 份是 7 次记录：一次记录的后续文件并进第一份，快照也就一份。
+
+        以前按文件逐个导出，会得到 9 个"半截"快照（每份 1,000,000 帧处被切开）。
+        """
+        import contextlib
+        import io
+        import tempfile
+
+        from i3pro import cli
+
+        pair = ["2026_10_03_173345_ID0001.csv", "2026_10_03_173936_ID0001.csv"]
+        missing = [name for name in pair if not (CAN_DATA / name).exists()]
+        if missing or not DBC_DIR.exists():
+            self.skipTest("缺 can_data/ 或 i2pro_data/dbc/")
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "data"
+            target = Path(tmp) / "out"
+            source.mkdir()
+            shutil.copytree(DBC_DIR, source / "dbc")
+            for name in pair:
+                shutil.copy2(CAN_DATA / name, source / name)
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = cli.main(["snapshot", "--data", str(source), "--out", str(target)])
+            self.assertEqual(code, 0)
+            pages = sorted(p.name for p in target.glob("*.html") if p.name != "index.html")
+            self.assertEqual(pages, ["2026_10_03_173345_ID0001+1.html"])
+            index = (target / "index.html").read_text(encoding="utf-8")
+            self.assertIn("2026_10_03_173345_ID0001+1", index)
+            # 索引里只有并起来的那一场，第二份文件不该单独占一行
+            self.assertNotIn("2026_10_03_173936_ID0001", index)
 
     def test_bind_moves_to_the_next_free_port(self):
         """Starting twice must not die with a bind error."""
@@ -5623,7 +5707,7 @@ class TestWorksheets(unittest.TestCase):
     def test_快照与本地服务都带上工作表(self):
         with ld.LogFile.read(HILL) as log:
             payload = render.build_payload(log, channels=["Vx KF"], buckets=50)
-            out = ROOT / "out" / "_worksheets_payload.html"
+            out = scratch("_worksheets_payload.html")
             out.parent.mkdir(parents=True, exist_ok=True)
             render.render_html(log, out, channels=["Vx KF"], buckets=50)
         self.assertEqual([s["name"] for s in payload["worksheets"]][:3], ["分析", "对比", "动力"])
@@ -6187,7 +6271,7 @@ class TestCanLog(unittest.TestCase):
     # ------------------------------------------------------------- 识别与读取
     def test_a_frame_table_is_not_mistaken_for_a_channel_table(self):
         self.assertTrue(canlog.looks_like_frames(self.small))
-        plain = ROOT / "out" / "_can_plain.csv"
+        plain = scratch("_can_plain.csv")
         plain.parent.mkdir(parents=True, exist_ok=True)
         plain.write_text("Time,Vx KF\n0,1\n0.01,2\n", encoding="utf-8")
         try:
@@ -6345,7 +6429,7 @@ class TestCanLog(unittest.TestCase):
         真实的 13 份之间没有冲突（实测）。这里**临时造一个**：把 0x660 用另一套
         信号写进一份新的 DBC——如果合并是静默的，通道会变成谁先读谁算数。
         """
-        work = ROOT / "out" / "_can_conflict"
+        work = scratch("_can_conflict")
         shutil.rmtree(work, ignore_errors=True)
         work.mkdir(parents=True)
         for path in DBC_DIR.glob("*.dbc"):
@@ -6372,7 +6456,7 @@ class TestCanLog(unittest.TestCase):
             shutil.rmtree(work, ignore_errors=True)
 
     def test_the_sidecar_records_the_choices_and_column_roles_can_be_overridden(self):
-        work = ROOT / "out" / "_can_sidecar"
+        work = scratch("_can_sidecar")
         shutil.rmtree(work, ignore_errors=True)
         work.mkdir(parents=True)
         copy = work / self.small.name
@@ -6410,7 +6494,7 @@ class TestCanLog(unittest.TestCase):
         """
         from unittest import mock
 
-        nowhere = ROOT / "out" / "_no_such_dbc"
+        nowhere = scratch("_no_such_dbc")
         with mock.patch.object(canlog, "default_dbc_directories", lambda path: [nowhere]):
             with self.assertRaises(ValueError) as caught:
                 canlog.read_can_session([self.small], write_sidecar=False, use_sidecar=False)
@@ -6435,7 +6519,7 @@ class TestCanLog(unittest.TestCase):
         self.assertEqual(sum(session.can["frames"] for session in sessions), 3684850)
 
     def test_the_library_shows_one_entry_per_recording(self):
-        work = ROOT / "out" / "_can_library"
+        work = scratch("_can_library")
         shutil.rmtree(work, ignore_errors=True)
         work.mkdir(parents=True)
         try:

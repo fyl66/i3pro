@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from . import csvlog, export as exportmod, laps as lapsmod
+from . import library as librarymod
 from . import derive
 from . import ld as ldmod
 from . import render as rendermod
@@ -433,24 +434,37 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 
 def cmd_snapshot(args: argparse.Namespace) -> int:
-    """Render every session in --data to a self-contained HTML, plus an index."""
-    data = Path(args.data)
+    """Render every session under ``--data`` (可重复) to a self-contained HTML, plus an index.
+
+    场次清单走 ``library.SessionLibrary``——和侧边栏是同一处发现逻辑，所以
+    ``.ld``、i2 Pro 导出的 ``.csv``、原始 CAN 帧表都在里面，而且 9 份粘连的
+    帧表是**一场**（``…+1``），不会变成 9 个半截快照。数学通道与 CAN 的 DBC
+    也由它一并带上（``get()`` 里做的事），这里不再自己算一遍。
+    """
+    dirs = [Path(p) for p in args.data] or [Path("i2pro_data")]
     out = Path(args.out)
-    if not data.is_dir():
-        print(f"# 数据目录不存在: {data}")
+    missing = [d for d in dirs if not d.is_dir()]
+    if missing:
+        print(f"# 数据目录不存在: {missing[0]}")
+        print("# 下一步：改 --data 指向真正放日志的目录，或先双击 导入数据.bat 把日志拷进来。")
         return 1
-    files = sorted(data.glob("*.ld"))
-    if not files:
-        print(f"# {data} 里没有 .ld 文件")
-        return 1
-    out.mkdir(parents=True, exist_ok=True)
-    rows: list[dict] = []
-    for path in files:
-        target = out / f"{path.stem}.html"
-        print(f"  {path.name} ...", end="", flush=True)
-        try:
-            with csvlog.open_session(path) as log:
-                mathsmod.apply_to_session(log, args.maths)
+    library = librarymod.SessionLibrary(
+        dirs, maths_root=args.maths, worksheets_root=args.worksheets
+    )
+    try:
+        names = library.names()
+        if not names:
+            where = "、".join(str(d) for d in dirs)
+            print(f"# {where} 里没有 .ld / .csv 场次")
+            print("# 下一步：把日志拷进这个目录，或双击 导入数据.bat 拖一个进去。")
+            return 1
+        out.mkdir(parents=True, exist_ok=True)
+        rows: list[dict] = []
+        for name in names:
+            target = out / f"{name}.html"
+            print(f"  {name} ...", end="", flush=True)
+            try:
+                log = library.get(name)          # 数学通道 / CAN 的 DBC 都在这里挂上
                 laps: list = []
                 try:
                     laps = lapsmod.detect_laps(log)
@@ -461,36 +475,38 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
                     worksheets_dir=args.worksheets,
                 )
                 meta = log.metadata()
-            complete = [l for l in laps if l.complete]
-            best = min((l.lap_time for l in complete), default=None)
-            rows.append(
-                {
-                    "file": path.name,
-                    "target": target.name,
-                    "device": meta["device"],
-                    "date": meta["log_date"],
-                    "duration": meta["duration"],
-                    "channels": meta["channels"],
-                    "complete_laps": len(complete),
-                    "best_lap": best,
-                    "size_mb": target.stat().st_size / 1e6,
-                    "error": None,
-                }
-            )
-            print(f" {target.stat().st_size / 1e6:.2f} MB"
-                  + (f", {len(complete)} 完整圈, 最快 {best:.3f}s" if best else ""))
-        except Exception as exc:  # one broken log must not stop the batch
-            rows.append({"file": path.name, "error": f"{type(exc).__name__}: {exc}"})
-            print(f" 失败: {exc}")
+                complete = [l for l in laps if l.complete]
+                best = min((l.lap_time for l in complete), default=None)
+                rows.append(
+                    {
+                        "session": name,
+                        "target": target.name,
+                        "device": meta["device"],
+                        "date": meta["log_date"],
+                        "duration": meta["duration"],
+                        "channels": meta["channels"],
+                        "complete_laps": len(complete),
+                        "best_lap": best,
+                        "size_mb": target.stat().st_size / 1e6,
+                        "error": None,
+                    }
+                )
+                print(f" {target.stat().st_size / 1e6:.2f} MB"
+                      + (f", {len(complete)} 完整圈, 最快 {best:.3f}s" if best else ""))
+            except Exception as exc:  # one broken log must not stop the batch
+                rows.append({"session": name, "error": f"{type(exc).__name__}: {exc}"})
+                print(f" 失败: {exc}")
+    finally:
+        library.close()
 
     index = out / "index.html"
-    index.write_text(_snapshot_index(rows, data), encoding="utf-8")
+    index.write_text(_snapshot_index(rows, "、".join(str(d) for d in dirs)), encoding="utf-8")
     ok = sum(1 for r in rows if not r["error"])
     print(f"\n生成 {ok}/{len(rows)} 个快照 -> {out}")
     print(f"双击这个文件开始看: {index}")
     for row in rows:
         if row["error"]:
-            print(f"  ! {row['file']}: {row['error']}")
+            print(f"  ! {row['session']}: {row['error']}")
     if args.open:
         import webbrowser
 
@@ -536,20 +552,20 @@ def cmd_import(args: argparse.Namespace) -> int:
     return 0 if imported else 1
 
 
-def _snapshot_index(rows: list[dict], data_dir: Path) -> str:
+def _snapshot_index(rows: list[dict], data_dirs: str) -> str:
     """A plain index page so the snapshot folder is self-explanatory."""
     body = []
     for row in rows:
         if row["error"]:
             body.append(
-                f"<tr><td>{row['file']}</td><td colspan='5' style='color:#ff5d6c'>"
+                f"<tr><td>{row['session']}</td><td colspan='5' style='color:#ff5d6c'>"
                 f"{row['error']}</td></tr>"
             )
             continue
         best = "--" if row["best_lap"] is None else f"{row['best_lap']:.3f} s"
         body.append(
             "<tr>"
-            f"<td><a href=\"{row['target']}\">{row['file']}</a></td>"
+            f"<td><a href=\"{row['target']}\">{row['session']}</a></td>"
             f"<td>{row['device']}</td><td>{row['date']}</td>"
             f"<td>{row['duration']:.0f} s</td><td>{row['channels']}</td>"
             f"<td>{row['complete_laps']}</td><td>{best}</td>"
@@ -585,7 +601,7 @@ def _snapshot_index(rows: list[dict], data_dir: Path) -> str:
   快照的波形是提前抽稀好的：放大到很细的时间段会看到折线。要看全分辨率细节，回到项目根目录
   双击 <code>启动.bat</code>，用交互模式。
 </p>
-<p style="margin-top:6px;color:#8b94a7">数据目录: {data_dir}</p>
+<p style="margin-top:6px;color:#8b94a7">数据目录: {data_dirs}</p>
 </main>
 """
 
@@ -801,7 +817,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_serve)
 
     p = sub.add_parser("snapshot", help="把每个场次导出成离线 HTML 快照")
-    p.add_argument("--data", default="i2pro_data", help=".ld 所在目录")
+    p.add_argument("--data", action="append", default=[],
+                   help="场次所在目录 (可重复, 默认 i2pro_data；CAN 原始帧表放 can_data)")
     p.add_argument("--out", default="out", help="输出目录")
     p.add_argument("--buckets", type=int, default=rendermod.DEFAULT_BUCKETS,
                    help="每通道下采样像素列数 (越大越清晰、文件越大)")

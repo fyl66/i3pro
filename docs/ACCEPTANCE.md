@@ -2524,6 +2524,103 @@ python -m i3pro serve --data i2pro_data --data can_data   # -> 23 个场次（16
 
 ---
 
+## A54 · CSV / CAN 场次补齐：快照、启动器与导入文案（ticket #41）
+
+`i3pro snapshot`（就是 `导出快照.bat`）过去只认 `*.ld`：它的清单是 `data.glob("*.ld")`，
+而侧边栏用的是 `library.SessionLibrary`。于是**同一个场次，侧边栏里有、快照里没有**，
+而且在一个只有 CSV / CAN 的目录上只打一句"没有 .ld 文件"就退出 1——"少了东西"和
+"本来就没有"长得一模一样。现在两处共用同一处发现逻辑：`.ld`、i2 Pro 导出的 `.csv`、
+原始 CAN 帧表都在里面，CAN 的并场（9 份文件 = 7 次记录）也照旧成立。
+
+索引页的"场次"列因此改成**侧边栏那套名字**（普通场次 = 去扩展名的文件名；并起来的
+CAN 记录带 `+1`），不再显示底层文件名——两处对不上时用户没法核对。
+
+**可复制的命令与判据**
+
+```powershell
+# 1. 三件套：快照本身 / CAN 帧表 / 并场（缺 can_data 或 DBC 时自动 skip，那不算通过）
+python -m unittest tests.test_i3pro.TestLaunchers -v          # -> Ran 5 tests / OK
+
+# 2. CAN 目录整场导出：7 个快照 + 索引
+python -m i3pro snapshot --data can_data --out out\_snap_can
+
+# 3. 两个目录各来一份（= 导出快照.bat 现在干的事；启动.bat 早就这么挂）
+python -m i3pro snapshot --data i2pro_data --data can_data --out out
+```
+
+**实测（2026-10-04）**
+
+| 项 | 结果 |
+| --- | --- |
+| 修之前 | `python -m i3pro snapshot --data can_data --out out\_snapcheck` → `# can_data 里没有 .ld 文件`，退出码 1 |
+| 修之后 | **7/7** 个 CAN 快照 + 索引 7 行，实测 **8.7 s** |
+| 并场 | 两份连续文件只出一个 `2026_10_03_173345_ID0001+1.html`，索引里也只有一行 |
+| 索引内容 | 设备 `CAN`、日期 `2026-10-03`、时长 18–699 s、通道 `62`（61 条 DBC 并集 + 全局数学通道 `速度kmh`） |
+| 文案 | `导入数据.bat` 与 `importer.import_paths` 都写明接受 `.csv`；目录里一个都没有时给出的下一步是"把日志放进这个目录，或把文件拖到 导入数据.bat 上" |
+
+**顺手修的一条（同一批命令暴露出来的）**：`tests/` 在 `out/` 下的临时目录用的是固定
+名字，两个进程同时跑这套测试时一方会 `rmtree` 掉另一方正在读的目录。实测复现过两次
+（同跑 `TestCanLog.test_the_library_shows_one_entry_per_recording`）：
+
+```
+FileNotFoundError: E:\桌面\i3pro\out\_can_library\2026_10_03_173345_ID0001.csv
+FAILED (errors=1)                     # 另一次的表现是 listing() 两次长度不同：23 → 16
+```
+
+现在临时路径带进程号（`scratch()`），金标准副本目录 `STAGE` 退出时删掉（否则每跑一次
+留 148 MB）。判据：**两个进程同跑上面那条用例，两条都 OK**（实测 23.2 s / 22.1 s）。
+
+---
+
+## A55 · 概览条认得出 CAN 的速度（ticket #38 / #40 的收尾）
+
+同一个量在两条数据线上叫两个名字：`.ld` 里是 **`Vx KF`**，CAN 线（`TH.dbc` 的
+`0xC1 Throttle_INFO`）解出来是 **`Vx_KF`**。距离轴那条解析早就认这两种写法
+（`derive.speed_channel`，ticket #40 修的），但**概览条和轨迹着色用的是另一张候选表**
+（`render.SPEED_FOR_COLORING`），只按原样比名字。后果实测如下：
+
+```powershell
+# serve 模式下，跑起来的 CAN 场次概览条是空的
+python -m i3pro serve --data i2pro_data --data can_data
+#   /api/session/2026_10_03_173345_ID0001+1/overview  ->  null
+```
+
+同一份数据导成快照却**有**概览条（那边退到了"第一条被选中的通道"）——所以这不是
+"少画一条线"，而是**同一个场次离线看得见、联网看不见**，而且画的是哪条通道两种模式
+都不同。现在两处共用 `render.overview_channel`（内部走
+`derive.resolve_channel` 的同一套名字匹配），并且**有距离轴就必须画在速度上**。
+
+顺带把没有圈时的报表提示改对：过去用的是区段模块那句"先放一个信标**再来分区段**"，
+用户在**报表**上看到它会以为点错了地方；现在两种模式都说"先放一个信标，再来看报表"。
+
+**可复制的命令与判据**
+
+```powershell
+python -m unittest tests.test_i3pro.TestSpeedChannelResolution -v   # 5 项
+python -m unittest tests.test_i3pro.TestCanSessionSurface -v        # 2 项
+
+# 快照那条路：跑起来的 CAN 场次必须过无头断言（新加的两条就在里面）
+python -c "from i3pro import csvlog, render; render.render_html(csvlog.open_session('can_data/2026_10_03_173345_ID0001.csv'), 'out/can_moved.html', worksheets_dir='.')"
+node tools\smoke_viewer.js out\can_moved.html
+```
+
+**实测（2026-10-04）**
+
+| 项 | 结果 |
+| --- | --- |
+| 23 个场次逐个比对（16 `.ld` + 7 CAN） | 16 个 `.ld` 选的还是 `Vx KF`（**一个都没变**，含两份金标准）；7 个 CAN 从"没有概览条"变成 `Vx_KF` |
+| 距离轴的判据没被带偏 | 原地不动的 `2026_10_03_201147_ID0001.csv`：概览条画 `Vx_KF`（平线），距离轴**仍然没有**（`derive.speed_channel` 的"要真的在动"那条只管距离轴） |
+| 快照无头断言 | 修前：跑起来的 CAN 场次 **4 条红**（报表 / 按圈直方图窗口 / 导出选中圈 / 没有可测的通道名）；修后 PASS。断言点数（`rg -o "check\(" tools/smoke_viewer.js \| Measure-Object`）**492 → 497** |
+| 变异测试 | 把 `display_speed_channel` 改回"只按原样比名字"，新加的那条立刻红（报"概览条画的不是速度通道，而是兜底的第一条通道：TH"）——证明断言不是空跑的 |
+| 报表提示 | 没有圈的场次（7 个 CAN + `FSS_jhy_autox`）都说"本场还没有圈：先放一个信标，再来看报表"；有圈的场次一个都没变 |
+
+**为什么三条断言要分开**：`hasDistance`（有没有距离轴）与 `hasLaps`（有没有圈）是
+两件事——CAN 跑起来之后有距离轴但**一条圈都没有**（没有 GPS、没人放信标）。早先把
+报表 / 按圈直方图 / 导出选中圈三块都写成 `if (hasDistance)`，于是"有距离轴但没圈"的
+场次一进来就报红，而那种场次正是 CAN 数据**唯一有用**的形态。
+
+---
+
 测试覆盖：
 
 | 分组 | 内容 |
@@ -2566,7 +2663,7 @@ python -m i3pro serve --data i2pro_data --data can_data   # -> 23 个场次（16
 | `TestChannelSeam` | 通道接缝（#18，10 项）：那条规则只准写在一个模块里（扫源码）、会话必须显式声明三样、原生通道保留自己的采样率与单位、同名覆盖时保持因子/采样率/单位、Parquet 写出的是派生列本身、挂载与卸载走声明、金标准 437 条通道逐条与旧公式一致（无数学通道时逐点不变） |
 | `TestNotes` / `TestNotesOverHttp` | 注释（#15，15 项）：文字折行与截断、时刻校验的下一步、增删改不改原表、距离在主采样上插值、轨迹取最近抽稀点、越界不猜位置、侧车往返与坏文件、**注释不动圈速表**、HTTP 的 PUT 落盘 / 400 说明下一步 / `.ld` 字节不变 |
 | `TestGpsFix` / `TestGpsFixOverHttp` | GPS 校正（#14，15 项）：`(0,0)` 只计数不进轨迹、跳点与空档各自断开、跳变两端都算坏点、**关掉校正逐点不变**、按秒与按更新周期两种偏移、分段插值绝不跨空档、路径里程跳过跳变、距离轴作用域的开关、抽稀后断点必须落在**跨着跳变的那一段**上、参数校验的中文下一步、侧车往返与坏文件、金标准（耐久 1 个 214.5 m 跳点且断的就是那 214 m 幽灵线 / 高避 0 跳点 638 个空定位）；HTTP 的 GET / PUT / 落盘 / 400 不动侧车 / `.ld` 字节不变 |
-| `TestLaunchers` | 一键启动：快照批量导出 + 索引页、缺数据目录的报错、端口占用自动换端口 |
+| `TestLaunchers` | 一键启动（5 项）：快照批量导出 + 索引页、**原始 CAN 帧表也导得出快照**（A54）、**两份连续记录只出一个 `+1` 快照**、缺数据目录的报错、端口占用自动换端口 |
 | `TestTimebase` | 主时间基（#22，5 项）：那条公式在 `src` 里只剩 `timebase.py` 一处、`tests` 里 0 处、两份金标准的轴与改动前逐点相同（长度 / 首末点 / 和）、Parquet 与报表取的是同一条轴、`--rate` 换的是同一个答案 |
 | `TestSidecar` | 侧车文件（#16，7 项）：六个领域模块里不再有 `read_text`/`write_text`/`json.load`/`json.dump`、六种侧车都在一处登记（含 `.ld`/`.csv`/名字带点的场次）、缺失=空、读坏=报错且**文件原样留着**（坏 JSON 与顶层形状两种）、写=原子替换且不留临时文件、新加一种侧车只要一条登记、快照/serve/命令行三条路径读到的侧车逐字节一致 |
 | `TestDbc` | DBC 解析（#37，13 项）：`@0` 锯齿位序（`0x4A97` 而不是按位反转的 `0x52E9`）、`@1` 小端、有符号、factor/offset、`VAL_` 值表、标准帧与扩展帧分开、伪报文跳过（信号不许挂到上一条报文上）、多路复用明确报错并给下一步、DLC 与实际载荷不一致时以载荷为准、两份真 DBC 的报文/信号数、14 条报文解出 46 条信号、与 `cantools` 对拍（真实帧 11.3 万帧 / 随机载荷 540 个值） |

@@ -116,7 +116,11 @@ def import_paths(
                 if child.is_file() and child.suffix.lower() in ALLOWED_SUFFIXES
             ]
             if not candidates:
-                results.append({"source": str(path), "error": "这个目录里没有 .ld/.ldx"})
+                results.append({
+                    "source": str(path),
+                    "error": "这个目录里没有 .ld/.ldx/.csv；下一步：把日志放进这个目录，"
+                             "或直接把文件（不是文件夹）拖到 导入数据.bat 上",
+                })
             for child in candidates:
                 if child in seen:
                     continue

@@ -24,6 +24,7 @@ from . import channels as channelsmod
 from . import derive, gpsfix, histogram as histogrammod, laps as lapsmod
 from . import notes as notesmod, report as reportmod, sections as sectionsmod
 from . import ld as ldmod
+from . import palette as palettemod
 from . import spectrum as spectrummod
 from . import timebase
 from . import worksheets as worksheetsmod
@@ -995,6 +996,13 @@ def build_payload(
             "duration": log.duration,
         },
         "channels": channel_index(log),
+        # 波形配色（ticket #35）：三套调色板与"缺失"语义灰都来自 palette.py，
+        # 前端不另存一份——同一套颜色写两处的下场是"导出的 PNG 和屏幕不一样"。
+        "palettes": {
+            key: {"label": entry["label"], "colors": list(entry["colors"])}
+            for key, entry in palettemod.PALETTES.items()
+        },
+        "missing_color": palettemod.MISSING,
         # 这次要的通道里，本场次没有的那几条（ticket #34）。快照与页面抬头拿它
         # 说清"少的是哪几条"——以前它们是**静默消失**的，用户看到的是"图坏了"。
         "missing": resolved["missing"],

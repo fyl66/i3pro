@@ -45,6 +45,29 @@
   .ch.missing .unit { color:#c9a227; }
   .ch .unit.dead { color:#c9a227; }
   .missnote { color:#c9a227; font-size:12px; line-height:1.5; }
+  /* 配色与抬头的小弹窗（ticket #35）：浮在画布上，所以给它实心底与阴影，
+     免得半透明地在波形上看得费劲。 */
+  .popmenu { position:fixed; z-index:40; width:250px; background:var(--panel2);
+             border:1px solid var(--line); border-radius:8px; padding:8px 10px 10px;
+             box-shadow:0 10px 26px rgba(0,0,0,.55); font-size:12px; }
+  .popmenu .pophead { color:var(--fg); font-weight:600; margin-bottom:7px;
+                      overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .popmenu .popshelf { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:7px; }
+  .popmenu .popswatch { width:20px; height:20px; border-radius:5px; padding:0;
+                        border:1px solid rgba(255,255,255,.18); cursor:pointer; }
+  .popmenu .popswatch.on { outline:2px solid var(--accent); outline-offset:1px; }
+  .popmenu .popauto { padding:1px 7px; font-size:11px; border-radius:5px; }
+  .popmenu .popauto.on { border-color:var(--accent); color:var(--accent); }
+  .popmenu .popchip { padding:1px 8px; font-size:11px; border-radius:5px; }
+  .popmenu .popchip.on { border-color:var(--accent); color:var(--accent); }
+  .popmenu .popdot { width:12px; height:12px; border-radius:3px; display:inline-block; }
+  .popmenu .poprow { display:flex; align-items:center; gap:7px; margin-bottom:6px; }
+  .popmenu .poplabel { color:var(--muted); }
+  .popmenu .popcheck { display:flex; align-items:center; gap:6px; padding:2px 0;
+                       cursor:pointer; }
+  .popmenu .popcheck input { accent-color:var(--accent); margin:0; }
+  .popmenu .pophint { color:var(--muted); font-size:11px; line-height:1.5;
+                      margin-top:7px; border-top:1px solid var(--line); padding-top:6px; }
   .swatch { width:9px; height:9px; border-radius:2px; flex:0 0 auto; }
   #channelList { max-height:38vh; overflow:auto; }
   .grphead { color:var(--muted); font-size:11px; padding:5px 5px 2px; display:flex; gap:6px; align-items:center; }
@@ -552,9 +575,6 @@
 </div>
 <script>
 const DATA = /*__I3PRO_DATA__*/null;
-const PALETTE = ["#4cc2ff","#ffb454","#35d07f","#ff5d6c","#b48cff","#4ce0d2",
-                 "#ff8ad1","#c9d24b","#7aa7ff","#ff9e6b","#6bdcff","#a0e57c",
-                 "#ff6bd6","#8bd45a","#5f7dff","#ffc857"];
 const GRID = "#232833";
 
 const $ = (id) => document.getElementById(id);
@@ -573,10 +593,21 @@ const GROUPS = ((DATA && DATA.groups) || []).concat(
     ? [{ key: "__status__", label: "状态与故障", unit: "", channels: DATA.status.slice() }]
     : []
 );
-//: 「本场次没有」那条通道用的灰。它**不属于任何调色板**：调色板是给真实通道
-//: 用的，灰是"这里本该有一条线、但本场次没有"的语义色，两者混在一起就会
-//: 让人以为那条灰线是真的（ticket #34 的用户故事 22）。
-const MISSING_COLOR = "#4a5160";
+/* --------------------------------------------------------- 配色（ticket #35）
+ * 三套调色板与"缺失"灰都来自服务端 `palette.py`（页面载荷 `palettes`）——
+ * 颜色只写一处，判据（CIE76 色差 / WCAG 对比度）也在那边算。
+ * `missing_color` 是**语义色**：它不属于任何调色板。
+ */
+const PALETTE_SET = (DATA && DATA.palettes) || {};
+const PALETTE_ORDER = Object.keys(PALETTE_SET);
+const MISSING_COLOR = (DATA && DATA.missing_color) || "#4a5160";
+
+/** 这套组件现在用哪套颜色（没写就是默认那套）。 */
+function paletteColors(comp) {
+  const key = (comp && comp.config && comp.config.palette) || "default";
+  const entry = PALETTE_SET[key] || PALETTE_SET[PALETTE_ORDER[0]] || null;
+  return (entry && entry.colors) || [MISSING_COLOR];
+}
 //: 服务端这次点名要、但本场次没有的通道（render.build_payload 的 ``missing``）。
 //: 快照与页面抬头拿它说话；工作表里引用的那些由 workbenchMissing() 现算。
 const PAYLOAD_MISSING = new Set((DATA && DATA.missing) || []);
@@ -1773,9 +1804,30 @@ function renderMissingNotice() {
 }
 
 function channelColor(name, comp) {
+  // 手选色优先（ticket #35）：关键通道永远是同一个颜色，换调色板也不动它。
+  const manual = comp && comp.config && comp.config.colors;
+  if (manual && manual[name]) return manual[name];
   const list = comp && comp.type === "graph" ? comp.config.channels : allGraphChannels();
   const idx = list.indexOf(name);
-  return PALETTE[(idx < 0 ? 0 : idx) % PALETTE.length];
+  const palette = paletteColors(comp);
+  return palette[(idx < 0 ? 0 : idx) % palette.length];
+}
+
+/** 这条通道的颜色是手选的还是跟调色板走的（界面要说清，才能"改回自动"）。 */
+function channelColorIsManual(name, comp) {
+  const manual = comp && comp.config && comp.config.colors;
+  return !!(manual && manual[name]);
+}
+
+/** 抬头里每个字段要不要显示（ticket #35）：**按组件**，没写过就是都显示。 */
+function headFields(comp) {
+  const cfg = (comp && comp.config && comp.config.show) || {};
+  return {
+    cursor: cfg.cursor !== false,
+    delta: cfg.delta !== false,
+    measure: cfg.measure !== false,
+    unit: cfg.unit !== false,
+  };
 }
 
 function traceOf(name) { return state.traces[name] || null; }
@@ -2424,6 +2476,17 @@ function buildWorksheet() {
     };
     btn("up", "↑", "上移");
     btn("down", "↓", "下移");
+    // 「显示」：这一件组件的调色板与抬头字段（ticket #35）。放在组件自己的标题栏上，
+    // 因为这两样都是**按组件**的——放到全局面板里就不是"这一张图想怎么看"了。
+    if (!tabular) {
+      const cfgBtn = makeEl("button", "", tools);
+      cfgBtn.textContent = "显示";
+      cfgBtn.title = "这一件组件的配色与抬头字段（存进工作表）";
+      cfgBtn.addEventListener("click", (event) => {
+        event.stopPropagation();
+        openDisplayMenu(comp, cfgBtn);
+      });
+    }
     if (tabular) btn("csv", "CSV", "把这张表导出成 CSV（列序与界面上看到的一致）");
     btn("close", "✕", "移除这个组件");
     const body = makeEl("div", "compbody" + (tabular ? " tabular" : ""), el);
@@ -2765,9 +2828,11 @@ function renderGraphHead(comp, b, groups, panels, overlapped) {
   // 这一条图上"本场次没有"的通道（ticket #34）。图上不画，但必须在抬眼的地方
   // 说清名字——不然用户看到的是"我明明有 6 条通道，图里只有 4 条"。
   const gone = (comp.config.channels || []).filter(isMissingChannel);
+  const fields = headFields(comp);
   const signature = groups.map((g) => g.key + ":" + g.channels.join(",")).join(";")
     + "|" + (state.show.measure ? 1 : 0) + "|" + (state.show.legend ? 1 : 0)
-    + "|" + (comp.config.mode || "tiled") + "|" + gone.join(",");
+    + "|" + (comp.config.mode || "tiled") + "|" + gone.join(",")
+    + "|" + [fields.cursor, fields.delta, fields.measure, fields.unit].join(",");
   b.head.style.display = state.show.legend ? "" : "none";
   if (b.legendKey !== signature) {
     b.head.innerHTML = "";
@@ -2781,13 +2846,27 @@ function renderGraphHead(comp, b, groups, panels, overlapped) {
         const row = makeEl("div", "lrow", block);
         const sw = makeEl("i", "swatch", row);
         sw.style.background = channelColor(name, comp);
+        // 点色块换这条通道的颜色（ticket #35）：手选色存进工作表，换调色板也不动它。
+        sw.title = "点一下换「" + name + "」的颜色（手选色存进这一套工作表）";
+        sw.style.cursor = "pointer";
+        sw.style.pointerEvents = "auto";
+        sw.addEventListener("click", (event) => {
+          if (event && event.stopPropagation) event.stopPropagation();
+          openColorMenu(comp, name, sw);
+        });
         makeEl("span", "lname", row).textContent = name;
         const cur = makeEl("span", "lcur", row);
         const dl = makeEl("span", "ldelta", row);
         const mn = makeEl("span", "lmm", row);
         const mx = makeEl("span", "lmm", row);
         const av = makeEl("span", "lmm", row);
-        makeEl("span", "lunit", row).textContent = (CHANNELS.get(name) || {}).unit || "";
+        // 抬头字段按组件开关（ticket #35）：先按开关藏掉，下面的更新循环只管数值。
+        if (!fields.cursor) cur.style.display = "none";
+        if (!fields.delta) dl.style.display = "none";
+        if (!fields.measure) mn.style.display = mx.style.display = av.style.display = "none";
+        const unit = makeEl("span", "lunit", row);
+        unit.textContent = (CHANNELS.get(name) || {}).unit || "";
+        if (!fields.unit) unit.style.display = "none";
         // 通道在、但整段没有有效样本（全空列）：正常颜色画，抬头写明是哪一种"没有"。
         // 这条与"本场次没有"必须分开——混在一起用户就去查错方向了。
         if (isEmptyChannel(name)) {
@@ -2816,11 +2895,12 @@ function renderGraphHead(comp, b, groups, panels, overlapped) {
       const dv = valueAt(trace, state.datum);
       const d = at - dv;
       node.delta.textContent = "Δ " + (Number.isFinite(d) ? (d >= 0 ? "+" : "") + fmt(d, 3) : "--");
-      node.delta.style.display = "";
+      // 这一条（Δ）在这一件组件上被关掉了就始终不出现（ticket #35）。
+      node.delta.style.display = fields.delta ? "" : "none";
     } else {
       node.delta.style.display = "none";
     }
-    if (state.show.measure && trace) {
+    if (state.show.measure && fields.measure && trace) {
       const st = visibleStats(trace, r[0], r[1]);
       node.min.textContent = st ? fmt(st.min) : "--";
       node.max.textContent = st ? fmt(st.max) : "--";
@@ -2830,6 +2910,160 @@ function renderGraphHead(comp, b, groups, panels, overlapped) {
       node.min.style.display = node.max.style.display = node.avg.style.display = "none";
     }
   }
+}
+
+/* ----------------------------------------------- 配色与抬头的小弹窗（#35）
+ * 两个入口共用一套弹窗："点色块换这条通道的颜色"与组件栏上的「显示」。
+ * 自己搭而不是用 alert/prompt：那些是阻塞的、长得也不像这个界面，而且
+ * "点开菜单选一个色"这件事在真浏览器验收里要能一步一步点出来。
+ */
+let popMenu = null;
+
+function closePopMenu() {
+  if (popMenu && popMenu.parentNode) popMenu.parentNode.removeChild(popMenu);
+  popMenu = null;
+  document.removeEventListener("mousedown", popMenuOutside, true);
+}
+
+function popMenuOutside(event) {
+  if (popMenu && !popMenu.contains(event.target)) closePopMenu();
+}
+
+/** 在某个元素旁边开一个小弹窗；`build(menu)` 往里面填内容。 */
+function openPopMenu(anchor, title, build) {
+  closePopMenu();
+  const menu = document.createElement("div");
+  menu.className = "popmenu";
+  const head = makeEl("div", "pophead", menu);
+  head.textContent = title;
+  build(menu);
+  document.body.appendChild(menu);
+  const box = anchor && anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : null;
+  const width = 250;
+  const height = menu.getBoundingClientRect ? (menu.getBoundingClientRect().height || 120) : 120;
+  const left = box ? Math.max(8, Math.min((window.innerWidth || 1200) - width - 8, box.left)) : 40;
+  const top = box
+    ? Math.max(8, Math.min((window.innerHeight || 800) - height - 8, box.bottom + 6))
+    : 60;
+  menu.style.left = left + "px";
+  menu.style.top = top + "px";
+  popMenu = menu;
+  document.addEventListener("mousedown", popMenuOutside, true);
+  return menu;
+}
+
+/** 小弹窗里的一行复选框（配色与抬头都用它）。 */
+function popCheck(menu, label, on, onToggle) {
+  const box = makeEl("label", "popcheck", menu);
+  const input = makeEl("input", "", box);
+  input.type = "checkbox";
+  input.checked = !!on;
+  makeEl("span", "", box).textContent = label;
+  input.addEventListener("change", () => onToggle(input.checked));
+  return input;
+}
+
+/** 改一条通道的手选色；`color` 为空 = 取消手选（跟调色板走）。 */
+function setChannelColor(comp, name, color) {
+  const colors = Object.assign({}, comp.config.colors || {});
+  if (color) colors[name] = color; else delete colors[name];
+  // 空表就别留在文件里：一份工作表里挂一堆 `"colors": {}` 是噪声，
+  // 而且 diff 起来像改过什么。
+  if (Object.keys(colors).length) comp.config.colors = colors;
+  else delete comp.config.colors;
+  const bundle = SHEET.get(comp.id);
+  // 两处都要失效：`cacheKey` 管画布上那层波形，`legendKey` 管抬头那一排色块。
+  // 只清一个的话，线换色了而色块还是旧色（真浏览器验收就是这么抓到的）。
+  if (bundle) { bundle.cacheKey = ""; bundle.legendKey = ""; }
+  saveLayout();
+  renderAll();
+  renderChannelList();
+}
+
+/** 改这一件组件的调色板（存进工作表）。 */
+function setComponentPalette(comp, key) {
+  if (!PALETTE_SET[key]) return;
+  comp.config.palette = key;
+  // 跟调色板走的通道要重新算颜色；手选的那些**不动**——那正是手选的意义。
+  for (const one of state.components) {
+    const bundle = SHEET.get(one.id);
+    if (bundle) { bundle.cacheKey = ""; bundle.legendKey = ""; }
+  }
+  saveLayout();
+  renderAll();
+  renderChannelList();
+}
+
+/** 改一个抬头字段开关（存进工作表）。 */
+function setHeadField(comp, key, on) {
+  const fields = headFields(comp);
+  fields[key] = !!on;
+  comp.config.show = fields;
+  const bundle = SHEET.get(comp.id);
+  if (bundle) { bundle.cacheKey = ""; bundle.legendKey = ""; }
+  saveLayout();
+  renderAll();
+}
+
+function openColorMenu(comp, name, anchor) {
+  openPopMenu(anchor, "「" + name + "」的颜色", (menu) => {
+    const shelf = makeEl("div", "popshelf", menu);
+    const auto = makeEl("button", "popauto", shelf);
+    auto.textContent = "自动";
+    auto.title = "跟这一件组件的调色板走（取消手选色）";
+    if (!channelColorIsManual(name, comp)) auto.classList.add("on");
+    auto.addEventListener("click", () => { setChannelColor(comp, name, null); closePopMenu(); });
+    const seen = {};
+    for (const key of PALETTE_ORDER) {
+      for (const color of (PALETTE_SET[key] || {}).colors || []) {
+        if (seen[color]) continue;
+        seen[color] = 1;
+        const spot = makeEl("button", "popswatch", shelf);
+        spot.style.background = color;
+        spot.title = color + "（" + ((PALETTE_SET[key] || {}).label || key) + "）";
+        if (channelColorIsManual(name, comp)
+            && String(channelColor(name, comp)).toLowerCase() === color.toLowerCase()) {
+          spot.classList.add("on");
+        }
+        spot.addEventListener("click", () => { setChannelColor(comp, name, color); closePopMenu(); });
+      }
+    }
+    const hint = makeEl("div", "pophint", menu);
+    hint.textContent = "手选色跟着这一套工作表走；「本场次没有」的灰是语义色，不在可选范围内。";
+  });
+}
+
+function openDisplayMenu(comp, anchor) {
+  openPopMenu(anchor, "这一件组件怎么看", (menu) => {
+    const line = makeEl("div", "poprow", menu);
+    makeEl("span", "poplabel", line).textContent = "调色板";
+    // 用按钮而不是 <select>：原生下拉在强浏览器验收里点不开（那是系统弹层），
+    // 而"真点一下换调色板"正是这一票要验的事。
+    const chosen = comp.config.palette && PALETTE_SET[comp.config.palette]
+      ? comp.config.palette : PALETTE_ORDER[0];
+    for (const key of PALETTE_ORDER) {
+      const chip = makeEl("button", "popchip", line);
+      chip.textContent = (PALETTE_SET[key] || {}).label || key;
+      chip.title = "换成这一套颜色";
+      if (key === chosen) chip.classList.add("on");
+      chip.addEventListener("click", () => {
+        setComponentPalette(comp, key);
+        openDisplayMenu(comp, anchor);      // 重开一次，让按钮上的选中状态跟着走
+      });
+    }
+    const shelf = makeEl("div", "popshelf", menu);
+    for (const color of paletteColors(comp)) {
+      const spot = makeEl("i", "popdot", shelf);
+      spot.style.background = color;
+    }
+    const fields = headFields(comp);
+    popCheck(menu, "光标值", fields.cursor, (on) => setHeadField(comp, "cursor", on));
+    popCheck(menu, "Δ（与基准光标之差）", fields.delta, (on) => setHeadField(comp, "delta", on));
+    popCheck(menu, "Min / Max / Avg", fields.measure, (on) => setHeadField(comp, "measure", on));
+    popCheck(menu, "单位", fields.unit, (on) => setHeadField(comp, "unit", on));
+    const hint = makeEl("div", "pophint", menu);
+    hint.textContent = "这几项跟着工作表存/还原；全局的「L 图例」「M 测量」仍然管所有组件。";
+  });
 }
 
 function renderOverview() {
@@ -7519,6 +7753,12 @@ window.i3pro = {
   worksheetChannels: worksheetChannels, workbenchMissing: workbenchMissing,
   missingText: missingText, renderMissingNotice: renderMissingNotice,
   exportMissingChannels: exportMissingChannels, syncExportFields: syncExportFields,
+  palettes: PALETTE_SET, missingColor: MISSING_COLOR,
+  paletteColors: paletteColors, headFields: headFields,
+  channelColor: channelColor, channelColorIsManual: channelColorIsManual,
+  setChannelColor: setChannelColor, setComponentPalette: setComponentPalette,
+  setHeadField: setHeadField, openColorMenu: openColorMenu,
+  openDisplayMenu: openDisplayMenu, closePopMenu: closePopMenu,
   encodeComponentConfig: encodeComponentConfig,
   buildWorksheet: buildWorksheet, syncScatterSelectors: syncScatterSelectors,
   apiUrl: apiUrl, apiGet: apiGet,

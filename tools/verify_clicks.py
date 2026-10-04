@@ -1574,6 +1574,184 @@ class Checker:
                 ".scrollIntoView({block:'start'});return true;})()")
         time.sleep(1.0)
 
+    def display_settings(self, work_dir):
+        """#35：真点开颜色菜单选色、真切换调色板、真开关抬头字段——而且**真的存住**。
+
+        配色与抬头都写进工作表，所以这一关的判据不是"点了有反应"，而是
+        **保存 → 切走 → 切回之后还在**：切回来那一步读的是磁盘上的文件，
+        内存里那份早被换掉了。假 DOM 里既没有文件也没有真正命中测试，只能在这里验。
+        """
+        def center_of(selector):
+            raw = self.js(
+                "(function(){var el=document.querySelector(%r);"
+                "return el?JSON.stringify(__center(el)):null;})()" % selector)
+            return json.loads(raw) if raw and raw != "null" else None
+
+        def click_at(selector, label):
+            box = center_of(selector)
+            self.check("#35 「%s」点得到" % label,
+                       bool(box) and box.get("w", 0) > 0, box)
+            if not box:
+                return False
+            self.browser.click(box["x"], box["y"], self.session)
+            time.sleep(0.5)
+            return True
+
+        def open_popmenu(selector, label):
+            if not click_at(selector, label):
+                return False
+            shown = self.js(
+                "!!document.querySelector('.popmenu')")
+            self.check("#35 点「%s」弹出小菜单" % label, shown,
+                       self.js("document.querySelectorAll('.popmenu').length"))
+            return shown
+
+        # 先确认停在一套有图的工作表上（前两关会把页面切来切去）。
+        self.js("i3pro.applyPreset(i3pro.worksheetCatalogue().sheets[0].name); true")
+        time.sleep(1.0)
+        first = self.js("i3pro.state.components[0].config.channels[0]")
+        self.check("#35 第一张图有通道（不然配色没得验）", bool(first), first)
+        if not first:
+            return
+
+        # ---------------------------------------------------------- 手选色
+        if not open_popmenu("#worksheet .comp .graphhead .swatch", "图例上的色块"):
+            return
+        seats = self.js(
+            "(function(){var s=document.querySelectorAll('.popmenu .popswatch');"
+            "if(s.length<8)return -1;var last=s[s.length-1];"
+            "var r=last.getBoundingClientRect();"
+            "return JSON.stringify({n:s.length,x:r.left+r.width/2,y:r.top+r.height/2});})()")
+        seat = json.loads(seats) if seats and seats not in ("-1", "null") else None
+        self.check("#35 颜色菜单里有一整排可选颜色", bool(seat) and seat.get("n", 0) >= 8, seat)
+        if not seat:
+            return
+        self.browser.shot(
+            os.path.join(ROOT, "out", "shots", "verify-color-menu.png"), self.session)
+        wanted = self.js(
+            "(function(){var s=document.querySelectorAll('.popmenu .popswatch');"
+            "return s[s.length-1].style.background;})()")
+        # 浏览器把颜色统一成 rgb(...)：要拿同一个尺子量，不然 "#b6ff00" 和
+        # "rgb(182, 255, 0)" 会被判成"没换色"（这条第一次跑就是这么红的）。
+        wanted = self.js(
+            "(function(){var p=document.createElement('i');"
+            "p.style.background=%r;return p.style.background;})()" % wanted)
+        self.browser.click(seat["x"], seat["y"], self.session)
+        time.sleep(0.6)
+        now = self.js(
+            "(function(){var p=document.createElement('i');"
+            "p.style.background=i3pro.channelColor(%r, i3pro.state.components[0]);"
+            "return p.style.background;})()" % first)
+        self.check("#35 真点一个颜色之后这条通道真的换了色",
+                   str(now).lower() == str(wanted).lower(),
+                   "%s -> %s" % (wanted, now))
+        self.check("#35 手选色记在组件配置里（不是只改了一次画布）",
+                   self.js("!!(i3pro.state.components[0].config.colors || {})[%r]" % first),
+                   self.js("JSON.stringify(i3pro.state.components[0].config.colors||{})"))
+        swatch_bg = self.js(
+            "getComputedStyle(document.querySelector('#worksheet .comp .graphhead .swatch'))"
+            ".backgroundColor")
+
+        # ------------------------------------------------- 抬头字段 / 调色板
+        if not open_popmenu("#worksheet .comp .compbar button[title*='配色与抬头']",
+                            "组件栏上的「显示」"):
+            return
+        fields = self.js(
+            "(function(){var ls=document.querySelectorAll('.popmenu .popcheck input');"
+            "var out={n:ls.length,boxes:[]};for(var i=0;i<ls.length;i++){"
+            "var r=ls[i].getBoundingClientRect();"
+            "out.boxes.push({x:r.left+r.width/2,y:r.top+r.height/2,on:ls[i].checked});}"
+            "return JSON.stringify(out);})()")
+        fields = json.loads(fields) if fields else None
+        self.check("#35 「显示」菜单里有抬头字段的开关", bool(fields) and fields.get("n", 0) >= 4,
+                   fields)
+        if not fields:
+            return
+        self.browser.shot(
+            os.path.join(ROOT, "out", "shots", "verify-display-menu.png"), self.session)
+        measure = fields["boxes"][2]                       # 光标值 / Δ / Min·Max·Avg / 单位
+        self.browser.click(measure["x"], measure["y"], self.session)
+        time.sleep(0.5)
+        self.check("#35 真点一下之后 Min/Max/Avg 关掉了",
+                   self.js("i3pro.headFields(i3pro.state.components[0]).measure") is False,
+                   self.js("JSON.stringify(i3pro.headFields(i3pro.state.components[0]))"))
+
+        chips = self.js(
+            "(function(){var cs=document.querySelectorAll('.popmenu .popchip');"
+            "for(var i=0;i<cs.length;i++){if(cs[i].textContent==='色盲友好'){"
+            "var r=cs[i].getBoundingClientRect();"
+            "return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2});}}return null;})()")
+        chip = json.loads(chips) if chips and chips != "null" else None
+        self.check("#35 「显示」菜单里能真点到「色盲友好」", bool(chip), chip)
+        if chip:
+            self.browser.click(chip["x"], chip["y"], self.session)
+            time.sleep(0.6)
+            self.check("#35 真点一下换成了色盲友好那一套",
+                       self.js("i3pro.state.components[0].config.palette") == "colorblind",
+                       self.js("i3pro.state.components[0].config.palette"))
+        self.js("i3pro.closePopMenu(); true")
+
+        # ---------------------------------------------------- 保存 → 切走 → 切回
+        sheet_id = self.js("(i3pro.currentSheet()||{}).id")
+        if not click_at("#wsSave", "保存"):
+            return
+        time.sleep(0.8)
+        on_disk = {}
+        path = os.path.join(work_dir, "_worksheets_root", "worksheets",
+                            str(sheet_id) + ".json")
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as handle:
+                body = json.load(handle)
+            first_comp = (body.get("components") or [{}])[0]
+            on_disk = (first_comp.get("config") or {})
+        self.check("#35 保存把配色真的写进了 worksheets/%s.json" % sheet_id,
+                   (on_disk.get("colors") or {}).get(first) and
+                   on_disk.get("palette") == "colorblind",
+                   json.dumps(on_disk, ensure_ascii=False)[:200])
+        self.check("#35 抬头开关也写进了文件",
+                   (on_disk.get("show") or {}).get("measure") is False,
+                   json.dumps(on_disk.get("show"), ensure_ascii=False))
+        sheets = self.js(
+            "JSON.stringify(i3pro.worksheetCatalogue().sheets.map(function(s){return s.name;}))")
+        sheets = json.loads(sheets) if sheets else []
+        if len(sheets) < 2:
+            self.check("#35 至少要有两套工作表才能验「切走再切回」", False, sheets)
+            return
+        other = sheets[1]
+        if not click_at("#presetRow button:nth-child(2)", "切到另一套工作表"):
+            return
+        self.check("#35 真的切到了另一套",
+                   self.js("i3pro.state.preset") == other,
+                   "%s / 想要 %s" % (self.js("i3pro.state.preset"), other))
+        click_at("#presetRow button:nth-child(1)", "切回原来那一套")
+        time.sleep(1.0)
+        self.check("#35 切回来还是原来那一套",
+                   self.js("i3pro.state.preset") == sheets[0],
+                   self.js("i3pro.state.preset"))
+        self.check("#35 切走再切回之后，**手选色**还在（这一条读的是磁盘上的文件）",
+                   self.js("!!(i3pro.state.components[0].config.colors || {})[%r]" % first),
+                   self.js("JSON.stringify(i3pro.state.components[0].config.colors||{})"))
+        self.check("#35 切回来之后调色板选择还在",
+                   self.js("i3pro.state.components[0].config.palette") == "colorblind",
+                   self.js("i3pro.state.components[0].config.palette"))
+        self.check("#35 切回来之后抬头开关还在",
+                   self.js("i3pro.headFields(i3pro.state.components[0]).measure") is False,
+                   self.js("JSON.stringify(i3pro.headFields(i3pro.state.components[0]))"))
+        if swatch_bg:
+            self.check("#35 图例上的色块画出来也是手选色",
+                       self.js("getComputedStyle(document.querySelector("
+                               "'#worksheet .comp .graphhead .swatch')).backgroundColor")
+                       == swatch_bg, swatch_bg)
+        self.browser.shot(
+            os.path.join(ROOT, "out", "shots", "verify-display-settings.png"), self.session)
+
+        # 收尾：把这一套恢复成没动过的样子（不然后面几个用例看到的是色盲配色）。
+        self.js("(function(){var c=i3pro.state.components[0];"
+                "delete c.config.colors;delete c.config.palette;delete c.config.show;"
+                "return true;})()")
+        click_at("#wsSave", "保存（收尾还原）")
+        time.sleep(0.6)
+
     def axis(self):
         """横轴随缩放换档（A36）：读真画布**画出来的**刻度文字。
 
@@ -2257,6 +2435,7 @@ def main(argv=None):
             checker.worksheets()
             checker.worksheet_editing(work_dir)
             checker.missing_channels(work_dir)
+            checker.display_settings(work_dir)
             checker.notes(work_dir, args.session)
             checker.gps(work_dir, args.session)
             checker.imports("http://127.0.0.1:%d/" % args.port, work_dir)

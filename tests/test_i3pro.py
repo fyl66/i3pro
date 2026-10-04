@@ -44,6 +44,7 @@ from i3pro import (  # noqa: E402
     canlog, channels, csvlog, dbc, derive, gpsfix, laps as lapsmod, ld, library as librarymod,
     maths as mathsmod, motec_csv,
     notes as notesmod, render, report as reportmod, sections as sectionsmod,
+    palette as palettemod,
     server, sidecar, store, timebase,
     txtlog,
     worksheets as worksheetsmod,
@@ -7817,6 +7818,112 @@ class TestChannelStates(unittest.TestCase):
         self.assertEqual(dead, [], f"这两条通道本该都是满的：{dead}")
         self.assertEqual(channels.state(log, "Vx KF"), channels.PRESENT)
         self.assertEqual(channels.state(log, "FSD13 Distance1"), channels.MISSING)
+
+
+class TestPalettes(unittest.TestCase):
+    """波形配色（ticket #35）：可辨性**是可量的**，所以这里量它。
+
+    为什么值得钉死：深色底上叠八条线"看着还行"是个会漂的标准——换一套颜色、
+    换一块屏、换一个人的色觉，结论就不一样。所以判据是 CIE76 色差（ΔE）与
+    WCAG 对比度，两个都是算得出来的数：
+
+    * 同屏最多先看到 **前 8 条**（颜色按通道序号分配），这 8 个两两 ΔE ≥ 25；
+    * 相邻两条（波形最容易挨着看混的一对）ΔE ≥ 30；
+    * 每个颜色在面板底色上对比度 ≥ 3.0（WCAG 非文本下限）；
+    * "缺失"灰与所有调色板颜色都拉开（ΔE ≥ 25）——它是语义色，不能被当成某条通道。
+
+    阈值都是**量出来再往下留一档**写的，不是拍脑袋：实测最紧的三种情况是
+    色盲调色板的前 8 条 ΔE 26.43、它在底色上的对比度 3.36、缺失灰与最近的颜色 33.96。
+    """
+
+    #: 同屏八条线两两之间至少要差这么多（实测最紧 26.43）。
+    FIRST_EIGHT_DELTA_E = 25.0
+    #: 相邻两条（序号挨着）至少要差这么多（实测最紧 55.80）。
+    ADJACENT_DELTA_E = 30.0
+    #: 在面板底色上的对比度下限（实测最紧 3.36）。
+    MIN_CONTRAST = 3.0
+    #: "缺失"灰与所有调色板颜色的最小色差（实测 33.96）。
+    MISSING_DELTA_E = 25.0
+
+    def test_三套调色板都在_而且每套至少八色(self):
+        self.assertEqual(list(palettemod.PALETTES), ["default", "colorblind", "contrast"])
+        for key, entry in palettemod.PALETTES.items():
+            self.assertGreaterEqual(len(entry["colors"]), 8, key)
+            self.assertTrue(entry["label"], f"{key} 没有按钮上的名字")
+            for color in entry["colors"]:
+                self.assertRegex(color, r"^#[0-9a-f]{6}$", f"{key} 里的 {color!r}")
+
+    def test_同屏八条通道两两分得开(self):
+        worst = {}
+        for key in palettemod.PALETTES:
+            first = palettemod.colors(key)[:8]
+            pairs = [
+                palettemod.delta_e(first[i], first[j])
+                for i in range(len(first)) for j in range(i + 1, len(first))
+            ]
+            worst[key] = min(pairs)
+        self.assertGreaterEqual(
+            min(worst.values()), self.FIRST_EIGHT_DELTA_E,
+            f"有一套调色板的前八色太挤了：{worst}（判据 ΔE ≥ {self.FIRST_EIGHT_DELTA_E}）",
+        )
+
+    def test_相邻两条分得开(self):
+        worst = {}
+        for key in palettemod.PALETTES:
+            swatches = palettemod.colors(key)
+            worst[key] = min(
+                palettemod.delta_e(swatches[i], swatches[(i + 1) % len(swatches)])
+                for i in range(len(swatches))
+            )
+        self.assertGreaterEqual(
+            min(worst.values()), self.ADJACENT_DELTA_E,
+            f"有一套调色板的相邻色太像了：{worst}",
+        )
+
+    def test_每个颜色在深色底上都看得见(self):
+        worst = {}
+        for key in palettemod.PALETTES:
+            worst[key] = min(
+                palettemod.contrast_ratio(color, palettemod.BACKGROUND)
+                for color in palettemod.colors(key)
+            )
+        self.assertGreaterEqual(
+            min(worst.values()), self.MIN_CONTRAST,
+            f"有颜色在面板底色上快看不见了：{worst}（底 {palettemod.BACKGROUND}）",
+        )
+
+    def test_缺失灰不属于任何调色板(self):
+        self.assertNotIn(palettemod.MISSING.upper(),
+                         [c.upper() for entry in palettemod.PALETTES.values()
+                          for c in entry["colors"]])
+        self.assertTrue(palettemod.missing_is_distinct(self.MISSING_DELTA_E))
+
+    def test_色差与对比度这两把尺子本身是对的(self):
+        self.assertEqual(palettemod.delta_e("#4cc2ff", "#4cc2ff"), 0.0)
+        self.assertAlmostEqual(palettemod.delta_e("#000000", "#ffffff"), 100.0, delta=0.5)
+        self.assertAlmostEqual(palettemod.contrast_ratio("#000000", "#ffffff"), 21.0, delta=0.1)
+        self.assertAlmostEqual(palettemod.contrast_ratio("#808080", "#808080"), 1.0, delta=0.01)
+        # 短写与大小写都认
+        self.assertEqual(palettemod.delta_e("#fff", "#FFFFFF"), 0.0)
+        with self.assertRaises(ValueError):
+            palettemod.delta_e("红色", "#ffffff")
+
+    def test_页面载荷带着三套调色板与缺失灰(self):
+        if not HILL.exists():
+            self.skipTest(f"缺金标准数据 {HILL.name}")
+        log = ld.LogFile.read(HILL)
+        self.addCleanup(log.close)
+        payload = render.build_payload(log)
+        self.assertEqual(set(payload["palettes"]),
+                         {"default", "colorblind", "contrast"})
+        for key, entry in payload["palettes"].items():
+            self.assertGreaterEqual(len(entry["colors"]), 8, key)
+            self.assertTrue(entry["label"], key)
+        self.assertEqual(payload["missing_color"], palettemod.MISSING)
+
+    def test_不认识的调色板名字退回默认那一套(self):
+        self.assertEqual(palettemod.colors("没有这套"), palettemod.colors("default"))
+        self.assertEqual(palettemod.colors(None), palettemod.colors("default"))
 
 
 class TestMissingChannelsOnExport(_ExportBase):

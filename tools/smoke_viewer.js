@@ -157,12 +157,22 @@ class Element {
 
   appendChild(child) {
     if (child && child.tagName === "FRAGMENT") {
+      child._children.forEach((one) => { one._parent = this; });
       this._children.push(...child._children);
       return child;
     }
+    if (child) child._parent = this;
     this._children.push(child);
     return child;
   }
+
+  removeChild(child) {
+    const i = this._children.indexOf(child);
+    if (i >= 0) this._children.splice(i, 1);
+    return child;
+  }
+
+  get parentNode() { return this._parent || null; }
 
   addEventListener(type, fn) {
     (this._handlers[type] = this._handlers[type] || []).push(fn);
@@ -241,6 +251,9 @@ function buildDom(markup) {
     },
     body: new Element("body"),
     addEventListener() {},
+    // 小弹窗（ticket #35）会在关掉时摘掉"点外面就收起来"那个监听；
+    // 假 DOM 少了这一半，页面就会在关闭菜单那一行抛错。
+    removeEventListener() {},
   };
   return { registry, document };
 }
@@ -3088,6 +3101,119 @@ if (api && exportDlg) {
     "通道列表里还留着灰掉的缺通道");
   check(String(notice.textContent) === "",
     "撤掉之后页面抬头还写着缺通道：" + notice.textContent);
+}
+
+/* ------------------- 配色与抬头（ticket #35） -------------------------------
+ * 判据分两半：**可辨性是服务端算的**（CIE76 色差 / WCAG 对比度，见
+ * tests/test_i3pro.py 的 TestPalettes），这里钉的是"界面真的用了它"：
+ * 三套调色板都在、换调色板真的换色、手选色优先、手选色会被写回工作表、
+ * 抬头字段按组件藏得住。"点得到菜单、选得中颜色"归真浏览器那关。 */
+{
+  const api = window.i3pro;
+  const dom = ctx.document;
+  const keys = Object.keys(api.palettes || {});
+  check(keys.length === 3, "调色板不是三套：" + keys.join(","));
+  let shortPalette = "";
+  for (const key of keys) {
+    const entry = api.palettes[key] || {};
+    if ((entry.colors || []).length < 8 || !entry.label) shortPalette = key;
+  }
+  check(!shortPalette, "有一套调色板没有八色的余量或没有名字：" + shortPalette);
+  check(keys.indexOf("default") === 0, "第一套不是 default（老工作表要退回它）");
+  check(!keys.some((k) => (api.palettes[k].colors || [])
+    .some((c) => String(c).toLowerCase() === String(api.missingColor).toLowerCase())),
+    "「本场次没有」的灰混进了调色板（它是语义色，不是第 N 条通道）");
+
+  const comp = api.state.components.filter((c) => c.type === "graph")[0];
+  const name = (comp.config.channels || [])[0];
+  check(!!name, "这张图没有通道，配色用例没法验");
+  const auto = api.channelColor(name, comp);
+  check(api.channelColorIsManual(name, comp) === false,
+    "这条通道一上来就被当成手选色了");
+  check(api.palettes.default.colors.indexOf(auto) >= 0,
+    "默认调色板下这条通道的颜色不在默认那一套里：" + auto);
+
+  // 换整套调色板：颜色跟着换，而且是那一套里的颜色。
+  api.setComponentPalette(comp, "colorblind");
+  check(comp.config.palette === "colorblind", "换调色板没写进组件配置");
+  const swapped = api.channelColor(name, comp);
+  check(api.palettes.colorblind.colors.indexOf(swapped) >= 0,
+    "换到色盲友好之后颜色不是那一套的：" + swapped);
+  check(swapped !== auto, "换了一整套调色板颜色却一点没变：" + swapped);
+
+  // 手选色优先，而且它必须**跟着工作表写回文件**。
+  api.setChannelColor(comp, name, "#ff00aa");
+  check(api.channelColorIsManual(name, comp), "手选色没被记下来");
+  check(api.channelColor(name, comp) === "#ff00aa", "手选色没生效");
+  api.setComponentPalette(comp, "contrast");
+  check(api.channelColor(name, comp) === "#ff00aa",
+    "换了调色板把手选色冲掉了（手选的意义就是不跟着调色板走）");
+  const written = JSON.parse(JSON.stringify(api.sheetComponent(comp)));
+  check((written.config || {}).colors
+    && written.config.colors[name] === "#ff00aa",
+    "手选色没有写进工作表的组件配置：" + JSON.stringify(written.config));
+  check((written.config || {}).palette === "contrast",
+    "调色板选择没有写进工作表：" + JSON.stringify(written.config));
+
+  // 抬头字段按组件开关，而且写进配置。
+  api.setHeadField(comp, "measure", false);
+  check(api.headFields(comp).measure === false, "关掉 Min/Max/Avg 没生效");
+  check(((JSON.parse(JSON.stringify(api.sheetComponent(comp)))).config || {})
+    .show.measure === false, "抬头开关没有写进工作表");
+  check(api.headFields(comp).cursor === true, "只关了一项，别的项跟着被关了");
+  api.renderAll();
+  const nodes = (registry.get("worksheet")._children || []);
+  const node = nodes.filter((c) => c.dataset && String(c.dataset.id) === String(comp.id))[0];
+  const body = (node && node._children ? node._children : [])
+    .filter((c) => String(c.className).indexOf("compbody") >= 0)[0];
+  const head = (body && body._children ? body._children : [])
+    .filter((c) => String(c.className).indexOf("graphhead") >= 0)[0];
+  const legend = (head && head._children ? head._children : [])
+    .filter((c) => String(c.className).indexOf("glegend") >= 0)[0];
+  const row = (legend && legend._children ? legend._children : [])
+    .filter((c) => String(c.className).indexOf("lrow") >= 0)[0];
+  const spans = (row && row._children ? row._children : [])
+    .filter((c) => String(c.className).indexOf("lmm") >= 0);
+  check(spans.length === 3 && spans.every((s) => s.style.display === "none"),
+    "关掉 Min/Max/Avg 之后抬头里那三格还露着：" + spans.length);
+  const curs = (row && row._children ? row._children : [])
+    .filter((c) => String(c.className).indexOf("lcur") >= 0);
+  check(curs.length === 1 && curs[0].style.display !== "none",
+    "只关了测量，光标值也跟着没了");
+
+  // 色块点出来的那个菜单：真的有可选的颜色，点了真的换。
+  const anchor = (row && row._children ? row._children : [])
+    .filter((c) => String(c.className).indexOf("swatch") >= 0)[0];
+  check(!!anchor, "抬头里没有色块（点不了颜色菜单）");
+  if (anchor) {
+    api.openColorMenu(comp, name, anchor);
+    const menu = (dom.body._children || [])
+      .filter((c) => String(c.className).indexOf("popmenu") >= 0)[0];
+    check(!!menu, "点色块没有弹出颜色菜单");
+    if (menu) {
+      const shelf = (menu._children || [])
+        .filter((c) => String(c.className).indexOf("popshelf") >= 0)[0];
+      const spots = (shelf && shelf._children ? shelf._children : [])
+        .filter((c) => String(c.className).indexOf("popswatch") >= 0);
+      check(spots.length >= 8, "颜色菜单里的可选颜色太少：" + spots.length);
+      const target = spots[spots.length - 1];
+      const wanted = String(target.style.background);
+      target.click();
+      check(api.channelColor(name, comp) === wanted,
+        "点了菜单里的颜色却没换：" + api.channelColor(name, comp) + " != " + wanted);
+      api.closePopMenu();
+      check(dom.body._children.filter(
+        (c) => String(c.className).indexOf("popmenu") >= 0).length === 0,
+        "菜单点了之后没关掉");
+    }
+  }
+
+  // 还原：把这一件组件恢复成没动过的样子。
+  delete comp.config.colors;
+  delete comp.config.palette;
+  delete comp.config.show;
+  api.renderAll();
+  check(api.headFields(comp).measure === true, "还原之后抬头开关没回到默认");
 }
 
 /* --------------------------------------------------------------- DOM checks */

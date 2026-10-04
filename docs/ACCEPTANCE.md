@@ -2502,6 +2502,9 @@ python -m unittest tests.test_i3pro.TestDbcMerge -v   # 并集 / 相同定义 / 
 python -m unittest tests.test_i3pro.TestCanLog -v      # 12 项：并集数字、并集通道数、距离轴、静止日志、固定一份、冲突
 python -m unittest tests.test_i3pro.TestMaths -v       # 含"每条坏定义各报各的缺通道""环仍然是环"
 node tools\smoke_viewer.js out\can.html                # 报告里的每份 DBC 贡献、每条通道的来源
+
+# 工作台里要能看见它们：两个数据目录都要挂（启动.bat 现在同时挂这两个）
+python -m i3pro serve --data i2pro_data --data can_data   # -> 23 个场次（16 个 .ld + 7 个 CAN）
 ```
 
 **实测（2026-10-04）**

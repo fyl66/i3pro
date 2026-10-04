@@ -15,19 +15,27 @@ chcp 65001 >nul 2>nul
 
 set "DATA_DIR=%~dp0i2pro_data"
 if not exist "%DATA_DIR%" set "DATA_DIR=%~dp0."
+rem CAN raw-frame logs live in their own folder; pass both so those sessions show
+rem up in the sidebar too (serve --data can be repeated).
+set "CAN_DIR=%~dp0can_data"
 
 echo.
 echo  ==============================================================
 echo    i3pro  -  MoTeC .ld data workbench
 echo  ==============================================================
 echo    data folder : %DATA_DIR%
+if exist "%CAN_DIR%" echo    can  folder : %CAN_DIR%
 echo.
 echo    Keep this window open while you work.
 echo    Press Ctrl-C or close the window when you are done.
 echo  ==============================================================
 echo.
 
-call "%~dp0i3pro.cmd" serve --data "%DATA_DIR%" --host 0.0.0.0 --open
+if exist "%CAN_DIR%" (
+  call "%~dp0i3pro.cmd" serve --data "%DATA_DIR%" --data "%CAN_DIR%" --host 0.0.0.0 --open
+) else (
+  call "%~dp0i3pro.cmd" serve --data "%DATA_DIR%" --host 0.0.0.0 --open
+)
 set "RC=%ERRORLEVEL%"
 
 if not "%RC%"=="0" (

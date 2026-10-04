@@ -57,6 +57,10 @@
   button:hover { border-color:var(--accent); }
   button.on { background:#1d3b52; border-color:var(--accent); }
   button:disabled { opacity:.4; cursor:default; }
+  button.danger { background:#4a1f26; border-color:#a04452; color:#ffd9dd; }
+  #sheetManage button { padding:3px 7px; font-size:11px; }
+  #wsAsk input { flex:1 1 90px; min-width:80px; background:var(--panel2); color:var(--fg);
+                 border:1px solid var(--line); border-radius:5px; padding:3px 7px; font-size:12px; }
   .row { display:flex; gap:5px; flex-wrap:wrap; margin-bottom:6px; align-items:center; }
   .chk { display:flex; align-items:center; gap:4px; font-size:11px; color:var(--muted);
          border:1px solid var(--line); border-radius:5px; padding:3px 7px; cursor:pointer; }
@@ -283,6 +287,23 @@
     <div class="group" id="sheetGroup">
       <h2>工作表 <span class="count" id="sheetName"></span></h2>
       <div class="row" id="presetRow"></div>
+      <!-- 这一排管的是"这一套本身"（ticket #33）；上面那排管"切到哪一套"。 -->
+      <div class="row" id="sheetManage">
+        <button id="wsSave" title="把当前这一屏写回正在用的工作表文件">保存</button>
+        <button id="wsSaveAs" title="把当前这一屏存成新的一套（同名自动加后缀，不覆盖）">另存为</button>
+        <button id="wsNew" title="新建一套只放一张图的工作表">新建</button>
+        <button id="wsRename" title="改名（文件名跟着变，旧文件删掉）">重命名</button>
+        <button id="wsDelete" title="删掉这一套（要点两次）">删除</button>
+        <button id="wsExport" title="导出一份 .json 发给队友">导出</button>
+        <button id="wsImport" title="导入队友发来的一份 .json">导入</button>
+      </div>
+      <div class="row" id="wsAsk" style="display:none">
+        <span class="hint" id="wsAskLabel" style="margin:0"></span>
+        <input id="wsAskInput" type="text" spellcheck="false" placeholder="工作表名称">
+        <button id="wsAskOk">确定</button>
+        <button id="wsAskCancel">取消</button>
+      </div>
+      <input type="file" id="wsFile" accept=".json,application/json" style="display:none">
       <div class="hint warn" id="sheetNote"></div>
       <div class="row">
         <select id="addType" title="选择要添加的组件"></select>
@@ -1285,6 +1306,14 @@ function makeComponent(type, overrides) {
 
 let worksheetCatalogueCache = null;
 
+/** 让下一次 worksheetCatalogue() 重新读 DATA.worksheets。
+ *
+ * 改名 / 删除 / 另存为之后必须调它：那一排按钮是这份缓存的投影，缓存不清，
+ * "文件变了但按钮没变"就会静默发生（ticket #33）。 */
+function resetWorksheetCache() {
+  worksheetCatalogueCache = null;
+}
+
 /** 一份 worksheets/*.json 都没读到时的兜底工作表。
  *
  * 旧快照、目录被删干净、打包时漏了文件——这三种情况都会让顶上那排按钮空掉。
@@ -1377,6 +1406,9 @@ function applyPicks(comp, pick, hints) {
       : (now !== null && now !== undefined && now !== "");
     if (filled) continue;
     comp.config[key] = resolvePickValue(pick[key], hints);
+    // 记下"这个键是规则填的，不是用户写的"。保存回文件时不把本场次的通道名写死
+    // ——写死了换一个场次这张图就空着，那是 i2 Pro 用别名解决的问题（#33/#36）。
+    (comp.picked || (comp.picked = [])).push(key);
   }
 }
 
@@ -1387,6 +1419,8 @@ function componentsOfWorksheet(sheet) {
       x: raw.x, y: raw.y, w: raw.w, h: raw.h, config: raw.config,
     });
     applyPicks(comp, raw.pick, sheet.hints || []);
+    // 文件里"怎么挑通道"那条规则跟着组件走，保存时原样写回去（ticket #33）。
+    if (raw.pick) comp.pick = JSON.parse(JSON.stringify(raw.pick));
     return comp;
   });
 }
@@ -6648,6 +6682,299 @@ function applyPreset(name) {
   renderAll();
 }
 
+/* ---------------------------------------- 工作表的增删改与进出（ticket #33）
+ * 上面那排按钮决定"用哪一套"，这一排决定"这一套本身"：保存 / 另存为 / 新建 /
+ * 重命名 / 删除 / 导出 / 导入。改动直接落到仓库里的 worksheets/*.json。
+ *
+ * 快照是离线 HTML，没有服务端可写，所以那几个按钮**不置灰**：点了要说清
+ * "改用 serve 模式"（置灰的按钮什么也不说，用户只能猜）。
+ *
+ * 写回文件的是**这一屏的形状**：类型 / 位置 / 尺寸 / 各组件自己的配置，外加文件里
+ * 那条 pick。pick 填出来的通道名（本场次才有的那些）不写回去——写死了换场次就空图，
+ * 那是 #34 / #36 要正式解决的事，这一票先不制造那个坑。 */
+let wsAskOnOk = null;
+let wsDeleteArmedAt = 0;
+let wsDeleteTimer = null;
+
+function sheetWritable() { return !!(DATA && DATA.api); }
+
+function sheetRefuse(what) {
+  toast("快照模式不能" + what + "工作表：这是离线 HTML，改了也带不走。"
+    + "双击 启动.bat 用 serve 模式打开再改。");
+}
+
+/** 现在用的是哪一份文件；"自定义"（URL 带来的那一屏）没有文件，返回 null。 */
+function currentSheet() {
+  const sheets = worksheetCatalogue().sheets;
+  for (const sheet of sheets) if (sheet.name === state.preset) return sheet;
+  return null;
+}
+
+/** 一个组件写回文件时长什么样：picked 里的键（规则填的通道名）不写。 */
+function sheetComponent(comp) {
+  const picked = comp.picked || [];
+  const config = {};
+  for (const key of Object.keys(comp.config || {})) {
+    if (picked.indexOf(key) >= 0) continue;
+    if (comp.config[key] === undefined || comp.config[key] === null) continue;
+    config[key] = comp.config[key];
+  }
+  const out = { type: comp.type };
+  for (const key of ["x", "y", "w", "h"]) {
+    if (typeof comp[key] === "number") out[key] = comp[key];
+  }
+  if (Object.keys(config).length) out.config = config;
+  if (comp.pick) out.pick = comp.pick;
+  return out;
+}
+
+function currentSheetBody() {
+  return state.components.map(sheetComponent);
+}
+
+/** 服务端回的那份目录快照 -> 页面状态。改动之后那排按钮要立刻跟着变。 */
+function applySheetState(data) {
+  DATA.worksheets = data.worksheets || [];
+  DATA.worksheet_problems = data.worksheet_problems || [];
+  resetWorksheetCache();
+  renderPresetButtons();
+}
+
+async function sheetRequest(path, method, body) {
+  const options = { method: method };
+  if (body !== undefined) {
+    options.headers = { "Content-Type": "application/json" };
+    options.body = JSON.stringify(body);
+  }
+  const res = await fetch(DATA.api + "/worksheets" + path, options);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+  return data;
+}
+
+function askSheetName(label, initial, onOk) {
+  wsAskOnOk = onOk;
+  $("wsAskLabel").textContent = label;
+  $("wsAskInput").value = initial || "";
+  $("wsAsk").style.display = "";
+  $("wsAskInput").focus();
+  $("wsAskInput").select();
+}
+
+function hideSheetAsk() {
+  wsAskOnOk = null;
+  const row = $("wsAsk");
+  if (row) row.style.display = "none";
+}
+
+function submitSheetAsk() {
+  const value = ($("wsAskInput").value || "").trim();
+  if (!value) { toast("名字不能是空的：写一个名字再点确定"); return; }
+  const handler = wsAskOnOk;
+  hideSheetAsk();
+  if (handler) handler(value);
+}
+
+/** 保存：把这一屏写回**正在用的那份文件**（名字与排序不动）。 */
+async function saveCurrentSheet() {
+  if (!sheetWritable()) { sheetRefuse("保存"); return; }
+  const sheet = currentSheet();
+  if (!sheet) {
+    toast("这一屏还没归到哪一套工作表里（URL 带来的排布）；先「另存为」起个名字");
+    askSheetName("另存为", "", saveSheetAs);
+    return;
+  }
+  try {
+    const data = await sheetRequest("/" + encodeURIComponent(sheet.id), "PUT",
+                                    { components: currentSheetBody() });
+    applySheetState(data);
+    state.preset = data.worksheet.name;
+    saveLayout();
+    renderPresetButtons();
+    toast("已保存到 " + data.worksheet.id + ".json（" + data.worksheet.components.length + " 个组件）");
+  } catch (err) {
+    toast("保存工作表失败：" + err.message);
+  }
+}
+
+/** 另存为：同样的内容，新的一份文件。同名不覆盖——服务端会加后缀。 */
+async function saveSheetAs(name) {
+  try {
+    const data = await sheetRequest("", "POST",
+      { sheet: { name: name, components: currentSheetBody() } });
+    applySheetState(data);
+    state.preset = data.worksheet.name;
+    saveLayout();
+    renderPresetButtons();
+    if (data.worksheet.name !== name) {
+      toast("「" + name + "」已经有了，存成了「" + data.worksheet.name + "」"
+        + "（" + data.worksheet.id + ".json）");
+    } else {
+      toast("已存成新的一套「" + data.worksheet.name + "」（" + data.worksheet.id + ".json）");
+    }
+  } catch (err) {
+    toast("另存为失败：" + err.message);
+  }
+}
+
+/** 新建：一屏只放一张图（通道照提示词挑），再切过去改。 */
+async function newSheet(name) {
+  const blank = [{ type: "graph", x: 0, y: 0, w: 12, h: 10,
+                   pick: { channels: { limit: 8 } } }];
+  try {
+    const data = await sheetRequest("", "POST",
+                                    { sheet: { name: name, components: blank } });
+    applySheetState(data);
+    applyPreset(data.worksheet.name);
+    toast("已新建「" + data.worksheet.name + "」（" + data.worksheet.id + ".json）");
+  } catch (err) {
+    toast("新建工作表失败：" + err.message);
+  }
+}
+
+async function renameCurrentSheet(name) {
+  const sheet = currentSheet();
+  if (!sheet) { toast("这一屏是「自定义」排布，没有文件可改名；先「另存为」存一份"); return; }
+  try {
+    const data = await sheetRequest("/" + encodeURIComponent(sheet.id) + "/rename",
+                                    "POST", { name: name });
+    applySheetState(data);
+    state.preset = data.worksheet.name;
+    saveLayout();
+    renderPresetButtons();
+    toast("已改名为「" + data.worksheet.name + "」（文件 " + data.worksheet.id + ".json）");
+  } catch (err) {
+    toast("重命名失败：" + err.message);
+  }
+}
+
+/** 删除要点两次：第一次把按钮变成"确定删除？"，第二次才真删。 */
+function requestDeleteSheet() {
+  if (!sheetWritable()) { sheetRefuse("删除"); return; }
+  const sheet = currentSheet();
+  if (!sheet) { toast("这一屏还没归到哪一套工作表里，没有文件可删"); return; }
+  const btn = $("wsDelete");
+  const armed = Date.now() - wsDeleteArmedAt < 4000;
+  if (!armed) {
+    wsDeleteArmedAt = Date.now();
+    btn.textContent = "确定删除？";
+    btn.classList.add("danger");
+    clearTimeout(wsDeleteTimer);
+    wsDeleteTimer = setTimeout(disarmDeleteSheet, 4000);
+    return;
+  }
+  disarmDeleteSheet();
+  deleteCurrentSheet(sheet);
+}
+
+function disarmDeleteSheet() {
+  clearTimeout(wsDeleteTimer);
+  wsDeleteArmedAt = 0;
+  const btn = $("wsDelete");
+  if (btn) { btn.textContent = "删除"; btn.classList.remove("danger"); }
+}
+
+async function deleteCurrentSheet(sheet) {
+  try {
+    const data = await sheetRequest("/" + encodeURIComponent(sheet.id), "DELETE");
+    const wasCurrent = state.preset === sheet.name;
+    applySheetState(data);
+    if (!wasCurrent) { toast("已删除「" + sheet.name + "」"); return; }
+    const fallback = data.fallback || "默认";
+    applyPreset(fallback);
+    toast(data.fallback
+      ? "已删除「" + sheet.name + "」，现在切到「" + data.fallback + "」"
+      : "已删除「" + sheet.name + "」——worksheets/ 里一套都不剩了，先用兜底的「默认」");
+  } catch (err) {
+    toast("删除失败：" + err.message);
+  }
+}
+
+function requestImportSheet() {
+  if (!sheetWritable()) { sheetRefuse("导入"); return; }
+  $("wsFile").click();
+}
+
+async function importSheetFile(file) {
+  if (!file) return;
+  try {
+    const data = await sheetRequest("", "POST", { text: await file.text() });
+    applySheetState(data);
+    applyPreset(data.worksheet.name);
+    toast("已导入「" + data.worksheet.name + "」（" + data.worksheet.id + ".json）");
+  } catch (err) {
+    toast("导入失败：" + err.message);
+  } finally {
+    $("wsFile").value = "";
+  }
+}
+
+/** 导出：serve 走服务端（文件名就是那份文件的名字），快照按内嵌的那份现造一个。 */
+function sheetExportPayload(sheet) {
+  return {
+    schema: 1, name: sheet.name, order: sheet.order, hints: sheet.hints || [],
+    components: sheet.components || [],
+  };
+}
+
+function exportCurrentSheet() {
+  const sheet = currentSheet();
+  if (!sheet) { toast("这一屏是「自定义」排布，不是文件里的某一套；先「另存为」再导出"); return; }
+  if (DATA.api) {
+    location.href = DATA.api + "/worksheets/" + encodeURIComponent(sheet.id) + "/export";
+    return;
+  }
+  const payload = sheetExportPayload(sheet);
+  try {
+    const blob = new Blob([JSON.stringify(payload, null, 2) + "\n"],
+                          { type: "application/json" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = sheet.id + ".json";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    toast("已导出 " + sheet.id + ".json");
+  } catch (err) {
+    toast("这个浏览器不让直接下载工作表：" + err.message);
+  }
+}
+
+function wireSheetManage() {
+  $("wsSave").addEventListener("click", () => {
+    if (!sheetWritable()) { sheetRefuse("保存"); return; }
+    saveCurrentSheet();
+  });
+  $("wsSaveAs").addEventListener("click", () => {
+    if (!sheetWritable()) { sheetRefuse("另存为"); return; }
+    const sheet = currentSheet();
+    askSheetName("另存为", (sheet ? sheet.name + " 副本" : ""), saveSheetAs);
+  });
+  $("wsNew").addEventListener("click", () => {
+    if (!sheetWritable()) { sheetRefuse("新建"); return; }
+    askSheetName("新建", "工作表 " + (worksheetCatalogue().sheets.length + 1), newSheet);
+  });
+  $("wsRename").addEventListener("click", () => {
+    if (!sheetWritable()) { sheetRefuse("重命名"); return; }
+    const sheet = currentSheet();
+    askSheetName("重命名", sheet ? sheet.name : "", renameCurrentSheet);
+  });
+  $("wsDelete").addEventListener("click", requestDeleteSheet);
+  $("wsExport").addEventListener("click", exportCurrentSheet);
+  $("wsImport").addEventListener("click", requestImportSheet);
+  $("wsFile").addEventListener("change", (event) => {
+    const file = event.target.files && event.target.files[0];
+    importSheetFile(file);
+  });
+  $("wsAskOk").addEventListener("click", submitSheetAsk);
+  $("wsAskCancel").addEventListener("click", hideSheetAsk);
+  $("wsAskInput").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); submitSheetAsk(); }
+    if (event.key === "Escape") { event.preventDefault(); hideSheetAsk(); }
+  });
+}
+
 function renderAddTypeOptions() {
   const sel = $("addType");
   if (!sel) return;
@@ -6776,6 +7103,7 @@ function init() {
   renderChannelList();
   syncScatterSelectors();
   renderPresetButtons();
+  wireSheetManage();
   renderAddTypeOptions();
   attachInteractions();
 
@@ -6953,8 +7281,15 @@ window.i3pro = {
   componentTypeWithHotkey: componentTypeWithHotkey,
   worksheets: presetDefinitions,
   worksheetCatalogue: worksheetCatalogue,
-  resetWorksheetCache: () => { worksheetCatalogueCache = null; },
+  resetWorksheetCache: resetWorksheetCache,
   componentsOfWorksheet: componentsOfWorksheet,
+  currentSheet: currentSheet, sheetComponent: sheetComponent,
+  applySheetState: applySheetState, sheetWritable: sheetWritable,
+  sheetExportPayload: sheetExportPayload,
+  saveCurrentSheet: saveCurrentSheet, saveSheetAs: saveSheetAs, newSheet: newSheet,
+  renameCurrentSheet: renameCurrentSheet, deleteCurrentSheet: deleteCurrentSheet,
+  exportCurrentSheet: exportCurrentSheet, importSheetFile: importSheetFile,
+  askSheetName: askSheetName, submitSheetAsk: submitSheetAsk, hideSheetAsk: hideSheetAsk,
   resolvePickValue: resolvePickValue,
   renderWorksheetNote: renderWorksheetNote,
   encodeComponentConfig: encodeComponentConfig,

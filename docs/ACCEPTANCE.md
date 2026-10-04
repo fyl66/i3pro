@@ -2775,6 +2775,58 @@ python tools\verify_clicks.py                                    # 95 项检查�
 tolerance`；两份金标准快照各 `PASS`（7 圈 / 26 圈）；真浏览器 **95 项检查：95 通过，
 0 失败**。
 
+## A58 · 工作表增删改与进出（ticket #33）
+
+到 A57 为止，`worksheets/*.json` 只能靠手写；工作台上那排按钮只做"切到哪一套"。
+这一票补上"这一套本身"：**保存 / 另存为 / 新建 / 重命名 / 删除 / 导出 / 导入**，
+改完立刻落到仓库里的文件。快照（离线 HTML）只有"看与切"，点了会说改用 serve 模式。
+
+```powershell
+# 1) 单测：文件层的全部规矩（16 条）
+python -m unittest tests.test_i3pro.TestWorksheetEditing tests.test_i3pro.TestWorksheetEditingOverHttp -v
+
+# 2) 真浏览器：真鼠标点那 7 个按钮、真键盘打名字，每一步回到磁盘核对
+python tools\verify_clicks.py     # 127 项检查：127 通过，0 失败（其中 #33 有 32 条）
+
+# 3) 无头：写回文件的形状（pick 不许被写死）+ 快照里点按钮只提示不发请求
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
+```
+
+**通过判据**（`TestWorksheetEditing` + `TestWorksheetEditingOverHttp` **16 项** ＋
+真浏览器 32 条 ＋ 无头 12 条）：
+
+| 断言 | 说明 |
+| --- | --- |
+| 新建 / 另存为**真的多了文件** | 点完 `worksheets/` 里立刻多一个 `.json`，新那一套同时出现在按钮上（实测 `codex-probe.json`） |
+| 同名另存为加后缀、不覆盖 | 再来一次同名 → `sheet-2.json` + 显示名 `… 2`；**旧文件字节一个都没变**（实测两次 `read_bytes()` 相等） |
+| 保存只改那一份 | 真点组件 ✕ 去掉一个组件再点保存 → 文件里的组件数 6 → 5；**名字 / `order` / `hints` 留在文件里不动** |
+| **`pick` 填出来的通道名不写回文件** | 写回的图组件是 `{"type":"graph","config":{"mode":"tiled"},"pick":{...}}`——没有 `config.channels`。写死了换场次就空图（i2 Pro 用别名解决，见 #36） |
+| 改名会让**文件名**跟着变 | `codex-probe-2.json` → `codex-renamed.json`，旧文件删掉，按钮上也是新名字；目标名已被占用时报错，两份都不动 |
+| 删除要先确认、删完说清去处 | 第一次点变成「确定删除？」；第二次才删。删的是正在用的那套时自动切到第一套：实测提示"已删除「codex-renamed 2」，现在切到「分析」" |
+| 导出一份 = 一个文件 | 真点「导出」→ 下载目录里出现 `codex-renamed.json`；**字节与服务端那份文件完全相同**（`raw == (dir/"renamed.json").read_bytes()`） |
+| 导入队友那份立刻可用 | 把导出的文件塞回文件选择器 → 多一套 `codex-renamed 2`（同名加后缀），**本地那份不动**；坏文件报"第 N 行第 M 列"并提示让队友点「导出」 |
+| 快照只读 | 无头里逐个点那 7 个按钮：每个都提示"改用 serve 模式"，而且**一个请求都不发**（`/worksheets` 的调用数不变） |
+| 身份不能出目录 | `/api/worksheets/..%2F..%2Fevil`、带空格的 id、Windows 保留名（`con`）一律 400；写文件走 `.json.part` → 改名，断电不留半份 |
+| **没碰车队仓库** | 整条真浏览器流程跑在 `out\_verify_data_<端口>\_worksheets_root` 的副本上，跑完仓库里 `worksheets/` 每个文件的内容哈希逐一对得上 |
+
+**这一票撞出来的两个真问题**
+
+1. **清缓存不是函数。** `resetWorksheetCache` 只作为 `window.i3pro` 的一个属性存在，
+   而 `applySheetState()` 里直接调用了这个名字——`ReferenceError` 被 `try/catch`
+   吞进 toast 里，表现出来就是"文件真的建了、按钮一动不动"。第一次真浏览器跑就是
+   这么红的（`#33 新那一套立刻上了按钮 — ['分析', …]`）。现在它是一个真正的函数，
+   注册表里只做别名。
+2. **`--worksheets` 只接了一半。** `server.session_page()` 忘了把
+   `library.worksheets_root` 传给 `render.build_payload`，于是页面顶上那排按钮读的是
+   **仓库根目录**、`/api/worksheets` 读的是 `--worksheets` 指的那个目录。真浏览器
+   验收要跑在副本上，这条不修就等于"接口读 A、页面画 B"。判据是
+   `TestWorksheetEditingOverHttp.test_页面载荷里的工作表按钮跟着文件走`。
+
+**回归四项（本机实测）**：`Ran 393 tests` + `OK`；`verify_ld_vs_csv` `PASS - 0
+channel(s) outside tolerance`；两份金标准快照各 `PASS`（7 圈 / 471 通道行、
+26 圈 / 377 通道行）；真浏览器 **127 项检查：127 通过，0 失败**；
+`smoke_viewer.js` 里的 `check(` 共 **512** 条。
+
 **顺带**：`.txt` / `.tsv` 被加进场次库的发现范围（不加就等于导进来也看不见），
 `.gitignore` 补了 `*.tsv`（`*.txt` 不加——`request/*.txt` 是**要进仓库**的需求文档，
 全局忽略会让它们看起来像没被跟踪）。

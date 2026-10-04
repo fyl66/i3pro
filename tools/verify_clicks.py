@@ -23,6 +23,7 @@ dispatchKeyEvent（真命中测试、真焦点、真键盘），跑在**金标�
 import argparse
 import base64
 import glob
+import hashlib
 import http.client
 import json
 import math
@@ -353,14 +354,47 @@ def stage_session(session, work_dir):
     return copied > 0
 
 
-def start_server(work_dir, port):
+def stage_worksheets(work_dir):
+    """把仓库里的 worksheets/ 复制一份当"仓库根"，返回那个根。
+
+    ticket #33 的验收会真的新建 / 改名 / 删除工作表文件，所以服务必须指向副本——
+    和 `.ld` 那条理由一样：随便点都不该碰到车队仓库里的文件。
+    """
+    root = os.path.join(work_dir, "_worksheets_root")
+    target = os.path.join(root, "worksheets")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(target)
+    source = os.path.join(ROOT, "worksheets")
+    for name in sorted(os.listdir(source)):
+        if name.endswith(".json"):
+            shutil.copy2(os.path.join(source, name), os.path.join(target, name))
+    return root
+
+
+def _tree(directory):
+    """目录里每个文件的内容哈希；用来判"这一趟有没有动到不该动的文件"。"""
+    out = {}
+    if not os.path.isdir(directory):
+        return out
+    for name in sorted(os.listdir(directory)):
+        path = os.path.join(directory, name)
+        if os.path.isfile(path):
+            with open(path, "rb") as handle:
+                out[name] = hashlib.sha1(handle.read()).hexdigest()
+    return out
+
+
+def start_server(work_dir, port, worksheets_root=None):
     env = dict(os.environ)
     env["PYTHONPATH"] = os.path.join(ROOT, "src") + os.pathsep + env.get("PYTHONPATH", "")
     env["PYTHONIOENCODING"] = "utf-8"
     log = open(os.path.join(ROOT, "out", "_verify_serve.log"), "w", encoding="utf-8")
+    argv = [sys.executable, "-m", "i3pro", "serve", "--data", work_dir,
+            "--host", "127.0.0.1", "--port", str(port)]
+    if worksheets_root:
+        argv += ["--worksheets", worksheets_root]
     proc = subprocess.Popen(
-        [sys.executable, "-m", "i3pro", "serve", "--data", work_dir,
-         "--host", "127.0.0.1", "--port", str(port)],
+        argv,
         cwd=ROOT, env=env, stdout=log, stderr=log,
     )
     for _ in range(300):
@@ -1166,6 +1200,222 @@ class Checker:
                    back["preset"] == names[0] and back["comps"] == first["comps"],
                    "%s vs %s" % (back, first))
 
+    def worksheet_editing(self, work_dir):
+        """ticket #33：工作表的增删改与进出——**真鼠标点、真键盘打字**。
+
+        为什么非要这一关：这一票的判据全在"仓库里那个文件变没变"上，而假 DOM 里
+        既没有服务端也没有文件系统。所以每一步都回到磁盘核对：新建多了一个文件、
+        保存把改动落进那份文件、改名换了文件名、同名那次旧文件一个字节没动、
+        导入多出一套、删除之后文件不见了、导出的 JSON 落在下载目录里。
+        跑完再确认**车队仓库里的 worksheets/ 一个字节没动**（服务跑的是副本）。
+        """
+        root = os.path.join(work_dir, "_worksheets_root", "worksheets")
+        repo_dir = os.path.join(ROOT, "worksheets")
+        repo_before = _tree(repo_dir)
+
+        def files():
+            return sorted(n for n in os.listdir(root) if n.endswith(".json"))
+
+        def read(name):
+            with open(os.path.join(root, name), encoding="utf-8") as handle:
+                return json.load(handle)
+
+        def buttons():
+            return json.loads(self.js(
+                "JSON.stringify(Array.prototype.map.call("
+                "document.querySelectorAll('#presetRow button'),"
+                "function(b){return b.textContent;}))"))
+
+        def center(element_id):
+            raw = self.js(
+                "(function(){var el=document.getElementById(%r);"
+                "return el?JSON.stringify(__center(el)):null;})()" % element_id)
+            return json.loads(raw) if raw and raw != "null" else None
+
+        def click(element_id, label):
+            box = center(element_id)
+            self.check("#33 「%s」在页面上点得到" % label,
+                       bool(box) and box["w"] > 0, box)
+            if not box:
+                return False
+            self.browser.click(box["x"], box["y"], self.session)
+            time.sleep(0.7)
+            return True
+
+        def type_name(text):
+            """真键盘打一个名字：先聚焦、全选，再敲字、回车。"""
+            self.js("(function(){var i=document.getElementById('wsAskInput');"
+                    "i.focus();i.select();return true;})()")
+            self.browser.key(text, self.session)
+            self.browser.key_named("Enter", "Enter", 13, self.session)
+
+        def wait_file(name, want=True, timeout=20):
+            for _ in range(int(timeout / 0.2)):
+                if (name in files()) == want:
+                    return True
+                time.sleep(0.2)
+            return False
+
+        self.check("#33 服务读的是副本目录（车队仓库里的 worksheets/ 不能是它）",
+                   os.path.isdir(root) and sorted(os.listdir(root)) != [], root)
+        self.check("#33 副本里起始就是仓库里那几套工作表", len(files()) == 7, files())
+        self.check("#33 工作表那一栏多了一排管理按钮",
+                   self.js("document.querySelectorAll('#sheetManage button').length") == 7,
+                   self.js("document.querySelectorAll('#sheetManage button').length"))
+
+        # ---------------------------------------------------------- 另存为
+        if not click("wsSaveAs", "另存为"):
+            return
+        self.check("#33 点「另存为」弹出名字输入框",
+                   self.js("document.getElementById('wsAsk').style.display !== 'none'"))
+        type_name("codex-probe")
+        landed = wait_file("codex-probe.json")
+        self.check("#33 另存为之后 worksheets/ 里真的多了一个文件", landed, files())
+        self.check("#33 新那一套立刻上了按钮", "codex-probe" in buttons(), buttons())
+        if not landed:
+            return
+        saved = read("codex-probe.json")
+        graphs = [c for c in saved.get("components", []) if c.get("type") == "graph"]
+        self.check("#33 写回文件的图没有把本场次的通道名写死（pick 还在）",
+                   bool(graphs) and all(not (c.get("config") or {}).get("channels")
+                                        for c in graphs)
+                   and all("pick" in c for c in graphs),
+                   json.dumps(graphs, ensure_ascii=False)[:200])
+
+        # ------------------------------------------------------------ 保存
+        page_before = self.js("i3pro.state.components.length")
+        raw = self.js(
+            "(function(){var cs=document.querySelectorAll('#worksheet .comp');"
+            "if(!cs.length)return null;var el=cs[cs.length-1];"
+            "var bs=el.querySelectorAll('.compbar button');"
+            "for(var i=0;i<bs.length;i++){if(bs[i].textContent==='✕')"
+            "return JSON.stringify(__center(bs[i]));}return null;})()")
+        box = json.loads(raw) if raw and raw != "null" else None
+        self.check("#33 页面上找得到组件的 ✕", bool(box) and box.get("w", 0) > 0, box)
+        if not box:
+            return
+        self.browser.click(box["x"], box["y"], self.session)
+        time.sleep(0.8)
+        self.check("#33 真点 ✕ 之后页面上少了一个组件",
+                   self.js("i3pro.state.components.length") == page_before - 1,
+                   "%s -> %s" % (page_before, self.js("i3pro.state.components.length")))
+        click("wsSave", "保存")
+        time.sleep(0.5)
+        after = len(read("codex-probe.json")["components"])
+        self.check("#33 点「保存」之后文件里的组件数跟着变了（真的落盘）",
+                   after == len(saved["components"]) - 1,
+                   "%s -> %s" % (len(saved["components"]), after))
+        self.check("#33 保存之后那一套还在按钮上（没有变成没名字的「自定义」）",
+                   self.js("i3pro.state.preset") == "codex-probe",
+                   self.js("i3pro.state.preset"))
+
+        # ------------------------------------------- 同名另存为：加后缀不覆盖
+        before_bytes = open(os.path.join(root, "codex-probe.json"), "rb").read()
+        if not click("wsSaveAs", "另存为（第二次）"):
+            return
+        type_name("codex-probe")
+        second = wait_file("codex-probe-2.json")
+        self.check("#33 同名另存为自动加后缀，两份都在", second, files())
+        self.check("#33 同名另存为没有动旧的那一份",
+                   open(os.path.join(root, "codex-probe.json"), "rb").read() == before_bytes)
+        self.check("#33 按钮上两份分得清（后缀也加在显示名上）",
+                   "codex-probe 2" in buttons(), buttons())
+
+        # ---------------------------------------------------------- 重命名
+        if not click("wsRename", "重命名"):
+            return
+        type_name("codex-renamed")
+        renamed = wait_file("codex-renamed.json") and wait_file("codex-probe-2.json", False)
+        self.check("#33 重命名之后文件名跟着变了、旧文件删掉了", renamed, files())
+        if not renamed:
+            return
+        self.check("#33 改名之后按钮上也是新名字",
+                   "codex-renamed" in buttons() and "codex-probe 2" not in buttons(),
+                   buttons())
+
+        # ------------------------------------------------------------ 导出
+        download_dir = os.path.join(work_dir, "_downloads")
+        shutil.rmtree(download_dir, ignore_errors=True)
+        os.makedirs(download_dir)
+        self.browser.call("Browser.setDownloadBehavior",
+                          {"behavior": "allow", "downloadPath": download_dir})
+        if not click("wsExport", "导出"):
+            return
+        landed_files = []
+        for _ in range(50):
+            landed_files = [n for n in os.listdir(download_dir)
+                            if n.endswith(".json") and not n.endswith(".crdownload")]
+            if landed_files:
+                break
+            time.sleep(0.2)
+        self.check("#33 导出的工作表真的落在下载目录里", bool(landed_files), landed_files)
+        if landed_files:
+            path = os.path.join(download_dir, landed_files[0])
+            with open(path, encoding="utf-8") as handle:
+                exported = json.load(handle)
+            self.check("#33 导出的那份就是文件里那一份（名字与组件都在）",
+                       exported.get("name") == "codex-renamed" and exported.get("components"),
+                       json.dumps(exported, ensure_ascii=False)[:120])
+            with open(path, "rb") as handle:
+                blob = base64.b64encode(handle.read()).decode("ascii")
+        else:
+            blob = ""
+
+        # ------------------------------------------------------------ 导入
+        if blob:
+            self.js(
+                "(function(){var b=atob('%s'),a=new Uint8Array(b.length);"
+                "for(var i=0;i<b.length;i++)a[i]=b.charCodeAt(i);"
+                "var f=new File([a],'codex-renamed.json',{type:'application/json'});"
+                "var d=new DataTransfer();d.items.add(f);"
+                "var el=document.getElementById('wsFile');el.files=d.files;"
+                "el.dispatchEvent(new Event('change'));return true;})()" % blob)
+            imported = False
+            for _ in range(100):
+                imported = any(n.startswith("codex-renamed-") for n in files())
+                if imported:
+                    break
+                time.sleep(0.2)
+            self.check("#33 导入队友给的那份之后多出一套（同名加后缀）", imported, files())
+            self.check("#33 导入的那套立刻上了按钮",
+                       any(b.startswith("codex-renamed") for b in buttons()), buttons())
+
+        # ------------------------------------------------------------ 删除
+        current = self.js("i3pro.state.preset")
+        if not click("wsDelete", "删除"):
+            return
+        self.check("#33 第一次点「删除」只是变成「确定删除？」（不会一下就没了）",
+                   self.js("document.getElementById('wsDelete').textContent") == "确定删除？",
+                   self.js("document.getElementById('wsDelete').textContent"))
+        click("wsDelete", "确定删除？")
+        self.check("#33 第二次点才真的删掉，而且说清切回哪一套",
+                   "已删除" in self.toast()
+                   and self.js("i3pro.state.preset") != current,
+                   "%s / preset=%s" % (self.toast(), self.js("i3pro.state.preset")))
+        self.check("#33 删掉之后按钮上也没有它了",
+                   current not in buttons(), buttons())
+        self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-worksheets.png"),
+                          self.session)
+
+        # 这一趟跑完，车队仓库里的工作表文件必须一个字节都没动
+        self.check("#33 整条流程没有碰仓库里的 worksheets/", _tree(repo_dir) == repo_before,
+                   sorted(set(_tree(repo_dir)) ^ set(repo_before)))
+        # 收尾：切回第一套、把主图滚回视口里。__center 会 scrollIntoView，而后面
+        # 按坐标点画布的用例（注释 / GPS）用的是 getBoundingClientRect——页面停在
+        # 半中间的话它们会点到别处（第一次跑就是这么红的）。所以这里不光恢复，
+        # 还要**验一下**主图真的又能点：那条红过的用例靠这条才有意义。
+        self.js("(function(){i3pro.state.cursor=null;i3pro.state.view=null;"
+                "i3pro.applyPreset(i3pro.worksheetCatalogue().sheets[0].name);"
+                "document.querySelector('#worksheet .comp')"
+                ".scrollIntoView({block:'start'});return true;})()")
+        time.sleep(1.2)
+        x = self.js("__px((lane()[0]+lane()[1])/2)")
+        y = self.js("__py(60)")
+        self.browser.click(x, y, self.session)
+        self.check("#33 收尾之后主图还行点得到（后面的用例按坐标点画布）",
+                   self.js("i3pro.cursorTime()") is not None, "x=%s y=%s" % (x, y))
+        self.js("(function(){i3pro.state.cursor=null;i3pro.renderAll();return true;})()")
+
     def axis(self):
         """横轴随缩放换档（A36）：读真画布**画出来的**刻度文字。
 
@@ -1809,7 +2059,9 @@ def main(argv=None):
                    "beacons": [{"name": "手工穿越", "time": 120.0}],
                    "trusted": {"手工穿越 1": False}}, handle, ensure_ascii=False)
 
-    server = start_server(work_dir, args.port)
+    # 工作表文件也复制一份出来：这一票的验收会真的新建 / 改名 / 删除它们。
+    worksheets_root = stage_worksheets(work_dir)
+    server = start_server(work_dir, args.port, worksheets_root)
     browser = None
     try:
         # 验收从**干净的浏览器状态**开始：上一次跑留下的工作表存在 localStorage 里
@@ -1845,6 +2097,7 @@ def main(argv=None):
             checker.histogram()
             checker.axis()
             checker.worksheets()
+            checker.worksheet_editing(work_dir)
             checker.notes(work_dir, args.session)
             checker.gps(work_dir, args.session)
             checker.imports("http://127.0.0.1:%d/" % args.port, work_dir)

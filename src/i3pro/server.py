@@ -189,6 +189,10 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                 buckets=int_arg(query, "buckets", buckets),
                 api_base="/api",
                 step=float_arg(query, "step", 1.0),
+                # 页面顶上那排工作表按钮与 /api/worksheets 必须读**同一个目录**：
+                # --worksheets 指到别处时（快照打包、真浏览器验收的副本），
+                # 少了这一行就会"接口读 A、页面画 B"。
+                worksheets_dir=library.worksheets_root,
             )
             payload["session"] = name
             # 撤销的上一版只在这个进程的内存里，页面自己算不出来，只能由服务告诉它

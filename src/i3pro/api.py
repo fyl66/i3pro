@@ -44,6 +44,7 @@ from . import (
     spectrum as spectrummod,
     timebase,
     txtlog,
+    worksheets as worksheetsmod,
 )
 from .library import dumps
 
@@ -254,6 +255,8 @@ class _Call:
             return self._error(404, "no such api path")
         if parts[0] == "sessions":
             return self._json(self.library.listing())
+        if parts[0] == "worksheets":
+            return self.route_worksheets(parts[1:], query, method)
         if parts[0] == "maths":
             # /api/maths/functions —— 表达式编辑器要的函数表
             if len(parts) >= 2 and parts[1] == "functions":
@@ -296,6 +299,133 @@ class _Call:
                 404, f"没有 {action!r} 这个导入动作。这一版认得的是：{known}。"
             )
         return getattr(self, handler)(query, method)
+
+    # ----------------------------------------------------------- 工作表文件
+    def route_worksheets(self, parts: list[str], query: dict, method: str) -> Response:
+        """``/api/worksheets``：工作表的增删改与进出（ticket #33）。
+
+        **故意不挂在 ``/session/<名>/`` 下面**：工作表是仓库里的文件、跨场次复用，
+        "这套工作表是哪个场次的"本来就不是一个概念。
+
+        ``GET /api/worksheets``            列出全部（与页面载荷同一形状）
+        ``POST /api/worksheets``           新建 / 另存为 / 导入一份（永不覆盖）
+        ``GET /api/worksheets/<身份>``     读一份
+        ``PUT /api/worksheets/<身份>``     保存（换掉组件，名字与排序不动）
+        ``POST /api/worksheets/<身份>/rename``  改名（文件名跟着变）
+        ``DELETE /api/worksheets/<身份>``  删除
+        ``GET /api/worksheets/<身份>/export``  下载一份 JSON（发给队友）
+        """
+        directory = worksheetsmod.worksheets_dir(self.library.worksheets_root)
+        if not parts:
+            if method == "POST":
+                return self.create_worksheet(directory)
+            return self._json(self.worksheets_state(directory))
+        stem = worksheetsmod.check_stem(parts[0])
+        if len(parts) > 1:
+            if parts[1] == "export":
+                return self.export_worksheet(directory, stem)
+            if parts[1] == "rename":
+                return self.rename_worksheet(directory, stem)
+            return self._error(
+                404, f"工作表没有 {parts[1]!r} 这个子动作；这一版只有 export 与 rename。"
+            )
+        if method == "GET":
+            return self._json(worksheetsmod.read_sheet(directory, stem))
+        if method == "PUT":
+            return self.save_worksheet(directory, stem)
+        if method == "DELETE":
+            return self.delete_worksheet(directory, stem)
+        return self._error(
+            405, f"工作表不支持 {method}；能用的方法是 GET / PUT / DELETE。"
+        )
+
+    def worksheets_state(self, directory) -> dict:
+        """一份"目录现在长什么样"的快照；改动之后回给前端刷新那排按钮。"""
+        sheets, problems = worksheetsmod.load_directory(directory)
+        return {"worksheets": sheets, "worksheet_problems": problems}
+
+    def json_body(self) -> dict:
+        """请求体读成 JSON 对象；读不出来按项目规则说清"下一步做什么"。"""
+        raw = self.body
+        if not raw:
+            return {}
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise worksheetsmod.WorksheetError(
+                f"请求体不是合法的 JSON（{exc}）；这一版只收 JSON。"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise worksheetsmod.WorksheetError(
+                '请求体要是一个对象，例如 {"sheet": {"name": "…", "components": […]}}。'
+            )
+        return payload
+
+    def create_worksheet(self, directory) -> Response:
+        """新建一屏（"新建" / "另存为"）或收下队友发来的一份（"导入"）。"""
+        body = self.json_body()
+        text = body.get("text")
+        if text is not None:
+            if not isinstance(text, str):
+                raise worksheetsmod.WorksheetError("导入要带上 text（那份文件的原文）。")
+            sheet = worksheetsmod.import_text(directory, text)
+        else:
+            sheet = worksheetsmod.create(
+                directory, body.get("sheet"), name=body.get("name")
+            )
+        state = self.worksheets_state(directory)
+        state["worksheet"] = sheet
+        return self._json(state)
+
+    def save_worksheet(self, directory, stem: str) -> Response:
+        body = self.json_body()
+        components = body.get("components")
+        if not isinstance(components, list) or not components:
+            raise worksheetsmod.WorksheetError(
+                "保存工作表要带上 components（这一屏的组件）；空白的一屏存不了，"
+                "先在工作台上放一个组件再保存。"
+            )
+        sheet = worksheetsmod.replace(directory, stem, components)
+        state = self.worksheets_state(directory)
+        state["worksheet"] = sheet
+        return self._json(state)
+
+    def rename_worksheet(self, directory, stem: str) -> Response:
+        body = self.json_body()
+        name = body.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise worksheetsmod.WorksheetError("重命名要带上 name（新名字），不能是空的。")
+        sheet = worksheetsmod.rename(directory, stem, name)
+        state = self.worksheets_state(directory)
+        state["worksheet"] = sheet
+        #: 改名前的身份：界面拿它判断"正在用的那一套是不是就是被改名的这一套"。
+        state["previous_id"] = stem
+        return self._json(state)
+
+    def delete_worksheet(self, directory, stem: str) -> Response:
+        name = worksheetsmod.remove(directory, stem)
+        state = self.worksheets_state(directory)
+        state["deleted"] = {"id": stem, "name": name}
+        # 删掉的正好是正在用的那一套时，界面拿这个字段决定切回哪一套（没有就是 null）。
+        state["fallback"] = state["worksheets"][0]["name"] if state["worksheets"] else None
+        return self._json(state)
+
+    def export_worksheet(self, directory, stem: str) -> Response:
+        """把一份工作表当文件发出去：队友收到的是一个能直接导入的 .json。"""
+        sheet = worksheetsmod.read_sheet(directory, stem)
+        text = json.dumps(
+            worksheetsmod.export_payload(sheet), ensure_ascii=False, indent=2
+        ) + "\n"
+        disposition = (
+            f'attachment; filename="{stem}.json"; '
+            f"filename*=UTF-8''{quote(sheet['name'] + '.json')}"
+        )
+        return self._send(
+            text.encode("utf-8"),
+            200,
+            "application/json; charset=utf-8",
+            headers=(("Content-Disposition", disposition),),
+        )
 
     def act_info(self, log, name: str, query: dict, method: str) -> Response:
         payload = render.build_payload(

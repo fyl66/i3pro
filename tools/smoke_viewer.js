@@ -2931,6 +2931,70 @@ if (api && exportDlg) {
   api.applyPreset(catalogue.sheets[0].name);
 }
 
+/* ------------------------------------ 工作表增删改与进出（ticket #33）
+ * 快照模式没有服务端可写，所以这一组钉得住的是三件：
+ *   ① 写回文件的形状对不对——pick 填出来的通道名**不许**写死进文件；
+ *   ② 导出给队友的那份 JSON 是文件那一份（不带本地 id）；
+ *   ③ 快照里点那一排按钮要说"改用 serve"，而且**一个请求都不许发**
+ *      （没挂上处理器 / 发到一半失败都会被这一条抓住）。
+ * "点得到、文件真的变了"归真浏览器那关（tools/verify_clicks.py）。 */
+{
+  const sheet = api.worksheetCatalogue().sheets[0];
+  const comp = api.componentsOfWorksheet(sheet).filter((c) => c.type === "graph")[0];
+  check((comp.picked || []).length > 0, "pick 填了通道却没记下填了哪些键（保存会把通道名写死）");
+  const written = api.sheetComponent(comp);
+  check(written.type === "graph" && typeof written.x === "number"
+    && typeof written.h === "number",
+    "写回文件的组件缺了类型 / 位置 / 尺寸：" + JSON.stringify(written));
+  check(!(written.config && "channels" in written.config),
+    "pick 挑出来的通道名被写回文件了（换场次就空图）：" + JSON.stringify(written.config));
+  check(!!written.pick && !!written.pick.channels,
+    "文件里那条 pick 没有被保留：" + JSON.stringify(written));
+  // 用户自己设的键（不是 pick 填的那个）必须原样写回去
+  const probe = { type: "gauge", x: 1, y: 2, w: 3, h: 4,
+                  config: { subtype: "bar", channel: "Vx KF" }, picked: [] };
+  const kept = api.sheetComponent(probe);
+  check(kept.config && kept.config.subtype === "bar" && kept.config.channel === "Vx KF",
+    "用户自己设的配置在保存时被丢掉了：" + JSON.stringify(kept));
+
+  // 导出给队友的那份：是文件那一份（没有本地 id / picked），能被 import 回来
+  const dumped = JSON.parse(JSON.stringify(api.sheetExportPayload(sheet)));
+  check(dumped.schema === 1 && dumped.name === sheet.name
+    && dumped.components.length === sheet.components.length,
+    "导出的工作表不是文件那一份：" + JSON.stringify(dumped).slice(0, 120));
+  check(!("id" in dumped), "导出的 JSON 里带上了本地 id（那不是文件格式的一部分）");
+
+  // 当前用哪一份：按名字找得到；「自定义」（URL 带来的那一屏）没有文件
+  api.state.preset = sheet.name;
+  check((api.currentSheet() || {}).id === sheet.id,
+    "currentSheet() 没认出正在用的那一套：" + JSON.stringify(api.currentSheet()));
+  api.state.preset = "自定义";
+  check(api.currentSheet() === null, "「自定义」排布不该有对应的文件");
+  api.state.preset = sheet.name;
+
+  // 快照模式：7 个按钮逐个点，每个都要说"serve"，而且谁都不许发请求
+  const posts = () => ctx.httpCalls.filter(
+    (c) => c.url.indexOf("/worksheets") >= 0).length;
+  const before = posts();
+  for (const id of ["wsSave", "wsSaveAs", "wsNew", "wsRename", "wsDelete", "wsImport"]) {
+    const btn = registry.get(id);
+    check(!!btn, "工作表那一排少了按钮 " + id);
+    btn.click();
+    const said = String(registry.get("toast").textContent);
+    check(said.indexOf("serve") >= 0,
+      "快照里点「" + btn.textContent + "」没说改用 serve：" + said);
+  }
+  check(posts() === before,
+    "快照模式点工作表按钮居然发了请求（会给用户「改了」的错觉）");
+
+  // 导出在快照里走的是"现场造一个文件"那条路：没有 Blob 的沙箱会说不让下载，
+  // 但**不能崩**、也不能发请求。
+  registry.get("wsExport").click();
+  check(String(registry.get("toast").textContent).length > 0,
+    "快照里点「导出」什么也没说（用户不知道发生了什么）");
+  check(posts() === before, "快照里点「导出」发了请求");
+}
+
 /* --------------------------------------------------------------- DOM checks */
 /* ------------------------- 34. 原始 CAN 帧表（#38 / #39 / #40） --------------
  * 断言导入报告里该有的东西：帧数 / 覆盖率、**每份 DBC 的贡献与哈希**、

@@ -237,7 +237,7 @@ class _Http:
 
 @contextlib.contextmanager
 def http_session(session: Path, *, buckets: int = 200, roots=None, root=None,
-                 maths_root=None, cache_size: int = 1):
+                 maths_root=None, worksheets_root=None, cache_size: int = 1):
     """起一个真服务（后台线程 + 随机端口），退出时关干净。
 
     ``session`` 是要用的场次（传 ``HILL`` / ``ENDURANCE`` 这样的 Path）。三种形态：
@@ -270,7 +270,8 @@ def http_session(session: Path, *, buckets: int = 200, roots=None, root=None,
         root = Path(root)
         if roots is None:
             roots = [root]
-        library = server.SessionLibrary(roots, cache_size=cache_size, maths_root=maths_root)
+        library = server.SessionLibrary(roots, cache_size=cache_size, maths_root=maths_root,
+                                        worksheets_root=worksheets_root)
         httpd = ThreadingHTTPServer(
             ("127.0.0.1", 0), server.make_handler(library, buckets=buckets)
         )
@@ -6080,6 +6081,298 @@ class TestWorksheets(unittest.TestCase):
             self.assertEqual(len(info["worksheets"]), 7, info.get("worksheet_problems"))
             self.assertEqual(info["worksheet_problems"], [])
             self.assertEqual(info["worksheets"][0]["name"], "分析")
+
+
+class TestWorksheetEditing(unittest.TestCase):
+    """ticket #33：工作表的增删改与进出。
+
+    判据都在**文件层**：真的多了一个文件、真的换了文件名、同名那次**没有**把旧的盖掉、
+    导出的那份 JSON 原样导入得回来。界面怎么点归 `tools/verify_clicks.py`。
+    """
+
+    def _root(self, files: dict | None = None) -> Path:
+        tmp = tempfile.mkdtemp(prefix="i3pro-ws-edit-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        root = Path(tmp)
+        (root / "worksheets").mkdir()
+        for name, payload in (files or {}).items():
+            text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+            (root / "worksheets" / name).write_text(text, encoding="utf-8")
+        return root
+
+    def _sheet(self, name: str, order: int | None = None, components=None) -> dict:
+        """一份最短的工作表；``order`` 不给就交给 create 自己排到最后。"""
+        body = {
+            "schema": 1, "name": name,
+            "components": components or [
+                {"type": "graph", "pick": {"channels": {"limit": 3}}}
+            ],
+        }
+        if order is not None:
+            body["order"] = order
+        return body
+
+    # ------------------------------------------------------------ 文件名
+    def test_文件名由显示名派生_中文退回_sheet(self):
+        self.assertEqual(worksheetsmod.slug("Analysis v2"), "analysis-v2")
+        self.assertEqual(worksheetsmod.slug("分析"), "sheet")
+        self.assertEqual(worksheetsmod.slug("分析 2"), "sheet-2")
+        self.assertEqual(worksheetsmod.slug("Vx 的图"), "vx")
+        self.assertEqual(worksheetsmod.slug(""), "sheet")
+
+    def test_文件名不许乱来(self):
+        """身份会拼进网址，也会拼进路径：``../`` 这类东西必须在门口挡掉。"""
+        for bad in ("../x", "a/b", "a\\b", "", "  ", ".hidden", "x" * 90, "con"):
+            with self.assertRaises(worksheetsmod.WorksheetError, msg=bad):
+                worksheetsmod.check_stem(bad)
+        for good in ("analysis", "sheet-2", "a.b", "x" * 64):
+            self.assertEqual(worksheetsmod.check_stem(good), good)
+
+    # ------------------------------------------------------------ 新建
+    def test_新建写进目录而且排在最后(self):
+        root = self._root({"analysis.json": self._sheet("分析", order=10)})
+        directory = root / "worksheets"
+        sheet = worksheetsmod.create(directory, self._sheet("我的"))
+        self.assertEqual(sheet["id"], "sheet", "中文名该落到 sheet.json")
+        self.assertEqual(sheet["name"], "我的")
+        self.assertEqual(sheet["order"], 11, "新建的那套要排到最后")
+        written = json.loads((directory / "sheet.json").read_text(encoding="utf-8"))
+        self.assertEqual(written["name"], "我的")
+        self.assertEqual(written["components"], sheet["components"])
+        self.assertNotIn("id", written, "id 是本地身份，不该写进文件")
+
+    def test_同名另存为加后缀_而且不覆盖(self):
+        root = self._root()
+        directory = root / "worksheets"
+        first = worksheetsmod.create(directory, self._sheet("试验"))
+        before = (directory / "sheet.json").read_bytes()
+        second = worksheetsmod.create(directory, self._sheet("试验"))
+        self.assertEqual(first["id"], "sheet")
+        self.assertEqual(second["id"], "sheet-2", "同名该加后缀，不是覆盖")
+        self.assertEqual(second["name"], "试验 2", "按钮上也要分得清两份")
+        self.assertEqual((directory / "sheet.json").read_bytes(), before,
+                         "同名另存为把原来那份盖掉了")
+        self.assertEqual(len(list(directory.glob("*.json"))), 2)
+
+    def test_坏文件建不出新的(self):
+        root = self._root()
+        with self.assertRaises(worksheetsmod.WorksheetError) as caught:
+            worksheetsmod.create(root / "worksheets",
+                                 {"schema": 1, "name": "空", "components": []})
+        self.assertIn("至少一个", str(caught.exception))
+        self.assertEqual(list((root / "worksheets").glob("*.json")), [])
+
+    # ------------------------------------------------------------ 保存
+    def test_保存换掉组件_名字与排序留在文件里(self):
+        root = self._root({"dash.json": {
+            "schema": 1, "name": "仪表台", "order": 7, "hints": ["Vx"],
+            "components": [{"type": "graph"}]}})
+        sheet = worksheetsmod.replace(root / "worksheets", "dash",
+                                      [{"type": "track", "x": 1, "y": 2, "w": 3, "h": 4}])
+        self.assertEqual(sheet["name"], "仪表台")
+        self.assertEqual(sheet["order"], 7)
+        self.assertEqual(sheet["hints"], ["Vx"])
+        self.assertEqual([c["type"] for c in sheet["components"]], ["track"])
+        self.assertEqual(sheet["components"][0]["w"], 3)
+
+    def test_保存不存在的那份要说下一步(self):
+        root = self._root()
+        with self.assertRaises(worksheetsmod.WorksheetError) as caught:
+            worksheetsmod.replace(root / "worksheets", "nope", [{"type": "graph"}])
+        self.assertIn("刷新", str(caught.exception))
+
+    # ------------------------------------------------------------ 改名
+    def test_改名会把文件名也改掉(self):
+        root = self._root({"analysis.json": self._sheet("分析", order=3)})
+        directory = root / "worksheets"
+        sheet = worksheetsmod.rename(directory, "analysis", "底盘调校")
+        self.assertEqual(sheet["name"], "底盘调校")
+        self.assertEqual(sheet["id"], "sheet")
+        self.assertFalse((directory / "analysis.json").exists(),
+                         "旧文件没删：按钮上会同时出现两套一样的")
+        self.assertTrue((directory / "sheet.json").exists())
+        self.assertEqual(
+            json.loads((directory / "sheet.json").read_text("utf-8"))["order"], 3
+        )
+
+    def test_改名撞名被挡下_两份都不动(self):
+        root = self._root({"a.json": self._sheet("甲"), "b.json": self._sheet("乙")})
+        directory = root / "worksheets"
+        before = (directory / "a.json").read_bytes()
+        with self.assertRaises(worksheetsmod.WorksheetError) as caught:
+            worksheetsmod.rename(directory, "a", "乙")
+        self.assertIn("已经有一套叫", str(caught.exception))
+        self.assertEqual((directory / "a.json").read_bytes(), before)
+        self.assertTrue((directory / "b.json").exists())
+
+    def test_改成一个空名字要被挡下(self):
+        root = self._root({"a.json": self._sheet("甲")})
+        with self.assertRaises(worksheetsmod.WorksheetError):
+            worksheetsmod.rename(root / "worksheets", "a", "   ")
+
+    # ------------------------------------------------------------ 删除
+    def test_删除只删那一份并回报原来的名字(self):
+        root = self._root({"a.json": self._sheet("甲"), "b.json": self._sheet("乙")})
+        directory = root / "worksheets"
+        self.assertEqual(worksheetsmod.remove(directory, "a"), "甲")
+        self.assertEqual([p.name for p in sorted(directory.glob("*.json"))], ["b.json"])
+
+    def test_删除不存在的要说下一步(self):
+        root = self._root()
+        with self.assertRaises(worksheetsmod.WorksheetError) as caught:
+            worksheetsmod.remove(root / "worksheets", "nope")
+        self.assertIn("找不到", str(caught.exception))
+
+    # ------------------------------------------------------------ 导出 / 导入
+    def test_导出的那份能原样导入回来(self):
+        """这条就是"发给队友、队友导入后立即可用"的机械判据。"""
+        source = self._root({"analysis.json": self._sheet(
+            "分析", order=5,
+            components=[{"type": "graph", "x": 0, "y": 0, "w": 12, "h": 10,
+                         "config": {"mode": "split"},
+                         "pick": {"channels": {"patterns": ["Vx"], "limit": 2}}},
+                        {"type": "gauge", "config": {"subtype": "bar"}}])})
+        sheet = worksheetsmod.read_sheet(source / "worksheets", "analysis")
+        text = json.dumps(worksheetsmod.export_payload(sheet),
+                          ensure_ascii=False, indent=2) + "\n"
+        self.assertNotIn('"id"', text, "导出的文件里不该有本地 id")
+
+        destination = self._root()
+        made = worksheetsmod.import_text(destination / "worksheets", text)
+        self.assertEqual(made["name"], "分析")
+        self.assertEqual(made["order"], 5)
+        self.assertEqual(made["components"], sheet["components"])
+        self.assertEqual([c["type"] for c in made["components"]], ["graph", "gauge"])
+        # 队友那边已经有一套同名的时候：加后缀，不动他那一份
+        again = worksheetsmod.import_text(destination / "worksheets", text)
+        self.assertEqual(again["name"], "分析 2")
+        self.assertTrue((destination / "worksheets" / "sheet.json").exists())
+
+    def test_导入一份不是工作表的文件要说下一步(self):
+        root = self._root()
+        with self.assertRaises(worksheetsmod.WorksheetError) as caught:
+            worksheetsmod.import_text(root / "worksheets", "{ 这不是 JSON")
+        self.assertIn("导出", str(caught.exception), "要告诉队友去点「导出」")
+        self.assertIn("第 1 行", str(caught.exception))
+
+
+class TestWorksheetEditingOverHttp(unittest.TestCase):
+    """#33 的接口那一半：界面点的就是这条路，所以这里把五个动作与状态码钉住。"""
+
+    def _worksheet_root(self) -> Path:
+        tmp = tempfile.mkdtemp(prefix="i3pro-ws-http-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        base = Path(tmp)
+        shutil.copytree(ROOT / "worksheets", base / "worksheets")
+        return base
+
+    @_needs(HILL)
+    def test_新建保存改名删除一条龙(self):
+        base = self._worksheet_root()
+        directory = base / "worksheets"
+        with http_session(HILL, buckets=50, worksheets_root=base) as http:
+            try:
+                status, state = http.json("/api/worksheets")
+                self.assertEqual(status, 200)
+                self.assertEqual(len(state["worksheets"]), 7)
+                self.assertEqual(state["worksheet_problems"], [])
+
+                # 新建（界面的"另存为"）：中文名落到 sheet.json，排到最后
+                status, state = http.json("/api/worksheets", "POST", {
+                    "sheet": {"name": "验证用", "components": [{"type": "graph"}]}})
+                self.assertEqual(status, 200, state)
+                self.assertEqual((state["worksheet"]["id"], state["worksheet"]["name"]),
+                                 ("sheet", "验证用"))
+                self.assertTrue((directory / "sheet.json").exists())
+                self.assertEqual(len(state["worksheets"]), 8)
+                self.assertEqual(state["worksheets"][-1]["name"], "验证用")
+
+                # 同名再来一次：加后缀，前一份一个字节都不动
+                before = (directory / "sheet.json").read_bytes()
+                status, state = http.json("/api/worksheets", "POST", {
+                    "sheet": {"name": "验证用", "components": [{"type": "graph"}]}})
+                self.assertEqual(status, 200, state)
+                self.assertEqual(state["worksheet"]["id"], "sheet-2")
+                self.assertEqual(state["worksheet"]["name"], "验证用 2")
+                self.assertEqual((directory / "sheet.json").read_bytes(), before)
+
+                # 保存：只换组件，名字与排序留在文件里
+                status, state = http.json(
+                    "/api/worksheets/sheet", "PUT",
+                    {"components": [{"type": "track", "x": 0, "y": 0, "w": 4, "h": 4}]})
+                self.assertEqual(status, 200, state)
+                self.assertEqual([c["type"] for c in state["worksheet"]["components"]],
+                                 ["track"])
+                self.assertEqual(state["worksheet"]["name"], "验证用")
+
+                # 空的一屏不许存：页面上会出现一套画不出来的工作表
+                status, body = http.json("/api/worksheets/sheet", "PUT", {"components": []})
+                self.assertEqual(status, 400)
+                self.assertIn("components", body["error"])
+
+                # 改名：文件名跟着变，旧文件删掉
+                status, state = http.json("/api/worksheets/sheet/rename", "POST",
+                                          {"name": "renamed"})
+                self.assertEqual(status, 200, state)
+                self.assertEqual(state["worksheet"]["id"], "renamed")
+                self.assertEqual(state["previous_id"], "sheet")
+                self.assertFalse((directory / "sheet.json").exists(),
+                                 "改名之后旧文件还在，按钮上会多出一套")
+                self.assertTrue((directory / "renamed.json").exists())
+
+                # 导出：发出去的字节就是文件里那一份（可以原样导入回来）
+                status, raw = http.get_bytes("/api/worksheets/renamed/export")
+                self.assertEqual(status, 200)
+                self.assertEqual(raw, (directory / "renamed.json").read_bytes())
+                exported = json.loads(raw.decode("utf-8"))
+                self.assertEqual(exported["name"], "renamed")
+                self.assertNotIn("id", exported)
+
+                status, state = http.json("/api/worksheets", "POST",
+                                          {"text": raw.decode("utf-8")})
+                self.assertEqual(status, 200, state)
+                self.assertEqual(state["worksheet"]["name"], "renamed 2",
+                                 "队友导入同名的一份该加后缀，不是覆盖")
+                self.assertNotEqual(state["worksheet"]["id"], "renamed")
+
+                # 删除：说清删了哪一套、切回哪一套
+                status, state = http.json("/api/worksheets/renamed", "DELETE")
+                self.assertEqual(status, 200, state)
+                self.assertEqual(state["deleted"], {"id": "renamed", "name": "renamed"})
+                self.assertFalse((directory / "renamed.json").exists())
+                self.assertEqual(state["fallback"], state["worksheets"][0]["name"])
+
+                # 坏输入：路径穿越 / 不认得的子动作 / 不是 JSON 的请求体
+                for path in ("/api/worksheets/..%2F..%2Fevil", "/api/worksheets/a%20b"):
+                    status, body = http.json(path, "DELETE")
+                    self.assertEqual(status, 400, (path, body))
+                status, body = http.json("/api/worksheets/sheet/nope", "POST", {})
+                self.assertEqual(status, 404)
+                status, body = http.json("/api/worksheets", "POST", None)
+                self.assertEqual(status, 400)
+                self.assertIn("工作表", body["error"])
+            finally:
+                http.close()
+
+    @_needs(HILL)
+    def test_页面载荷里的工作表按钮跟着文件走(self):
+        """改完文件之后，刷新页面看到的就是改完的那一排（同一份目录，不是缓存）。"""
+        base = self._worksheet_root()
+        directory = base / "worksheets"
+        with http_session(HILL, buckets=50, worksheets_root=base) as http:
+            try:
+                payload = http.page_payload()
+                self.assertEqual(payload["worksheets"][0]["name"], "分析")
+                status, state = http.json("/api/worksheets", "POST", {
+                    "sheet": {"name": "刚建的", "components": [{"type": "graph"}]}})
+                self.assertEqual(status, 200)
+                new_id = state["worksheet"]["id"]
+                self.assertTrue((directory / f"{new_id}.json").exists())
+                payload = http.page_payload()
+                self.assertEqual(payload["worksheets"][-1]["name"], "刚建的")
+                self.assertEqual(payload["worksheet_problems"], [])
+            finally:
+                http.close()
 
 
 class TestMathsOverHttp(unittest.TestCase):

@@ -122,10 +122,14 @@ def hold_factor(session, channel, rate: float) -> int:
 
 def info(session, channel) -> dict:
     """界面要的那几项元数据（通道索引 ``render.channel_index`` 就用它）。"""
+    #: ``rate`` 是**界面显示**用的那一档：CAN 导入的通道列在主时间基上，但它来自
+    #: 另一条更慢的报文，这里显示报文自己的更新率（``update_rate``），免得把
+    #: 43.5 Hz 的胎温写成 100 Hz。计算用的 ``sample_rate`` 仍然是主采样率。
+    displayed = getattr(channel, "update_rate", None) or sample_rate(session, channel)
     return {
         "name": channel.name,
         "unit": unit(session, channel),
-        "rate": sample_rate(session, channel),
+        "rate": displayed,
         "samples": channel.sample_count,
         "derived": is_derived(session, channel),
     }

@@ -16,7 +16,7 @@ from urllib.parse import quote
 
 import numpy as np
 
-from . import beacons as beaconsmod, csvlog, maths, render
+from . import beacons as beaconsmod, canlog, csvlog, maths, render, sidecar
 from . import ld as ldmod
 
 __all__ = ["SessionLibrary", "dumps", "json_safe"]
@@ -76,25 +76,55 @@ class SessionLibrary:
         #: 场次文件 -> (会话对象身份, 定义指纹)。定义或数据一改就重算。
         self._maths_attached: dict[str, tuple] = {}
         self._maths_errors: dict[str, list[dict]] = {}
+        #: 并把连续记录并成一场（ticket #39）时算出来的分组，按文件指纹缓存：
+        #: ``_paths`` 每个请求都会走一遍，重新读 9 份文件的首尾行没有必要。
+        self._group_cache: tuple | None = None
+        #: 场次列表（带圈数/最快圈）。它要**解码**每个场次，CAN 场次更贵，
+        #: 所以按"文件 + 信标侧车的指纹"缓存，没变就直接给上一次的结果。
+        self._listing_cache: tuple | None = None
         #: 场次文件 -> 上一次信标编辑之前的那一版配置，供"撤销上一步"用。
         #: 按 ticket #6 的约定**只留一版**（一个槽），而且只在内存里：服务一重启
         #: 就没了，撤的是"这个进程里刚才那一步"，不是历史。
         self._laps_undo: dict[str, beaconsmod.LapConfig] = {}
 
     # ------------------------------------------------------------- discovery
+    def _groups(self, frames: list[Path]) -> list[dict]:
+        stamp = tuple(
+            (str(path),) + _file_stamp(path) for path in frames
+        )
+        with self._lock:
+            if self._group_cache is not None and self._group_cache[0] == stamp:
+                return self._group_cache[1]
+        groups = canlog.group_recordings(frames) if frames else []
+        with self._lock:
+            self._group_cache = (stamp, groups)
+        return groups
+
     def _paths(self) -> dict[str, Path]:
         found: dict[str, Path] = {}
+        frames: list[Path] = []
         for root in self.roots:
             if not root.exists():
                 continue
             for pattern in ("*.ld", "*.csv"):
                 for path in sorted(root.rglob(pattern)):
+                    if path.suffix.lower() == ".csv" and canlog.looks_like_frames(path):
+                        frames.append(path)
+                        continue
                     name = path.stem
                     if name in found:
                         # Two sources, one stem: keep both, so a CSV export of a
                         # session that also has its .ld is not silently hidden.
                         name = f"{name} ({path.suffix.lstrip('.').lower()})"
                     found.setdefault(name, path)
+        # 记录器在恰好 1,000,000 帧处切文件：9 份其实是 7 次记录（实测），这里把
+        # 同一次记录的后续文件并进第一份，侧边栏里就只有一场（ticket #39）。
+        for group in self._groups(frames):
+            items = [item["path"] for item in group["items"]]
+            name = items[0].stem + (f"+{len(items) - 1}" if len(items) > 1 else "")
+            if name in found:                      # 同名 .ld 在场时两场都要看得见
+                name = f"{name} (can)"
+            found.setdefault(name, items[0])
         return found
 
     def names(self) -> list[str]:
@@ -113,7 +143,9 @@ class SessionLibrary:
             if key in self._cache:
                 self._cache.move_to_end(key)
                 return self._cache[key]
-        log = csvlog.open_session(path)
+        # CAN 场次要一份 DBC 才能解码；DBC 放在各个数据根的 dbc/ 里，挨着场次的
+        # 那个目录最优先（原始帧日志在 can_data/，DBC 在 i2pro_data/dbc/）。
+        log = csvlog.open_session(path, dbc_dir=[root / "dbc" for root in self.roots])
         with self._lock:
             self._cache[key] = log
             while len(self._cache) > self.cache_size:
@@ -182,12 +214,23 @@ class SessionLibrary:
         return _json_safe(meta)
 
     def listing(self) -> list[dict]:
-        out = []
-        for name in self.names():
+        paths = self._paths()
+        stamp = tuple(
+            (name, str(path)) + _file_stamp(path)
+            + _file_stamp(sidecar.path_of("laps", path))
+            for name, path in sorted(paths.items())
+        )
+        with self._lock:
+            if self._listing_cache is not None and self._listing_cache[0] == stamp:
+                return self._listing_cache[1]
+        out: list[dict] = []
+        for name in paths:
             try:
                 out.append(self.summary(name))
             except Exception as exc:  # a broken file must not kill the index
                 out.append({"name": name, "error": str(exc)})
+        with self._lock:
+            self._listing_cache = (stamp, out)
         return out
 
     # -------------------------------------------------------------- lap edits

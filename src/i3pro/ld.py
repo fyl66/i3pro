@@ -99,6 +99,10 @@ class Channel:
     shift: int
     channel_id: int
     index: int
+    #: 这条通道**来源**的真实更新率（Hz），只有 CAN 导入的通道会填。
+    #: 它的列已经在主时间基上（导入时零阶保持），所以 ``sample_rate`` 是主采样率，
+    #: 而"这条报文其实 43.5 Hz 才发一次"是物理事实，界面要看得见（ticket #38）。
+    update_rate: float | None = None
 
     @property
     def dtype(self) -> np.dtype:

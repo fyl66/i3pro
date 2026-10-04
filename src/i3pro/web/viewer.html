@@ -236,6 +236,31 @@
                     margin:8px 0 0; }
   #exportDlg .bar > i { display:block; height:100%; width:0; background:var(--accent);
                         transition:width .12s linear; }
+
+  /* CAN 导入报告（ticket #38/#39）：外壳与导出窗口同一套观感，只有表格是新东西。
+     它要回答的是"这份日志里有多少帧是我读不懂的、为什么"——实测 75.4% 的帧没有
+     DBC 定义，包括车上插着诊断电脑时那 6 个 OBD/UDS 的 ID。 */
+  #canDlg { position:fixed; inset:0; z-index:60; display:flex; align-items:center;
+            justify-content:center; background:rgba(8,10,13,.62); }
+  #canDlg[hidden] { display:none; }
+  #canDlg .box { width:760px; max-width:94vw; max-height:88vh; overflow:auto;
+                 background:#161a21; border:1px solid #2b313c; border-radius:10px;
+                 padding:14px 16px 12px; box-shadow:0 18px 60px #0008; }
+  #canDlg h3 { margin:0 0 4px; font-size:14px; }
+  #canDlg .sub { color:var(--muted); font-size:11px; margin-bottom:10px; }
+  #canDlg .plan { background:#12151b; border:1px solid #2b313c; border-radius:6px;
+                  padding:8px 10px; font-size:12px; margin:10px 0 8px; line-height:1.6; }
+  #canDlg .plan b { color:var(--accent); font-weight:600; }
+  #canDlg .warn { color:var(--warn); }
+  #canDlg .foot { display:flex; align-items:center; gap:8px; justify-content:flex-end;
+                  margin-top:10px; }
+  #canDlg .foot .grow { flex:1; }
+  #canDlg table { width:100%; border-collapse:collapse; font-size:11px; }
+  #canDlg th, #canDlg td { text-align:left; padding:3px 6px; border-bottom:1px solid #232935; }
+  #canDlg th { color:var(--muted); font-weight:500; }
+  #canDlg td.num, #canDlg th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  #canDlg tr.diag td { color:var(--warn); }
+  #canDlg code { color:#cfe3ff; }
 </style>
 </head>
 <body>
@@ -398,6 +423,16 @@
   </section>
 </main>
 <div id="toast"></div>
+
+<div id="canDlg" hidden>
+  <div class="box">
+    <h3>CAN 导入报告</h3>
+    <div class="sub" id="canSub"></div>
+    <div class="plan" id="canPlan"></div>
+    <div id="canTableWrap"></div>
+    <div class="foot"><span class="grow"></span><button id="canClose">关闭</button></div>
+  </div>
+</div>
 
 <div id="exportDlg" hidden>
   <div class="box">
@@ -1307,7 +1342,13 @@ function resolvePickSpec(spec, hints) {
   const patterns = spec.patterns || hints || [];
   const index = spec.index === undefined ? null : spec.index;
   const want = Math.max(spec.limit || 0, index === null ? 0 : index + 1, 1);
-  const found = channelsMatching(patterns, want);
+  let found = channelsMatching(patterns, want);
+  if (!found.length) {
+    // 一条提示都对不上——换一种数据源就会这样（原始 CAN 帧表里没有 Vx KF / GPS，
+    // 也没有任何一个 ·ld· 通道名）。这时候空图什么也说明不了，先按本场实际有的
+    // 通道取前几条；通道列表照实显示本场有什么，ticket #34 会把"缺通道"正式画灰。
+    found = ((DATA && DATA.channels) || []).slice(0, want).map((ch) => ch.name);
+  }
   if (index === null) return found;
   return found[index] === undefined ? null : found[index];
 }
@@ -6053,6 +6094,18 @@ function exportConfig() {
 }
 
 function applyExportConfig(cfg) {
+  // 没有距离轴的场次（实测：CAN 日志里没有车速/GPS）不能选"指定距离段"——选了
+  // 服务端只会回一句 400。这里先把它从选项里去掉，别让用户撞上去再猜。
+  const distanceOption = $("exportRange").querySelector('option[value="distance"]');
+  if (distanceOption) distanceOption.disabled = !DATA.meta.has_distance;
+  const axisOption = $("exportAxis").querySelector('option[value="distance"]');
+  if (axisOption) axisOption.disabled = !DATA.meta.has_distance;
+  if (!DATA.meta.has_distance && (cfg.range === "distance" || cfg.axis === "distance")) {
+    cfg = Object.assign({}, cfg, {
+      range: cfg.range === "distance" ? "all" : cfg.range,
+      axis: cfg.axis === "distance" ? "time" : cfg.axis,
+    });
+  }
   $("exportRange").value = cfg.range;
   $("exportFrom").value = cfg.from;
   $("exportTo").value = cfg.to;
@@ -6366,6 +6419,67 @@ function openExportDialog() {
   refreshExportPlan();
 }
 
+/* ------------------------------------------------------- CAN import report */
+// 原始帧表导入之后，"有多少帧我读不懂"是必须说清楚的一件事：实测 75.4% 的帧没有
+// DBC 定义，其中 6 个是当时插着诊断电脑的 OBD/UDS 流量（0x7E0…0x7E7）。这些数字
+// 由 Python 侧算好放在 DATA.meta.can 里，界面只负责照实显示——两边各算一遍迟早会
+// 对不上（ticket #39 的验收条目就是"两处数字一致"）。
+function canReport() { return (DATA.meta && DATA.meta.can) || null; }
+
+function canRows() {
+  const can = canReport();
+  return can && can.undecoded ? can.undecoded : [];
+}
+
+function renderCanReport() {
+  const can = canReport();
+  if (!can) return;
+  const dbc = can.dbc || {};
+  const pct = (can.coverage * 100).toFixed(1);
+  $("canSub").innerHTML = "DBC " + esc(dbc.file || "-") + " · 覆盖 "
+    + can.covered_frames.toLocaleString() + " / " + can.frames.toLocaleString()
+    + " 帧（" + pct + "%）· 主时间基 " + can.master_rate + " Hz · 来源 "
+    + (can.sources || []).length + " 份"
+    + (can.merged ? "（已自动并场）" : "");
+  const bits = [];
+  (can.notes || []).forEach((text) => bits.push('<span class="warn">' + esc(text) + "</span>"));
+  (can.merge_evidence || []).forEach((text) => bits.push("并场依据：" + esc(text)));
+  (can.dbc_candidates || []).forEach((row) => {
+    bits.push("候选 DBC " + esc(row.file) + "：" + row.messages + " 条报文 / "
+      + row.signals + " 条信号，覆盖 " + row.covered_frames.toLocaleString() + " 帧"
+      + (row.covered_frames === 0 ? "（<span class=\"warn\">一条都对不上</span>）" : ""));
+  });
+  ((can.dbc || {}).skipped || []).forEach((text) => bits.push("跳过：" + esc(text)));
+  $("canPlan").innerHTML = bits.length
+    ? bits.join("<br>")
+    : "没有需要注意的地方。";
+  const rows = canRows();
+  if (!rows.length) {
+    $("canTableWrap").innerHTML = '<div class="plan">所有帧都能被这份 DBC 解释。</div>';
+    return;
+  }
+  const body = rows.map((row) => "<tr" + (row.diagnostic ? ' class="diag"' : "") + ">"
+    + "<td><code>" + esc(row.id) + "</code></td>"
+    + '<td class="num">' + row.frames.toLocaleString() + "</td>"
+    + '<td class="num">' + row.rate.toFixed(2) + "</td>"
+    + "<td>" + (row.diagnostic ? "诊断流量（OBD/UDS）" : "车辆数据？") + "</td>"
+    + '<td><code>' + esc(row.sample || "-") + "</code></td></tr>").join("");
+  $("canTableWrap").innerHTML =
+    '<div class="plan">读不懂的 ID（共 ' + rows.length + " 个，"
+    + rows.reduce((sum, row) => sum + row.frames, 0).toLocaleString() + " 帧）——不生成字节通道：</div>"
+    + "<table><tr><th>ID</th><th class=\"num\">帧数</th><th class=\"num\">帧率</th>"
+    + "<th>类型</th><th>前 8 字节</th></tr>" + body + "</table>";
+}
+
+function openCanDialog() {
+  renderCanReport();
+  $("canDlg").hidden = false;
+}
+
+function closeCanDialog() {
+  $("canDlg").hidden = true;
+}
+
 function closeExportDialog() {
   if (exportAbort) exportAbort.abort();
   $("exportDlg").hidden = true;
@@ -6575,6 +6689,13 @@ function initHeader() {
   $("fileInfo").innerHTML = "<b>" + m.file + "</b> · " + m.device + " " + m.log_date + " "
     + m.log_time + " · " + (m.event || "-") + " · " + m.duration.toFixed(1) + " s @ "
     + m.sample_rate + " Hz · " + m.channels + " 通道 · 速度源 " + (m.speed_channel || "-");
+  // 原始 CAN 帧表：帧数与"读不懂多少"要一眼看得见（ticket #39）。一行字加一个
+  // 入口，比把报告塞进状态栏更合适——它是要细看的表，不是一句话。
+  if (m.can) {
+    const unknown = (m.can.undecoded || []).length;
+    $("fileInfo").innerHTML += ' · <a href="#" id="canLink">CAN 导入报告'
+      + (unknown ? "（" + unknown + " 个未定义 ID）" : "") + "</a>";
+  }
   document.title = "i3pro · " + m.file;
 }
 
@@ -6769,6 +6890,13 @@ function init() {
   $("dataBtn").addEventListener("click", openExportDialog);
   $("exportCancel").addEventListener("click", closeExportDialog);
   $("exportGo").addEventListener("click", runExport);
+  if ($("canLink")) {
+    $("canLink").addEventListener("click", (event) => {
+      event.preventDefault();
+      openCanDialog();
+    });
+  }
+  if ($("canClose")) $("canClose").addEventListener("click", closeCanDialog);
   EXPORT_FIELDS.forEach((id) => {
     const el = $(id);
     if (!el || !el.addEventListener) return;

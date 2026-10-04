@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.parse
@@ -37,7 +38,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from i3pro import (  # noqa: E402
-    channels, csvlog, derive, gpsfix, laps as lapsmod, ld, maths as mathsmod, motec_csv,
+    canlog, channels, csvlog, dbc, derive, gpsfix, laps as lapsmod, ld, library as librarymod,
+    maths as mathsmod, motec_csv,
     notes as notesmod, render, report as reportmod, sections as sectionsmod,
     server, sidecar, store, timebase,
     worksheets as worksheetsmod,
@@ -5818,6 +5820,461 @@ class TestMathsOverHttp(unittest.TestCase):
                 self.assertIn("本场次没有这个通道", errors["别场才有的"])
             finally:
                 http.close()
+
+
+#: 原始 CAN 帧日志与 DBC 都是车队本地数据（`.gitignore` 挡着），缺了就跳过。
+CAN_DATA = ROOT / "can_data"
+DBC_DIR = DATA / "dbc"
+SENSORS_DBC = DBC_DIR / "Sensors.dbc"
+DASHBOARD_DBC = DBC_DIR / "E27_Dashboard_AutoX_20260902_pjgps - Internal Display (using Display Creator).dbc"
+
+#: 扫一遍 9 份原始帧表拿到的 ID 集合。扫描本身要几秒，所以整个测试进程只做一次。
+_CAN_ID_CACHE: dict[str, object] = {}
+
+
+def _can_id_counts() -> dict[int, int]:
+    """``{帧 ID: 帧数}``：所有原始帧日志的并集（缺数据时是空字典）。"""
+    if "counts" not in _CAN_ID_CACHE:
+        counts: dict[int, int] = {}
+        for path in sorted(CAN_DATA.glob("*.csv")):
+            with path.open("r", encoding="gbk", errors="replace", newline="") as handle:
+                handle.readline()
+                for line in handle:
+                    cells = line.split(",")
+                    if len(cells) < 10:
+                        continue
+                    try:
+                        frame_id = int(cells[4], 16)
+                    except ValueError:
+                        continue
+                    counts[frame_id] = counts.get(frame_id, 0) + 1
+        _CAN_ID_CACHE["counts"] = counts
+    return _CAN_ID_CACHE["counts"]  # type: ignore[return-value]
+
+
+def _cantools():
+    """独立裁判；没装就跳过（规则 4 只允许它出现在测试里）。"""
+    try:
+        import cantools  # noqa: PLC0415
+    except ImportError:
+        return None
+    return cantools
+
+
+class TestDbc(unittest.TestCase):
+    """DBC 解析与解码（ticket #37）。
+
+    合成用例管"写错了会静默错"的三种：字节序（@0 锯齿走法）、有符号、超短载荷；
+    真数据用例管数字（报文数 / 信号数 / 46 条通道）与 ``cantools`` 逐信号对拍。
+    """
+
+    SYNTHETIC = """
+BO_ 291 Mixed_Endian: 8 Vector__XXX
+ SG_ Big_At_Seven : 7|16@0+ (1,0) [0|65535] "V" Vector__XXX
+ SG_ Big_At_TwentyThree : 23|16@0+ (1,0) [0|65535] "V" Vector__XXX
+ SG_ Little_At_32 : 32|16@1+ (1,0) [0|65535] "V" Vector__XXX
+ SG_ Signed_Big : 55|8@0- (1,0) [-128|127] "V" Vector__XXX
+ SG_ Scaled : 63|8@0+ (0.5,10) [10|137.5] "deg" Vector__XXX
+BO_ 2147483939 Extended_One: 2 Node
+ SG_ Only_Extended : 7|16@0+ (1,0) [0|65535] "" Node
+BO_ 3221225472 VECTOR__INDEPENDENT_SIG_MSG: 0 Vector__XXX
+ SG_ Unused_Signal : 0|8@1+ (1,0) [0|0] "" Vector__XXX
+VAL_ 291 Scaled 1 "off" 2 "on" ;
+VAL_TABLE_ Ignored 1 "off" ;
+BO_TX_BU_ 291 : Vector__XXX;
+"""
+
+    def test_big_endian_follows_the_sawtooth_convention(self):
+        """``@0`` 的起始位是最高位，且字节内位号 0 是最低位。
+
+        这一条是本模块最容易写反的地方：把字节内位号当成"0 是最高位"，两个 16 位值
+        会各自按位反转，**不报错**。这里用 0x4A97 钉死——它反转过来是 0x52E9。
+        """
+        db = dbc.parse(self.SYNTHETIC)
+        message = db.messages[(False, 291)]
+        payload = bytes([0x4A, 0x97, 0x48, 0xE9, 0x01, 0x02, 0xFF, 0x80])
+        values = dbc.decode(message, payload)
+        self.assertEqual(values["Big_At_Seven"], 0x4A97)
+        self.assertEqual(values["Big_At_TwentyThree"], 0x48E9)
+        self.assertNotEqual(values["Big_At_Seven"], 0x52E9)
+
+    def test_little_endian_signed_and_scaling(self):
+        db = dbc.parse(self.SYNTHETIC)
+        message = db.messages[(False, 291)]
+        payload = bytes([0x4A, 0x97, 0x48, 0xE9, 0x34, 0x12, 0xFF, 0x80])
+        values = dbc.decode(message, payload)
+        self.assertEqual(values["Little_At_32"], 0x1234)
+        self.assertEqual(values["Signed_Big"], -1.0)      # 0xFF 是 -1，不是 255
+        self.assertEqual(values["Scaled"], 0x80 * 0.5 + 10)
+
+    def test_value_table_is_read_and_kept_per_signal(self):
+        db = dbc.parse(self.SYNTHETIC)
+        signal = db.messages[(False, 291)].signal("Scaled")
+        self.assertEqual(signal.choices, {1: "off", 2: "on"})
+        self.assertEqual(db.messages[(False, 291)].signal("Big_At_Seven").choices, {})
+
+    def test_extended_ids_do_not_shadow_standard_ones(self):
+        db = dbc.parse(self.SYNTHETIC)
+        # 同一个数字 ID 下面，标准帧与扩展帧是两条不同的报文，不许互相盖住：
+        # 这份合成 DBC 里 291 两种都有（实测那份 dashboard DBC 就全是扩展帧）。
+        standard = db.messages[(False, 291)]
+        extended = db.messages[(True, 291)]
+        self.assertFalse(standard.extended)
+        self.assertTrue(extended.extended)
+        self.assertEqual((standard.name, extended.name), ("Mixed_Endian", "Extended_One"))
+        self.assertIs(db.find(291, extended=False), standard)
+        self.assertIs(db.find(291, extended=True), extended)
+        self.assertEqual(dbc.decode(extended, bytes([0x12, 0x34]))["Only_Extended"], 0x1234)
+
+    def test_vector_pseudo_message_is_skipped(self):
+        db = dbc.parse(self.SYNTHETIC)
+        self.assertNotIn((False, 0xC0000000), db.messages)
+        self.assertNotIn((True, 0xC0000000), db.messages)
+        self.assertEqual(len(db.skipped), 1)
+        self.assertIn("VECTOR__INDEPENDENT_SIG_MSG", db.skipped[0])
+        self.assertEqual(db.signal_count, 6)              # 伪报文里的那条不算
+
+    def test_multiplexed_message_is_refused_with_a_next_step(self):
+        db = dbc.parse("""
+BO_ 100 Muxed: 8 Node
+ SG_ Selector M : 0|8@0+ (1,0) [0|255] "" Node
+ SG_ On_Zero m0 : 8|8@0+ (1,0) [0|255] "" Node
+""")
+        message = db.messages[(False, 100)]
+        self.assertTrue(message.multiplexed)
+        with self.assertRaises(dbc.DbcError) as caught:
+            dbc.decode(message, bytes(8))
+        self.assertIn("多路复用", str(caught.exception))
+        self.assertIn("下一步", str(caught.exception))
+
+    def test_payload_length_wins_over_the_dbc_dlc(self):
+        """实测 ``0x66D``：DBC 写 4，日志里发 8 字节。短了要吵，长了照解。"""
+        db = dbc.parse("""
+BO_ 1645 Front_Aero_Ride_Height: 4 Node
+ SG_ FL : 23|16@0+ (1,0) [0|65535] "cm" Node
+""")
+        message = db.messages[(False, 1645)]
+        self.assertEqual(dbc.decode(message, bytes([0, 0, 0x12, 0x34, 0xFF, 0xFF, 0xFF, 0xFF]))["FL"], 0x1234)
+        with self.assertRaises(dbc.DbcError) as caught:
+            dbc.decode(message, bytes([0x12, 0x34]))
+        self.assertIn("只有 2 字节", str(caught.exception))
+
+    def test_a_file_without_messages_says_what_to_do(self):
+        with self.assertRaises(dbc.DbcError) as caught:
+            dbc.parse("VERSION \"\"\n\nNS_ :\n")
+        self.assertIn("BO_", str(caught.exception))
+
+    # ------------------------------------------------------------ 真数据（跳过）
+    @_needs(SENSORS_DBC)
+    def test_sensors_dbc_parses_to_the_measured_counts(self):
+        db = dbc.parse(SENSORS_DBC.read_text(encoding="utf-8", errors="replace"),
+                       source=SENSORS_DBC.name)
+        self.assertEqual(len(db.messages), 17)
+        self.assertEqual(db.signal_count, 56)
+        self.assertEqual(len(db.skipped), 1)
+        self.assertFalse(any(m.extended for m in db.messages_only))
+        self.assertFalse(any(m.multiplexed for m in db.messages_only))
+
+    @_needs(DASHBOARD_DBC)
+    def test_dashboard_dbc_parses_to_the_measured_counts(self):
+        db = dbc.parse(DASHBOARD_DBC.read_text(encoding="utf-8", errors="replace"),
+                       source=DASHBOARD_DBC.name)
+        self.assertEqual(len(db.messages), 63)
+        self.assertEqual(db.signal_count, 180)
+        self.assertTrue(all(m.extended for m in db.messages_only))
+
+    @_needs(SENSORS_DBC)
+    def test_the_46_channels_are_the_signals_on_ids_the_log_really_carries(self):
+        """实测：日志里出现 14 条 Sensors.dbc 的报文，共 46 条信号。"""
+        if not CAN_DATA.exists():
+            self.skipTest("缺 can_data/ 原始帧日志")
+        db = dbc.parse(SENSORS_DBC.read_text(encoding="utf-8", errors="replace"))
+        present = {frame_id for frame_id in _can_id_counts() if db.covers(frame_id)}
+        signals = [s.name for m in db.messages_only if m.frame_id in present for s in m.signals]
+        self.assertEqual(len(present), 14)
+        self.assertEqual(len(signals), 46)
+
+    @_needs(SENSORS_DBC)
+    def test_cantools_agrees_signal_by_signal_on_real_frames(self):
+        """独立裁判：cantools 解同一批真实帧，逐信号完全一致。"""
+        cantools = _cantools()
+        if cantools is None:
+            self.skipTest("没装 cantools（测试期裁判）")
+        if not CAN_DATA.exists():
+            self.skipTest("缺 can_data/ 原始帧日志")
+        text = SENSORS_DBC.read_text(encoding="utf-8", errors="replace")
+        reference = cantools.database.load_string(text, database_format="dbc")
+        mine = dbc.parse(text)
+        compared = 0
+        seen: set[str] = set()
+        for path in sorted(CAN_DATA.glob("*.csv"))[:3]:
+            with path.open("r", encoding="gbk", errors="replace", newline="") as handle:
+                handle.readline()
+                for index, line in enumerate(handle):
+                    if index > 40000:
+                        break
+                    cells = line.split(",")
+                    if len(cells) < 10:
+                        continue
+                    frame_id = int(cells[4], 16)
+                    message = mine.find(frame_id)
+                    if message is None:
+                        continue
+                    payload = bytes(int(x, 16) for x in cells[9].split("|")[1].split())
+                    got = dbc.decode(message, payload)
+                    want = reference.get_message_by_frame_id(frame_id).decode(
+                        payload, decode_choices=False)
+                    for name, value in got.items():
+                        seen.add(name)
+                        self.assertAlmostEqual(
+                            value, float(want[name]), places=9,
+                            msg=f"{path.name}:{index} {message.name}.{name}")
+                    compared += 1
+        self.assertGreater(compared, 20000)
+        self.assertGreaterEqual(len(seen), 40)
+
+    @_needs(DASHBOARD_DBC)
+    def test_cantools_agrees_on_random_payloads_for_every_signal(self):
+        """日志里没有扩展帧，所以那份 63 报文 / 180 信号用随机载荷对拍。"""
+        cantools = _cantools()
+        if cantools is None:
+            self.skipTest("没装 cantools（测试期裁判）")
+        random = __import__("random")
+        random.seed(20261004)
+        text = DASHBOARD_DBC.read_text(encoding="utf-8", errors="replace")
+        reference = cantools.database.load_string(text, database_format="dbc")
+        mine = dbc.parse(text)
+        checked = 0
+        for message in mine.messages_only:
+            raw_id = message.frame_id | (0x80000000 if message.extended else 0)
+            reference_message = reference.get_message_by_frame_id(raw_id)
+            for _ in range(3):
+                payload = bytes(random.randrange(256) for _ in range(message.length or 8))
+                got = dbc.decode(message, payload)
+                want = reference_message.decode(payload, decode_choices=False,
+                                                allow_truncated=True)
+                for name, value in got.items():
+                    if isinstance(want[name], str):
+                        continue
+                    self.assertAlmostEqual(value, float(want[name]), places=9,
+                                           msg=f"{message.name}.{name}")
+                    checked += 1
+        self.assertGreater(checked, 500)
+
+
+class TestCanLog(unittest.TestCase):
+    """原始 CAN 帧表 -> 场次（ticket #38）与并场（ticket #39）。
+
+    数字全部来自实测：9 份文件、3,684,850 帧、43 个 ID、Sensors.dbc 覆盖 24.6%、
+    解出 46 条通道；9 份其实是 7 次记录（两次切分的墙钟差是 26 µs 与 249 µs）。
+    """
+
+    def setUp(self):
+        if not CAN_DATA.exists() or not SENSORS_DBC.exists():
+            self.skipTest("缺 can_data/ 或 i2pro_data/dbc/")
+        self.files = sorted(CAN_DATA.glob("*.csv"))
+        if len(self.files) < 9:
+            self.skipTest(f"can_data/ 里只有 {len(self.files)} 份文件")
+        self.small = CAN_DATA / "2026_10_03_201147_ID0001.csv"
+
+    # ------------------------------------------------------------- 识别与读取
+    def test_a_frame_table_is_not_mistaken_for_a_channel_table(self):
+        self.assertTrue(canlog.looks_like_frames(self.small))
+        plain = ROOT / "out" / "_can_plain.csv"
+        plain.parent.mkdir(parents=True, exist_ok=True)
+        plain.write_text("Time,Vx KF\n0,1\n0.01,2\n", encoding="utf-8")
+        try:
+            self.assertFalse(canlog.looks_like_frames(plain))
+            # 一张普通的通道表照旧走 CSV 那条路（不会被帧表识别抢走）
+            session = csvlog.read_csv_session(plain)
+            self.assertEqual(len(session.channels), 1)
+            self.assertFalse(csvlog.open_session(plain).metadata()["format"] == "can")
+        finally:
+            plain.unlink(missing_ok=True)
+
+    def test_a_session_holds_the_master_timebase_and_the_true_update_rate(self):
+        session = canlog.read_can_session([self.small], dbc_dir=[DBC_DIR], write_sidecar=False)
+        self.assertEqual(session.sample_rate, 100.0)
+        axis = timebase.axis(session)
+        self.assertEqual(axis.size, int(round(session.duration * 100)) + 1)
+        for channel in session.channels:
+            self.assertEqual(session.values(channel).size, axis.size)
+            self.assertEqual(channel.sample_rate, 100.0)          # 落在主时间基上
+            self.assertIsNotNone(channel.update_rate)             # 真实更新率另有记录
+            self.assertGreater(channel.update_rate, 0)
+        self.assertEqual(len(session.channels), 46)
+
+    def test_zero_order_hold_lands_every_frame_on_the_master_grid(self):
+        """每条已定义报文的值变化时刻，必须与它的帧时间戳逐点对齐。
+
+        这条挡的是"被压缩到前 69% / 变成 50 Hz"那类静默错位——把源速率交给
+        ``channels.hold_factor`` 就是这么错的。测试自己按帧时间戳重算一遍保持，
+        与场次里的列逐点比较（独立的一条路径，不是把实现抄一遍）。
+        """
+        session = canlog.read_can_session([self.small], dbc_dir=[DBC_DIR], write_sidecar=False)
+        row = next(r for r in session.can["channels"] if r["message"] == "Front_Wheel_Sensors")
+        signal = dbc.parse(SENSORS_DBC.read_text(encoding="utf-8", errors="replace")) \
+            .messages[(False, 0x662)].signal(row["signal"])
+
+        # 自己读一遍这份 CSV 里 0x662 的帧（不经过 canlog 的扫描）
+        moments, raw = [], []
+        with self.small.open("r", encoding="gbk", errors="replace", newline="") as handle:
+            handle.readline()
+            for line in handle:
+                cells = line.split(",")
+                if len(cells) < 10 or cells[4].strip().lower() != "0x662":
+                    continue
+                moments.append(float(cells[2]))
+                payload = bytes.fromhex(cells[9].split("|", 1)[1])
+                raw.append(dbc.signal_value(signal, payload))
+        self.assertGreater(len(moments), 100)
+        # 时间轴的原点是**第一份文件的第一帧**，不是这条报文的第一帧
+        times = np.asarray(moments) - canlog.summarise(self.small)["first_t"]
+        axis = timebase.axis(session)
+        index = np.clip(np.searchsorted(times, axis, side="right") - 1, 0, len(raw) - 1)
+        expected = np.asarray(raw, dtype=np.float64)[index]
+        self.assertTrue(np.array_equal(session.values(row["name"]), expected),
+                        "零阶保持的结果与按帧时间戳重算的不一致")
+        # 而且真的有台阶——不然上面那条断言是空的
+        self.assertGreater(np.count_nonzero(np.diff(expected)), 10)
+
+    def test_the_report_carries_the_measured_numbers(self):
+        """9 份文件 = 7 次记录，合起来是实测的帧数 / ID 数 / 覆盖率 / 46 条通道。"""
+        groups = canlog.group_recordings(self.files)
+        sessions = [canlog.read_can_session([item["path"] for item in group["items"]],
+                                            dbc_dir=[DBC_DIR], write_sidecar=False,
+                                            use_sidecar=False)
+                    for group in groups]
+        self.assertEqual(sum(session.can["frames"] for session in sessions), 3684850)
+        ids = set()
+        for session in sessions:
+            ids |= {row["id"] for row in session.can["undecoded"]}
+            ids |= set(session.can["covered_ids"])
+        self.assertEqual(len(ids), 43)
+
+        can = sessions[0].can                     # 第一场 = 前两份文件并起来的那一场
+        self.assertEqual(can["frames"], 1984096)
+        self.assertTrue(can["merged"])
+        self.assertEqual(len(can["sources"]), 2)
+        self.assertEqual(can["dbc"]["file"], "Sensors.dbc")
+        self.assertEqual(len(can["channels"]), 46)
+        self.assertAlmostEqual(can["coverage"], 0.2255, places=3)
+        session = sessions[0]
+        self.assertEqual(can["dbc"]["file"], "Sensors.dbc")
+        # 未定义 ID：按帧数从多到少，6 个诊断 ID 各自标出来
+        undecoded = can["undecoded"]
+        self.assertEqual(sum(row["frames"] for row in undecoded) + can["covered_frames"],
+                         can["frames"])
+        # 全部 7 场加起来才是实测的 904,825 帧被覆盖 / 75.4% 没定义
+        covered = sum(item.can["covered_frames"] for item in sessions)
+        self.assertEqual(covered, 904825)
+        self.assertAlmostEqual(covered / 3684850, 0.2455, places=3)
+        diagnostic = {row["id"] for row in undecoded if row["diagnostic"]}
+        self.assertTrue(diagnostic.issubset({"0x7E0", "0x7E2", "0x7E3", "0x7E4", "0x7E6", "0x7E7"}))
+        self.assertTrue(all(row["diagnostic"] for row in undecoded
+                            if row["id"].startswith("0x7E")))
+        self.assertTrue(all(row["sample"] for row in undecoded))
+        self.assertEqual([row["frames"] for row in undecoded],
+                         sorted((row["frames"] for row in undecoded), reverse=True))
+        # 那份 dashboard DBC 一条都对不上：报告要写明原因（全是扩展帧）
+        dashboard = next(row for row in sessions[0].can["dbc_candidates"]
+                         if row["file"].startswith("E27_"))
+        self.assertEqual(dashboard["covered_frames"], 0)
+        # 没有车速 / GPS ⇒ 没有距离轴
+        with self.assertRaises(ValueError):
+            derive.distance_series(session)
+        self.assertTrue(any("距离轴" in text for text in can["notes"]))
+
+    def test_the_sidecar_records_the_choices_and_column_roles_can_be_overridden(self):
+        work = ROOT / "out" / "_can_sidecar"
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True)
+        copy = work / self.small.name
+        shutil.copy2(self.small, copy)
+        try:
+            session = canlog.read_can_session([copy], dbc_dir=[DBC_DIR])
+            self.assertEqual(session.can["dbc"]["file"], "Sensors.dbc")
+            stored = sidecar.read("canmap", copy)
+            self.assertEqual(stored["dbc"], "Sensors.dbc")
+            self.assertEqual(stored["rate"], 100.0)
+            self.assertEqual(stored["roles"]["id"], "ID号")
+            # 换一个 CAN 工具导出的列名不一样：侧车里改掉角色就能读
+            sidecar.write("canmap", copy, {"roles": {"id": "CANID"}, "dbc": "Sensors.dbc"})
+            with self.assertRaises(ValueError) as caught:
+                canlog.read_can_session([copy], dbc_dir=[DBC_DIR], write_sidecar=False)
+            self.assertIn("表头里找不到", str(caught.exception))
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def test_a_missing_dbc_directory_says_what_to_do(self):
+        """哪儿都找不到 DBC 时要吵，并且说清把文件放哪。
+
+        ``default_dbc_directories`` 平时会把仓库里的 ``i2pro_data/dbc`` 兜进来
+        （原始帧日志在 ``can_data/``，DBC 不在它旁边），所以这里把它换成一条死路。
+        """
+        from unittest import mock
+
+        nowhere = ROOT / "out" / "_no_such_dbc"
+        with mock.patch.object(canlog, "default_dbc_directories", lambda path: [nowhere]):
+            with self.assertRaises(ValueError) as caught:
+                canlog.read_can_session([self.small], write_sidecar=False, use_sidecar=False)
+        message = str(caught.exception)
+        self.assertIn("DBC", message)
+        self.assertTrue("放进去" in message or "把本车的 DBC" in message, message)
+
+    # ------------------------------------------------------------------- 并场
+    def test_contiguous_recordings_merge_into_seven(self):
+        groups = canlog.group_recordings(self.files)
+        self.assertEqual(len(groups), 7)
+        merged = [[item["path"].name for item in group["items"]] for group in groups]
+        self.assertIn(["2026_10_03_173345_ID0001.csv", "2026_10_03_173936_ID0001.csv"], merged)
+        self.assertIn(["2026_10_03_174748_ID0001.csv", "2026_10_03_175413_ID0001.csv"], merged)
+        evidence = " ".join(text for group in groups for text in group["evidence"])
+        self.assertIn("0.026 ms", evidence)               # 实测的墙钟差
+        self.assertIn("0.249 ms", evidence)
+        # 关掉并场就是 9 份各自一场（判据是"两个时钟同时接上"）
+        sessions = [canlog.read_can_session([path], dbc_dir=[DBC_DIR], merge=False,
+                                            write_sidecar=False) for path in self.files]
+        self.assertEqual(len(sessions), 9)
+        self.assertEqual(sum(session.can["frames"] for session in sessions), 3684850)
+
+    def test_the_library_shows_one_entry_per_recording(self):
+        work = ROOT / "out" / "_can_library"
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True)
+        try:
+            for path in self.files:
+                shutil.copy2(path, work / path.name)
+            library = librarymod.SessionLibrary([work, DATA], cache_size=1, maths_root=ROOT)
+            names = [name for name in library.names() if name.startswith("2026_10_03")]
+            self.assertEqual(len(names), 7)
+            merged = [name for name in names if name.endswith("+1")]
+            self.assertEqual(len(merged), 2)
+            summary = library.summary(names[0])
+            self.assertEqual(summary["format"], "can")
+            self.assertEqual(summary["channels"], 46)
+            # 列表缓存：第二次不再解码（第一次要解码全部 CAN 场次，几秒）
+            first = library.listing()
+            second = library.listing()
+            self.assertEqual(len(first), len(second))
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    # ----------------------------------------------------------------- 性能
+    def test_one_file_stays_under_five_seconds(self):
+        big = CAN_DATA / "2026_10_03_173345_ID0001.csv"
+        if not big.exists():
+            self.skipTest("缺那份 91 MB 的帧表")
+        start = time.perf_counter()
+        canlog.read_can_session([self.small], dbc_dir=[DBC_DIR], merge=False,
+                                write_sidecar=False)
+        small_seconds = time.perf_counter() - start
+        start = time.perf_counter()
+        canlog.read_can_session([big], dbc_dir=[DBC_DIR], merge=False, write_sidecar=False)
+        big_seconds = time.perf_counter() - start
+        print(f"\n[#38 实测] 单份 {big.name}（91 MB）{big_seconds:.1f} s，"
+              f"小份 {small_seconds:.1f} s")
+        self.assertLess(big_seconds, 5.0)
 
 
 if __name__ == "__main__":

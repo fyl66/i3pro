@@ -43,9 +43,14 @@ def _print_table(rows: list[dict], columns: list[str] | None = None) -> None:
 
 def cmd_info(args: argparse.Namespace) -> int:
     rows = []
+    can_reports = []
     for path in args.files:
         with csvlog.open_session(path) as log:
             meta = log.metadata()
+            # 原始 CAN 帧表：帧数、覆盖率、"读不懂的 ID" 才是重点，单独打一段
+            # （ticket #38/#39；界面上的"CAN 导入报告"读的是同一份数据）。
+            if meta.get("can"):
+                can_reports.append(meta["can"])
             rows.append(
                 {
                     "file": meta["file"],
@@ -60,6 +65,24 @@ def cmd_info(args: argparse.Namespace) -> int:
                 }
             )
     _print_table(rows)
+    for can in can_reports:
+        print()
+        print(f"CAN：{can['frames']} 帧 / {can['ids']} 个 ID，"
+              f"DBC {can['dbc']['file']}（{can['dbc']['messages']} 条报文 / "
+              f"{can['dbc']['signals']} 条信号）覆盖 {can['covered_frames']} 帧"
+              f"（{can['coverage'] * 100:.1f}%）")
+        if can["sources"]:
+            print(f"  来源：{'、'.join(can['sources'])}"
+                  + ("（自动并成一次记录）" if can["merged"] else ""))
+        for text in can["notes"]:
+            print(f"  注意：{text}")
+        unknown = can["undecoded"]
+        if unknown:
+            print(f"  读不懂的 ID {len(unknown)} 个（前 5 个）：")
+            for row in unknown[:5]:
+                mark = "（诊断流量）" if row["diagnostic"] else ""
+                print(f"    {row['id']:>6}  {row['frames']:>8} 帧  "
+                      f"{row['rate']:>7.2f} Hz  {row['sample']}{mark}")
     return 0
 
 

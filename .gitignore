@@ -13,6 +13,8 @@ out/
 *.notes.json
 *.gps.json
 *.map.json
+#: CAN 导入的选择（列角色 / 用哪份 DBC / 主时间基）——ticket #38
+*.can.json
 # 侧车写盘时先落的临时文件（sidecar.py 原子替换用），正常情况下瞬间就没了。
 *.json.tmp
 .tmp_deps/

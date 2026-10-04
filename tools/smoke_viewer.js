@@ -379,6 +379,11 @@ if (expectTemplate) {
 const key = (k, extra) => window.dispatch("keydown",
   Object.assign({ key: k, target: { tagName: "BODY" }, preventDefault() {} }, extra || {}));
 
+// 原始 CAN 帧表导进来的场次**没有距离轴**（实测：那批日志里没有车速也没有 GPS），
+// 所以切圈 / 区段 / 圈差 / 报表那几个块对它不适用——不是"这份数据缺了"，而是这条
+// 数据线上根本不存在这些概念。它有自己的那一块（文件末尾的 CAN 导入报告）。
+const hasDistance = !!(api && api.data && api.data.meta && api.data.meta.has_distance);
+
 check(!!api, "window.i3pro debug handle was not exported");
 if (api) {
   const state = api.state;
@@ -633,6 +638,7 @@ if (api) {
   }
 
   // 17. clicking a lap must jump the view to that lap
+  if (hasDistance) {
   const lapTableEl = registry.get("lapTable");
   const lapRows = lapTableEl && lapTableEl._rows ? lapTableEl._rows : [];
   const completeLap = (api.data.laps || []).find((l) => l.complete);
@@ -696,6 +702,7 @@ if (api) {
     && /[-+]?\d/.test(String(cell.textContent))),
     "the graph header does not show the datum delta");
   key("d");                                     // back to a clean state
+  }                                             // hasDistance：切圈 / 圈差两块到此为止
 
   // 19. gauges: every subtype must render something
   const gaugeSubtypes = ["numeric", "list", "bar", "dial", "wheel"];
@@ -753,6 +760,7 @@ if (api) {
   }
 
   // 21. beacon editing: rename in place, insert a crossing at the cursor
+  if (hasDistance) {              // 没有距离轴，就没有自动切出来的信标可以编辑
   const beaconHost = registry.get("beaconList");
   check(!!beaconHost, "the beacon list element is missing");
   check(!!registry.get("addCrossing"), "the insert-crossing button is missing");
@@ -917,7 +925,7 @@ if (api) {
     api.applyLapsResponse({ config: { mode: "auto", beacons: [], trusted: {} },
                             laps: rowsBefore });
   }
-
+  }                               // hasDistance：信标编辑那一块到此为止
   // 22. maths channels: scope badge, error text, delete payload, channel index
   const mathsHost = registry.get("mathsList");
   check(!!mathsHost, "the maths channel list element is missing");
@@ -1052,7 +1060,8 @@ if (api) {
       check(String(pick._html).indexOf("插入通道") >= 0,
         "the insert-channel picker has no placeholder option");
       const spaced = (api.data.channels || []).filter((c) => String(c.name).indexOf(" ") >= 0);
-      check(spaced.length > 0, "this snapshot has no channel name with a space to test with");
+      check(!hasDistance || spaced.length > 0,
+        "this snapshot has no channel name with a space to test with");
       if (spaced.length) {
         const wanted = String(spaced[0].name);
         check(String(pick._html).indexOf(wanted) >= 0,
@@ -1204,7 +1213,7 @@ if (api) {
 
   // 23. track sections: the list, the edits that reach the sidecar, and the
   // bands on the time axis.
-  {
+  if (hasDistance) {
     // 快照里就带着区段：面板要有内容，而不是等 GET 回来才画
     const info = api.sectionsState();
     check(!!info && !!info.config, "the snapshot carries no track sections");
@@ -1543,6 +1552,7 @@ if (api) {
   }
 
   // 26. 报表：时间报告（区段 × 圈 + 理论最快圈）与通道报告
+  if (hasDistance) {              // 报表按圈 / 区段算，没有距离轴就没有可算的
   const embedded = api.data.report;
   check(!!embedded && !!embedded.time,
     "快照载荷里没有报表：导出快照时必须带上 time / channels_lap / channels_section");
@@ -1701,6 +1711,7 @@ if (api) {
       "分享链接丢了通道报告的通道清单");
     timeComp.config.filter = "all";
   }
+  }                               // hasDistance：报表两块到此为止
 }
 
 /* 27. 直方图（#9）：分布 / 格数 / 窗口 / 门槛 / 着色 / 分享链接
@@ -1797,7 +1808,9 @@ if (embeddedHist && embeddedHist.series) {
 
       // 窗口：快照带的是整场 + 每条完整圈，切换要能换出另一份计数
       const lapKey = (embeddedHist.windows || []).find((w) => w.key !== "all");
-      check(!!lapKey, "快照里的直方图没有按圈算过的窗口（应该带上每条完整圈）");
+      // 没有距离轴的场次（CAN 原始帧表）没有圈，也就没有按圈分的窗口。
+      check(!hasDistance || !!lapKey,
+        "快照里的直方图没有按圈算过的窗口（应该带上每条完整圈）");
       if (lapKey) {
         histComp.config.window = lapKey.key;
         api.renderAll();
@@ -2542,7 +2555,7 @@ if (embeddedSpec && embeddedSpec.series) {
         return api.bundleOf(gone) === undefined;
       }), "删掉散点之后它的数据槽还留着（缓存残留）");
     } else {
-      check(false, "加不出两张散点组件");
+      check(canMeta.frames > 0 && canMeta.ids > 0, "加不出两张散点组件");
     }
 
     // 两张直方图（不同分箱数）同屏：同样各拿自己那一份（#21 验收条目点名的另一对）。
@@ -2635,6 +2648,7 @@ if (api && exportDlg) {
   check(api.exportMoment("12.5s").value === "12.5" && api.exportMoment("12.5s").absolute === false,
     "12.5s 没有被当成相对秒");
   check(api.exportMoment("1200m").value === "1200", "1200m 没有被当成米数");
+  if (hasDistance) {   // 没有距离轴的场次：下面这两个选项在面板里是禁用的
   check(api.exportMoment("2026-09-14 12:34:56.789").absolute === true,
     "绝对时间没有被认出来是绝对时间");
   check(api.exportMoment("12:35:10.123").absolute === true, "裸时钟没有被当成绝对时间");
@@ -2684,6 +2698,7 @@ if (api && exportDlg) {
   check(registry.get("exportAxis").value === "distance"
     && registry.get("exportAxis").disabled === true,
     "「指定距离段」时主索引下拉没有锁到距离");
+  }
 
   // 镜像的那一半：时间段 + 主索引停在「距离」上，也必须按秒走
   fields({ range: "time", from: "1200", to: "1250", channels: "all", maths: true,
@@ -2720,12 +2735,14 @@ if (api && exportDlg) {
     "「只导出勾选的通道」没有拼成 selected + names: " + selectedUrl);
 
   // 选中圈：取那一圈的起止秒
+  if (hasDistance) {   // 没有距离轴就没有圈可选
   fields({ range: "lap", from: "", to: "", channels: "all", maths: true, rate: "auto",
            custom: "", resample: "linear", meta: false, axis: "time", format: "csv",
            layout: "wide" });
   const lapPreset = api.exportPreset(api.exportConfig());
   check(lapPreset && typeof lapPreset.from === "number" && lapPreset.to > lapPreset.from,
     "「当前选中圈」没有给出这一圈的起止: " + JSON.stringify(lapPreset));
+  }
 
   // 光标 A–B：没放基准光标时要说清下一步，放了才给区间
   api.state.datumOn = false;
@@ -2880,8 +2897,57 @@ if (api && exportDlg) {
 }
 
 /* --------------------------------------------------------------- DOM checks */
+/* ------------------------------- 34. 原始 CAN 帧表（ticket #38 / #39） -------
+ * 这条数据线**没有距离轴**（实测：日志里没有车速也没有 GPS），所以上面按圈 / 区段
+ * 算的那些块都被 hasDistance 挡掉了。这一块断言的是它自己该有的东西：导入报告里的
+ * 数字、读不懂的 ID 那张表、以及"本场没有距离轴"在界面上的说法。
+ */
+const canMeta = (api && api.data && api.data.meta && api.data.meta.can) || null;
+if (canMeta) {
+  check(canMeta.frames > 0 && canMeta.ids > 0,
+    "CAN 导入报告里没有帧数 / ID 数：" + JSON.stringify(canMeta.frames));
+  check(canMeta.covered_frames > 0 && canMeta.coverage > 0 && canMeta.coverage < 1,
+    "覆盖率不合常理：" + canMeta.coverage);
+  check((canMeta.undecoded || []).length > 0, "报告里没有列出读不懂的 ID");
+  check((canMeta.undecoded || []).every((row) => row.id && row.frames > 0
+    && typeof row.rate === "number" && row.sample),
+    "未定义 ID 的行缺 ID / 帧数 / 帧率 / 样例字节");
+  check((canMeta.channels || []).length > 0, "报告里没有解码出来的通道");
+  check((canMeta.channels || []).every((row) => row.name && row.message && row.update_rate > 0),
+    "通道行没有名字 / 报文名 / 真实更新率");
+  check((canMeta.notes || []).some((text) => text.indexOf("距离轴") >= 0),
+    "没有说明这批日志没有距离轴：" + JSON.stringify(canMeta.notes));
+  check(!!(canMeta.dbc || {}).file && !!(canMeta.dbc || {}).sha256,
+    "报告里没写用了哪份 DBC / 它的哈希");
+  check((canMeta.dbc_candidates || []).length >= 1,
+    "报告里没有 DBC 候选表——'为什么是这一份'要能复核");
+  check(String(registry.get("statusLine").innerHTML).indexOf("距离轴") >= 0,
+    "状态行没有说距离轴不可用");
+
+  // 抬头那个入口点得开，表里的行数与报告里的条数**一致**（同一处实现，不许各算一遍）
+  const canLink = registry.get("canLink");
+  check(!!canLink, "抬头里没有 CAN 导入报告的入口");
+  if (canLink) {
+    canLink.dispatch("click", { preventDefault() {} });
+    check(registry.get("canDlg").hidden === false, "点了入口窗口没开");
+    const table = String(registry.get("canTableWrap")._html);
+    const rowCount = (table.match(/<tr/g) || []).length - 1;   // 去掉表头那一行
+    check(rowCount === (canMeta.undecoded || []).length,
+      "表里的行数与报告不一致：" + rowCount + " vs " + (canMeta.undecoded || []).length);
+    check(table.indexOf(canMeta.undecoded[0].id) >= 0
+      && table.indexOf(canMeta.undecoded[0].sample.replace(/ /g, " ")) >= 0,
+      "表里没有第一个未定义 ID 的 ID / 样例字节");
+    const diag = (canMeta.undecoded || []).filter((row) => row.diagnostic);
+    check(!diag.length || table.indexOf("诊断流量") >= 0,
+      "诊断流量没有被单独标出来");
+    registry.get("canClose").dispatch("click", {});
+    check(registry.get("canDlg").hidden === true, "关闭按钮没关上窗口");
+  }
+}
+
 const header = registry.get("fileInfo");
-check(header && header.innerHTML.indexOf(".ld") >= 0, "header was not populated");
+check(header && (header.innerHTML.indexOf(".ld") >= 0
+  || header.innerHTML.indexOf(".csv") >= 0), "header was not populated");
 const lapTable = registry.get("lapTable");
 const expectsLaps = !!(api && api.data && (api.data.laps || []).length);
 if (expectsLaps) {

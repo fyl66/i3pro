@@ -71,6 +71,9 @@ KINDS: dict[str, Kind] = {
     "notes": Kind(".notes.json", list, "注释清空", shape=(list, dict)),
     "maths": Kind(".maths.json", dict, "数学通道回到只读全局定义"),
     "csvmap": Kind(".map.json", dict, "CSV 列名回到自动匹配"),
+    #: 原始 CAN 帧表的导入选择（列角色 / 用哪份 DBC / 主时间基）——换一个 CAN 工具
+    #: 导出的列名不一样，改动必须落在文件上而不是代码里（ticket #38）。
+    "canmap": Kind(".can.json", dict, "CAN 导入回到按表头自动识别、DBC 取覆盖最多的那份"),
 }
 
 

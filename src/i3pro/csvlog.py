@@ -423,8 +423,21 @@ def read_csv_session(
 
 
 def open_session(path: str | Path, **kwargs):
-    """Pick the reader by extension, so callers stop caring about the format."""
+    """按**内容**挑读取器，调用方从此不用关心格式。
+
+    ``.csv`` 有两种完全不同的东西：i2 Pro / 别的工具导出的**通道表**，和 CAN 记录仪
+    写出来的**原始帧表**。它们都叫 ``.csv``，但列名和读法毫无共同之处，所以这里按
+    表头特征先分一次流（ticket #38）；认不出是帧表就还是走通道表那条路。
+    """
     path = Path(path)
     if path.suffix.lower() == ".csv":
+        from . import canlog
+
+        if canlog.looks_like_frames(path):
+            allowed = {"dbc_dir", "rate", "merge", "roles", "dbc_file", "write_sidecar",
+                       "use_sidecar"}
+            return canlog.read_can_session(
+                path, **{k: v for k, v in kwargs.items() if k in allowed}
+            )
         return read_csv_session(path, **kwargs)
     return ldmod.LogFile.read(path)

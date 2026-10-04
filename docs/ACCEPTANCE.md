@@ -2410,8 +2410,8 @@ python -m unittest tests.test_i3pro.TestCanLog -v      # -> Ran 9 tests / OK
 # 命令行看一眼（帧数 / 覆盖率 / 读不懂的 ID）
 python -m i3pro info "can_data\2026_10_03_201147_ID0001.csv"
 
-# 快照 + 无头断言（这条数据线没有距离轴，驱动会把按圈算的块让过去，
-# 只断言它自己该有的东西）
+# 快照 + 无头断言（**有距离轴但没有圈**——见 A53：跑起来的 CAN 日志拿 Vx_KF
+# 积出了距离轴。驱动按 hasLaps 让过"按圈算"的块，只断言它自己该有的东西）
 python -c "from i3pro import csvlog, render; render.render_html(csvlog.open_session('can_data/2026_10_03_201147_ID0001.csv'), 'out/can.html', worksheets_dir='.')"
 node tools\smoke_viewer.js out\can.html                # -> PASS（含 CAN 报告那一块）
 ```
@@ -2519,7 +2519,7 @@ python -m i3pro serve --data i2pro_data --data can_data   # -> 23 个场次（16
 | 原地不动的日志 | `201147` 那份 `Vx_KF` = −0.05…0.00 kph → **没有距离轴**，报告写明原因（不是"没有这条通道"） |
 | 读不懂的最大一块 | `0xCC` **139,050 帧**（9 份合计），6 个 OBD/UDS 诊断 ID 仍单独标出 |
 | 冲突 | 真实 13 份之间**没有冲突**；合成的冲突用例（`0x660` 两种定义）按覆盖帧数选了 `Sensors.dbc`，冲突进报告，用的是赢的那份信号名 |
-| 性能 | 9 份全解码 **6.0 s**（判据 ≤ 20 s）；单份 91 MB **1.6 s**（判据 ≤ 5 s） |
+| 性能 | 9 份全解码 **6.12 s**（判据 ≤ 20 s）；单份 91 MB：`merge=False` **1.56–1.61 s**（单测走这条），**默认的 `merge=True` 3.22–3.30 s**（工作台走这条——它会先看一眼同目录的邻居，判断这份是不是被切开的记录）。两条都过判据 ≤ 5 s |
 | 报错错因 | 三条各缺一条通道的定义分别报出自己的那条；互相引用仍报"绕成一个圈" |
 
 ---

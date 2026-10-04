@@ -6555,9 +6555,15 @@ class TestCanLog(unittest.TestCase):
         start = time.perf_counter()
         canlog.read_can_session([big], dbc_dir=[DBC_DIR], merge=False, write_sidecar=False)
         big_seconds = time.perf_counter() - start
+        # 工作台走的是**默认**那条（merge=True：先看一眼同目录的邻居，判断这份是不是
+        # 被切开的记录），所以判据要落在它身上，不能只测 merge=False 那条捷径。
+        start = time.perf_counter()
+        canlog.read_can_session([big], dbc_dir=[DBC_DIR], write_sidecar=False)
+        merged_seconds = time.perf_counter() - start
         print(f"\n[#38 实测] 单份 {big.name}（91 MB）{big_seconds:.1f} s，"
-              f"小份 {small_seconds:.1f} s")
+              f"小份 {small_seconds:.1f} s；工作台那条（merge=True）{merged_seconds:.1f} s")
         self.assertLess(big_seconds, 5.0)
+        self.assertLess(merged_seconds, 5.0)
 
 
 class TestSpeedChannelResolution(unittest.TestCase):

@@ -7966,6 +7966,24 @@ class TestAliases(unittest.TestCase):
         self.assertEqual(changed["aliases"], newer)
         self.assertEqual(worksheetsmod.load_file(root / "alias-demo.json")["aliases"], newer)
 
+    def test_导出的那份能原样导入回来_别名也带着(self):
+        """队友拿到的必须是"能直接用"的那份：导出 → 导入，别名一条不少。"""
+        source = tempfile.TemporaryDirectory(prefix="i3pro-alias-")
+        self.addCleanup(source.cleanup)
+        destination = tempfile.TemporaryDirectory(prefix="i3pro-alias-")
+        self.addCleanup(destination.cleanup)
+        worksheetsmod.write_sheet(Path(source.name), "alias-demo", {
+            "name": "别名样例",
+            "components": [{"type": "graph", "config": {"channels": ["@左后轮速"]}}],
+            "aliases": self.WHEEL,
+        })
+        sheet = worksheetsmod.read_sheet(Path(source.name), "alias-demo")
+        text = json.dumps(worksheetsmod.export_payload(sheet),
+                          ensure_ascii=False, indent=2) + "\n"
+        made = worksheetsmod.import_text(Path(destination.name), text)
+        self.assertEqual(made["aliases"], self.WHEEL)
+        self.assertEqual(made["components"][0]["config"]["channels"], ["@左后轮速"])
+
     def test_页面载荷带着落点表(self):
         log = self._open(HILL)
         directory = tempfile.TemporaryDirectory(prefix="i3pro-alias-")

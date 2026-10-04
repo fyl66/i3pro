@@ -3287,6 +3287,27 @@ if (api && exportDlg) {
   api.aliasRemoveAlias("测试别名");
   check(!(api.state.aliases || []).some((one) => one.name === "测试别名"),
     "删别名没生效");
+
+  // 一条都没落地的别名也要说清（i2 Pro 的 Channel Status 存在的理由）：
+  // 刚建好只有名字、还没加候选时，落点是 undefined → 界面写"待保存"，不是空白。
+  api.aliasAddAlias("还没候选");
+  api.state.aliasLanding = { "@还没候选": null };
+  api.state.aliasesDirty = false;
+  api.renderAliasList();
+  // 假 DOM 里文字挂在子节点上（行本身是 makeEl 造的空壳），所以递归收一遍。
+  const textOf = (el) => {
+    let out = String(el.textContent || "") + String(el._html || "");
+    for (const kid of el._children || []) out += " " + textOf(kid);
+    return out;
+  };
+  const barren = (registry.get("aliasList")._children || [])
+    .filter((one) => textOf(one).indexOf("还没候选") >= 0)[0];
+  const barrenText = barren ? textOf(barren) : "";
+  check(barrenText.indexOf("本场次一条都没落地") >= 0,
+    "一条都没落地的别名没写明原因：" + barrenText);
+  api.aliasRemoveAlias("还没候选");
+  api.state.aliasLanding = {};
+
   api.state.aliases = aliasesBefore;
   api.state.aliasesDirty = false;
   api.renderAliasList();

@@ -2899,7 +2899,7 @@ python tools\verify_clicks.py     # 172 项检查：172 通过，0 失败（其�
 node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
 ```
 
-**通过判据**（`TestPalettes` 8 项 ＋ 真浏览器 24 条 ＋ 无头 16 条）：
+**通过判据**（`TestPalettes` 8 项 ＋ 真浏览器 24 条 ＋ 无头 26 条）：
 
 | 断言 | 说明 |
 | --- | --- |
@@ -2946,8 +2946,8 @@ python tools\verify_clicks.py     # 188 项检查：188 通过，0 失败（其�
 node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
 ```
 
-**通过判据**（`TestAliases` 13 项 ＋ `TestAliasesOverHttp` 2 项 ＋ 真浏览器 16 条 ＋
-无头 14 条）：
+**通过判据**（`TestAliases` 14 项 ＋ `TestAliasesOverHttp` 2 项 ＋ 真浏览器 16 条 ＋
+无头 18 条）：
 
 | 断言 | 说明 |
 | --- | --- |
@@ -2958,7 +2958,8 @@ node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
 | 编辑：增删候选、调顺序、增删别名 | 真浏览器真点：`＋ 别名`（真键盘打字）、候选上的 `↑` 连点两下把它顶到第一位、保存后回磁盘核对候选顺序 = `["GPS Speed","SpeedRL","Gear Speed1"]` |
 | **保存写回的是引用，不是真通道名** | 落盘的 `worksheets/sheet-1.json` 里 `"channels": ["@左后轮速"]`——写成 `Gear Speed1` 的话换场次就又空了。用户真改过那一格才按他写的存 |
 | 落点跟着新顺序走 | 保存回来之后 `alias_landing` 变成 `GPS Speed`（新顺序的第一条），图里画的那条通道也跟着换 |
-| 别名随工作表进出 | `aliases` 是工作表文件里的一个键；导入 / 导出 / 另存为都带着它走，`.ld` 一律只读 |
+| 别名随工作表进出 | `aliases` 是工作表文件里的一个键；导出 → 导入实测逐字段相同（`_test_导出的那份能原样导入回来_别名也带着`），`.ld` 一律只读 |
+| 一条都没落地的别名写得清 | 刚建好还没加候选（或候选全不在）的别名，状态视图写"本场次一条都没落地"；改过还没保存的写"改过了 · 保存后重新判定" |
 | 坏形状说下一步 | 没写名字 / 重名 / 名字带 `@` / `candidates` 不是一列 / 候选里又写别名 —— 各自一条中文报错；`POST` 坏别名 400 且带原文 |
 
 **两处刻意的取舍**
@@ -2971,10 +2972,10 @@ node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
   叫什么"，两件事各自解决各自的问题；混在一起会让"为什么这条图上是这个通道"变成
   一道要读两套规则的题。
 
-**回归四项（本机实测）**：`Ran 430 tests` + `OK`；`verify_ld_vs_csv` `PASS - 0
+**回归四项（本机实测）**：`Ran 431 tests` + `OK`；`verify_ld_vs_csv` `PASS - 0
 channel(s) outside tolerance`；两份金标准快照各 `PASS`（7 圈 / 471 通道行、
 26 圈 / 377 通道行）；真浏览器 **188 项检查：188 通过，0 失败**；
-`smoke_viewer.js` 里的 `check(` 共 **575** 条。
+`smoke_viewer.js` 里的 `check(` 共 **576** 条。
 
 ---
 
@@ -3007,8 +3008,8 @@ channel(s) outside tolerance`；两份金标准快照各 `PASS`（7 圈 / 471 �
 | `TestIndependentParsers` | 第二套实现交叉验证、213 通道 CSV 全量对照 |
 | `TestBeaconUndo` | 撤销的纯函数层：什么是"同一版"、什么时候没有可撤销的一步、交回去的是上一版本身 |
 | `TestBeaconUndoOverHttp` | 撤销走真实 `PUT`：改名 / 插入 / 删除各自一步回到原样、`trusted` 迁移、落盘、一次无改动的保存不吃掉上一步、没有可撤销的一步时 400 并说明下一步、页面注入的 `laps_can_undo` 三态 |
-| `TestViewerScript` | 无头驱动前端：脚本里 **575 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
-| `TestAliases` / `TestAliasesOverHttp` | 通道别名（#36，15 项）：有序候选取第一条存在的、重复候选去掉、九种坏形状各说下一步、空候选合法、不是引用就不去别名表里翻、**同一套别名在两份金标准上落到不同通道**（`Gear Speed1` / `SpeedRL`）、`annotate` 贴出落点表、别名随文件往返、保存时给不给 aliases 的两种行为、页面载荷带着落点；HTTP：保存别名与落点、坏别名 400 带下一步 |
+| `TestViewerScript` | 无头驱动前端：脚本里 **576 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
+| `TestAliases` / `TestAliasesOverHttp` | 通道别名（#36，16 项）：有序候选取第一条存在的、重复候选去掉、九种坏形状各说下一步、空候选合法、不是引用就不去别名表里翻、**同一套别名在两份金标准上落到不同通道**（`Gear Speed1` / `SpeedRL`）、`annotate` 贴出落点表、别名随文件往返、**导出 → 导入逐字段相同**、保存时给不给 aliases 的两种行为、页面载荷带着落点；HTTP：保存别名与落点、坏别名 400 带下一步 |
 | `TestPalettes` | 波形配色（#35，8 项）：三套调色板齐、每套 ≥ 8 色、前八色两两 ΔE ≥ 25、相邻 ≥ 30、对底色对比度 ≥ 3.0、"缺失"灰不属于任何一套且与所有颜色 ΔE ≥ 25、色差与对比度这两把尺子本身对拍（黑/白 = 100 / 21）、页面载荷带着三套与缺失灰、不认识的调色板名退回默认 |
 | `TestWorksheets` | 工作表（#30，12 项）：仓库里那七份文件全都读得出来（名字 / 身份 / 顺序 / 组件类型）、随版本发布的那几份**不写死通道名**（挑通道一律走 `pick`）、坏文件不连累别人、七种坏法各自的下一步（坏 JSON / schema 不认 / 键打错 / 尺寸非法 / 空组件列 / 空规则 / 规则键打错）、重名被挡、目录不存在与目录为空、载荷在快照与本地服务两条路上都带工作表（含 `--worksheets` 换目录只影响那一个载荷）、**搬进文件之后与搬之前逐字段一致**（夹具是硬编码那版倒出来的） |
 | `TestExportRangeResolution` | 导出的范围解析（#23，4 项）：裸时钟沿用场次那天、范围左闭右闭、颠倒/越界各自说下一步、距离段填的是米而 `t_start` 才是秒 |

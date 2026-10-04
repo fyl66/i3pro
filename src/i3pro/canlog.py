@@ -6,9 +6,14 @@
     序号,系统时间,时间标识,CAN通道,ID号,帧类型,帧格式,CAN类型,长度,数据
     1000000,="17:54:13.761949,385.624895,ch1,0x27,数据帧,标准帧,CAN,8,x| 01 01 ...
 
-产出与 ``.ld`` **同形状**的场次：进侧边栏、能画图、能加数学通道、能导出。距离轴 /
-切圈 / 区段用不了——这批日志里**没有车速也没有 GPS**（实测 43 个 ID 全查过），
-所以报告里会写明，而不是等用户画不出距离轴再来猜。
+产出与 ``.ld`` **同形状**的场次：进侧边栏、能画图、能加数学通道、能导出。距离轴取决于
+这批日志里到底有没有车速：13 份 DBC **取并集**之后 `0xC1 Throttle_INFO.Vx_KF`
+（`TH.dbc`）就是车速，跑起来的日志因此**有距离轴**（实测 0.1–5546.8 m），切圈靠手工
+信标（没有 GPS）；只有几十秒、车没动的日志里那条是死通道，那种场次就没有距离轴。
+报告把这两种情况分开说，而不是等用户画不出距离轴再来猜。详见 ticket #40 与 A53。
+
+多份 DBC 要**取并集**而不是挑一份：这台车把 CAN 布局拆成了 13 份小 DBC，任何单独一份
+只覆盖 0–22% 的帧，只挑一份会让用户后来补上的 DBC 一条都不参与解码。
 
 三条硬约束（都有实测支撑，写在票里）：
 
@@ -34,12 +39,12 @@ from pathlib import Path
 
 import numpy as np
 
-from . import dbc as dbcmod, ld as ldmod, sidecar
+from . import dbc as dbcmod, derive as derivemod, ld as ldmod, sidecar
 from .csvlog import CsvSession
 
 __all__ = [
     "CanSession", "DEFAULT_ROLES", "GROUP_TOLERANCE_S", "GROUP_WINDOW_S",
-    "can_roles", "choose_database", "dbc_directory", "group_recordings", "looks_like_frames",
+    "can_roles", "dbc_directory", "group_recordings", "looks_like_frames",
     "read_can_session", "summarise", "write_can_map",
 ]
 
@@ -147,13 +152,17 @@ def can_roles(session_path: str | Path, overrides: dict | None = None) -> dict[s
     return roles
 
 
-def write_can_map(session_path: str | Path, **values) -> Path:
+def write_can_map(session_path: str | Path, drop: tuple[str, ...] = (), **values) -> Path:
     """把这次导入的选择写进侧车：列角色、用了哪份 DBC、主时间基、并场与否。
 
     这是"重开可复现"的那一半：同样的输入文件 + 同样的侧车，必须得到同样的场次。
+    ``drop`` 里的键会被删掉——``values`` 里给 ``None`` 是"别动"（保留侧车里已有的
+    值），而"这一条现在不成立了"要能真的拿掉（例如改成并集之后那条旧的 ``dbc``）。
     """
     stored = sidecar.read("canmap", session_path) or {}
     stored.update({k: v for k, v in values.items() if v is not None})
+    for key in drop:
+        stored.pop(key, None)
     return sidecar.write("canmap", session_path, stored)
 
 
@@ -295,31 +304,18 @@ def group_recordings(
     return groups
 
 
-def choose_database(databases: list[tuple[str, dbcmod.Database]], counts: dict[int, int],
-                    extended_ids: set[int]) -> tuple[str, dbcmod.Database, list[dict]]:
-    """一份日志可能配着好几份 DBC（仪表一份、传感器一份），选覆盖帧数最多的那份。
+def coverage_of(databases: list[tuple[str, dbcmod.Database]], counts: dict[int, int],
+                extended_ids: set[int]) -> dict[str, int]:
+    """每份 DBC **各自**覆盖了多少帧。
 
-    返回 ``(文件, 库, 候选表)``：候选表要进导入报告——"为什么是它"必须能复核，
-    尤其是那份覆盖 0 帧的（实测 dashboard DBC 全是扩展 ID，日志里没有扩展帧）。
+    这个数字有两个用处：进导入报告（"为什么用了它 / 它一条都对不上"要能复核），
+    以及同一条 ID 被两份 DBC 定义成不同样子时当裁判（ticket #40）。
     """
-    scored: list[dict] = []
-    best: tuple[str, dbcmod.Database] | None = None
-    best_covered = -1
-    for name, database in databases:
-        covered = sum(
-            frames for frame_id, frames in counts.items()
-            if database.covers(frame_id, frame_id in extended_ids)
-        )
-        scored.append({"file": name, "covered_frames": covered, "messages": len(database.messages),
-                       "signals": database.signal_count})
-        if covered > best_covered:
-            best_covered, best = covered, (name, database)
-    if best is None:
-        raise ValueError(
-            "没有可用的 DBC。把本车的 DBC 放进数据目录的 dbc/ 里"
-            "（例如 i2pro_data/dbc/Sensors.dbc），或者在侧车里用 dbc 指定文件名。"
-        )
-    return best[0], best[1], scored
+    return {
+        name: sum(frames for frame_id, frames in counts.items()
+                  if database.covers(frame_id, frame_id in extended_ids))
+        for name, database in databases
+    }
 
 
 def load_databases(
@@ -518,7 +514,13 @@ def read_can_session(
         )
     axis = np.arange(int(round(duration * master_rate)) + 1, dtype=np.float64) / master_rate
 
-    chosen_name = dbc_file or stored.get("dbc") or None
+    # 侧车里的 ``dbc`` 只在**明确指名**时才算数。旧版本每次导入都会把"当时挑中的
+    # 那一条"写进侧车，那种自动写的值和用户点名固定一份长得一模一样——所以加了
+    # ``dbc_mode`` 把两者分开（ticket #40）。没有 ``dbc_mode`` 的旧侧车按并集解，
+    # 并在报告里说明这件事，不静默改变行为。
+    pinned = stored.get("dbc") if stored.get("dbc_mode") == "file" else None
+    chosen_name = dbc_file or pinned
+    legacy_pin = None if chosen_name else stored.get("dbc")
     candidates_dirs = default_dbc_directories(first)
     if dbc_dir:
         # 调用方给的目录优先（场次库知道自己的根目录在哪），再退回到默认那几处。
@@ -533,10 +535,12 @@ def read_can_session(
             f"{first.name}: 一行帧都没读出来。确认列角色对不对"
             f"（侧车 {_kind().suffix} 的 roles，或 --role 列名=角色）。"
         )
-    database_name, database, candidates = choose_database(databases, counts, scan["extended_ids"])
-    digest = hashlib.sha256((directory / database_name).read_bytes()).hexdigest()
+    # 多份 DBC 取并集：这台车把 CAN 布局拆成 13 份小 DBC，单独任何一份都只覆盖
+    # 0–22% 的帧。只挑一份的话，用户后来补的 DBC 一条都不参与解码（ticket #40）。
+    covered_by = coverage_of(databases, counts, scan["extended_ids"])
+    database, origin, conflicts = dbcmod.merge(databases, covered_by)
 
-    # 选中的 DBC 覆盖了哪些 ID：其余留在报告里（实测 75.4% 的帧属于这一类）。
+    # 并集覆盖了哪些 ID：其余留在报告里（实测仍有一半以上的帧读不懂）。
     covered_ids = [
         frame_id for frame_id in counts
         if database.covers(frame_id, frame_id in scan["extended_ids"])
@@ -586,19 +590,22 @@ def read_can_session(
             # factor 1 的计数一位都不需要。
             decimals = max(0, min(6, int(math.ceil(-math.log10(abs(signal.factor)))))) \
                 if signal.factor else 0
+            # 这条通道来自哪份 DBC（并集之后必须能回答，否则"少了一条"没法查）。
+            source = origin.get((message.extended, message.frame_id), "")
             channel_rows.append({
                 "name": name, "message": message.name, "signal": signal.name,
                 "unit": signal.unit, "update_rate": update_rate,
                 "samples": int(len(times)),
                 "leading_gap_s": float(axis[leading - 1] - times[0]) if leading > 1 and len(times) else 0.0,
                 "decimals": decimals,
+                "dbc": source,
             })
             report.append({
                 "column": f"0x{message.frame_id:X}", "status": "通道", "name": name,
-                "matched_by": f"DBC:{database_name}", "unit": signal.unit,
+                "matched_by": f"DBC:{source}", "unit": signal.unit,
                 "rate": master_rate, "rate_from": "主时间基",
                 "samples": int(axis.size), "update_rate": update_rate,
-                "message": message.name, "decimals": decimals,
+                "message": message.name, "decimals": decimals, "dbc": source,
             })
 
     channels_list = [
@@ -637,27 +644,66 @@ def read_can_session(
         for group in group_recordings(given) if len(given) > 1 else []:
             recording_evidence.extend(group["evidence"])
     stamp = _stamp_from_name(first.name)
-    notes: list[str] = []
-    if not any(name in columns for name in ("Vx KF", "GPS Speed", "Ground Speed")):
-        notes.append(
-            "这批日志里没有车速 / GPS 通道，所以没有距离轴：切圈、区段、圈差都用不了，"
-            "画图、散点、直方图、频谱、数学通道、导出照常可用。"
+
+    # 每份 DBC 贡献了哪些 ID / 多少帧 / sha256：可复现，也能一眼看出"哪份没用上"。
+    by_file: list[dict] = []
+    for name, entry in databases:
+        owned = sorted(
+            f"0x{key[1]:X}" for key, source in origin.items() if source == name
         )
+        hits = [frame_id for frame_id in counts
+                if entry.covers(frame_id, frame_id in scan["extended_ids"])]
+        by_file.append({
+            "file": name,
+            "sha256": hashlib.sha256((directory / name).read_bytes()).hexdigest(),
+            "messages": len(entry.messages),
+            "signals": entry.signal_count,
+            "covered_frames": covered_by.get(name, 0),
+            "covered_ids": sorted(f"0x{frame_id:X}" for frame_id in hits),
+            # 并集里真正归它名下的 ID：与 hit 不同——撞 ID 时只有胜出的那份算数
+            "used_ids": owned,
+            "channels": sum(1 for row in channel_rows if row["dbc"] == name),
+        })
+
+    notes: list[str] = []
+    if legacy_pin:
+        notes.append(
+            f"侧车里记着旧版本的「用了 {legacy_pin}」，本次按并集解"
+            "（旧版本每次导入都会自动写这一条，和「点名固定一份」长得一样）。"
+            "要固定成一份：把侧车的 dbc 写成文件名，并把 dbc_mode 设成 \"file\"。"
+        )
+    if not conflicts and len(databases) > 1:
+        notes.append(f"{len(databases)} 份 DBC 按并集解码，没有一条 ID 被重复定义。")
+    for row in conflicts:
+        notes.append(f"ID {row['id']} 有不止一份定义：{row['reason']}")
     if too_short:
         notes.append(f"有 {too_short} 条信号因为某一帧的字节数不够而整条跳过（DBC 与日志可能不是同一版）。")
+    if len(databases) > 1:
+        dead = [row["file"] for row in by_file if row["covered_frames"] == 0]
+        if dead:
+            notes.append(
+                f"{len(dead)} 份 DBC 的 ID 在这批日志里一条都没出现（车上的布局和它不一致）："
+                + "、".join(dead) + "。"
+            )
 
     can = {
         "frames": total_frames,
         "ids": len(counts),
         "covered_frames": covered_frames,
-        #: 被这份 DBC 覆盖的 ID（报告里"哪些读得懂"要能核对，测试也用它求并集）
+        #: 被并集覆盖的 ID（报告里"哪些读得懂"要能核对，测试也用它求并集）
         "covered_ids": [f"0x{frame_id:X}" for frame_id in sorted(covered_ids)],
         "coverage": round(covered_frames / total_frames, 4) if total_frames else 0.0,
         "covered_messages": len(covered_ids),
-        "dbc": {"file": database_name, "sha256": digest,
-                "messages": len(database.messages), "signals": database.signal_count,
-                "skipped": list(database.skipped)},
-        "dbc_candidates": candidates,
+        "dbc": {
+            "method": "file" if chosen_name else "union",
+            "files": by_file,
+            "messages": len(database.messages),
+            "signals": database.signal_count,
+            "skipped": list(database.skipped),
+            "conflicts": conflicts,
+            "pinned": chosen_name,
+            "legacy_pin_ignored": legacy_pin,
+        },
         "sources": [path.name for path in given],
         "merged": bool(merge and len(given) > 1),
         "merge_evidence": recording_evidence,
@@ -676,7 +722,25 @@ def read_can_session(
     )
     if write_sidecar:
         # 只记"这次是怎么解的"，不碰数据文件本身（ADR-0001）。
-        write_can_map(first, roles=roles, dbc=database_name, rate=master_rate)
+        # ``dbc`` 只在明确指名时写；写 None 会保留侧车里已有的值（write_can_map 跳过
+        # None），所以并集时那条旧的 dbc 要显式 drop 掉——不然"旧侧车按并集解"的
+        # 提示会一直跟着这一场（实测过）。
+        write_can_map(
+            first, roles=roles, dbc=chosen_name,
+            dbc_mode="file" if chosen_name else "union", rate=master_rate,
+            drop=() if chosen_name else ("dbc",),
+        )
+    # 距离轴是**算出来**的，不是写死的：拿到真正的场次之后再问一次"有没有速度源"。
+    if derivemod.speed_channel(session) is None:
+        notes.append(
+            "这批日志里没有车速 / GPS 通道，所以没有距离轴：切圈、区段、圈差都用不了，"
+            "画图、散点、直方图、频谱、数学通道、导出照常可用。"
+        )
+    else:
+        notes.append(
+            f"距离轴来源：{derivemod.speed_channel(session)}（速度积分）；"
+            "这批日志没有 GPS，所以切圈要靠手工信标。"
+        )
     return session
 
 

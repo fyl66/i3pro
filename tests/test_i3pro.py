@@ -2349,6 +2349,41 @@ class TestMaths(unittest.TestCase):
         self.assertEqual({e["name"] for e in errors}, {"坏的", "引用坏的"})
         self.assertIn("没有这个通道", errors[0]["error"])
 
+    def test_each_broken_definition_reports_its_own_missing_channel(self):
+        """错因要各自算各自，不能把第一条的原因发给所有人。
+
+        实测：一场 CAN 日志上，``maths/global.json`` 里五条定义全报"本场次没有
+        ``G Force Lat``"——其中四条根本没引用它（它们缺的是 ``FSD13 Distance1``、
+        ``G Force Long`` 之类）。那种报错会把人带去查一条不相干的通道。
+        """
+        session = self._session()
+        _values, errors = mathsmod.resolve_available(session, [
+            mathsmod.Definition("甲", "'缺一' + 1"),
+            mathsmod.Definition("乙", "'缺二' + 1"),
+            mathsmod.Definition("丙", "'缺三' + 1"),
+        ])
+        by_name = {row["name"]: row["error"] for row in errors}
+        self.assertEqual(set(by_name), {"甲", "乙", "丙"})
+        self.assertIn("缺一", by_name["甲"])
+        self.assertIn("缺二", by_name["乙"])
+        self.assertIn("缺三", by_name["丙"])
+        for name, own in (("甲", "缺一"), ("乙", "缺二"), ("丙", "缺三")):
+            for other in ("缺一", "缺二", "缺三"):
+                if other != own:
+                    self.assertNotIn(other, by_name[name])
+
+    def test_a_cycle_keeps_its_real_reason_through_resolve_available(self):
+        """互相引用时报的是"绕成一个圈"，不是"本场次没有这个通道"（那条会误导）。"""
+        session = self._session()
+        values, errors = mathsmod.resolve_available(session, [
+            mathsmod.Definition("甲", "乙 + 1"),
+            mathsmod.Definition("乙", "甲 + 1"),
+        ])
+        self.assertEqual(values, {})
+        self.assertEqual({row["name"] for row in errors}, {"甲", "乙"})
+        for row in errors:
+            self.assertIn("圈", row["error"])
+
     def test_a_cycle_is_reported_instead_of_recursing(self):
         session = self._session()
         with self.assertRaises(mathsmod.MathError) as caught:
@@ -6062,6 +6097,78 @@ BO_ 1645 Front_Aero_Ride_Height: 4 Node
         self.assertGreater(checked, 500)
 
 
+class TestDbcMerge(unittest.TestCase):
+    """多份 DBC 取并集（ticket #40）：各解各的，撞车时不猜。
+
+    这台车把 CAN 布局拆成了 13 份小 DBC（仪表一份、每个 ECU 一份），所以"一份
+    日志配多份 DBC"是常态。这些用例不带数据，纯合成——真数据那两条在
+    :class:`TestCanLog` 里。
+    """
+
+    @staticmethod
+    def _db(text: str, name: str) -> tuple[str, object]:
+        return (name, dbc.parse(text, source=name))
+
+    ONE = 'BO_ 100 A: 8 X\n SG_ One : 0|8@1+ (1,0) [0|255] "" X\n'
+    TWO = 'BO_ 100 A: 8 X\n SG_ One : 0|8@1+ (2,0) [0|510] "" X\n'
+    OTHER = 'BO_ 200 B: 8 X\n SG_ Two : 0|8@1+ (1,0) [0|255] "" X\n'
+
+    def test_two_files_that_define_different_ids_both_get_used(self):
+        """各管各的 ID：两份都要进并集，各自记下归属。"""
+        merged, origin, conflicts = dbc.merge([self._db(self.ONE, "left.dbc"),
+                                               self._db(self.OTHER, "right.dbc")])
+        self.assertEqual(sorted(message.frame_id for message in merged.messages_only),
+                         [100, 200])
+        self.assertEqual(origin[(False, 100)], "left.dbc")
+        self.assertEqual(origin[(False, 200)], "right.dbc")
+        self.assertEqual(conflicts, [])
+
+    def test_identical_definitions_in_two_files_are_not_a_conflict(self):
+        """两份写了同一条报文、定义逐字相同：不是冲突，也不该报出来。"""
+        merged, origin, conflicts = dbc.merge([self._db(self.ONE, "a.dbc"),
+                                               self._db(self.ONE, "b.dbc")])
+        self.assertEqual(len(merged.messages_only), 1)
+        self.assertEqual(origin[(False, 100)], "a.dbc")
+        self.assertEqual(conflicts, [])
+
+    def test_conflicting_definitions_pick_by_coverage_and_say_so(self):
+        """同一条 ID 两种定义：按每份 DBC 的覆盖帧数选，并把这件事写进冲突表。"""
+        merged, origin, conflicts = dbc.merge(
+            [self._db(self.ONE, "a.dbc"), self._db(self.TWO, "b.dbc")],
+            {"a.dbc": 10, "b.dbc": 500},
+        )
+        self.assertEqual(origin[(False, 100)], "b.dbc")
+        self.assertEqual(merged.messages[(False, 100)].signals[0].factor, 2.0)
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(conflicts[0]["chosen"], "b.dbc")
+        self.assertEqual(conflicts[0]["rejected"], "a.dbc")
+        self.assertEqual(conflicts[0]["id"], "0x64")
+        # 冲突的文字里要给出下一步（怎么改成另一份）
+        self.assertIn("dbc", conflicts[0]["reason"])
+
+    def test_a_tie_is_broken_by_file_name_so_the_result_is_reproducible(self):
+        """覆盖帧数一样时按文件名定序——同样的输入必须永远给同样的结果。"""
+        merged, origin, conflicts = dbc.merge(
+            [self._db(self.ONE, "b.dbc"), self._db(self.TWO, "a.dbc")],
+            {"b.dbc": 5, "a.dbc": 5},
+        )
+        # a.dbc 在字典序前面，所以它赢——哪怕它是**后**读进来的那份
+        self.assertEqual(origin[(False, 100)], "a.dbc")
+        self.assertEqual(merged.messages[(False, 100)].signals[0].factor, 2.0)
+        self.assertEqual(len(conflicts), 1)
+
+    def test_a_standard_frame_and_an_extended_frame_do_not_collide(self):
+        """同一个数字的标准帧与扩展帧是两条报文，不许互相盖住。"""
+        # BO_ 的 ID 最高位是扩展帧标记：0x80000064 -> 扩展帧 0x64，与 BO_ 100 同号
+        extended = 'BO_ 2147483748 A: 8 X\n SG_ One : 0|8@1+ (1,0) [0|255] "" X\n'
+        merged, origin, conflicts = dbc.merge([self._db(self.ONE, "std.dbc"),
+                                               self._db(extended, "ext.dbc")])
+        self.assertEqual(len(merged.messages_only), 2)
+        self.assertEqual(origin[(False, 100)], "std.dbc")
+        self.assertEqual(origin[(True, 100)], "ext.dbc")
+        self.assertEqual(conflicts, [])
+
+
 class TestCanLog(unittest.TestCase):
     """原始 CAN 帧表 -> 场次（ticket #38）与并场（ticket #39）。
 
@@ -6102,7 +6209,7 @@ class TestCanLog(unittest.TestCase):
             self.assertEqual(channel.sample_rate, 100.0)          # 落在主时间基上
             self.assertIsNotNone(channel.update_rate)             # 真实更新率另有记录
             self.assertGreater(channel.update_rate, 0)
-        self.assertEqual(len(session.channels), 46)
+        self.assertEqual(len(session.channels), 61)
 
     def test_zero_order_hold_lands_every_frame_on_the_master_grid(self):
         """每条已定义报文的值变化时刻，必须与它的帧时间戳逐点对齐。
@@ -6139,7 +6246,11 @@ class TestCanLog(unittest.TestCase):
         self.assertGreater(np.count_nonzero(np.diff(expected)), 10)
 
     def test_the_report_carries_the_measured_numbers(self):
-        """9 份文件 = 7 次记录，合起来是实测的帧数 / ID 数 / 覆盖率 / 46 条通道。"""
+        """9 份文件 = 7 次记录；13 份 DBC **取并集**之后的实测数字。
+
+        只挑一份的话是 Sensors.dbc 的 46 条 / 24.6%——用户后来补的 11 份 DBC
+        一条都不参与解码（ticket #40 的那个 bug）。并集把它变成 61 条 / 43.42%。
+        """
         groups = canlog.group_recordings(self.files)
         sessions = [canlog.read_can_session([item["path"] for item in group["items"]],
                                             dbc_dir=[DBC_DIR], write_sidecar=False,
@@ -6156,19 +6267,39 @@ class TestCanLog(unittest.TestCase):
         self.assertEqual(can["frames"], 1984096)
         self.assertTrue(can["merged"])
         self.assertEqual(len(can["sources"]), 2)
-        self.assertEqual(can["dbc"]["file"], "Sensors.dbc")
-        self.assertEqual(len(can["channels"]), 46)
-        self.assertAlmostEqual(can["coverage"], 0.2255, places=3)
-        session = sessions[0]
-        self.assertEqual(can["dbc"]["file"], "Sensors.dbc")
+        self.assertEqual(can["dbc"]["method"], "union")
+        self.assertEqual(len(can["dbc"]["files"]), 13)
+        self.assertEqual(can["dbc"]["messages"], 91)
+        self.assertEqual(len(can["channels"]), 61)
+        self.assertAlmostEqual(can["coverage"], 0.4018, places=3)
+        # 每条通道 → 来自哪份 DBC；每份 DBC → 贡献了哪些 ID 与多少条通道
+        self.assertTrue(all(row["dbc"] for row in can["channels"]))
+        by_file = {row["file"]: row for row in can["dbc"]["files"]}
+        self.assertEqual(by_file["Sensors.dbc"]["channels"], 46)
+        self.assertEqual(by_file["TH.dbc"]["channels"], 5)
+        self.assertEqual(by_file["TH.dbc"]["used_ids"], ["0xC1"])
+        self.assertTrue(all(len(row["sha256"]) == 64 for row in can["dbc"]["files"]))
+        speed_rows = [row for row in can["channels"] if row["name"] == "Vx_KF"]
+        self.assertEqual(len(speed_rows), 1)
+        self.assertEqual(speed_rows[0]["unit"], "kph")
+        self.assertEqual(speed_rows[0]["dbc"], "TH.dbc")
+        # 单份最多只给 46 条——通道数必须比它多，否则就是没取并集
+        self.assertGreater(len(can["channels"]),
+                           max(row["channels"] for row in can["dbc"]["files"]))
         # 未定义 ID：按帧数从多到少，6 个诊断 ID 各自标出来
         undecoded = can["undecoded"]
         self.assertEqual(sum(row["frames"] for row in undecoded) + can["covered_frames"],
                          can["frames"])
-        # 全部 7 场加起来才是实测的 904,825 帧被覆盖 / 75.4% 没定义
+        # 全部 7 场加起来才是实测的 1,600,064 帧被覆盖（43.42%）
         covered = sum(item.can["covered_frames"] for item in sessions)
-        self.assertEqual(covered, 904825)
-        self.assertAlmostEqual(covered / 3684850, 0.2455, places=3)
+        self.assertEqual(covered, 1600064)
+        self.assertAlmostEqual(covered / 3684850, 0.4342, places=3)
+        totals: dict[str, int] = {}
+        for item in sessions:
+            for row in item.can["undecoded"]:
+                totals[row["id"]] = totals.get(row["id"], 0) + row["frames"]
+        # 剩下的最大一块读不懂的是 0xCC（139,050 帧，约 100 Hz）
+        self.assertEqual(max(totals.items(), key=lambda pair: pair[1]), ("0xCC", 139050))
         diagnostic = {row["id"] for row in undecoded if row["diagnostic"]}
         self.assertTrue(diagnostic.issubset({"0x7E0", "0x7E2", "0x7E3", "0x7E4", "0x7E6", "0x7E7"}))
         self.assertTrue(all(row["diagnostic"] for row in undecoded
@@ -6177,13 +6308,68 @@ class TestCanLog(unittest.TestCase):
         self.assertEqual([row["frames"] for row in undecoded],
                          sorted((row["frames"] for row in undecoded), reverse=True))
         # 那份 dashboard DBC 一条都对不上：报告要写明原因（全是扩展帧）
-        dashboard = next(row for row in sessions[0].can["dbc_candidates"]
-                         if row["file"].startswith("E27_"))
-        self.assertEqual(dashboard["covered_frames"], 0)
-        # 没有车速 / GPS ⇒ 没有距离轴
+        self.assertEqual(by_file[DASHBOARD_DBC.name]["covered_frames"], 0)
+        # 有车速就有距离轴（Vx_KF 积分，实测 0.1–5546.8 m），而且是**算出来**的
+        axis = derive.distance_series(sessions[0])
+        self.assertGreater(axis[-1], 5000.0)
+        self.assertTrue(np.all(np.diff(axis) >= -1e-9), "距离轴不能倒退")
+        self.assertTrue(any("距离轴来源" in text for text in can["notes"]))
+
+    def test_a_stationary_log_reports_that_there_is_no_distance_axis(self):
+        """几十秒原地不动的日志：车速通道在、但值是死的，距离轴就**没有**。
+
+        实测 ``2026_10_03_201147_ID0001.csv`` 的 ``Vx_KF`` 值域 −0.05…0.00 kph。
+        "有通道但没数据"和"没有这条通道"是两回事，报告要分别说清。
+        """
+        session = canlog.read_can_session([self.small], dbc_dir=[DBC_DIR],
+                                          write_sidecar=False, use_sidecar=False)
+        self.assertIn("Vx_KF", [channel.name for channel in session.channels])
+        self.assertIsNone(derive.speed_channel(session))
         with self.assertRaises(ValueError):
             derive.distance_series(session)
-        self.assertTrue(any("距离轴" in text for text in can["notes"]))
+        self.assertTrue(any("没有距离轴" in text for text in session.can["notes"]))
+
+    def test_pinning_one_dbc_still_works_and_is_recorded(self):
+        """想只按一份解也行——但那要写进侧车（``dbc_mode: file``），不是默认行为。"""
+        session = canlog.read_can_session([self.small], dbc_dir=[DBC_DIR],
+                                          dbc_file="Sensors.dbc",
+                                          write_sidecar=False, use_sidecar=False)
+        self.assertEqual(session.can["dbc"]["method"], "file")
+        self.assertEqual(session.can["dbc"]["pinned"], "Sensors.dbc")
+        self.assertEqual(len(session.can["dbc"]["files"]), 1)
+        self.assertEqual(len(session.channels), 46)
+
+    def test_a_conflict_between_two_dbcs_is_reported_and_resolved(self):
+        """同一条 ID 两份不同定义：按覆盖帧数选，并把冲突写进报告（不静默合并）。
+
+        真实的 13 份之间没有冲突（实测）。这里**临时造一个**：把 0x660 用另一套
+        信号写进一份新的 DBC——如果合并是静默的，通道会变成谁先读谁算数。
+        """
+        work = ROOT / "out" / "_can_conflict"
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True)
+        for path in DBC_DIR.glob("*.dbc"):
+            shutil.copy2(path, work / path.name)
+        (work / "zz_bogus.dbc").write_text(
+            'BO_ 1632 Right_Rear_Sensors: 8 Other\n'
+            ' SG_ Bogus_Channel : 0|8@1+ (1,0) [0|255] "" X\n',
+            encoding="utf-8",
+        )
+        try:
+            session = canlog.read_can_session([self.small], dbc_dir=[work],
+                                              write_sidecar=False, use_sidecar=False)
+            conflicts = session.can["dbc"]["conflicts"]
+            self.assertEqual([row["id"] for row in conflicts], ["0x660"])
+            # Sensors.dbc 覆盖的帧多得多，所以是它赢；写的每一步都要能复核
+            self.assertEqual(conflicts[0]["chosen"], "Sensors.dbc")
+            self.assertEqual(conflicts[0]["rejected"], "zz_bogus.dbc")
+            self.assertTrue(any("0x660" in text for text in session.can["notes"]))
+            signals = {row["signal"] for row in session.can["channels"]
+                       if row["message"] == "Right_Rear_Sensors"}
+            self.assertIn("RR_Water_Temperature", signals)      # 用的是赢的那份
+            self.assertNotIn("Bogus_Channel", signals)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
 
     def test_the_sidecar_records_the_choices_and_column_roles_can_be_overridden(self):
         work = ROOT / "out" / "_can_sidecar"
@@ -6193,13 +6379,23 @@ class TestCanLog(unittest.TestCase):
         shutil.copy2(self.small, copy)
         try:
             session = canlog.read_can_session([copy], dbc_dir=[DBC_DIR])
-            self.assertEqual(session.can["dbc"]["file"], "Sensors.dbc")
+            self.assertEqual(session.can["dbc"]["method"], "union")
+            self.assertEqual(len(session.channels), 61)
             stored = sidecar.read("canmap", copy)
-            self.assertEqual(stored["dbc"], "Sensors.dbc")
+            # 并集不写单个文件名，只把"这次用的是并集"记下来
+            self.assertNotIn("dbc", stored)
+            self.assertEqual(stored["dbc_mode"], "union")
             self.assertEqual(stored["rate"], 100.0)
             self.assertEqual(stored["roles"]["id"], "ID号")
+            # 旧侧车（有 dbc、没有 dbc_mode）是按并集解，并且要说出来——
+            # 那是旧版本每次导入自动写的值，和"点名固定一份"长得一样
+            sidecar.write("canmap", copy, {"roles": {"id": "ID号"}, "dbc": "Sensors.dbc"})
+            legacy = canlog.read_can_session([copy], dbc_dir=[DBC_DIR], write_sidecar=False)
+            self.assertEqual(legacy.can["dbc"]["method"], "union")
+            self.assertEqual(legacy.can["dbc"]["legacy_pin_ignored"], "Sensors.dbc")
+            self.assertTrue(any("并集" in text for text in legacy.can["notes"]))
             # 换一个 CAN 工具导出的列名不一样：侧车里改掉角色就能读
-            sidecar.write("canmap", copy, {"roles": {"id": "CANID"}, "dbc": "Sensors.dbc"})
+            sidecar.write("canmap", copy, {"roles": {"id": "CANID"}, "dbc_mode": "union"})
             with self.assertRaises(ValueError) as caught:
                 canlog.read_can_session([copy], dbc_dir=[DBC_DIR], write_sidecar=False)
             self.assertIn("表头里找不到", str(caught.exception))
@@ -6252,7 +6448,10 @@ class TestCanLog(unittest.TestCase):
             self.assertEqual(len(merged), 2)
             summary = library.summary(names[0])
             self.assertEqual(summary["format"], "can")
-            self.assertEqual(summary["channels"], 46)
+            # 61 条来自 DBC 并集，外加全局数学通道 `速度kmh`——它的表达式是
+            # `'Vx KF'`（空格），而 CAN 那条叫 `Vx_KF`（下划线）；名字匹配允许
+            # 空格/下划线互换，所以同一个定义两边的数据都能用（实测）。
+            self.assertEqual(summary["channels"], 62)
             # 列表缓存：第二次不再解码（第一次要解码全部 CAN 场次，几秒）
             first = library.listing()
             second = library.listing()

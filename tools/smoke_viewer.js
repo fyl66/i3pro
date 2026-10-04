@@ -1213,7 +1213,13 @@ if (api) {
 
   // 23. track sections: the list, the edits that reach the sidecar, and the
   // bands on the time axis.
-  if (hasDistance) {
+  if (hasDistance && !((api.sectionsState() || {}).config)) {
+    // 有距离轴但一个圈都没有（CAN 日志：有车速、没有 GPS / 信标）——没有可切的
+    // 区段，所以下面那些断言跳过；但"没有圈"这件事本身要成立。
+    check(!((api.data.laps || []).length),
+      "有距离轴却没有参考圈，圈表却不是空的");
+  }
+  if (hasDistance && ((api.sectionsState() || {}).config)) {
     // 快照里就带着区段：面板要有内容，而不是等 GET 回来才画
     const info = api.sectionsState();
     check(!!info && !!info.config, "the snapshot carries no track sections");
@@ -2897,10 +2903,11 @@ if (api && exportDlg) {
 }
 
 /* --------------------------------------------------------------- DOM checks */
-/* ------------------------------- 34. 原始 CAN 帧表（ticket #38 / #39） -------
- * 这条数据线**没有距离轴**（实测：日志里没有车速也没有 GPS），所以上面按圈 / 区段
- * 算的那些块都被 hasDistance 挡掉了。这一块断言的是它自己该有的东西：导入报告里的
- * 数字、读不懂的 ID 那张表、以及"本场没有距离轴"在界面上的说法。
+/* ------------------------- 34. 原始 CAN 帧表（#38 / #39 / #40） --------------
+ * 断言导入报告里该有的东西：帧数 / 覆盖率、**每份 DBC 的贡献与哈希**、
+ * **每条通道来自哪份 DBC**、读不懂的 ID 那张表、以及"有没有距离轴"的说法。
+ * 距离轴是**算出来**的：跑起来的日志里有 Vx_KF 就有距离轴，只有几十秒的原地
+ * 日志没有——两种情况都要认（ticket #40）。
  */
 const canMeta = (api && api.data && api.data.meta && api.data.meta.can) || null;
 if (canMeta) {
@@ -2913,16 +2920,38 @@ if (canMeta) {
     && typeof row.rate === "number" && row.sample),
     "未定义 ID 的行缺 ID / 帧数 / 帧率 / 样例字节");
   check((canMeta.channels || []).length > 0, "报告里没有解码出来的通道");
-  check((canMeta.channels || []).every((row) => row.name && row.message && row.update_rate > 0),
-    "通道行没有名字 / 报文名 / 真实更新率");
-  check((canMeta.notes || []).some((text) => text.indexOf("距离轴") >= 0),
-    "没有说明这批日志没有距离轴：" + JSON.stringify(canMeta.notes));
-  check(!!(canMeta.dbc || {}).file && !!(canMeta.dbc || {}).sha256,
-    "报告里没写用了哪份 DBC / 它的哈希");
-  check((canMeta.dbc_candidates || []).length >= 1,
-    "报告里没有 DBC 候选表——'为什么是这一份'要能复核");
-  check(String(registry.get("statusLine").innerHTML).indexOf("距离轴") >= 0,
-    "状态行没有说距离轴不可用");
+  check((canMeta.channels || []).every((row) => row.name && row.message
+    && row.update_rate > 0 && row.dbc),
+    "通道行没有名字 / 报文名 / 真实更新率 / 来自哪份 DBC");
+
+  // 多份 DBC 取并集：每份的贡献、哈希、归属都要能复核
+  const dbcFiles = ((canMeta.dbc || {}).files) || [];
+  check(dbcFiles.length >= 2,
+    "报告里没有列出每份 DBC 的贡献（ticket #40）：" + dbcFiles.length);
+  check(dbcFiles.every((row) => row.file && row.sha256 && row.covered_frames >= 0
+    && row.channels >= 0),
+    "DBC 贡献行缺文件名 / 哈希 / 覆盖帧数 / 贡献通道数");
+  const dbcOwners = new Set(dbcFiles.map((row) => row.file));
+  check((canMeta.channels || []).every((row) => dbcOwners.has(row.dbc)),
+    "有通道写着来自一份不在贡献表里的 DBC");
+  const bestSingle = Math.max.apply(null, dbcFiles.map((row) => row.channels || 0));
+  check((canMeta.channels || []).length > bestSingle,
+    "通道数没有超过任何单份 DBC（" + (canMeta.channels || []).length + " vs 最高 "
+    + bestSingle + "）——那就是没取并集");
+  check((canMeta.dbc || {}).method === "union" || (canMeta.dbc || {}).method === "file",
+    "报告没说清是并集还是固定一份：" + JSON.stringify((canMeta.dbc || {}).method));
+  const canNotes = canMeta.notes || [];
+  check(canNotes.some((text) => text.indexOf("DBC") >= 0),
+    "报告没有说明用了几份 DBC：" + JSON.stringify(canNotes));
+  if (hasDistance) {
+    check(canNotes.some((text) => text.indexOf("距离轴来源") >= 0),
+      "有距离轴却没写来源：" + JSON.stringify(canNotes));
+  } else {
+    check(canNotes.some((text) => text.indexOf("距离轴") >= 0),
+      "没有说明这批日志没有距离轴：" + JSON.stringify(canNotes));
+    check(String(registry.get("statusLine").innerHTML).indexOf("距离轴") >= 0,
+      "状态行没有说距离轴不可用");
+  }
 
   // 抬头那个入口点得开，表里的行数与报告里的条数**一致**（同一处实现，不许各算一遍）
   const canLink = registry.get("canLink");
@@ -2931,7 +2960,13 @@ if (canMeta) {
     canLink.dispatch("click", { preventDefault() {} });
     check(registry.get("canDlg").hidden === false, "点了入口窗口没开");
     const table = String(registry.get("canTableWrap")._html);
-    const rowCount = (table.match(/<tr/g) || []).length - 1;   // 去掉表头那一行
+    check(table.indexOf("来自哪份 DBC") >= 0,
+      "报告里没有「每条通道来自哪份 DBC」那张表");
+    check((canMeta.channels || []).every((row) => table.indexOf(row.name) >= 0),
+      "有通道没出现在报告表里");
+    // 两张表：通道表在前、读不懂的 ID 表在后；行数只数最后那张
+    const lastTable = table.split("<table>").pop();
+    const rowCount = (lastTable.match(/<tr/g) || []).length - 1;   // 去掉表头那一行
     check(rowCount === (canMeta.undecoded || []).length,
       "表里的行数与报告不一致：" + rowCount + " vs " + (canMeta.undecoded || []).length);
     check(table.indexOf(canMeta.undecoded[0].id) >= 0

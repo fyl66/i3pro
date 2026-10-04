@@ -1441,10 +1441,28 @@ def resolve_available(
             message = "这些数学通道求值失败，原因不明。"   # pragma: no cover - 理论上到不了
         except MathError as exc:
             message = str(exc)
-        errors = [
-            {"name": d.name, "expr": d.expr, "scope": d.scope, "error": message}
-            for d in remaining
-        ]
+        # 批量那句是"绕成环 / 互相依赖"的**真正**错因（单条求值会把同文件里的
+        # 另一条当成"本场次没有这个通道"，误导）。但一条只缺自己那条通道时，
+        # 批量那句会把**第一条**的原因发给所有人——实测：一场 CAN 上五条定义
+        # 全报"没有 `G Force Lat`"，其中四条根本没引用它。所以逐条再问一次，
+        # 只有当它抱怨的通道不是同批里的另一条定义时才用逐条的解释。
+        siblings = {definition.name for definition in remaining}
+        errors = []
+        for definition in remaining:
+            own = None
+            try:
+                resolve_all(session, [definition], cache=cache, session_path=session_path,
+                            preset=values)
+            except MathError as exc:
+                own = str(exc)
+            if own is not None and not any(
+                f"`{name}`" in own for name in siblings if name != definition.name
+            ):
+                message_for_it = own
+            else:
+                message_for_it = message
+            errors.append({"name": definition.name, "expr": definition.expr,
+                           "scope": definition.scope, "error": message_for_it})
     return values, errors
 
 

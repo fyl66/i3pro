@@ -41,6 +41,11 @@ SPEED_CANDIDATES = (
     "Vx",
 )
 
+
+def _squashed(text: str) -> str:
+    """去掉空格/下划线/大小写之后的键，用来认"同一个名字的两种写法"。"""
+    return "".join(character for character in text.lower() if character.isalnum())
+
 GPS_PAIRS = (
     ("GPS Latitude", "GPS Longitude"),
     ("PosLat", "PosLon"),
@@ -49,12 +54,27 @@ GPS_PAIRS = (
 
 
 def speed_channel(log: ldmod.LogFile) -> str | None:
-    """Pick the most trustworthy speed channel present in the log."""
+    """Pick the most trustworthy speed channel present in the log.
+
+    名字里的空格与下划线不总是写一样：``.ld`` 里是 ``Vx KF``，CAN 那条线
+    （``i2pro_data/dbc/TH.dbc`` 的 ``0xC1 Throttle_INFO``）叫 ``Vx_KF``——同一个量。
+    所以先按原样找，再按"去掉空格/下划线/大小写"找一遍。
+
+    这两种写法**不能**都写进 :data:`SPEED_CANDIDATES`：``csvlog.canonical_names()``
+    拿它当列名归一表，多写一个同一化的名字会让导入的 CSV 列被改名
+    （实测：一张列叫 ``Vx KF`` 的表被改成了 ``Vx_KF``）。
+    """
+    # 原生通道在 ``log.channels`` 里，数学通道在 ``channels.names()`` 里（那是个活集合）
+    known = {channel.name for channel in log.channels} | set(channelsmod.names(log))
+    squashed = {}
+    for name in sorted(known):
+        squashed.setdefault(_squashed(name), name)
     for candidate in SPEED_CANDIDATES:
-        if log.has(candidate):
-            values = log.values(candidate)
+        actual = candidate if log.has(candidate) else squashed.get(_squashed(candidate))
+        if actual is not None:
+            values = log.values(actual)
             if np.nanmax(np.abs(values)) > 1.0:  # not a dead channel
-                return candidate
+                return actual
     return None
 
 

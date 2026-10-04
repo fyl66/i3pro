@@ -67,10 +67,18 @@ def cmd_info(args: argparse.Namespace) -> int:
     _print_table(rows)
     for can in can_reports:
         print()
+        dbc = can["dbc"]
+        files = dbc.get("files") or []
+        how = (f"固定用 {dbc['pinned']}" if dbc.get("method") == "file"
+               else f"{len(files)} 份 DBC 取并集")
         print(f"CAN：{can['frames']} 帧 / {can['ids']} 个 ID，"
-              f"DBC {can['dbc']['file']}（{can['dbc']['messages']} 条报文 / "
-              f"{can['dbc']['signals']} 条信号）覆盖 {can['covered_frames']} 帧"
+              f"{how}（{dbc['messages']} 条报文 / "
+              f"{dbc['signals']} 条信号）覆盖 {can['covered_frames']} 帧"
               f"（{can['coverage'] * 100:.1f}%）")
+        for row in files:
+            print(f"    {row['file']}：{row['messages']} 条报文 / {row['signals']} 条信号，"
+                  f"覆盖 {row['covered_frames']} 帧，贡献 {row['channels']} 条通道"
+                  f"（sha256 {row['sha256'][:12]}…）")
         if can["sources"]:
             print(f"  来源：{'、'.join(can['sources'])}"
                   + ("（自动并成一次记录）" if can["merged"] else ""))

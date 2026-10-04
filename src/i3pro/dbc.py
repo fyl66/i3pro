@@ -38,7 +38,8 @@ import re
 from dataclasses import dataclass, field
 
 __all__ = [
-    "DbcError", "Database", "Message", "Signal", "decode", "parse", "signal_value",
+    "DbcError", "Database", "Message", "Signal", "decode", "merge", "parse",
+    "signal_value",
 ]
 
 #: Vector 的伪报文：一份"没有用到的信号"的容器，不是一个真实报文。盲解会造出
@@ -146,6 +147,69 @@ class Database:
     @property
     def signal_count(self) -> int:
         return sum(len(message.signals) for message in self.messages.values())
+
+
+def merge(
+    sources: list[tuple[str, "Database"]],
+    coverage: dict[str, int] | None = None,
+) -> tuple["Database", dict, list[dict]]:
+    """多份 DBC 取**并集**：一份日志配好几份 DBC 时，每一条报文都要能解。
+
+    为什么不是"挑覆盖最多的一份"：实测这台车把 CAN 布局拆成了 13 份小 DBC
+    （仪表一份、传感器一份、每个 ECU 一份），任何单独一份都只覆盖 0–22% 的帧。
+    只挑一份会让用户后来补上的 DBC **一条都不参与解码**，而且界面上看不出少了什么
+    ——那正是这次要修的 bug。
+
+    同一条 ID 被两份 DBC **定义成不同样子**时不许静默合并：按 ``coverage``
+    （每份 DBC 各自覆盖的帧数）选一份，并记进冲突列表；两边一样时按文件名定序，
+    保证"同样的输入永远给同样的结果"。调用方要把冲突写进导入报告，用户可以用侧车
+    的 ``dbc`` 字段指名用哪一份。
+
+    返回 ``(并集, 每条报文来自哪份文件, 冲突列表)``。
+    """
+    coverage = coverage or {}
+    merged: dict[tuple[bool, int], Message] = {}
+    origin: dict[tuple[bool, int], str] = {}
+    conflicts: list[dict] = []
+    for name, database in sources:
+        for key, message in database.messages.items():
+            existing = merged.get(key)
+            if existing is None:
+                merged[key] = message
+                origin[key] = name
+                continue
+            if existing.signals == message.signals and existing.length == message.length:
+                # 两份文件写了同一条报文、定义逐字相同：不是冲突，留一份就够。
+                continue
+            # 定义不一样：谁都能解出数，但解出来的是两回事，必须选一个。
+            first = origin[key]
+            score_first, score_new = coverage.get(first, 0), coverage.get(name, 0)
+            keep_first = score_first > score_new or (
+                score_first == score_new and first <= name
+            )
+            winner, loser = (first, name) if keep_first else (name, first)
+            if winner != first:
+                merged[key] = message
+                origin[key] = winner
+            kept = merged[key]
+            conflicts.append({
+                "id": f"0x{key[1]:X}",
+                "extended": key[0],
+                "chosen": winner,
+                "chosen_message": kept.name,
+                "chosen_signals": len(kept.signals),
+                "rejected": loser,
+                "rejected_message": message.name if loser == name else existing.name,
+                "rejected_signals": len(message.signals) if loser == name else len(existing.signals),
+                "reason": f"两份 DBC 对同一条 ID 给了不同定义，用了覆盖帧数更多的"
+                          f"{winner}；要改用 {loser} 就把侧车的 dbc 写成它的文件名。",
+            })
+    skipped = tuple(
+        f"{name}：{text}" for name, database in sources for text in database.skipped
+    )
+    return Database(messages=merged, skipped=skipped, source="+".join(
+        name for name, _database in sources
+    )), origin, conflicts
 
 
 def _number(text: str, what: str, line: str) -> float:

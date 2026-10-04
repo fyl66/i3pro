@@ -74,6 +74,7 @@
   @media (max-width:1250px) { .split { grid-template-columns:1fr 1fr; } }
   .hint { color:var(--muted); font-size:11px; margin-top:5px; line-height:1.7; }
   .warn { color:var(--warn); }
+  .dim { opacity:.6; }
   #toast { position:fixed; right:14px; bottom:14px; background:#1d3b52; color:var(--fg);
            border:1px solid var(--accent); border-radius:6px; padding:7px 12px; font-size:12px;
            opacity:0; transition:opacity .25s; pointer-events:none; z-index:90; }
@@ -6094,8 +6095,9 @@ function exportConfig() {
 }
 
 function applyExportConfig(cfg) {
-  // 没有距离轴的场次（实测：CAN 日志里没有车速/GPS）不能选"指定距离段"——选了
-  // 服务端只会回一句 400。这里先把它从选项里去掉，别让用户撞上去再猜。
+  // 没有距离轴的场次（实测：没有车速通道、或车速通道整段是死的，例如几十秒
+  // 原地不动的 CAN 日志）不能选"指定距离段"——选了服务端只会回一句 400。
+  // 这里先把它从选项里去掉，别让用户撞上去再猜。
   const distanceOption = $("exportRange").querySelector('option[value="distance"]');
   if (distanceOption) distanceOption.disabled = !DATA.meta.has_distance;
   const axisOption = $("exportAxis").querySelector('option[value="distance"]');
@@ -6435,8 +6437,13 @@ function renderCanReport() {
   const can = canReport();
   if (!can) return;
   const dbc = can.dbc || {};
+  const files = dbc.files || [];
   const pct = (can.coverage * 100).toFixed(1);
-  $("canSub").innerHTML = "DBC " + esc(dbc.file || "-") + " · 覆盖 "
+  const how = dbc.method === "file"
+    ? "固定用 " + esc(dbc.pinned || "-")
+    : (files.length > 1 ? files.length + " 份 DBC 取并集" : "DBC " + esc((files[0] || {}).file || "-"));
+  $("canSub").innerHTML = how + " · 共 " + (dbc.messages || 0) + " 条报文 / "
+    + (dbc.signals || 0) + " 条信号 · 覆盖 "
     + can.covered_frames.toLocaleString() + " / " + can.frames.toLocaleString()
     + " 帧（" + pct + "%）· 主时间基 " + can.master_rate + " Hz · 来源 "
     + (can.sources || []).length + " 份"
@@ -6444,18 +6451,36 @@ function renderCanReport() {
   const bits = [];
   (can.notes || []).forEach((text) => bits.push('<span class="warn">' + esc(text) + "</span>"));
   (can.merge_evidence || []).forEach((text) => bits.push("并场依据：" + esc(text)));
-  (can.dbc_candidates || []).forEach((row) => {
-    bits.push("候选 DBC " + esc(row.file) + "：" + row.messages + " 条报文 / "
+  files.forEach((row) => {
+    bits.push("DBC " + esc(row.file) + "：" + row.messages + " 条报文 / "
       + row.signals + " 条信号，覆盖 " + row.covered_frames.toLocaleString() + " 帧"
-      + (row.covered_frames === 0 ? "（<span class=\"warn\">一条都对不上</span>）" : ""));
+      + "，贡献 " + (row.channels || 0) + " 条通道"
+      + (row.covered_frames === 0 ? "（<span class=\"warn\">一条都对不上</span>）" : "")
+      + ' <span class="dim">sha256 ' + esc((row.sha256 || "").slice(0, 12)) + "…</span>");
   });
-  ((can.dbc || {}).skipped || []).forEach((text) => bits.push("跳过：" + esc(text)));
+  (dbc.conflicts || []).forEach((row) => bits.push(
+    '<span class="warn">ID ' + esc(row.id) + " 有两份不同定义，用了 " + esc(row.chosen)
+    + "（" + row.chosen_signals + " 条信号），弃用 " + esc(row.rejected)
+    + "（" + row.rejected_signals + " 条信号）</span>"));
+  (dbc.skipped || []).forEach((text) => bits.push("跳过：" + esc(text)));
   $("canPlan").innerHTML = bits.length
     ? bits.join("<br>")
     : "没有需要注意的地方。";
   const rows = canRows();
+  const channels = can.channels || [];
+  const channelTable = channels.length
+    ? '<div class="plan">解出来的通道来自哪份 DBC（共 ' + channels.length + " 条）：</div>"
+      + "<table><tr><th>通道</th><th>单位</th><th class=\"num\">实测更新率</th>"
+      + "<th>报文</th><th>来自 DBC</th></tr>"
+      + channels.map((row) => "<tr><td>" + esc(row.name) + "</td><td>"
+          + esc(row.unit || "-") + '</td><td class="num">' + row.update_rate.toFixed(2)
+          + " Hz</td><td>" + esc(row.message || "-") + "</td><td>"
+          + esc(row.dbc || "-") + "</td></tr>").join("")
+      + "</table>"
+    : "";
   if (!rows.length) {
-    $("canTableWrap").innerHTML = '<div class="plan">所有帧都能被这份 DBC 解释。</div>';
+    $("canTableWrap").innerHTML = channelTable
+      + '<div class="plan">所有帧都能被 DBC 解释。</div>';
     return;
   }
   const body = rows.map((row) => "<tr" + (row.diagnostic ? ' class="diag"' : "") + ">"
@@ -6465,7 +6490,8 @@ function renderCanReport() {
     + "<td>" + (row.diagnostic ? "诊断流量（OBD/UDS）" : "车辆数据？") + "</td>"
     + '<td><code>' + esc(row.sample || "-") + "</code></td></tr>").join("");
   $("canTableWrap").innerHTML =
-    '<div class="plan">读不懂的 ID（共 ' + rows.length + " 个，"
+    channelTable
+    + '<div class="plan">读不懂的 ID（共 ' + rows.length + " 个，"
     + rows.reduce((sum, row) => sum + row.frames, 0).toLocaleString() + " 帧）——不生成字节通道：</div>"
     + "<table><tr><th>ID</th><th class=\"num\">帧数</th><th class=\"num\">帧率</th>"
     + "<th>类型</th><th>前 8 字节</th></tr>" + body + "</table>";

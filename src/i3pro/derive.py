@@ -22,6 +22,8 @@ from . import timebase
 
 __all__ = [
     "SPEED_CANDIDATES",
+    "name_table",
+    "resolve_channel",
     "speed_channel",
     "speed_series",
     "distance_series",
@@ -46,6 +48,41 @@ def _squashed(text: str) -> str:
     """去掉空格/下划线/大小写之后的键，用来认"同一个名字的两种写法"。"""
     return "".join(character for character in text.lower() if character.isalnum())
 
+
+def name_table(log: ldmod.LogFile) -> dict[str, str]:
+    """``_squashed(名字) -> 真名``，给 :func:`resolve_channel` 一次建好反复用。
+
+    同一个键落回多条通道时取**排序后的第一条**，所以同样的输入永远给同样的答案
+    （不然"这场用了哪条速度"会随字典顺序漂移）。
+    """
+    # 原生通道在 ``log.channels`` 里，数学通道在 ``channels.names()`` 里（那是个活集合）
+    known = {channel.name for channel in log.channels} | set(channelsmod.names(log))
+    table: dict[str, str] = {}
+    for name in sorted(known):
+        table.setdefault(_squashed(name), name)
+    return table
+
+
+def resolve_channel(
+    log: ldmod.LogFile, name: str, table: dict[str, str] | None = None
+) -> str | None:
+    """``name`` 在本场次里实际叫什么；没有这条通道就是 ``None``。
+
+    先按原样找，再按"去掉空格/下划线/大小写"找一遍：``.ld`` 里那条 ``Vx KF``
+    与 CAN 线（``i2pro_data/dbc/TH.dbc`` 的 ``0xC1 Throttle_INFO``）解出来的
+    ``Vx_KF`` 是同一个量。
+
+    这两种写法**不能**都写进 :data:`SPEED_CANDIDATES`：``csvlog.canonical_names()``
+    拿它当列名归一表，多写一个同一化的名字会让导入的 CSV 列被改名（实测：一张
+    列叫 ``Vx KF`` 的表被改成了 ``Vx_KF``）。所以匹配规则只写在这里一处。
+    """
+    if log.has(name):
+        return name
+    if table is None:
+        table = name_table(log)
+    return table.get(_squashed(name))
+
+
 GPS_PAIRS = (
     ("GPS Latitude", "GPS Longitude"),
     ("PosLat", "PosLon"),
@@ -56,25 +93,23 @@ GPS_PAIRS = (
 def speed_channel(log: ldmod.LogFile) -> str | None:
     """Pick the most trustworthy speed channel present in the log.
 
-    名字里的空格与下划线不总是写一样：``.ld`` 里是 ``Vx KF``，CAN 那条线
-    （``i2pro_data/dbc/TH.dbc`` 的 ``0xC1 Throttle_INFO``）叫 ``Vx_KF``——同一个量。
-    所以先按原样找，再按"去掉空格/下划线/大小写"找一遍。
+    名字的空格/下划线写法差异交给 :func:`resolve_channel`（``Vx KF`` / ``Vx_KF``）；
+    这里比"找一条速度"多一条判据：**候选要真的在动**（``max|v| > 1 km/h``）。
+    距离轴是拿这条速度积分出来的，死通道会积出一条假的 0 m 轴——实测
+    ``2026_10_03_201147_ID0001.csv`` 的 ``Vx_KF`` 是 −0.05…0.00 kph，那种场次
+    应该"没有距离轴"，而不是"有一条 0 米的距离轴"。
 
-    这两种写法**不能**都写进 :data:`SPEED_CANDIDATES`：``csvlog.canonical_names()``
-    拿它当列名归一表，多写一个同一化的名字会让导入的 CSV 列被改名
-    （实测：一张列叫 ``Vx KF`` 的表被改成了 ``Vx_KF``）。
+    只想要"哪条通道叫速度"（概览条画什么、轨迹按什么着色）就**别**用这个——
+    那种场合不要求它在动，见 :func:`render.display_speed_channel`。
     """
-    # 原生通道在 ``log.channels`` 里，数学通道在 ``channels.names()`` 里（那是个活集合）
-    known = {channel.name for channel in log.channels} | set(channelsmod.names(log))
-    squashed = {}
-    for name in sorted(known):
-        squashed.setdefault(_squashed(name), name)
+    table = name_table(log)
     for candidate in SPEED_CANDIDATES:
-        actual = candidate if log.has(candidate) else squashed.get(_squashed(candidate))
-        if actual is not None:
-            values = log.values(actual)
-            if np.nanmax(np.abs(values)) > 1.0:  # not a dead channel
-                return actual
+        actual = resolve_channel(log, candidate, table)
+        if actual is None:
+            continue
+        values = log.values(actual)
+        if np.nanmax(np.abs(values)) > 1.0:  # not a dead channel
+            return actual
     return None
 
 

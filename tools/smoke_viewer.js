@@ -379,10 +379,20 @@ if (expectTemplate) {
 const key = (k, extra) => window.dispatch("keydown",
   Object.assign({ key: k, target: { tagName: "BODY" }, preventDefault() {} }, extra || {}));
 
-// 原始 CAN 帧表导进来的场次**没有距离轴**（实测：那批日志里没有车速也没有 GPS），
-// 所以切圈 / 区段 / 圈差 / 报表那几个块对它不适用——不是"这份数据缺了"，而是这条
-// 数据线上根本不存在这些概念。它有自己的那一块（文件末尾的 CAN 导入报告）。
+// 两条**互相独立**的前提，别把它们混成一条（混过一次，代价是 CAN 那批日志里
+// "车真的跑起来"的那些场次整个跑不了这套断言）：
+//
+//   hasDistance —— 有没有距离轴。CAN 场次是**算**出来的（拿 Vx_KF 积分，ticket #40）：
+//                  车动过的日志有，原地怠速几十秒的那些没有。切圈 / 区段 / 圈差
+//                  需要它。
+//   hasLaps     —— 有没有圈。CAN 那批日志没有 GPS，也没有人放过信标，所以一条圈
+//                  都没有——**即使它有距离轴**。报表 / 按圈分窗的直方图 / "导出当前
+//                  选中圈"要的是这个，不是 hasDistance。
+//
+// 用错前提的后果是断言在错的形状上跑：早先三块都写成 `if (hasDistance)`，于是
+// "有距离轴但没圈"的场次（正是 CAN 跑起来的样子）一进来就报四条红。
 const hasDistance = !!(api && api.data && api.data.meta && api.data.meta.has_distance);
+const hasLaps = !!(api && api.data && (api.data.laps || []).length);
 
 check(!!api, "window.i3pro debug handle was not exported");
 if (api) {
@@ -1059,11 +1069,16 @@ if (api) {
     if (pick) {
       check(String(pick._html).indexOf("插入通道") >= 0,
         "the insert-channel picker has no placeholder option");
-      const spaced = (api.data.channels || []).filter((c) => String(c.name).indexOf(" ") >= 0);
-      check(!hasDistance || spaced.length > 0,
-        "this snapshot has no channel name with a space to test with");
-      if (spaced.length) {
-        const wanted = String(spaced[0].name);
+      // 要测的是"打不出来的名字"：含空格（``Vx KF``）、点（CAN 解出来的
+      // ``Front_Compartment_Sensors.Channel_0``）或短横线的都得能从下拉里选。
+      // 早先只找空格——CAN 场次的通道名一个空格都没有，这条在 CAN 上直接报红。
+      const awkward = (api.data.channels || []).filter((c) => /[ .\-()]/.test(String(c.name)));
+      // 下拉对**任何**名字都加引号，所以没有"难写的名字"时退到第一条通道测整条通路，
+      // 有的话优先拿它测（那才是当初加这个下拉的原因）。
+      const sample = awkward[0] || (api.data.channels || [])[0] || null;
+      check(!!sample, "this snapshot has no channel to test the insert-channel picker with");
+      if (sample) {
+        const wanted = String(sample.name);
         check(String(pick._html).indexOf(wanted) >= 0,
           "the picker does not offer the channel " + wanted);
         api.openMathsEditor(null);
@@ -1558,10 +1573,21 @@ if (api) {
   }
 
   // 26. 报表：时间报告（区段 × 圈 + 理论最快圈）与通道报告
-  if (hasDistance) {              // 报表按圈 / 区段算，没有距离轴就没有可算的
+  // 报表是按圈 / 区段算的，所以要的前提是**有圈**（hasLaps），不是"有距离轴"：
+  // CAN 场次跑起来之后有距离轴但仍没有圈（没有 GPS、没人放信标）。
   const embedded = api.data.report;
-  check(!!embedded && !!embedded.time,
-    "快照载荷里没有报表：导出快照时必须带上 time / channels_lap / channels_section");
+  if (hasLaps) {
+    check(!!embedded && !!embedded.time,
+      "快照载荷里没有报表：导出快照时必须带上 time / channels_lap / channels_section");
+  } else {
+    // 没圈时不许给一张空表（空表看起来像"算出来就是零"），要给下一条指令
+    const empty = api.data.report || {};
+    check(!!empty.error && empty.error.indexOf("信标") >= 0 && empty.time === null,
+      "没有圈时报表既没有表也没有下一条指令：" + JSON.stringify(empty.error));
+    check(empty.error.indexOf("报表") >= 0,
+      "没有圈时的提示用的是区段模块的说法，用户在报表上会以为点错了地方："
+      + empty.error);
+  }
   if (embedded && embedded.time) {
     api.applyPreset("报表");
     const kinds = state.components.map((c) => c.type);
@@ -1717,8 +1743,7 @@ if (api) {
       "分享链接丢了通道报告的通道清单");
     timeComp.config.filter = "all";
   }
-  }                               // hasDistance：报表两块到此为止
-}
+}                                 // 26 报表两块到此为止（也是 if (api) 的收尾）
 
 /* 27. 直方图（#9）：分布 / 格数 / 窗口 / 门槛 / 着色 / 分享链接
  *
@@ -1814,8 +1839,9 @@ if (embeddedHist && embeddedHist.series) {
 
       // 窗口：快照带的是整场 + 每条完整圈，切换要能换出另一份计数
       const lapKey = (embeddedHist.windows || []).find((w) => w.key !== "all");
-      // 没有距离轴的场次（CAN 原始帧表）没有圈，也就没有按圈分的窗口。
-      check(!hasDistance || !!lapKey,
+      // 没有圈的场次（CAN：没有 GPS、没放信标）没有按圈分的窗口——
+      // 要的是 hasLaps，不是 hasDistance（CAN 跑起来之后有距离轴但仍没有圈）。
+      check(!hasLaps || !!lapKey,
         "快照里的直方图没有按圈算过的窗口（应该带上每条完整圈）");
       if (lapKey) {
         histComp.config.window = lapKey.key;
@@ -2741,13 +2767,16 @@ if (api && exportDlg) {
     "「只导出勾选的通道」没有拼成 selected + names: " + selectedUrl);
 
   // 选中圈：取那一圈的起止秒
-  if (hasDistance) {   // 没有距离轴就没有圈可选
   fields({ range: "lap", from: "", to: "", channels: "all", maths: true, rate: "auto",
            custom: "", resample: "linear", meta: false, axis: "time", format: "csv",
            layout: "wide" });
   const lapPreset = api.exportPreset(api.exportConfig());
-  check(lapPreset && typeof lapPreset.from === "number" && lapPreset.to > lapPreset.from,
-    "「当前选中圈」没有给出这一圈的起止: " + JSON.stringify(lapPreset));
+  if (hasLaps) {   // 没有圈就没得选：要有圈，不是"有距离轴"
+    check(lapPreset && typeof lapPreset.from === "number" && lapPreset.to > lapPreset.from,
+      "「当前选中圈」没有给出这一圈的起止: " + JSON.stringify(lapPreset));
+  } else {
+    check(!!lapPreset && !!lapPreset.error && lapPreset.error.indexOf("圈") >= 0,
+      "没有圈的时候「当前选中圈」既没给区间也没给下一步: " + JSON.stringify(lapPreset));
   }
 
   // 光标 A–B：没放基准光标时要说清下一步，放了才给区间
@@ -2923,6 +2952,28 @@ if (canMeta) {
   check((canMeta.channels || []).every((row) => row.name && row.message
     && row.update_rate > 0 && row.dbc),
     "通道行没有名字 / 报文名 / 真实更新率 / 来自哪份 DBC");
+
+  // 概览条（页面顶上那条全程波形）画的是"速度"。CAN 场次的速度叫 ``Vx_KF``，
+  // 而候选表里写的是 ``Vx KF``（空格）——只按原样找就会一条都找不到，
+  // 于是**跑起来的 CAN 场次连概览条都没有**（ticket #40 实测：serve 模式
+  // /overview 返回 null；同一份数据导成快照却有，因为那边退到了第一条通道）。
+  // 有距离轴就等于"有一条真的在动的速度"，那就必须有概览条。
+  if (hasDistance) {
+    check(!!api.state.overview && (api.state.overview.time || []).length > 0,
+      "CAN 场次有速度却没有概览条（速度候选只认带空格的 Vx KF）");
+  }
+  // 而且画的必须**是速度那条**，不能是"找不到速度就退到第一条通道"的兜底：
+  // 兜底也会给出非空概览条，所以只看"有没有"抓不到这个 bug（变异测试实测过）。
+  // 比较的是去掉空格/下划线/大小写之后的名字，也就是
+  // `src/i3pro/render.py` 里 SPEED_FOR_COLORING 认名字的那条规则；下面这份
+  // 候选表是它的镜像（改名要两处一起改——所以只镜像名字，不镜像顺序）。
+  if (api.state.overview) {
+    const squash = (text) => String(text).toLowerCase().replace(/[^a-z0-9]/g, "");
+    const SPEEDY = ["vxkf", "groundspeed", "gpsspeed", "speedfr", "speedfl"];
+    check(SPEEDY.indexOf(squash(api.state.overview.name)) >= 0,
+      "概览条画的不是速度通道，而是兜底的第一条通道："
+      + api.state.overview.name);
+  }
 
   // 多份 DBC 取并集：每份的贡献、哈希、归属都要能复核
   const dbcFiles = ((canMeta.dbc || {}).files) || [];

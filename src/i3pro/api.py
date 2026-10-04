@@ -372,8 +372,10 @@ class _Call:
             return self._error(400, str(exc))
 
     def act_overview(self, log, name: str, query: dict, method: str) -> Response:
-        name = (query.get("channel") or [None])[0] or (
-            next((n for n in render.SPEED_FOR_COLORING if log.has(n)), None)
+        # 走 render 那一处解析：否则 CAN 场次（速度叫 ``Vx_KF``）在 serve 模式下
+        # 拿不到概览条，而同一份数据导出成快照却有——实测过这个不一致。
+        name = (query.get("channel") or [None])[0] or render.overview_channel(
+            log, render.pick_channels(log)
         )
         if name is None or not log.has(name):
             return self._json(None)

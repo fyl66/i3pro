@@ -41,6 +41,8 @@ __all__ = [
     "spectrum",
     "groups",
     "pick_channels",
+    "display_speed_channel",
+    "overview_channel",
     "track_payload",
     "notes_payload",
     "sections_payload",
@@ -94,6 +96,39 @@ OVERLAY_PRIORITY = (
 )
 
 SPEED_FOR_COLORING = ("Vx KF", "Ground Speed", "GPS Speed", "SpeedFR", "SpeedFL")
+
+
+def display_speed_channel(log: ldmod.LogFile) -> str | None:
+    """概览条画哪条通道、轨迹按哪条通道着色。
+
+    与 :func:`derive.speed_channel`（距离轴那条速度）差一处：**这里不要求它在动**。
+    车没动时原样画一条平线，比"整条概览条消失"更诚实；而距离轴要拿它积分，
+    死通道会积出一条假的 0 m 轴。
+
+    名字的空格/下划线写法差异交给 ``derive.resolve_channel``（``.ld`` 是
+    ``Vx KF``，CAN 那条线是 ``Vx_KF``），这里只管**顺序**。
+
+    实测（2026-10-04，23 个场次逐个比对）：换成本函数之后，16 个 ``.ld`` 场次
+    选的**还是** ``Vx KF``（一个都没变）；7 个 CAN 场次全都从"没有概览条"变成
+    ``Vx_KF``——车动过的那两个画的是真实波形，原地怠速的那五个画的是一条平线
+    （通道在、值不动），两种情况都比原来"整条横条消失"更接近事实。
+    """
+    table = derive.name_table(log)
+    for candidate in SPEED_FOR_COLORING:
+        actual = derive.resolve_channel(log, candidate, table)
+        if actual is not None:
+            return actual
+    return None
+
+
+def overview_channel(log: ldmod.LogFile, selected: list[str] | None = None) -> str | None:
+    """概览条画哪条通道：先速度，再退到第一条被选中的通道。
+
+    快照（:func:`build_payload`）与服务（``/api/session/<名>/overview``）都走这里，
+    否则同一个场次"离线看得到概览条、联网看不到"——CAN 场次上实测过这种不一致。
+    """
+    return display_speed_channel(log) or (selected[0] if selected else None)
+
 
 #: MoTeC-style status/error channels: binary or state flags drawn in a band
 #: under the graph rather than as traces (i2 Pro's "Status and Errors" panel).
@@ -687,7 +722,7 @@ def track_payload(
         ]
     if time.size < 2:
         return None
-    speed_name = next((n for n in SPEED_FOR_COLORING if log.has(n)), None)
+    speed_name = display_speed_channel(log)
     if speed_name is None:
         speed = np.zeros(time.size)
     else:
@@ -863,7 +898,13 @@ def report_payload(
         except ValueError as exc:
             return {"error": str(exc), "notice": str(exc), "time": None, "channels": None}
     if config is None or len(config.boundaries) < 2:
-        message = notice or "本场还没有圈，先放一个信标再来看报表"
+        # ``config is None`` 是"连一圈都没有"，这时 ``notice`` 是区段模块那句话
+        # （"再来分区段"）——用户在**报表**上看到它会以为点错了地方。
+        message = (
+            "本场还没有圈：先放一个信标，再来看报表"
+            if config is None
+            else (notice or "本场还没有圈：先放一个信标，再来看报表")
+        )
         return {"error": message, "notice": message, "time": None, "channels": None}
     chosen = [c for c in (channels or pick_channels(log)) if log.has(c)]
     out = reportmod.report_payload(
@@ -928,10 +969,7 @@ def build_payload(
 
     # The outing strip always needs one cheap whole-session series. Prefer the
     # speed channel, because that is the shape a driver/engineer scans for.
-    overview_name = next(
-        (n for n in SPEED_FOR_COLORING if log.has(n)),
-        selected[0] if selected else None,
-    )
+    overview_name = overview_channel(log, selected)
     overview = None
     if overview_name is not None:
         overview = trace(log, overview_name, time, distance, overview_buckets)
@@ -1003,7 +1041,11 @@ def _snapshot_report_or_error(
     except ValueError as exc:
         return {"error": str(exc), "notice": str(exc), "time": None}
     if config is None or len(config.boundaries) < 2:
-        message = notice or "本场还没有圈，先放一个信标再来看报表"
+        message = (
+            "本场还没有圈：先放一个信标，再来看报表"
+            if config is None
+            else (notice or "本场还没有圈：先放一个信标，再来看报表")
+        )
         return {"error": message, "notice": message, "time": None}
     out = snapshot_report(log, recognized, config, channels)
     out["notice"] = notice

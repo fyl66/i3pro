@@ -6560,5 +6560,132 @@ class TestCanLog(unittest.TestCase):
         self.assertLess(big_seconds, 5.0)
 
 
+class TestSpeedChannelResolution(unittest.TestCase):
+    """同一个量在两条数据线上叫两个名字：``.ld`` 是 ``Vx KF``，CAN 是 ``Vx_KF``。
+
+    这条缝漏过两次，所以这里把两种用途**分开**钉住：
+
+    * 距离轴（``derive.speed_channel``）要求候选**真的在动**——拿一条死通道积分
+      会得到一条假的 0 m 轴；
+    * 概览条 / 轨迹着色（``render.display_speed_channel``）**不要求它在动**——
+      车没动时原样画平线，比整条概览条消失更诚实。
+
+    两处共用 ``derive.resolve_channel`` 一套名字匹配（去掉空格/下划线/大小写）。
+    """
+
+    def _can(self, name="2026_10_03_173345_ID0001.csv"):
+        path = CAN_DATA / name
+        if not path.exists():
+            self.skipTest(f"缺 {path.name}")
+        return canlog.read_can_session([path], dbc_dir=[DBC_DIR], merge=False,
+                                       write_sidecar=False, use_sidecar=False)
+
+    def test_a_squashed_name_finds_the_channel_whatever_the_spacing(self):
+        if not SENSORS_DBC.exists():
+            self.skipTest("缺 i2pro_data/dbc/")
+        session = self._can()
+        self.assertIn("Vx_KF", [channel.name for channel in session.channels])
+        # 三种写法都落到同一条通道上；本场次没有的名字仍然是 None（不硬凑）
+        for spelling in ("Vx_KF", "Vx KF", "vx kf"):
+            self.assertEqual(derive.resolve_channel(session, spelling), "Vx_KF")
+        self.assertIsNone(derive.resolve_channel(session, "Ground Speed"))
+        # 原样存在时原样返回——不许把 `Vx KF` 改写成 `Vx_KF`（CSV 列名归一表也用它）
+        if not HILL.exists():
+            self.skipTest("缺金标准场次")
+        with ld.LogFile.read(HILL) as hill:
+            self.assertEqual(derive.resolve_channel(hill, "Vx KF"), "Vx KF")
+
+    def test_the_overview_strip_shows_speed_on_both_data_lines(self):
+        """``.ld`` 与 CAN 的概览条都必须画在速度上，而不是兜底的第一条通道。"""
+        if not HILL.exists():
+            self.skipTest("缺金标准场次")
+        with ld.LogFile.read(HILL) as hill:
+            self.assertEqual(render.display_speed_channel(hill), "Vx KF")
+        session = self._can()
+        self.assertEqual(render.display_speed_channel(session), "Vx_KF")
+
+    def test_the_distance_axis_still_ignores_a_dead_speed_channel(self):
+        """概览条认``Vx_KF``，但距离轴**不**认——那条日志的车没动（实测 −0.05…0.00）。"""
+        stationary = self._can("2026_10_03_201147_ID0001.csv")
+        self.assertEqual(render.display_speed_channel(stationary), "Vx_KF")
+        self.assertIsNone(derive.speed_channel(stationary))
+        with self.assertRaises(ValueError):
+            derive.distance_series(stationary)
+
+    def test_the_overview_channel_falls_back_only_without_any_speed(self):
+        session = self._can()
+        self.assertEqual(render.overview_channel(session, ["Steering_Linear"]), "Vx_KF")
+        # 把速度候选都拿掉（空表）时，才轮到第一条被选中的通道
+        saved = render.SPEED_FOR_COLORING
+        render.SPEED_FOR_COLORING = ()
+        try:
+            self.assertEqual(render.overview_channel(session, ["Steering_Linear"]),
+                             "Steering_Linear")
+            self.assertIsNone(render.overview_channel(session, []))
+        finally:
+            render.SPEED_FOR_COLORING = saved
+
+    def test_the_golden_sessions_keep_the_channel_they_always_showed(self):
+        """冻结：改这条解析不许动 ``.ld`` 场次的概览条（23 个场次逐个比对过）。"""
+        for path in (HILL, ENDURANCE):
+            if not path.exists():
+                self.skipTest(f"缺 {path.name}")
+            with ld.LogFile.read(path) as log:
+                self.assertEqual(render.display_speed_channel(log), "Vx KF")
+
+
+class TestCanSessionSurface(unittest.TestCase):
+    """CAN 场次在服务端的门面：概览条要有、报表要说清下一步（ticket #38 / #41）。
+
+    这两条都是"看着像成功其实什么都没有"的形态：概览条返回 ``null`` 时前端只是
+    不画那条横条，报表返回空表时看起来像"算出来就是零"。
+    """
+
+    def setUp(self):
+        if not CAN_DATA.exists() or not SENSORS_DBC.exists():
+            self.skipTest("缺 can_data/ 或 i2pro_data/dbc/")
+
+    def _library(self):
+        return librarymod.SessionLibrary(
+            [CAN_DATA, DATA], maths_root=str(ROOT), worksheets_root=str(ROOT)
+        )
+
+    def test_the_overview_endpoint_is_not_empty_for_a_moving_can_log(self):
+        from i3pro import api
+
+        path = CAN_DATA / "2026_10_03_173345_ID0001.csv"
+        if not path.exists():
+            self.skipTest("缺那份 91 MB 的帧表")
+        library = self._library()
+        name = next(n for n in library.names() if n.startswith("2026_10_03_173345"))
+        body = api.Api(library).handle(["session", name, "overview"], {}, "GET").body
+        payload = json.loads(body)
+        self.assertIsNotNone(payload, "跑起来的 CAN 场次没有概览条")
+        self.assertEqual(payload["name"], "Vx_KF")
+        self.assertGreater(len(payload["time"]), 100)
+
+    def test_the_report_tells_you_to_drop_a_beacon_when_there_are_no_laps(self):
+        from i3pro import api
+
+        path = CAN_DATA / "2026_10_03_201147_ID0001.csv"
+        if not path.exists():
+            self.skipTest("缺那份小帧表")
+        library = self._library()
+        name = next(n for n in library.names() if n.startswith("2026_10_03_201147"))
+        response = api.Api(library).handle(["session", name, "report"], {}, "GET")
+        payload = json.loads(response.body)
+        self.assertEqual(response.status, 400)
+        self.assertIn("信标", payload["error"])
+        # 说"报表"而不是区段模块那句"再来分区段"——用户在报表上会以为点错了地方
+        self.assertIn("报表", payload["error"])
+
+        # 快照那条路走的是 payload 里的 report 字段：**不许给一张空表**
+        # （空表看起来像"算出来就是零"），要给同一条下一条指令。
+        snapshot = render.build_payload(library.get(name), with_report=True)["report"]
+        self.assertIsNone(snapshot["time"], "没有圈时不该给一张空表")
+        self.assertIn("信标", snapshot["error"])
+        self.assertIn("报表", snapshot["error"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

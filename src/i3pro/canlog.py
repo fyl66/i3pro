@@ -685,6 +685,31 @@ def read_can_session(
                 f"{len(dead)} 份 DBC 的 ID 在这批日志里一条都没出现（车上的布局和它不一致）："
                 + "、".join(dead) + "。"
             )
+            # "布局对不上"与"记录仪根本没接那条总线"是两种原因，报告要说清是哪一种
+            # （ticket #38 的验收点名了那份 dashboard DBC）。判据两条：这份 DBC 的
+            # 报文**全是扩展帧**，而这批日志里**一帧扩展帧都没有**。
+            if not scan["extended_ids"]:
+                by_entry = dict(databases)
+                buses = [
+                    name for name in dead
+                    if by_entry.get(name) is not None
+                    and by_entry[name].messages
+                    and all(extended for extended, _frame in by_entry[name].messages)
+                ]
+                if buses:
+                    # 按 DBC 文件里的写法印（扩展帧在 `BO_` 里带 0x80000000 标记），
+                    # 这样用户能在自己的 DBC 里搜到这个号。
+                    ids = sorted({
+                        frame | (0x80000000 if extended else 0)
+                        for name in buses
+                        for extended, frame in by_entry[name].messages
+                    })
+                    span = f"0x{ids[0]:X}–0x{ids[-1]:X}"
+                    notes.append(
+                        f"其中 {'、'.join(buses)} 的报文**全是扩展帧**（{span}，"
+                        f"共 {len(ids)} 个 ID），而这批日志里一帧扩展帧都没有——"
+                        "不是布局对不上，是记录仪没接那条总线。"
+                    )
 
     can = {
         "frames": total_frames,

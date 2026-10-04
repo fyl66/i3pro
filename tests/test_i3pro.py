@@ -6393,6 +6393,13 @@ class TestCanLog(unittest.TestCase):
                          sorted((row["frames"] for row in undecoded), reverse=True))
         # 那份 dashboard DBC 一条都对不上：报告要写明原因（全是扩展帧）
         self.assertEqual(by_file[DASHBOARD_DBC.name]["covered_frames"], 0)
+        self.assertTrue(
+            any("扩展帧" in text and DASHBOARD_DBC.name in text for text in can["notes"]),
+            "报告只说了'布局对不上'，没说清那份 dashboard DBC 全是扩展帧、"
+            "而日志里没有扩展帧（ticket #38 的验收点名了这条）",
+        )
+        self.assertTrue(any("0x9D22" in text for text in can["notes"]),
+                        "报告里的扩展帧 ID 要按 DBC 文件的写法印（0x9D22xxxx）")
         # 有车速就有距离轴（Vx_KF 积分，实测 0.1–5546.8 m），而且是**算出来**的
         axis = derive.distance_series(sessions[0])
         self.assertGreater(axis[-1], 5000.0)

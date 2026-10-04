@@ -1928,7 +1928,11 @@ function headFields(comp) {
   return {
     cursor: cfg.cursor !== false,
     delta: cfg.delta !== false,
-    measure: cfg.measure !== false,
+    // min / max / avg 是**三个**开关（需求里就是三个字段）：有人只想知道峰值、
+    // 不关心平均，合成一个"测量"开关就逼他全看或全不看。
+    min: cfg.min !== false,
+    max: cfg.max !== false,
+    avg: cfg.avg !== false,
     unit: cfg.unit !== false,
   };
 }
@@ -2935,7 +2939,8 @@ function renderGraphHead(comp, b, groups, panels, overlapped) {
   const signature = groups.map((g) => g.key + ":" + g.channels.join(",")).join(";")
     + "|" + (state.show.measure ? 1 : 0) + "|" + (state.show.legend ? 1 : 0)
     + "|" + (comp.config.mode || "tiled") + "|" + gone.join(",")
-    + "|" + [fields.cursor, fields.delta, fields.measure, fields.unit].join(",");
+    + "|" + [fields.cursor, fields.delta, fields.min, fields.max, fields.avg,
+             fields.unit].join(",");
   b.head.style.display = state.show.legend ? "" : "none";
   if (b.legendKey !== signature) {
     b.head.innerHTML = "";
@@ -2966,7 +2971,9 @@ function renderGraphHead(comp, b, groups, panels, overlapped) {
         // 抬头字段按组件开关（ticket #35）：先按开关藏掉，下面的更新循环只管数值。
         if (!fields.cursor) cur.style.display = "none";
         if (!fields.delta) dl.style.display = "none";
-        if (!fields.measure) mn.style.display = mx.style.display = av.style.display = "none";
+        if (!fields.min) mn.style.display = "none";
+        if (!fields.max) mx.style.display = "none";
+        if (!fields.avg) av.style.display = "none";
         const unit = makeEl("span", "lunit", row);
         unit.textContent = (CHANNELS.get(name) || {}).unit || "";
         if (!fields.unit) unit.style.display = "none";
@@ -3003,12 +3010,15 @@ function renderGraphHead(comp, b, groups, panels, overlapped) {
     } else {
       node.delta.style.display = "none";
     }
-    if (state.show.measure && fields.measure && trace) {
+    if (state.show.measure && trace) {
       const st = visibleStats(trace, r[0], r[1]);
       node.min.textContent = st ? fmt(st.min) : "--";
       node.max.textContent = st ? fmt(st.max) : "--";
       node.avg.textContent = st ? fmt(st.avg) : "--";
-      node.min.style.display = node.max.style.display = node.avg.style.display = "";
+      // 三个格子各看各的开关：全局的 M 是总闸，这里是每件组件自己的细调。
+      node.min.style.display = fields.min ? "" : "none";
+      node.max.style.display = fields.max ? "" : "none";
+      node.avg.style.display = fields.avg ? "" : "none";
     } else {
       node.min.style.display = node.max.style.display = node.avg.style.display = "none";
     }
@@ -3162,7 +3172,9 @@ function openDisplayMenu(comp, anchor) {
     const fields = headFields(comp);
     popCheck(menu, "光标值", fields.cursor, (on) => setHeadField(comp, "cursor", on));
     popCheck(menu, "Δ（与基准光标之差）", fields.delta, (on) => setHeadField(comp, "delta", on));
-    popCheck(menu, "Min / Max / Avg", fields.measure, (on) => setHeadField(comp, "measure", on));
+    popCheck(menu, "Min（可见区间最小）", fields.min, (on) => setHeadField(comp, "min", on));
+    popCheck(menu, "Max（可见区间最大）", fields.max, (on) => setHeadField(comp, "max", on));
+    popCheck(menu, "Avg（可见区间平均）", fields.avg, (on) => setHeadField(comp, "avg", on));
     popCheck(menu, "单位", fields.unit, (on) => setHeadField(comp, "unit", on));
     const hint = makeEl("div", "pophint", menu);
     hint.textContent = "这几项跟着工作表存/还原；全局的「L 图例」「M 测量」仍然管所有组件。";

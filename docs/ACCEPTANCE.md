@@ -2899,7 +2899,7 @@ python tools\verify_clicks.py     # 172 项检查：172 通过，0 失败（其�
 node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
 ```
 
-**通过判据**（`TestPalettes` 8 项 ＋ 真浏览器 24 条 ＋ 无头 26 条）：
+**通过判据**（`TestPalettes` 8 项 ＋ 真浏览器 24 条 ＋ 无头 27 条）：
 
 | 断言 | 说明 |
 | --- | --- |
@@ -2910,7 +2910,7 @@ node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
 | "缺失"灰不与调色板冲突 | 灰 `#4a5160` 不在任何一套里，且与**所有**调色板颜色 ΔE ≥ 25；实测最近 **33.96** |
 | 手选色优先、且**跟着工作表存** | 真浏览器：点色块 → 选色 → 点「保存」→ 切到「对比」再切回「分析」→ 颜色还在。落盘的 `worksheets/analysis.json` 里实测 `"colors": {"Vx KF": "#b6ff00"}` |
 | 换调色板不动手选色 | 手选的那条通道在换整套调色板之后颜色不变（那正是手选的意义） |
-| 抬头字段按组件开关 | 真点「显示」里的 `Min / Max / Avg` → `{"cursor":true,"delta":true,"measure":false,"unit":true}`，抬头那三格真的收起来了（`display:none`），而且**同样存进工作表**、切走切回还在 |
+| 抬头字段按组件开关 | 六个字段各有各的开关（光标值 / Δ / Min / Max / Avg / 单位）。真点「显示」里的 `Avg` → `{"cursor":true,"delta":true,"min":true,"max":true,"avg":false,"unit":true}`：**只有那一格**收起来（`display:none`），而且同样存进工作表、切走切回还在 |
 | 尺子本身是对的 | `delta_e(#000,#fff)` = 100.0、`contrast_ratio(#000,#fff)` = 21.0、同色 = 0 / 1.0（这两把尺子被改坏就红） |
 
 **这一票撞出来的一个真问题**：换色只清了画布缓存（`cacheKey`），漏了抬头那一排色块
@@ -2975,7 +2975,7 @@ node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
 **回归四项（本机实测）**：`Ran 431 tests` + `OK`；`verify_ld_vs_csv` `PASS - 0
 channel(s) outside tolerance`；两份金标准快照各 `PASS`（7 圈 / 471 通道行、
 26 圈 / 377 通道行）；真浏览器 **188 项检查：188 通过，0 失败**；
-`smoke_viewer.js` 里的 `check(` 共 **576** 条。
+`smoke_viewer.js` 里的 `check(` 共 **577** 条。
 
 ---
 
@@ -3008,7 +3008,7 @@ channel(s) outside tolerance`；两份金标准快照各 `PASS`（7 圈 / 471 �
 | `TestIndependentParsers` | 第二套实现交叉验证、213 通道 CSV 全量对照 |
 | `TestBeaconUndo` | 撤销的纯函数层：什么是"同一版"、什么时候没有可撤销的一步、交回去的是上一版本身 |
 | `TestBeaconUndoOverHttp` | 撤销走真实 `PUT`：改名 / 插入 / 删除各自一步回到原样、`trusted` 迁移、落盘、一次无改动的保存不吃掉上一步、没有可撤销的一步时 400 并说明下一步、页面注入的 `laps_can_undo` 三态 |
-| `TestViewerScript` | 无头驱动前端：脚本里 **576 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
+| `TestViewerScript` | 无头驱动前端：脚本里 **577 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
 | `TestAliases` / `TestAliasesOverHttp` | 通道别名（#36，16 项）：有序候选取第一条存在的、重复候选去掉、九种坏形状各说下一步、空候选合法、不是引用就不去别名表里翻、**同一套别名在两份金标准上落到不同通道**（`Gear Speed1` / `SpeedRL`）、`annotate` 贴出落点表、别名随文件往返、**导出 → 导入逐字段相同**、保存时给不给 aliases 的两种行为、页面载荷带着落点；HTTP：保存别名与落点、坏别名 400 带下一步 |
 | `TestPalettes` | 波形配色（#35，8 项）：三套调色板齐、每套 ≥ 8 色、前八色两两 ΔE ≥ 25、相邻 ≥ 30、对底色对比度 ≥ 3.0、"缺失"灰不属于任何一套且与所有颜色 ΔE ≥ 25、色差与对比度这两把尺子本身对拍（黑/白 = 100 / 21）、页面载荷带着三套与缺失灰、不认识的调色板名退回默认 |
 | `TestWorksheets` | 工作表（#30，12 项）：仓库里那七份文件全都读得出来（名字 / 身份 / 顺序 / 组件类型）、随版本发布的那几份**不写死通道名**（挑通道一律走 `pick`）、坏文件不连累别人、七种坏法各自的下一步（坏 JSON / schema 不认 / 键打错 / 尺寸非法 / 空组件列 / 空规则 / 规则键打错）、重名被挡、目录不存在与目录为空、载荷在快照与本地服务两条路上都带工作表（含 `--worksheets` 换目录只影响那一个载荷）、**搬进文件之后与搬之前逐字段一致**（夹具是硬编码那版倒出来的） |

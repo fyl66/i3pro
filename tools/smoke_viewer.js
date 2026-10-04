@@ -3156,10 +3156,12 @@ if (api && exportDlg) {
     "调色板选择没有写进工作表：" + JSON.stringify(written.config));
 
   // 抬头字段按组件开关，而且写进配置。
-  api.setHeadField(comp, "measure", false);
-  check(api.headFields(comp).measure === false, "关掉 Min/Max/Avg 没生效");
+  api.setHeadField(comp, "avg", false);
+  check(api.headFields(comp).avg === false, "关掉 Avg 没生效");
+  check(api.headFields(comp).min === true && api.headFields(comp).max === true,
+    "只关了 Avg，Min/Max 跟着被关了（三个字段各有各的开关）");
   check(((JSON.parse(JSON.stringify(api.sheetComponent(comp)))).config || {})
-    .show.measure === false, "抬头开关没有写进工作表");
+    .show.avg === false, "抬头开关没有写进工作表");
   check(api.headFields(comp).cursor === true, "只关了一项，别的项跟着被关了");
   api.renderAll();
   const nodes = (registry.get("worksheet")._children || []);
@@ -3174,8 +3176,10 @@ if (api && exportDlg) {
     .filter((c) => String(c.className).indexOf("lrow") >= 0)[0];
   const spans = (row && row._children ? row._children : [])
     .filter((c) => String(c.className).indexOf("lmm") >= 0);
-  check(spans.length === 3 && spans.every((s) => s.style.display === "none"),
-    "关掉 Min/Max/Avg 之后抬头里那三格还露着：" + spans.length);
+  check(spans.length === 3
+    && spans.filter((s) => s.style.display === "none").length === 1,
+    "关掉 Avg 之后抬头里藏起来的格子数不对（应该只藏一格）："
+    + spans.map((s) => s.style.display).join("|"));
   const curs = (row && row._children ? row._children : [])
     .filter((c) => String(c.className).indexOf("lcur") >= 0);
   check(curs.length === 1 && curs[0].style.display !== "none",
@@ -3213,7 +3217,7 @@ if (api && exportDlg) {
   delete comp.config.palette;
   delete comp.config.show;
   api.renderAll();
-  check(api.headFields(comp).measure === true, "还原之后抬头开关没回到默认");
+  check(api.headFields(comp).avg === true, "还原之后抬头开关没回到默认");
 }
 
 /* -------------------- 通道别名（ticket #36） --------------------------------

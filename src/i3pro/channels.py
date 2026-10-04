@@ -18,10 +18,13 @@
 | 单位 | 文件里那一档 | 定义里写的（``derived_units``） |
 | 原始样本 | mmap 里 | 没有，``LogFile.raw`` 拒绝 |
 | 列放在哪 | 文件里 | 一个 dict（``derived_target``） |
+| 有没有有效样本 | 扫 ``raw()``（整数样本免扫） | 扫那一列（``valid_count``） |
 
-会话类型必须**显式声明**这三样：``derived_target``（放列的 dict）、``derived_names``
-（名字集合）、``derived_units``（名字到单位）。本模块不去嗅探对象有哪些属性：没声明就
-报错并说清下一步，这样「多了一种会话」是一件看得见的事，而不是悄悄少一支分支。
+会话类型必须**显式声明**这几样：``derived_target``（放列的 dict）、``derived_names``
+（名字集合）、``derived_units``（名字到单位），以及 ``raw(name)``（原始样本——
+ticket #34 判"整段有没有有效样本"要用，见 :func:`valid_count`）。本模块不去嗅探对象
+有哪些属性：没声明就报错并说清下一步，这样「多了一种会话」是一件看得见的事，
+而不是悄悄少一支分支。
 """
 
 from __future__ import annotations

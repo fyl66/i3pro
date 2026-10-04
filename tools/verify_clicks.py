@@ -1669,11 +1669,13 @@ class Checker:
             return
         self.browser.shot(
             os.path.join(ROOT, "out", "shots", "verify-display-menu.png"), self.session)
-        measure = fields["boxes"][2]                       # 光标值 / Δ / Min·Max·Avg / 单位
-        self.browser.click(measure["x"], measure["y"], self.session)
+        average = fields["boxes"][4]                       # 光标值 / Δ / Min / Max / Avg / 单位
+        self.browser.click(average["x"], average["y"], self.session)
         time.sleep(0.5)
-        self.check("#35 真点一下之后 Min/Max/Avg 关掉了",
-                   self.js("i3pro.headFields(i3pro.state.components[0]).measure") is False,
+        self.check("#35 真点一下之后只关掉了 Avg（Min/Max 还在）",
+                   self.js("i3pro.headFields(i3pro.state.components[0]).avg") is False
+                   and self.js("i3pro.headFields(i3pro.state.components[0]).min") is True
+                   and self.js("i3pro.headFields(i3pro.state.components[0]).max") is True,
                    self.js("JSON.stringify(i3pro.headFields(i3pro.state.components[0]))"))
 
         chips = self.js(
@@ -1709,7 +1711,7 @@ class Checker:
                    on_disk.get("palette") == "colorblind",
                    json.dumps(on_disk, ensure_ascii=False)[:200])
         self.check("#35 抬头开关也写进了文件",
-                   (on_disk.get("show") or {}).get("measure") is False,
+                   (on_disk.get("show") or {}).get("avg") is False,
                    json.dumps(on_disk.get("show"), ensure_ascii=False))
         sheets = self.js(
             "JSON.stringify(i3pro.worksheetCatalogue().sheets.map(function(s){return s.name;}))")
@@ -1735,7 +1737,7 @@ class Checker:
                    self.js("i3pro.state.components[0].config.palette") == "colorblind",
                    self.js("i3pro.state.components[0].config.palette"))
         self.check("#35 切回来之后抬头开关还在",
-                   self.js("i3pro.headFields(i3pro.state.components[0]).measure") is False,
+                   self.js("i3pro.headFields(i3pro.state.components[0]).avg") is False,
                    self.js("JSON.stringify(i3pro.headFields(i3pro.state.components[0]))"))
         if swatch_bg:
             self.check("#35 图例上的色块画出来也是手选色",

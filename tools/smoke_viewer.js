@@ -3034,7 +3034,17 @@ if (canMeta) {
 const header = registry.get("fileInfo");
 check(header && (header.innerHTML.indexOf(".ld") >= 0
   || header.innerHTML.indexOf(".csv") >= 0
-  || header.innerHTML.indexOf(".xlsx") >= 0), "header was not populated");
+  || header.innerHTML.indexOf(".xlsx") >= 0
+  || header.innerHTML.indexOf(".txt") >= 0
+  || header.innerHTML.indexOf(".tsv") >= 0), "header was not populated");
+// 分隔文本（.txt / 分隔符不是逗号的 .csv）要把"怎么读的"画在抬头那一行上
+// （ticket #32）。跑 .ld 快照时这一段没有 parse_note，跳过——它由验收里那份
+// 文本快照负责跑。
+const parseNote = (api && api.data && api.data.meta && api.data.meta.parse_note) || "";
+if (parseNote) {
+  check(header.innerHTML.indexOf(parseNote) >= 0,
+    "读法没有写进抬头：" + parseNote);
+}
 const lapTable = registry.get("lapTable");
 const expectsLaps = !!(api && api.data && (api.data.laps || []).length);
 if (expectsLaps) {

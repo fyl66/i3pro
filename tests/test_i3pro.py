@@ -15,7 +15,9 @@ from __future__ import annotations
 import json
 import contextlib
 import atexit
+import csv
 import dataclasses
+import io
 import os
 import re
 import shutil
@@ -43,6 +45,7 @@ from i3pro import (  # noqa: E402
     maths as mathsmod, motec_csv,
     notes as notesmod, render, report as reportmod, sections as sectionsmod,
     server, sidecar, store, timebase,
+    txtlog,
     worksheets as worksheetsmod,
     export as exportmod, xlsx as xlsxmod,
 )
@@ -1487,8 +1490,9 @@ class TestCsvSession(unittest.TestCase):
 
         self.assertIn(".csv", importer.ALLOWED_SUFFIXES)
         self.assertEqual(importer.safe_name("别的队给的.csv"), "别的队给的.csv")
+        # ``.txt`` 从 ticket #32 起是**收**的（分隔文本），所以这里换一个真的不收的
         with self.assertRaises(ValueError):
-            importer.safe_name("notes.txt")
+            importer.safe_name("笔记.md")
 
     @_needs(DATA / "20260524-耐久正赛.csv")
     def test_a_csv_session_can_compare_two_laps_on_the_distance_axis(self):
@@ -7054,6 +7058,338 @@ class TestCanSessionSurface(unittest.TestCase):
         self.assertIsNone(snapshot["time"], "没有圈时不该给一张空表")
         self.assertIn("信标", snapshot["error"])
         self.assertIn("报表", snapshot["error"])
+
+
+class TestTextImport(unittest.TestCase):
+    """读分隔文本成场次（ticket #32）：`.txt` / `.tsv`，以及分隔符不是逗号的 `.csv`。
+
+    这里最要紧的一条判据是**预览与导入一致**：预览面板显示的分隔符 / 表头行 / 通道
+    列表，和点下"导入"之后真正得到的东西，必须来自同一次读取。分开写两套解析
+    （前端猜一套、后端读一套）正是这类功能最常见的坏法——面板上说"8 个通道"，
+    导入完是 1 个。
+    """
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="i3pro-txt-"))
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def write(self, name: str, text: str, encoding: str = "utf-8") -> Path:
+        path = self.dir / name
+        path.write_text(text, encoding=encoding)
+        return path
+
+    @staticmethod
+    def body(rows: int = 6, columns: int = 3) -> list[list[str]]:
+        header = ["Time", "Vx KF [km/h]", "TH"][:columns]
+        return [header] + [[f"{i / 100:.3f}", str(i), str(i * 2)] for i in range(rows)]
+
+    def table(self, name: str, delimiter: str, rows: int = 6) -> Path:
+        return self.write(name, "\n".join(delimiter.join(r) for r in self.body(rows)) + "\n")
+
+    # ------------------------------------------------------------ 四种分隔符
+    def test_the_four_delimiters_all_read_as_the_same_session(self):
+        wanted = None
+        for i, delimiter in enumerate((",", "\t", ";", "|")):
+            path = self.table(f"t{i}.txt", delimiter)
+            preview = txtlog.preview(path)
+            self.assertTrue(preview["ready"], preview.get("error"))
+            self.assertEqual(preview["delimiter"], delimiter, preview)
+            self.assertEqual(preview["channels"], ["Vx KF", "TH"], preview)
+            session = csvlog.open_session(path)
+            self.assertEqual([c.name for c in session.channels], ["Vx KF", "TH"])
+            self.assertEqual(session.channel("Vx KF").unit, "km/h")
+            self.assertAlmostEqual(session.sample_rate, 100.0)
+            values = session.values("Vx KF")
+            if wanted is None:
+                wanted = values
+            else:
+                np.testing.assert_array_equal(values, wanted)
+
+    def test_a_multi_space_file_reads_too(self):
+        """一份用连续空格对齐的表（有人拿它当"表格"存）。"""
+        path = self.write("space.txt", "\n".join([
+            "Time    Vx      TH",
+            "0.000   0       0",
+            "0.010   1       2",
+            "0.020   2       4",
+        ]) + "\n")
+        preview = txtlog.preview(path)
+        self.assertEqual(preview["delimiter"], " ")
+        self.assertEqual(preview["delimiter_label"], "多空格")
+        self.assertEqual(preview["channels"], ["Vx", "TH"])
+
+    # ---------------------------------------------------------- 预览 = 导入
+    def test_the_preview_names_the_channels_the_import_will_produce(self):
+        path = self.table("same.txt", ";")
+        preview = txtlog.preview(path)
+        session = csvlog.open_session(path)
+        self.assertEqual(preview["channels"], [c.name for c in session.channels])
+        self.assertEqual(preview["samples"], int(session.time.size))
+        self.assertAlmostEqual(preview["sample_rate"], session.sample_rate)
+        self.assertEqual(preview["rows"][0][0], "Time")     # 前 20 行的原样内容
+        self.assertEqual(preview["width"], 3)
+
+    def test_a_wrong_guess_is_visible_in_the_preview_and_fixable(self):
+        """分隔符猜错时，预览里要**看得出来**，改一下就能读对。"""
+        path = self.table("wrong.txt", ";")
+        broken = txtlog.preview(path, delimiter=",")
+        self.assertFalse(broken["ready"])
+        self.assertEqual(broken["delimiter"], ",")
+        # 报的必须是"下一步做什么"：整份表被读成一列时要说分隔符，别只说读不出来
+        self.assertIn("分隔符", broken["error"])
+        fixed = txtlog.preview(path, delimiter=";")
+        self.assertTrue(fixed["ready"], fixed.get("error"))
+        self.assertEqual(fixed["channels"], ["Vx KF", "TH"])
+
+    # ------------------------------------------------------------ 侧车记忆
+    def test_the_sidecar_remembers_how_the_file_was_read(self):
+        path = self.write("two.txt", "说明行\nTime;TH\ns;\n" + "".join(
+            f"{i};{i * 2}\n" for i in range(6)
+        ))
+        first = csvlog.open_session(path)                 # 自动认：分号 + 第 2 行是表头
+        self.assertEqual([c.name for c in first.channels], ["TH"])
+        csvlog.save_options(path, delimiter=";", header=1, unit_row=True)
+        second = csvlog.open_session(path)                # 第二次：照侧车来
+        np.testing.assert_array_equal(second.time, first.time)
+        self.assertEqual(second.channel("TH").unit, "")
+        # 改别的键（列名覆盖）不能把这些选项冲掉——同一个文件里两个东西在存
+        csvlog.save_map(path, {"TH": "节气门"}, {})
+        self.assertEqual(csvlog.load_options(path)["header"], 1)
+        self.assertEqual(csvlog.open_session(path).channels[0].name, "节气门")
+        # 空值 = 改回自动，不是"存了个空字符串"
+        csvlog.save_options(path, header=None)
+        self.assertNotIn("header", csvlog.load_options(path))
+
+    def test_an_unknown_option_name_is_refused(self):
+        path = self.table("opts.txt", ",")
+        with self.assertRaises(ValueError) as caught:
+            csvlog.save_options(path, delimeter=";")
+        self.assertIn("delimeter", str(caught.exception))
+
+    # -------------------------------------------------------- 没有时间列
+    def test_a_table_without_a_time_column_is_refused_with_a_next_step(self):
+        path = self.write("notime.txt", "Vx\tTH\n" + "".join(
+            f"{i}\t{i}\n" for i in range(6)
+        ))
+        preview = txtlog.preview(path)
+        self.assertFalse(preview["ready"])
+        self.assertIn("时间列", preview["error"])
+        self.assertIn("--rate", preview["error"])          # 说清下一步
+        with self.assertRaises(ValueError):
+            csvlog.open_session(path)
+
+    def test_a_generated_time_column_is_reproducible_and_recorded(self):
+        path = self.write("notime.txt", "Vx\tTH\n" + "".join(
+            f"{i}\t{i * 2}\n" for i in range(6)
+        ))
+        preview = txtlog.preview(path, generate_rate=50)
+        self.assertTrue(preview["ready"], preview.get("error"))
+        self.assertEqual(preview["channels"], ["Vx", "TH"])   # 时间列不算通道
+        self.assertIn("50 Hz", preview["parse_note"])
+        csvlog.save_options(path, generate_rate=50)
+        first = csvlog.open_session(path)
+        np.testing.assert_allclose(first.time, np.arange(6) / 50.0)
+        self.assertAlmostEqual(first.sample_rate, 50.0)
+        second = csvlog.open_session(path)                    # 第二次照样复现
+        np.testing.assert_array_equal(second.time, first.time)
+        self.assertIn("生成", second.metadata()["parse_note"])
+        self.assertTrue(any(row.get("generated") for row in second.report))
+
+    def test_a_real_time_column_is_never_replaced_by_a_generated_one(self):
+        """勾了"生成时间列"但表里本来就有时间：以文件里的为准，别把真时间盖掉。"""
+        path = self.table("hastime.txt", ",")
+        session = csvlog.open_session(path, generate_rate=1)
+        np.testing.assert_allclose(session.time[:3], [0.0, 0.01, 0.02])
+        self.assertFalse(any(row.get("generated") for row in session.report))
+
+    # -------------------------------------------------------- 表头行 / 无表头
+    def test_a_header_override_points_at_the_right_row(self):
+        path = self.write("messy.txt", "导出说明\n\nTime\tTH\ns\t\n" + "".join(
+            f"{i}\t{i * 3}\n" for i in range(6)
+        ))
+        shown = txtlog.preview(path, header=2, unit_row=True)
+        self.assertTrue(shown["ready"], shown.get("error"))
+        self.assertEqual(shown["effective_header"], 2)
+        self.assertTrue(shown["effective_unit_row"])
+        self.assertEqual(shown["channels"], ["TH"])
+        # 选错行时要说清"只有几行"，而不是读出一堆莫名其妙的列
+        with self.assertRaises(ValueError) as caught:
+            csvlog.open_session(path, header=99)
+        self.assertIn("表头行", str(caught.exception))
+
+    def test_no_header_row_gets_positional_names(self):
+        path = self.write("bare.txt", "".join(f"{i}\t{i * 2}\n" for i in range(6)))
+        session = csvlog.open_session(path, header=csvlog.NO_HEADER, generate_rate=100)
+        self.assertEqual([c.name for c in session.channels], ["列1", "列2"])
+        np.testing.assert_allclose(session.values("列2")[:3], [0.0, 2.0, 4.0])
+        self.assertIn("没有表头行", session.metadata()["parse_note"])
+
+    # ------------------------------------------------------------ CSV 同路
+    def test_csv_and_txt_of_one_table_read_the_same(self):
+        """同一张表存成 CSV 与 TXT，读出来必须一模一样（ticket #32 的验收条目）。"""
+        comma = self.write("same.csv", "\n".join(
+            ",".join(r) for r in self.body()
+        ) + "\n")
+        tabs = self.write("same.txt", "\n".join(
+            "\t".join(r) for r in self.body()
+        ) + "\n")
+        left, right = csvlog.open_session(comma), csvlog.open_session(tabs)
+        self.assertEqual([c.name for c in left.channels], [c.name for c in right.channels])
+        np.testing.assert_array_equal(left.time, right.time)
+        np.testing.assert_array_equal(left.values("TH"), right.values("TH"))
+        # 分隔符不是逗号的 CSV 也吃同一条路：`open_session` 按内容分流，不是按扩展名
+        odd = self.write("odd.csv", "Time;TH\n0.000;0\n0.010;1\n0.020;2\n")
+        self.assertEqual([c.name for c in csvlog.open_session(odd).channels], ["TH"])
+
+    # ------------------------------------------------------------ 界面与接口
+    def test_the_import_page_offers_the_parse_choices(self):
+        library = librarymod.SessionLibrary([self.dir])
+        page = server.index_page(library)
+        for needle in ('accept=".ld,.ldx,.csv,.xlsx,.txt,.tsv"', 'id="cardOk"',
+                       'id="optDelimiter"', 'id="optEncoding"', 'id="optHeader"',
+                       'id="optUnitRow"', 'id="optRate"'):
+            self.assertIn(needle, page)
+
+    def test_the_api_stages_previews_and_commits(self):
+        from i3pro import api as apimod
+
+        library = librarymod.SessionLibrary([self.dir])
+        api = apimod.Api(library)
+        text = "Time;Vx KF;TH\ns;km/h;\n" + "".join(
+            f"{i};{i * 2};{i}\n" for i in range(20)
+        )
+        staged = json.loads(api.handle(
+            ["import"], {"name": ["接口.csv"]}, "PUT", text.encode("utf-8")
+        ).body)
+        self.assertTrue(staged["ok"])
+        token = staged["token"]
+        self.assertEqual(staged["preview"]["delimiter"], ";")
+        # 暂存期间这份表**不许**进场次列表
+        self.assertEqual(library.names(), [])
+        again = json.loads(api.handle(
+            ["import", "preview"], {"token": [token], "delimiter": [";"]}, "GET"
+        ).body)
+        self.assertEqual(again["preview"]["channels"], ["Vx KF", "TH"])
+        done = api.handle(["import", "commit"],
+                          {"token": [token], "delimiter": [";"]}, "POST")
+        summary = json.loads(done.body)
+        self.assertEqual(done.status, 200, summary)
+        self.assertEqual(summary["channels"], 2)
+        self.assertEqual(library.names(), ["接口"])
+        # 选择的解析方式写进了侧车：换一次读取照样是分号
+        self.assertEqual(csvlog.load_options(self.dir / "接口.csv")["delimiter"], ";")
+        self.assertFalse(Path(staged["path"]).exists(), "提交之后暂存要收掉")
+
+    def test_the_api_cancel_deletes_the_staged_file(self):
+        from i3pro import api as apimod
+
+        library = librarymod.SessionLibrary([self.dir])
+        api = apimod.Api(library)
+        staged = json.loads(api.handle(
+            ["import"], {"name": ["取消.txt"]}, "PUT", b"Time\tTH\n0\t0\n1\t1\n"
+        ).body)
+        token = staged["token"]
+        self.assertTrue(Path(staged["path"]).exists())
+        cancelled = api.handle(["import", "cancel"], {"token": [token]}, "DELETE")
+        self.assertEqual(cancelled.status, 200)
+        self.assertFalse(Path(staged["path"]).exists())
+        self.assertEqual(library.names(), [])
+        # 拿一个过期的编号来提交：要说清下一步，而不是 500
+        stale = api.handle(["import", "commit"], {"token": [token]}, "POST")
+        self.assertEqual(stale.status, 404)
+        self.assertIn("重新选", json.loads(stale.body)["error"])
+
+    def test_a_bad_option_is_refused_with_the_list_of_good_ones(self):
+        from i3pro import api as apimod
+
+        library = librarymod.SessionLibrary([self.dir])
+        api = apimod.Api(library)
+        staged = json.loads(api.handle(
+            ["import"], {"name": ["x.txt"]}, "PUT", b"Time\tTH\n0\t0\n1\t1\n"
+        ).body)
+        bad = api.handle(["import", "preview"],
+                         {"token": [staged["token"]], "delimiter": ["@"]}, "GET")
+        self.assertEqual(bad.status, 400)
+        self.assertIn("不认识的分隔符", json.loads(bad.body)["error"])
+
+    def test_the_cli_preview_shows_the_reading_and_imports_with_rate(self):
+        from i3pro import cli
+
+        source = self.write("命令.txt", "Vx\tTH\n" + "".join(
+            f"{i}\t{i * 2}\n" for i in range(10)
+        ))
+        target = self.dir / "data"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = cli.main(["import", str(source), "--data", str(target),
+                             "--preview", "--rate", "100"])
+        printed = out.getvalue()
+        self.assertEqual(code, 0, printed)
+        self.assertIn("100 Hz", printed)
+        self.assertFalse((target / "命令.txt").exists(), "--preview 不许动文件")
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = cli.main(["import", str(source), "--data", str(target),
+                             "--rate", "100"])
+        self.assertEqual(code, 0)
+        session = csvlog.open_session(target / "命令.txt")
+        np.testing.assert_allclose(session.time[:3], [0.0, 0.01, 0.02])
+
+    def test_staging_is_swept_but_fresh_ones_are_kept(self):
+        from i3pro import importer as importermod
+
+        fresh = importermod.staging_dir("aabbccdd11223344")
+        fresh.mkdir(parents=True, exist_ok=True)
+        (fresh / "x.txt").write_text("a", encoding="utf-8")
+        old = importermod.staging_dir("ffffffffffffffff")
+        old.mkdir(parents=True, exist_ok=True)
+        stale = time.time() - 7200
+        os.utime(old, (stale, stale))
+
+        removed = importermod.sweep_staging(max_age=3600)
+        self.assertTrue(fresh.exists(), "一小时内的暂存不该被扫掉")
+        self.assertFalse(old.exists(), "超过一小时的暂存要收掉")
+        self.assertGreaterEqual(removed, 1)
+        shutil.rmtree(fresh, ignore_errors=True)
+
+    def test_a_sparse_gps_column_does_not_hide_the_laps(self):
+        """我们自己的导出（auto 模式）会给慢通道留空格子，GPS 也一样。
+
+        那些空格子以前**被当成有效定位**——NaN 的两次比较都是 False，所以它既不算
+        "0,0 掉星"也不算"卫星不足"，一路混进轨迹：`x`/`y` 里带 NaN，切圈从 7 圈
+        **静默**退化成 1 圈（1 圈还标着"不完整"）。这条是 ticket #32 的文本导入
+        验收里撞出来的：导出 → 读回来 → 圈没了，中间一个错都不报。
+        """
+        from i3pro import derive, ld as ldmod
+
+        source = DATA / "20260908-cjh 高避5圈.ld"
+        if not source.exists():
+            self.skipTest("缺金标准数据 20260908-cjh 高避5圈.ld")
+        log = ldmod.LogFile.read(source)
+        try:
+            csv_out = self.dir / "sparse.csv"
+            request = exportmod.parse_request(log, {
+                "channels": "selected",
+                "names": "Vx KF,GPS Speed,GPS Latitude,GPS Longitude",
+                "rate": "auto", "format": "csv",
+            })
+            exportmod.write(log, request, csv_out)
+            wanted = len(lapsmod.detect_laps(log))
+        finally:
+            log.close()
+        # 同一张表换成 TXT（分号）读进来：跟"队友发来一份分号表"是同一件事
+        text = self.dir / "sparse.txt"
+        with csv_out.open(encoding="utf-8-sig", newline="") as src, \
+                text.open("w", encoding="utf-8", newline="") as dst:
+            csv.writer(dst, delimiter=";").writerows(csv.reader(src))
+        session = csvlog.open_session(text)
+        blanks = int(np.isnan(session.values("GPS Latitude")).sum())
+        self.assertGreater(blanks, 0, "这份导出本该是稀疏的（慢通道留空）")
+        track = derive.gps_track(session)
+        self.assertEqual(int(np.isnan(track["x"]).sum()), 0, "轨迹里不该有 NaN 点")
+        laps = lapsmod.detect_laps(session)
+        self.assertEqual(len(laps), wanted,
+                         f"空格子把圈吃掉了：{len(laps)} 圈，应该有 {wanted} 圈")
+        self.assertGreaterEqual(len([l for l in laps if l.complete]), 3)
 
 
 if __name__ == "__main__":

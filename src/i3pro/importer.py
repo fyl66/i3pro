@@ -14,18 +14,27 @@ so a half-finished copy never appears in the session list as a broken log.
 
 from __future__ import annotations
 
+import secrets
 import shutil
+import tempfile
+import time
 from pathlib import Path
 from typing import BinaryIO, Iterable
 
-__all__ = ["ALLOWED_SUFFIXES", "safe_name", "unique_target", "store_stream", "import_paths"]
+__all__ = ["ALLOWED_SUFFIXES", "safe_name", "unique_target", "store_stream", "import_paths",
+           "bring", "stage_stream", "staging_dir", "sweep_staging", "STAGING_PREFIX"]
 
 #: ``.ld`` plus its ``.ldx`` sidecar (layers, beacons) is the primary source.
 #: ``.csv`` is accepted too: i2 Pro exports and other teams' / other tools'
 #: tables both go through the same session model, so ``.csv`` is imported, not
 #: treated as a second-class citizen.
 #: ``.xlsx`` joined them in ticket #31 (读 Excel 成场次),同样进侧边栏。
-ALLOWED_SUFFIXES = (".ld", ".ldx", ".csv", ".xlsx")
+#: ``.txt`` / ``.tsv`` 是分隔文本（ticket #32）：别的工具导出的表多半长这样。
+ALLOWED_SUFFIXES = (".ld", ".ldx", ".csv", ".xlsx", ".txt", ".tsv")
+
+#: 导入预览的暂存目录前缀。暂存在 ``%TEMP%`` 而不是数据根目录里：场次库会**递归**
+#: 扫 ``*.csv``，把还没确认的文件放在它眼皮底下就会先冒出一个"半成品场次"。
+STAGING_PREFIX = "i3pro-import-"
 
 
 def safe_name(name: str) -> str:
@@ -117,9 +126,10 @@ def import_paths(
                 if child.is_file() and child.suffix.lower() in ALLOWED_SUFFIXES
             ]
             if not candidates:
+                suffixes = "/".join(ALLOWED_SUFFIXES)
                 results.append({
                     "source": str(path),
-                    "error": "这个目录里没有 .ld/.ldx/.csv/.xlsx；下一步：把日志放进这个目录，"
+                    "error": f"这个目录里没有 {suffixes}；下一步：把日志放进这个目录，"
                              "或直接把文件（不是文件夹）拖到 导入数据.bat 上",
                 })
             for child in candidates:
@@ -142,3 +152,53 @@ def _one(path: Path, directory: Path, move: bool) -> dict:
         return _bring(path, directory, move)
     except (ValueError, OSError) as exc:
         return {"source": str(path), "error": str(exc)}
+
+
+# --------------------------------------------------------------- 导入预览暂存
+def bring(path: str | Path, directory: str | Path, move: bool = True) -> dict:
+    """把一份已经在磁盘上的文件搬进数据目录（:func:`_bring` 的公开名字）。"""
+    return _bring(Path(path), Path(directory), move)
+
+
+def staging_dir(token: str) -> Path:
+    """``token`` 对应的暂存目录。token 只认十六进制——它来自 URL，不能当路径用。"""
+    clean = str(token).strip().lower()
+    if not clean or any(c not in "0123456789abcdef" for c in clean):
+        raise ValueError(f"暂存编号不合法：{token!r}。下一步：重新选一次文件再导入。")
+    return Path(tempfile.gettempdir()) / (STAGING_PREFIX + clean)
+
+
+def stage_stream(name: str, stream: BinaryIO, length: int | None = None) -> dict:
+    """把上传的字节写进暂存目录，返回 ``{token, name, path, bytes}``。
+
+    预览阶段（选分隔符 / 表头行 / 编码）读的就是这份暂存文件；用户点"导入"才
+    :func:`bring` 进数据目录。取消（或服务重启）留下的目录由
+    :func:`sweep_staging` 收掉。
+    """
+    token = secrets.token_hex(8)
+    directory = staging_dir(token)
+    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        info = store_stream(directory, name, stream, length)
+    except BaseException:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
+    return {"token": token, **info}
+
+
+def sweep_staging(max_age: float = 3600.0, now: float | None = None) -> int:
+    """删掉超过 ``max_age`` 秒没动过的暂存目录（服务启动时扫一次）。"""
+    root = Path(tempfile.gettempdir())
+    if not root.exists():
+        return 0
+    stamp = time.time() if now is None else now
+    removed = 0
+    for child in root.glob(STAGING_PREFIX + "*"):
+        try:
+            if not child.is_dir() or stamp - child.stat().st_mtime < max_age:
+                continue
+        except OSError:
+            continue
+        shutil.rmtree(child, ignore_errors=True)
+        removed += 1
+    return removed

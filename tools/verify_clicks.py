@@ -1635,6 +1635,152 @@ class Checker:
             self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-import-view.png"),
                               view)
 
+    def text_import(self, base_url, work_dir):
+        """#32：分隔文本的导入预览——**真鼠标点、真键盘改**，然后看它是不是照改的读。
+
+        `smoke_viewer.js` 跑在快照 HTML 上，够不到 serve 现生成的导入页；而这条
+        流程整个都是"点了才出现"：卡片要不要弹、改完下拉框预览会不会变、按钮
+        点不点得到、点完场次列表里有没有多一个。
+
+        三件事只有真浏览器给得了答案：① 预览卡片在**猜错**时是否说清下一步
+        （这份样例没有时间列）；② 改了采样率之后卡片是否跟着变绿；③ 点「导入」
+        与「取消」是否真的走到底（取消要连暂存文件一起删掉）。
+        """
+        name = "验证用文本"
+        doomed = "验证用文本取消"
+        staging = tempfile.TemporaryDirectory(prefix="i3pro-verify-text-")
+
+        def sample(where, text):
+            path = os.path.join(where, text)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("Vx KF;TH\n")
+                for i in range(200):
+                    handle.write("%d;%d\n" % (i * 0.5, i * 2))
+            return path
+
+        # 没有时间列，而且分隔符是分号：正好是"预览里要改一下"的那种文件。
+        blob = _blob(sample(staging.name, name + ".txt"))
+        blob2 = _blob(sample(staging.name, doomed + ".txt"))
+        staging.cleanup()
+
+        def listed(needle):
+            return ("Array.prototype.some.call(document.querySelectorAll('a'),"
+                    "function(a){return decodeURIComponent(a.getAttribute('href')||'')"
+                    ".indexOf(%r)>=0;})" % needle)
+
+        def rect_of(selector):
+            raw = self.browser.js(
+                "(function(){var el=document.querySelector(%r);if(!el)return 'null';"
+                "var r=el.getBoundingClientRect();return JSON.stringify({x:r.left+r.width/2,"
+                "y:r.top+r.height/2,w:r.width,h:r.height,disabled:!!el.disabled});})()"
+                % selector, page)
+            return json.loads(raw) if raw and raw != "null" else None
+
+        def text(selector):
+            return self.browser.js(
+                "((document.querySelector(%r)||{}).textContent||'')" % selector, page)
+
+        def card_open():
+            return self.browser.js(
+                "(function(){var c=document.getElementById('importCard');"
+                "return !!c && c.style.display !== 'none';})()", page)
+
+        def hand_over(data, filename):
+            self.browser.js(
+                "(function(){var b=atob('%s'),a=new Uint8Array(b.length);"
+                "for(var i=0;i<b.length;i++)a[i]=b.charCodeAt(i);"
+                "var f=new File([a],'%s',{type:'text/plain'});"
+                "var d=new DataTransfer();d.items.add(f);"
+                "var el=document.getElementById('files');el.files=d.files;"
+                "el.dispatchEvent(new Event('change'));return true;})()" % (data, filename),
+                page)
+
+        before_staging = set(glob.glob(os.path.join(tempfile.gettempdir(),
+                                                    "i3pro-import-*")))
+        page = self.browser.open(base_url, wait=0.8)
+        accept = self.browser.js("(document.getElementById('files')||{}).accept||''", page)
+        self.check("#32 导入页的文件选择器收得到 .txt", ".txt" in (accept or ""), accept)
+        self.check("#32 导入前列表里没有这份文本", not self.browser.js(listed(name), page))
+
+        hand_over(blob, name + ".txt")
+        opened = self.browser.wait_for(
+            "(function(){var c=document.getElementById('importCard');"
+            "return !!c && c.style.display !== 'none';})()", page, timeout=20)
+        self.check("#32 选一份 .txt 之后弹出预览卡片", opened)
+        self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-text-preview.png"), page)
+        self.check("#32 预览里说清了这份表没有时间列（下一步是填采样率）",
+                   "时间列" in text("#cardError") or "时间列" in text("#cardInfo"),
+                   (text("#cardError") + text("#cardInfo"))[:120])
+        # 预览表里的格子是**按认出来的分隔符切过**的：分号表在这里就该是两列，
+        # 而不是一行 "Vx KF;TH" 的文字。
+        table = text("#cardTable")
+        self.check("#32 预览表按认出来的分隔符切成了多列",
+                   "Vx KF" in table and "TH" in table, table[:80])
+
+        # 真键盘填采样率：点进去、打 100、按 Tab（Tab 触发 change，预览随即重算）
+        box = rect_of("#optRate")
+        self.browser.click(box["x"], box["y"], page)
+        self.browser.insert_text("100", page)
+        self.browser.key_named("Tab", "Tab", 9, page)
+        green = self.browser.wait_for(
+            "(function(){var e=document.getElementById('cardError');"
+            "return e.style.display === 'none' && /\\d+ Hz/.test("
+            "document.getElementById('cardInfo').textContent);})()", page, timeout=15)
+        self.check("#32 填上 100 Hz 之后预览变绿并报出通道数", green, text("#cardInfo")[:90])
+        self.check("#32 绿了之后写明了读法（分号 · 生成的时间列）",
+                   "分号分隔" in text("#cardInfo") and "生成" in text("#cardInfo"),
+                   text("#cardInfo")[:120])
+
+        ok = rect_of("#cardOk")
+        self.browser.click(ok["x"], ok["y"], page)
+        appeared = self.browser.wait_for(listed(name), page, timeout=25)
+        self.check("#32 真点「导入」之后，场次列表里出现了它", appeared)
+        self.check("#32 导入之后暂存目录被收掉",
+                   not (set(glob.glob(os.path.join(tempfile.gettempdir(), "i3pro-import-*")))
+                        - before_staging),
+                   "剩下了 %s" % sorted(set(glob.glob(os.path.join(
+                       tempfile.gettempdir(), "i3pro-import-*"))) - before_staging))
+
+        # 打开它：抬头要写明这份表是怎么读出来的，采样率要真是 100
+        view = self.browser.open(base_url + "session/" + urllib.parse.quote(name), wait=1.2)
+        if self.browser.wait_for("!!(window.i3pro && i3pro.data && i3pro.data.meta)", view):
+            note = self.browser.js("(i3pro.data.meta.parse_note||'')", view)
+            rate = float(self.browser.js("i3pro.data.meta.sample_rate", view) or 0)
+            self.check("#32 场次抬头写明了读法（分号 · 生成的时间列）",
+                       "分号" in note and "100 Hz" in note, note)
+            self.check("#32 生成的时间列就是 100 Hz", abs(rate - 100.0) < 1e-6, rate)
+            header = self.browser.js("document.getElementById('fileInfo').innerHTML", view)
+            self.check("#32 读法真的画在页头那一行上", "读法" in (header or ""),
+                       (header or "")[:120])
+            self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-text-session.png"),
+                              view)
+        else:
+            self.check("#32 这份文本场次能当工作台打开", False)
+
+        # 取消那条路：暂存文件必须立刻删掉，场次列表里不许出现
+        page = self.browser.open(base_url, wait=0.6)
+        hand_over(blob2, doomed + ".txt")
+        if self.browser.wait_for(
+                "(function(){var c=document.getElementById('importCard');"
+                "return !!c && c.style.display !== 'none';})()", page, timeout=20):
+            cancel = rect_of("#cardCancel")
+            self.browser.click(cancel["x"], cancel["y"], page)
+            time.sleep(1.0)
+            self.check("#32 点「取消」之后卡片关掉、场次列表里没有它",
+                       not card_open() and not self.browser.js(listed(doomed), page))
+            self.check("#32 取消也要把暂存文件删掉",
+                       not (set(glob.glob(os.path.join(tempfile.gettempdir(),
+                                                       "i3pro-import-*")))
+                            - before_staging))
+        else:
+            self.check("#32 取消那条路能走到（第二份文件也弹了卡片）", False)
+
+
+def _blob(path):
+    with open(path, "rb") as handle:
+        return base64.b64encode(handle.read()).decode("ascii")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="真浏览器交互验收（需要 Edge + 金标准数据）")
     parser.add_argument("--session", default="20260908-cjh 高避5圈", help="用哪个场次（默认高避5圈）")
@@ -1702,6 +1848,7 @@ def main(argv=None):
             checker.notes(work_dir, args.session)
             checker.gps(work_dir, args.session)
             checker.imports("http://127.0.0.1:%d/" % args.port, work_dir)
+            checker.text_import("http://127.0.0.1:%d/" % args.port, work_dir)
             errors = browser.page_errors()
             checker.check("整场没有页面级报错", not errors, errors[:3])
         bad = [name for name, ok in checker.results if not ok]

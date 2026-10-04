@@ -28,6 +28,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import render
 from .api import Api, Body, ClientGone, Response, csv_arg, float_arg, int_arg
+from .indexpage import index_page
 from .library import SessionLibrary, dumps, json_safe
 
 __all__ = [
@@ -68,6 +69,10 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
 
         def do_PUT(self):  # noqa: N802 - http.server API
             self.dispatch("PUT")
+
+        def do_DELETE(self):  # noqa: N802 - http.server API
+            """取消导入预览时用（ticket #32）：暂存文件得被主动删掉。"""
+            self.dispatch("DELETE")
 
         # ------------------------------------------------------------ plumbing
         def _content_length(self) -> int:
@@ -229,122 +234,7 @@ def _lan_addresses() -> list[str]:
     return others[:4]
 
 
-_IMPORT_BLOCK = """
-<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;
-            background:#171a21;border:1px solid #2b313c;border-radius:8px;
-            padding:10px 12px;margin:0 0 14px">
-  <input id="files" type="file" multiple accept=".ld,.ldx,.csv,.xlsx" style="display:none">
-  <button id="pickBtn" style="background:#1d3b52;border:1px solid #4cc2ff;color:#e6e9ef;
-          border-radius:6px;padding:6px 12px;cursor:pointer;font-size:13px">
-    选择日志文件导入
-  </button>
-  <span style="color:#8b94a7;font-size:12px">
-    .ld / .ldx / .csv / .xlsx · 或者把文件直接拖进这个窗口 · 也可以拖到 <code>导入数据.bat</code> 上
-  </span>
-  <span id="importMsg" style="color:#4cc2ff;font-size:12px;margin-left:auto"></span>
-</div>
-<script>
-(function () {
-  var input = document.getElementById("files");
-  var msg = document.getElementById("importMsg");
-  var busy = false;
 
-  document.getElementById("pickBtn").addEventListener("click", function () {
-    if (!busy) input.click();
-  });
-
-  async function upload(list) {
-    var files = Array.prototype.slice.call(list);
-    if (!files.length || busy) return;
-    busy = true;
-    for (var i = 0; i < files.length; i++) {
-      var file = files[i];
-      msg.textContent = "上传 " + (i + 1) + "/" + files.length + ": " + file.name
-        + " (" + (file.size / 1e6).toFixed(1) + " MB) …";
-      try {
-        var res = await fetch("/api/upload?name=" + encodeURIComponent(file.name),
-                              { method: "PUT", body: file });
-        var body = await res.json().catch(function () { return {}; });
-        if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
-      } catch (err) {
-        msg.style.color = "#ff5d6c";
-        msg.textContent = "导入失败: " + file.name + " — " + err.message;
-        busy = false;
-        return;
-      }
-    }
-    msg.textContent = "导入完成，正在刷新…";
-    location.reload();
-  }
-
-  input.addEventListener("change", function () { upload(input.files); });
-  document.addEventListener("dragover", function (e) { e.preventDefault(); });
-  document.addEventListener("drop", function (e) {
-    e.preventDefault();
-    if (e.dataTransfer && e.dataTransfer.files) upload(e.dataTransfer.files);
-  });
-})();
-</script>
-"""
-
-
-def index_page(library: SessionLibrary, error: str | None = None) -> str:
-    """A no-frills session picker; the real UI is the workbench itself."""
-    if error:
-        return (
-            "<!doctype html><meta charset='utf-8'><title>i3pro</title>"
-            "<body style='font:14px system-ui;padding:32px;background:#0f1115;color:#e6e9ef'>"
-            f"<h1>i3pro 本地服务</h1><p>{error}</p>"
-            "</body>"
-        )
-    rows = []
-    for entry in library.listing():
-        if "error" in entry:
-            rows.append(
-                f"<tr><td>{entry['name']}</td><td colspan='5' style='color:#ff5d6c'>"
-                f"{entry['error']}</td></tr>"
-            )
-            continue
-        best = "--" if entry.get("best_lap") is None else f"{entry['best_lap']:.3f} s"
-        rows.append(
-            "<tr>"
-            f"<td><a href='{entry['url']}'>{entry['name']}</a></td>"
-            f"<td>{entry.get('device', '')}</td>"
-            f"<td>{entry.get('log_date', '')} {entry.get('log_time', '')}</td>"
-            f"<td>{entry.get('duration', 0):.0f} s</td>"
-            f"<td>{entry.get('channels', 0)}</td>"
-            f"<td>{entry.get('complete_laps', 0)}</td>"
-            f"<td>{best}</td>"
-            "</tr>"
-        )
-    return f"""<!doctype html>
-<meta charset="utf-8">
-<title>i3pro - 场次</title>
-<style>
- body {{ margin:0; background:#0f1115; color:#e6e9ef;
-        font:14px/1.5 "Segoe UI","Microsoft YaHei",system-ui,sans-serif; }}
- header {{ padding:22px 28px; border-bottom:1px solid #2b313c; }}
- h1 {{ margin:0 0 4px; font-size:18px; }}
- p {{ margin:0; color:#8b94a7; }}
- main {{ padding:18px 28px; }}
- table {{ border-collapse:collapse; width:100%; }}
- th, td {{ text-align:left; padding:7px 10px; border-bottom:1px solid #2b313c; }}
- th {{ color:#8b94a7; font-weight:600; }}
- a {{ color:#4cc2ff; text-decoration:none; }}
- a:hover {{ text-decoration:underline; }}
-</style>
-<header>
-  <h1>i3pro 本地服务</h1>
-  <p>选择一个试车场次开始分析；所有数据都在本机解析，不上传。</p>
-</header>
-<main>
-{_IMPORT_BLOCK}
-<table>
- <tr><th>场次</th><th>设备</th><th>日期</th><th>时长</th><th>通道</th><th>完整圈</th><th>最快圈</th></tr>
- {''.join(rows) or '<tr><td colspan="7">没有找到场次文件（.ld / .csv / .xlsx）</td></tr>'}
-</table>
-</main>
-"""
 
 
 def bind(host: str, port: int, handler, attempts: int = 10) -> ThreadingHTTPServer:

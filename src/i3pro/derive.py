@@ -226,7 +226,13 @@ def gps_track(
     time = np.arange(lat.size) / rate
     # 掉星时记录仪给的是 (0, 0)——不滤掉就等于把车放到几内亚湾，距离轴、轨迹
     # 与切圈会一起被带歪。这里把它和"卫星数不足"分开计数，界面上要念出来。
+    #
+    # **空格子（NaN）同样是"没有定位"**：分隔文本（我们自己的导出在 auto 模式下
+    # 就会留空）读回来时，比主时间基慢的 GPS 列有一半格子是空的。NaN 的两次比较
+    # 都是 False，所以它以前**混在有效点里**——轨迹里带着 NaN 空洞，切圈从 7 圈
+    # 静默退化成 1 圈（真跑出来过，ticket #32 的文本导入验收里撞见的）。
     no_fix = (np.abs(lat) <= 1e-3) | (np.abs(lon) <= 1e-3)
+    no_fix |= ~np.isfinite(lat) | ~np.isfinite(lon)
     low_sats = np.zeros(lat.size, dtype=bool)
     if log.has(sats_channel):
         sats = log.values(sats_channel)

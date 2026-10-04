@@ -6715,6 +6715,11 @@ function initHeader() {
   $("fileInfo").innerHTML = "<b>" + m.file + "</b> · " + m.device + " " + m.log_date + " "
     + m.log_time + " · " + (m.event || "-") + " · " + m.duration.toFixed(1) + " s @ "
     + m.sample_rate + " Hz · " + m.channels + " 通道 · 速度源 " + (m.speed_channel || "-");
+  // 分隔文本（.txt / 分隔符不是逗号的 .csv）要写清是怎么读的（ticket #32）：
+  // "列名没匹配上"到底是文件的问题还是我们读法的问题，这一行是判断依据。
+  if (m.parse_note) {
+    $("fileInfo").innerHTML += " · 读法 " + m.parse_note;
+  }
   // 原始 CAN 帧表：帧数与"读不懂多少"要一眼看得见（ticket #39）。一行字加一个
   // 入口，比把报告塞进状态栏更合适——它是要细看的表，不是一句话。
   if (m.can) {

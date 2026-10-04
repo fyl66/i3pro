@@ -43,6 +43,7 @@ from . import (
     sections,
     spectrum as spectrummod,
     timebase,
+    txtlog,
 )
 from .library import dumps
 
@@ -159,6 +160,9 @@ class Api:
         # 这个模块拥有导出临时目录，也由它负责收尾：上一次服务被强杀会留下空壳，
         # 攒在临时目录里会让"临时文件不残留"那条验收永远报红。只清一小时没动过的。
         sweep_temp_exports()
+        # 导入预览的暂存目录（ticket #32）同理：强杀一次就留下一个空壳，
+        # 攒着只会让人以为"导入没清干净"。同样只清一小时没动过的。
+        importer.sweep_staging()
 
     def handle(self, parts, query, method: str = "GET", body=None) -> Response:
         """把一个请求变成 ``Response``；**不起 socket 也能调**（单测就这么用）。"""
@@ -257,6 +261,8 @@ class _Call:
             return self._error(404, "no such api path")
         if parts[0] == "upload":
             return self.upload(query, method)
+        if parts[0] == "import":
+            return self.route_import(parts[1:], query, method)
         if parts[0] != "session" or len(parts) < 3:
             return self._error(404, "no such api path")
         name, action = parts[1], parts[2]
@@ -271,6 +277,26 @@ class _Call:
         return getattr(self, handler)(log, name, query, method)
 
     # ----------------------------------------------------------------- 动作
+    #: ``/api/import/<最后一段>`` -> 方法名。空段（``PUT /api/import``）是"收进
+    #: 暂存区"。和 :data:`ACTIONS` 一样是一张表：加一个导入动作 = 加一行，
+    #: 不是在 if/elif 长链里翻（ticket #32）。
+    IMPORT_ACTIONS = {
+        "": "stage_import",
+        "preview": "preview_import",
+        "commit": "commit_import",
+        "cancel": "cancel_import",
+    }
+
+    def route_import(self, parts: list[str], query: dict, method: str) -> Response:
+        action = parts[0] if parts else ""
+        handler = self.IMPORT_ACTIONS.get(action)
+        if handler is None:
+            known = "、".join(sorted(name for name in self.IMPORT_ACTIONS if name))
+            return self._error(
+                404, f"没有 {action!r} 这个导入动作。这一版认得的是：{known}。"
+            )
+        return getattr(self, handler)(query, method)
+
     def act_info(self, log, name: str, query: dict, method: str) -> Response:
         payload = render.build_payload(
             log,
@@ -967,11 +993,17 @@ class _Call:
         except OSError as exc:
                 return self._error(500, f"写盘失败: {exc}")
 
+        return self._json(self.summarize_import(info))
+
+    def summarize_import(self, info: dict) -> dict:
+        """一份刚落到数据目录的文件："读成了什么"要当场说出来。
+
+        五种场次文件（.ld / .csv / 原始 CAN 帧表 / .xlsx / 分隔文本）都走这里，
+        不是只认 .ld——导入一份 Excel 却听不到"读成了什么"，用户只能自己去猜。
+        """
         summary: dict = {"ok": True, **info}
         target = Path(info["path"])
-        # 四种场次文件（.ld / .csv / 原始 CAN 帧表 / .xlsx）都在这里给一句概览，
-        # 不是只认 .ld——导入一个 Excel 却听不到"读成了什么"，用户只能自己去猜。
-        if target.suffix.lower() in (".ld", ".csv", ".xlsx"):
+        if target.suffix.lower() in (".ld", ".csv", ".xlsx", ".txt", ".tsv"):
             try:
                 with csvlog.open_session(
                     target, dbc_dir=[self.library.upload_dir() / "dbc"]
@@ -992,9 +1024,186 @@ class _Call:
             + (f" · {summary.get('channels')} 通道" if summary.get("channels") else "")
             + (f" · {summary['warning']}" if summary.get("warning") else "")
         )
-        return self._json(summary)
+        return summary
+
+    # ----------------------------------------------------------- 导入预览
+    def stage_import(self, query: dict, method: str) -> Response:
+        """``PUT /api/import?name=<文件名>``：先收进暂存区，回一份预览。
+
+        分隔文本（.txt / .tsv，以及分隔符不是逗号的 .csv）在**导入之前**要看一眼：
+        分隔符猜错了整份表就是一堆一列的文字，时间列没有则根本画不出图。预览读的是
+        这份暂存文件，改选项再调 ``/api/import/preview`` 就现算一遍——所以"预览里
+        看到的"与"真正导入的"是同一条代码路径（:mod:`i3pro.txtlog`）。
+
+        别的格式（.ld / .xlsx）照旧一步到位：它们没有"怎么读"要问用户的。
+        """
+        if method not in ("PUT", "POST"):
+            return self._error(405, "导入请用 PUT")
+        name = (query.get("name") or [""])[0]
+        try:
+            clean = importer.safe_name(name)
+        except ValueError as exc:
+            return self._error(400, str(exc))
+        try:
+            length = self.length
+        except ValueError:
+            length = 0
+        if length <= 0:
+            return self._error(400, "请求体为空")
+        if length > MAX_UPLOAD_BYTES:
+            return self._error(
+                413, f"文件太大: {length / 1e6:.0f} MB > {MAX_UPLOAD_BYTES / 1e6:.0f} MB"
+            )
+        try:
+            staged = importer.stage_stream(clean, self.body_source.stream(), length)
+        except ValueError as exc:
+            return self._error(400, str(exc))
+        except OSError as exc:
+            return self._error(500, f"写盘失败: {exc}")
+        if Path(clean).suffix.lower() not in (".csv", ".txt", ".tsv"):
+            return self._json({"ok": True, "preview": None, **staged})
+        try:
+            shown = txtlog.preview(Path(staged["path"]), **self.text_options(query))
+        except ValueError as exc:
+            return self._error(400, str(exc))
+        return self._json({"ok": True, **staged, "preview": shown})
+
+    def preview_import(self, query: dict, method: str) -> Response:
+        """``GET /api/import/preview?token=...``：按当前选择再预览一次。"""
+        if method not in ("GET", "POST"):
+            return self._error(405, "看预览请用 GET")
+        staged = self._staged(query)
+        if isinstance(staged, Response):
+            return staged
+        try:
+            shown = txtlog.preview(staged, **self.text_options(query))
+        except ValueError as exc:
+            return self._error(400, str(exc))
+        return self._json({"ok": True, "name": staged.name, "preview": shown})
+
+    def commit_import(self, query: dict, method: str) -> Response:
+        """``POST /api/import/commit?token=...``：把暂存文件搬进数据目录。
+
+        选择的解析方式写进 ``<场次>.map.json`` 侧车——同一份文件第二次导入自动套用，
+        换一台机器上打开也还是同一个读法。
+        """
+        if method not in ("POST", "PUT"):
+            return self._error(405, "确认导入请用 POST")
+        staged = self._staged(query)
+        if isinstance(staged, Response):
+            return staged
+        try:
+            options = self.text_options(query)
+        except ValueError as exc:
+            return self._error(400, str(exc))
+        try:
+            info = importer.bring(staged, self.library.upload_dir(), move=True)
+        except (ValueError, OSError) as exc:
+            return self._error(400, f"移动文件失败: {exc}")
+        finally:
+            shutil.rmtree(staged.parent, ignore_errors=True)
+        if options:
+            csvlog.save_options(info["path"], **options)
+        return self._json(self.summarize_import(info))
+
+    def cancel_import(self, query: dict, method: str) -> Response:
+        """``DELETE /api/import?token=...``：用户点了取消，暂存文件立刻删掉。"""
+        if method not in ("DELETE", "POST"):
+            return self._error(405, "取消导入请用 DELETE")
+        staged = self._staged(query)
+        if isinstance(staged, Response):
+            return staged
+        shutil.rmtree(staged.parent, ignore_errors=True)
+        return self._json({"ok": True, "cancelled": staged.name})
+
+    def _staged(self, query: dict):
+        """token -> 暂存文件；找不到就回一个说清下一步的错误。"""
+        token = (query.get("token") or [""])[0]
+        try:
+            directory = importer.staging_dir(token)
+        except ValueError as exc:
+            return self._error(400, str(exc))
+        files = sorted(p for p in directory.glob("*") if p.is_file()) if directory.is_dir() else []
+        if not files:
+            return self._error(
+                404,
+                "这份文件的暂存已经不在了（服务重启或超过一小时会被清掉）。"
+                "下一步：重新选一次文件。",
+            )
+        return files[0]
+
+    def text_options(self, query: dict) -> dict:
+        """URL 里的解析选项 -> :mod:`i3pro.txtlog` 认识的值；空 = 自动。"""
+        return parse_text_options(query)
 
 # --------------------------------------------------------------- 查询参数
+def parse_text_options(query: dict) -> dict:
+    """``delimiter`` / ``encoding`` / ``header`` / ``unit_row`` / ``generate_rate``
+    -> :mod:`i3pro.txtlog` 认识的类型。
+
+    空串一律当"自动"（``parse_qs`` 本来就把空值丢掉，这里是给显式传空串的调用方
+    兜底）。认不出的值**报错**而不是忽略：用户选了 Tab 却按逗号读，那是最难查的
+    一类错——每一列都成了"未匹配"，而报告里看不出原因。
+    """
+    def one(key: str) -> str:
+        return str((query.get(key) or [""])[0]).strip()
+
+    options: dict = {}
+    delimiter = one("delimiter")
+    if delimiter:
+        if delimiter not in txtlog.DELIMITERS:
+            choices = "、".join(f"{value!r}" for value in txtlog.DELIMITERS)
+            raise ValueError(
+                f"不认识的分隔符 {delimiter!r}。这一版能用的有：{choices}（' ' = 连续空白）。"
+            )
+        options["delimiter"] = delimiter
+    encoding = one("encoding")
+    if encoding:
+        if encoding not in txtlog.ENCODINGS:
+            choices = "、".join(txtlog.ENCODINGS)
+            raise ValueError(f"不认识的编码 {encoding!r}。这一版能用的有：{choices}。")
+        options["encoding"] = encoding
+    header = one("header")
+    if header and header not in ("auto", "-"):
+        if header.lower() in ("none", "no", "没有"):
+            options["header"] = csvlog.NO_HEADER
+        else:
+            try:
+                index = int(header)
+            except ValueError:
+                raise ValueError(
+                    f"表头行要填行号（第 1 行 = 1），收到 {header!r}。"
+                    '想表示"没有表头行"就填 none。'
+                ) from None
+            if index == 0:
+                raise ValueError("表头行从 1 开始数（第 1 行 = 1），0 不是一个行号。")
+            options["header"] = csvlog.NO_HEADER if index < 0 else index - 1
+    unit_row = one("unit_row")
+    if unit_row:
+        if unit_row.lower() in ("1", "true", "yes", "有"):
+            options["unit_row"] = True
+        elif unit_row.lower() in ("0", "false", "no", "没有", "无"):
+            options["unit_row"] = False
+        else:
+            raise ValueError(f"单位行只有「有」和「无」两种，收到 {unit_row!r}。")
+    rate = one("generate_rate")
+    if rate:
+        try:
+            value = float(rate)
+        except ValueError:
+            raise ValueError(f"采样率要是个数，收到 {rate!r}（例如 100）。") from None
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"采样率要大于 0，收到 {rate!r}。")
+        options["generate_rate"] = value
+    start = one("generate_start")
+    if start:
+        try:
+            options["generate_start"] = float(start)
+        except ValueError:
+            raise ValueError(f"起点要是个数（秒），收到 {start!r}。") from None
+    return options
+
+
 def csv_arg(query: dict, key: str) -> list[str]:
     raw = (query.get(key) or [""])[0]
     return [c.strip() for c in raw.split(",") if c.strip()]

@@ -459,7 +459,7 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
         names = library.names()
         if not names:
             where = "、".join(str(d) for d in dirs)
-            print(f"# {where} 里没有 .ld / .csv / .xlsx 场次")
+            print(f"# {where} 里没有 .ld / .csv / .xlsx / .txt / .tsv 场次")
             print("# 下一步：把日志拷进这个目录，或双击 导入数据.bat 拖一个进去。")
             return 1
         out.mkdir(parents=True, exist_ok=True)
@@ -519,12 +519,15 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
 
 
 def cmd_import(args: argparse.Namespace) -> int:
-    """Copy or move .ld/.ldx/.csv/.xlsx files into the data folder so they show up."""
+    """把 .ld/.ldx/.csv/.xlsx/.txt/.tsv 复制或移动进数据目录，让它们出现在侧边栏。"""
     from . import importer
 
     destination = Path(args.data)
     renames, units = _parse_pairs(args.map or []), _parse_pairs(args.unit or [])
     sheet = getattr(args, "sheet", None)
+    options = _text_options(args)
+    if args.preview:
+        return _print_previews(args.paths, options)
     results = importer.import_paths(args.paths, destination, move=args.move)
     imported = [r for r in results if "error" not in r]
     failed = [r for r in results if "error" in r]
@@ -532,16 +535,21 @@ def cmd_import(args: argparse.Namespace) -> int:
     for row in imported:
         note = ""
         suffix = Path(row["file"]).suffix.lower()
-        if suffix in (".csv", ".xlsx") and (renames or units or (suffix == ".xlsx" and sheet)):
+        if suffix in (".csv", ".xlsx", ".txt", ".tsv") and (
+            renames or units or (suffix == ".xlsx" and sheet)
+        ):
             csvlog.save_map(row["path"], renames, units,
                             sheet=sheet if suffix == ".xlsx" else None)
             note += "已写入列映射 · "
-        if suffix in (".ld", ".csv", ".xlsx"):
+        if suffix in (".csv", ".txt", ".tsv") and options:
+            csvlog.save_options(row["path"], **options)
+            note += "已记住解析方式 · "
+        if suffix in (".ld", ".csv", ".xlsx", ".txt", ".tsv"):
             try:
                 with csvlog.open_session(row["path"]) as log:
                     meta = log.metadata()
                     note = f"{meta['channels']} 通道 · {meta['duration']:.0f} s · {meta['device']}"
-                    if suffix in (".csv", ".xlsx"):
+                    if suffix in (".csv", ".xlsx", ".txt", ".tsv"):
                         note += "\n" + _csv_mapping_note(log)
             except Exception as exc:  # imported but unreadable -> say so now
                 note = f"⚠ 无法解析: {type(exc).__name__}: {exc}"
@@ -556,6 +564,62 @@ def cmd_import(args: argparse.Namespace) -> int:
     if imported:
         print("下一步: 双击 启动.bat 打开工作台，场次列表里就能看到它们。")
     return 0 if imported else 1
+
+
+#: 文本导入的解析方式：命令行参数名 -> 侧车里的键（ticket #32）。
+_TEXT_OPTION_ARGS = (("delimiter", "delimiter"), ("encoding", "encoding"),
+                     ("rate", "generate_rate"), ("start", "generate_start"))
+
+
+def _text_options(args: argparse.Namespace) -> dict:
+    """``--delimiter/--encoding/--header/--rate/--start`` -> 侧车里存的那几个键。"""
+    options: dict = {}
+    for attr, key in _TEXT_OPTION_ARGS:
+        value = getattr(args, attr, None)
+        if value is not None:
+            options[key] = value
+    header = getattr(args, "header", None)
+    if header is not None:
+        options["header"] = csvlog.NO_HEADER if header in ("none", "无") else int(header) - 1
+    unit_row = getattr(args, "unit_row", None)
+    if unit_row is not None:
+        options["unit_row"] = bool(unit_row)
+    return options
+
+
+def _print_previews(paths, options: dict) -> int:
+    """``i3pro import --preview``：只说"这份文件会被读成什么"，不复制任何东西。"""
+    from . import txtlog
+
+    bad = 0
+    for raw in paths:
+        path = Path(raw)
+        if path.is_dir() or path.suffix.lower() not in (".csv", ".txt", ".tsv"):
+            continue
+        try:
+            shown = txtlog.preview(path, **options)
+        except Exception as exc:
+            print(f"  ! {path.name}: {exc}")
+            bad += 1
+            continue
+        print(f"\n{path.name} · {shown['size'] / 1e6:.2f} MB · "
+              f"{shown['delimiter_label']}分隔 · {shown['encoding']}")
+        for row in shown.get("rows", [])[:10]:
+            print("   " + " | ".join(str(cell) for cell in row[:8]))
+        if shown.get("error"):
+            print(f"   ✗ {shown['error']}")
+            bad += 1
+            continue
+        where = ("没有表头行" if shown["effective_header"] < 0
+                 else f"表头第 {shown['effective_header'] + 1} 行")
+        print(f"   ✓ {len(shown['channels'])} 通道 · {where}"
+              + ("（含单位行）" if shown["effective_unit_row"] else "")
+              + f" · {shown['sample_rate']:g} Hz")
+        if shown.get("parse_note"):
+            print(f"   读法: {shown['parse_note']}")
+    print("\n下一步: 去掉 --preview 就会真的导入；分隔符/表头行不对就加 "
+          '--delimiter ";" --header 2 --rate 100 这些参数。')
+    return 1 if bad else 0
 
 
 def _snapshot_index(rows: list[dict], data_dirs: str) -> str:
@@ -835,7 +899,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="工作表的根目录 (默认: 仓库根目录，读 worksheets/*.json)")
     p.set_defaults(func=cmd_snapshot)
 
-    p = sub.add_parser("import", help="把 .ld/.ldx/.csv/.xlsx 导入数据目录（可拖拽到 导入数据.bat 上）")
+    p = sub.add_parser("import",
+                       help="把 .ld/.ldx/.csv/.xlsx/.txt/.tsv 导入数据目录（可拖拽到 导入数据.bat 上）")
     p.add_argument("paths", nargs="+", help="文件或目录，可多个")
     p.add_argument("--data", default="i2pro_data", help="目标数据目录")
     p.add_argument("--move", action="store_true", help="移动而不是复制")
@@ -845,6 +910,21 @@ def build_parser() -> argparse.ArgumentParser:
                    help='列单位: "原始列=单位"，可重复')
     p.add_argument("--sheet", default=None,
                    help="Excel 读哪一张 sheet（默认按顺序试，用第一张能当通道表读的）")
+    p.add_argument("--preview", action="store_true",
+                   help="只看这份文本会被读成什么（分隔符/表头行/通道），不复制任何文件")
+    p.add_argument("--delimiter", default=None,
+                   help="分隔符：',' / '\\t' / ';' / '|' / ' '(连续空白)，默认自己猜")
+    p.add_argument("--encoding", default=None, help="编码，例如 gbk / utf-8-sig，默认自己猜")
+    p.add_argument("--header", default=None,
+                   help="表头在第几行（从 1 数），或 none 表示没有表头行")
+    p.add_argument("--unit-row", dest="unit_row", action="store_true", default=None,
+                   help="表头下面那一行是单位行")
+    p.add_argument("--no-unit-row", dest="unit_row", action="store_false",
+                   help="表头下面那一行是数据，不是单位")
+    p.add_argument("--rate", type=float, default=None,
+                   help="这份表没有时间列时，按这个采样率生成一列时间（例如 100）")
+    p.add_argument("--start", type=float, default=None,
+                   help="生成的时间列从第几秒开始（默认 0）")
     p.set_defaults(func=cmd_import)
 
     p = sub.add_parser("track", help="圈速柱状速览")

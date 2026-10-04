@@ -1,11 +1,13 @@
 @echo off
 rem ===========================================================================
-rem  i3pro data import  --  drag .ld / .ldx / .csv / .xlsx files (or a folder)
+rem  i3pro data import  --  drag .ld / .ldx / .csv / .xlsx / .txt / .tsv files (or a folder)
 rem  onto this file.
 rem
 rem  .csv covers both i2 Pro exports and raw CAN frame logs.  A frame log is
 rem  decoded with the DBCs in i2pro_data\dbc -- nothing to configure.
 rem  .xlsx is an Excel table (first sheet that looks like a channel table).
+rem  .txt / .tsv are delimited tables (Tab / comma / semicolon / spaces); run
+rem  "i3pro.cmd import <file> --preview" first to see how one will be read.
 rem
 rem  Copies them into i2pro_data so they show up in the workbench.  Nothing is
 rem  uploaded anywhere: it is a local file copy, and an existing file with the
@@ -23,7 +25,7 @@ if "%~1"=="" (
   echo   ==============================================================
   echo     i3pro  -  import logs
   echo   ==============================================================
-  echo     Drag one or more .ld / .ldx / .csv / .xlsx files (or a whole folder)
+  echo     Drag one or more .ld / .ldx / .csv / .xlsx / .txt / .tsv files (or a folder)
   echo     onto this file to copy them into:
   echo.
   echo       %~dp0i2pro_data
@@ -33,6 +35,10 @@ if "%~1"=="" (
   echo.
   echo     Excel: the first sheet that looks like a channel table is used;
   echo     pick another one with --sheet "sheet name".
+  echo.
+  echo     Text tables (.txt / .tsv): run  i3pro.cmd import "file" --preview
+  echo     first -- it prints how the file will be read (separator / header
+  echo     row / channels) without copying anything.
   echo.
   echo     Command line equivalent:
   echo       i3pro.cmd import "D:\logs\2026-09-xx.ld" --data i2pro_data

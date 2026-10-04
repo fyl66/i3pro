@@ -35,7 +35,9 @@
 
 ## 4. 不新增运行期第三方依赖
 
-运行期只允许 `numpy` / `pandas` / `pyarrow`（Python）和浏览器原生能力（前端）。
+运行期只允许 `numpy` / `pandas` / `pyarrow`（Python）和浏览器原生能力（前端）；
+**`openpyxl` 是唯一的例外，且只用于读 `.xlsx`**（见 `docs/adr/0003`，导出 Excel 仍然
+用仓库自带的最小 OOXML 写入器）。
 要引入新的运行期依赖，必须先写一份 ADR 说明：为什么现有工具做不到、代价是什么、怎么退出。
 **测试工具**不受此限（例如 PyInstaller、pypdf 只用于开发）。
 
@@ -55,7 +57,7 @@
 python -m unittest discover -s tests -v      # 全部通过
 python tools\verify_ld_vs_csv.py             # PASS，0 channel(s) outside tolerance
 node tools\smoke_viewer.js out\<场次>.html   # 交互断言全过
-python tools\verify_clicks.py                # 真浏览器真鼠标：75 项全过（需要 Edge）
+python tools\verify_clicks.py                # 真浏览器真鼠标：81 项全过（需要 Edge）
 ```
 
 四条全绿才算改完。缺数据的机器上相关用例会自动 skip，这不算通过——要在有数据的机器上跑。

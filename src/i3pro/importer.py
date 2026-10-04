@@ -24,7 +24,8 @@ __all__ = ["ALLOWED_SUFFIXES", "safe_name", "unique_target", "store_stream", "im
 #: ``.csv`` is accepted too: i2 Pro exports and other teams' / other tools'
 #: tables both go through the same session model, so ``.csv`` is imported, not
 #: treated as a second-class citizen.
-ALLOWED_SUFFIXES = (".ld", ".ldx", ".csv")
+#: ``.xlsx`` joined them in ticket #31 (读 Excel 成场次),同样进侧边栏。
+ALLOWED_SUFFIXES = (".ld", ".ldx", ".csv", ".xlsx")
 
 
 def safe_name(name: str) -> str:
@@ -118,7 +119,7 @@ def import_paths(
             if not candidates:
                 results.append({
                     "source": str(path),
-                    "error": "这个目录里没有 .ld/.ldx/.csv；下一步：把日志放进这个目录，"
+                    "error": "这个目录里没有 .ld/.ldx/.csv/.xlsx；下一步：把日志放进这个目录，"
                              "或直接把文件（不是文件夹）拖到 导入数据.bat 上",
                 })
             for child in candidates:

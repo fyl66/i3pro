@@ -3033,7 +3033,8 @@ if (canMeta) {
 
 const header = registry.get("fileInfo");
 check(header && (header.innerHTML.indexOf(".ld") >= 0
-  || header.innerHTML.indexOf(".csv") >= 0), "header was not populated");
+  || header.innerHTML.indexOf(".csv") >= 0
+  || header.innerHTML.indexOf(".xlsx") >= 0), "header was not populated");
 const lapTable = registry.get("lapTable");
 const expectsLaps = !!(api && api.data && (api.data.laps || []).length);
 if (expectsLaps) {

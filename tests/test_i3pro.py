@@ -4657,6 +4657,344 @@ def _openpyxl():
     return openpyxl
 
 
+class TestUploadEndpoint(unittest.TestCase):
+    """浏览器上传这一步：``PUT /api/upload``（ticket #31 顺手修好的那条）。
+
+    这之前**一条用例都没有**——于是 #26 把请求闭包拆成 ``api.py`` 那一层时，
+    ``upload`` 里的 ``self.rfile`` 被留在了已经不存在的闭包作用域里，浏览器**上传
+    一直 500**，而命令行的 ``i3pro import`` 照样好用，所以没人发现。这条用一份真的
+    ``.xlsx`` 走一遍：落盘、进列表、概览三样都验，外加流式读的两种坏情况。
+    """
+
+    def setUp(self):
+        from i3pro import api as apimod
+
+        self.apimod = apimod
+        self.work = scratch("_upload_work")
+        shutil.rmtree(self.work, ignore_errors=True)
+        self.work.mkdir(parents=True)
+        self.library = librarymod.SessionLibrary([self.work], cache_size=1, maths_root=ROOT)
+        self.api = apimod.Api(self.library, 900)
+
+    def tearDown(self):
+        self.library.close()
+        shutil.rmtree(self.work, ignore_errors=True)
+
+    def source(self, name="源.xlsx"):
+        """上传的源文件放在**数据目录之外**，不然"上传后才出现"这条就是空跑。"""
+        directory = tempfile.TemporaryDirectory(prefix="i3pro-upload-src-")
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / name
+        xlsxmod.write_workbook(path, [{
+            "name": "数据", "header": ["time_s", "TH", "Vx KF [km/h]"],
+            "rows": [[i / 100.0, i, i * 0.5] for i in range(50)], "split": False,
+        }])
+        return path
+
+    def put(self, name, payload):
+        return self.api.handle(["upload"], {"name": [name]}, "PUT",
+                               self.apimod.Body.of(payload))
+
+    def test_上传一份_xlsx_落盘并进侧边栏(self):
+        payload = self.source().read_bytes()
+        response = self.put("新场次.xlsx", payload)
+        self.assertEqual(response.status, 200, response.body[:300])
+        body = json.loads(response.body)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["file"], "新场次.xlsx")
+        self.assertEqual(body["bytes"], len(payload))
+        self.assertEqual(body["device"], "Excel")
+        self.assertEqual(body["channels"], 2)
+        self.assertEqual(body["complete_laps"], 0)
+        self.assertIn("url", body)
+        self.assertEqual((self.work / "新场次.xlsx").read_bytes(), payload)
+        self.assertIn("新场次", self.library.names())
+        self.assertEqual(self.library.summary("新场次")["format"], "xlsx")
+
+    def test_同名上传不覆盖(self):
+        payload = self.source().read_bytes()
+        self.put("新场次.xlsx", payload)
+        second = self.put("新场次.xlsx", payload)
+        self.assertEqual(json.loads(second.body)["file"], "新场次-1.xlsx")
+        self.assertTrue((self.work / "新场次.xlsx").exists())
+        self.assertTrue((self.work / "新场次-1.xlsx").exists())
+
+    def test_不认识的扩展名被挡下来(self):
+        response = self.put("坏文件.exe", b"MZ")
+        self.assertEqual(response.status, 400)
+        self.assertIn("只接受", json.loads(response.body)["error"])
+
+    def test_上传中断要吵而且不留半截文件(self):
+        chunks = [b"0123456789"]
+
+        def reader(_n):
+            return chunks.pop(0) if chunks else b""
+
+        body = self.apimod.Body(100, reader=reader)
+        response = self.api.handle(["upload"], {"name": ["半截.xlsx"]}, "PUT", body)
+        self.assertEqual(response.status, 400)
+        self.assertIn("中断", json.loads(response.body)["error"])
+        self.assertEqual(list(self.work.iterdir()), [], "半截文件或 .part 留下来了")
+
+
+class TestXlsxImport(_ExportBase):
+    """读 Excel 成场次（ticket #31）。
+
+    最硬的一条判据是 **round-trip**：同一份导出请求，CSV 与 xlsx 两种文件读回来
+    必须给出同一串数字。它不需要新样例，却正好挡住"看着成功、名字或数值悄悄换了"
+    那一类错——列名里的 ``[单位]`` 就是这么被抓出来的。
+    """
+
+    def book(self, name="表.xlsx", sheets=()):
+        """写一份 xlsx 出来（用仓库自己的写入器，写侧另有独立裁判）。"""
+        path = self.tmp() / name
+        if sheets:
+            xlsxmod.write_workbook(path, list(sheets))
+        return path
+
+    def simple(self, name="表.xlsx", header=("time_s", "Vx KF [km/h]", "TH"), rows=50):
+        return self.book(name, [{
+            "name": "数据", "header": list(header),
+            "rows": iter([[i / 100.0, i * 0.5, i * 2.0] for i in range(rows)]),
+            "split": False,
+        }])
+
+    # ------------------------------------------------------------ 读得回来
+    def test_一份普通工作簿读成场次(self):
+        session = csvlog.open_session(self.simple())
+        meta = session.metadata()
+        self.assertEqual(meta["format"], "xlsx")
+        self.assertEqual(meta["sheet"], "数据")
+        self.assertEqual(meta["device"], "Excel")
+        self.assertEqual([c.name for c in session.channels], ["Vx KF", "TH"])
+        self.assertEqual(session.channels[0].unit, "km/h")   # 列名里的 [单位] 拆回去了
+        self.assertAlmostEqual(session.sample_rate, 100.0, places=6)
+        np.testing.assert_allclose(session.values("Vx KF"), np.arange(50) * 0.5)
+        np.testing.assert_allclose(session.values("TH"), np.arange(50) * 2.0)
+        self.assertEqual(session.report[0]["status"], "时间轴")
+
+    def test_硬判据_同一次导出的_csv_与_xlsx_读回来是同一串数字(self):
+        import pandas as pd
+
+        request = self.request(format="xlsx", rate="50",
+                               **{"from": "0", "to": "2", "names": "Vx KF,Gear"})
+        xlsx_path = self.tmp() / "x.xlsx"
+        stats = exportmod.write(self.log, request, xlsx_path)
+        csv_path = self.tmp() / "x.csv"
+        exportmod.write(self.log, self.request(format="csv", rate="50",
+                                               **{"from": "0", "to": "2",
+                                                  "names": "Vx KF,Gear"}), csv_path)
+
+        session = csvlog.open_session(xlsx_path)
+        frame = pd.read_csv(csv_path)
+        self.assertEqual(len(session.channels), 2)
+        self.assertEqual([c.name for c in session.channels], ["Vx KF", "Gear"])
+        self.assertEqual(session.channels[0].unit, "km/h")
+        self.assertEqual(frame.shape[0], stats["rows"])
+        self.assertEqual(session.time.size, stats["rows"])
+        np.testing.assert_allclose(session.time, frame["time_s"].to_numpy(),
+                                   rtol=0, atol=1e-6)
+        np.testing.assert_allclose(session.values("Vx KF"),
+                                   frame["Vx KF [km/h]"].to_numpy(), rtol=0, atol=1e-6)
+        # 读回来的值对得上 `.ld` 本身：0.02 s 一个点，取第 50 个点（1.00 s）
+        expected = self.log.values("Vx KF")[int(round(1.0 * self.log.sample_rate))]
+        self.assertAlmostEqual(session.values("Vx KF")[50], expected, places=4)
+
+    def test_csv_导出的方括号单位也拆得回去(self):
+        """同一条规则对 CSV 与 Excel 一起生效（两条读取器共用一份装配代码）。"""
+        request = self.request(format="csv", rate="50",
+                               **{"from": "0", "to": "2", "names": "Vx KF,Gear"})
+        path = self.tmp() / "x.csv"
+        exportmod.write(self.log, request, path)
+        session = csvlog.read_csv_session(path)
+        self.assertEqual([c.name for c in session.channels], ["Vx KF", "Gear"])
+        self.assertEqual(session.channels[0].unit, "km/h")
+
+    def test_两份金标准导出的_xlsx_读回来逐点一致(self):
+        """规则 ⑤：这条功能要在两份金标准上各实跑一次，不是只跑一份。"""
+        measured = []
+        for source in (HILL, ENDURANCE):
+            if not source.exists():
+                continue
+            with ld.LogFile.read(source) as log:
+                names = [name for name in ("Vx KF", "TH") if log.has(name)]
+                request = exportmod.parse_request(log, {
+                    "channels": "selected", "names": ",".join(names),
+                    "format": "xlsx", "resample": "linear",
+                    "rate": "50", "from": "60", "to": "80",
+                })
+                out = self.tmp() / (source.stem + ".xlsx")
+                stats = exportmod.write(log, request, out)
+                session = csvlog.open_session(out)
+                self.assertEqual(session.time.size, stats["rows"], source.name)
+                self.assertEqual([c.name for c in session.channels], names, source.name)
+                axis = timebase.axis(log)
+                for name in names:
+                    expected = np.interp(session.time, axis, log.values(name))
+                    np.testing.assert_allclose(
+                        session.values(name), expected, rtol=0, atol=1e-6,
+                        err_msg=f"{source.name} 的 {name} 读回来对不上",
+                    )
+                measured.append((source.stem, stats["rows"], len(names),
+                                 int(out.stat().st_size)))
+        self.assertTrue(measured, "两份金标准都不在，这条验不了")
+        print("\n[#31 实测] " + "；".join(
+            f"{stem} {rows} 行 × {cols} 通道 {size / 1024:.0f} KB"
+            for stem, rows, cols, size in measured))
+
+    def test_中间的空列或文字列不会把后面的列错位(self):
+        """一列有表头、却没有数值（或写着文字）时，**名字与数值的对应关系不能挪**。
+
+        旧写法把"整列都是 NaN"的列 drop 掉，后面每一列就往前挪一格：实测那份
+        ``Time,A,Empty,B`` 里，叫 ``B`` 的通道拿到了 10/20/30，而 ``Empty`` 拿到了
+        本该属于 B 的数字，报告里还写着 B「缺列」——一个错都不报，数字全配错了对。
+        文字列在旧写法里则是抛一句 pandas 的 ``could not convert string to float``，
+        没有下一步。
+        """
+        blank = self.tmp() / "blank.csv"
+        blank.write_text("Time,A,Empty,B\n0,1,,10\n0.01,2,,20\n0.02,3,,30\n",
+                         encoding="utf-8")
+        session = csvlog.read_csv_session(blank)
+        self.assertEqual([c.name for c in session.channels], ["A", "B"])
+        np.testing.assert_allclose(session.values("A"), [1, 2, 3])
+        np.testing.assert_allclose(session.values("B"), [10, 20, 30])
+        self.assertEqual([row["column"] for row in session.report
+                          if row.get("status", "").startswith("跳过")], ["Empty"])
+
+        text = self.tmp() / "text.csv"
+        text.write_text("Time,A,Note,B\n0,1,hello,10\n0.01,2,world,20\n0.02,3,x,30\n",
+                        encoding="utf-8")
+        session = csvlog.read_csv_session(text)
+        self.assertEqual([c.name for c in session.channels], ["A", "B"])
+        np.testing.assert_allclose(session.values("B"), [10, 20, 30])
+        self.assertEqual([row["column"] for row in session.report
+                          if row.get("status", "").startswith("跳过")], ["Note"])
+
+    # ------------------------------------------------------------ 选哪张 sheet
+    def test_默认挑第一张能当表读的_sheet(self):
+        path = self.book("两页.xlsx", [
+            {"name": "元数据", "header": ["项", "值"], "split": False,
+             "rows": iter([["日志文件", "a.ld"], ["场次", "a"]])},
+            {"name": "数据", "header": ["time_s", "TH"], "split": False,
+             "rows": iter([[i / 100.0, i] for i in range(20)])},
+        ])
+        session = csvlog.open_session(path)
+        self.assertEqual(session.metadata()["sheet"], "数据")
+        self.assertEqual(session.header["sheets"], ["元数据", "数据"])
+        with self.assertRaises(ValueError) as caught:
+            csvlog.open_session(path, sheet="没这张")
+        self.assertIn("没有叫", str(caught.exception))
+        self.assertIn("数据", str(caught.exception))
+
+    def test_选了哪张_sheet_记在侧车里_后面的列名覆盖不会把它抹掉(self):
+        path = self.book("两页.xlsx", [
+            {"name": "第一张", "header": ["time_s", "TH"], "split": False,
+             "rows": iter([[i / 100.0, i] for i in range(20)])},
+            {"name": "第二张", "header": ["time_s", "Vx KF [km/h]"], "split": False,
+             "rows": iter([[i / 100.0, i] for i in range(20)])},
+        ])
+        self.assertEqual(csvlog.open_session(path).metadata()["sheet"], "第一张")
+        csvlog.save_map(path, {}, {}, sheet="第二张")
+        csvlog.save_map(path, {"TH": "节气门"}, {})          # 不带 sheet 的一次保存
+        self.assertEqual(csvlog.load_sheet(path), "第二张")
+        self.assertEqual(csvlog.load_map(path)["renames"], {"TH": "节气门"})
+        self.assertEqual(csvlog.open_session(path).metadata()["sheet"], "第二张")
+
+    # ------------------------------------------------------------ 读不了的形态
+    def test_没有时间列就拒绝并说下一步(self):
+        path = self.book("无时间.xlsx", [
+            {"name": "数据", "header": ["转速", "油门"], "split": False,
+             "rows": iter([[i, i * 2] for i in range(20)])},
+        ])
+        with self.assertRaises(ValueError) as caught:
+            csvlog.open_session(path)
+        message = str(caught.exception)
+        self.assertIn("时间", message)
+        self.assertIn("下一步", message)
+
+    def test_宏_图表_外链各自报错并给下一步(self):
+        for marker, label in (("xl/vbaProject.bin", "宏"),
+                              ("xl/charts/chart1.xml", "图表"),
+                              ("xl/externalLinks/externalLink1.xml", "外部链接")):
+            path = self.simple(f"feat-{label}.xlsx")
+            with zipfile.ZipFile(path, "a") as archive:
+                archive.writestr(marker, "x")
+            with self.assertRaises(ValueError) as caught:
+                csvlog.open_session(path)
+            message = str(caught.exception)
+            self.assertIn(label, message)
+            self.assertIn("下一步", message)
+
+    def test_公式没有缓存值就报错(self):
+        """别的工具生成的表常常只有公式、没有结果；读出来会是一片空白。"""
+        openpyxl = _openpyxl()
+        book = openpyxl.Workbook()
+        sheet = book.active
+        sheet.title = "数据"
+        sheet.append(["time_s", "TH", "两倍"])
+        for i in range(20):
+            sheet.append([i / 100.0, i, f"=B{i + 2}*2"])
+        path = self.tmp() / "公式.xlsx"
+        book.save(path)
+        with self.assertRaises(ValueError) as caught:
+            csvlog.open_session(path)
+        self.assertIn("没有存结果", str(caught.exception))
+
+    def test_不是_zip_就说是改了后缀(self):
+        path = self.tmp() / "假的.xlsx"
+        path.write_text("Time,TH\n0,1\n", encoding="utf-8")
+        with self.assertRaises(ValueError) as caught:
+            csvlog.open_session(path)
+        message = str(caught.exception)
+        self.assertIn("不是一个 .xlsx", message)
+        self.assertIn("另存为", message)
+
+    def test_日期时间列折成相对秒并带出场次日期(self):
+        import datetime
+
+        openpyxl = _openpyxl()
+        book = openpyxl.Workbook()
+        sheet = book.active
+        sheet.title = "数据"
+        sheet.append(["timestamp", "TH"])
+        start = datetime.datetime(2026, 9, 14, 12, 34, 56, 789000)
+        for i in range(20):
+            sheet.append([start + datetime.timedelta(seconds=i / 100.0), i])
+        path = self.tmp() / "时间戳.xlsx"
+        book.save(path)
+        session = csvlog.open_session(path)
+        self.assertAlmostEqual(session.time[0], 0.0, places=9)
+        self.assertAlmostEqual(session.time[-1], 0.19, places=6)
+        self.assertAlmostEqual(session.sample_rate, 100.0, places=3)
+        meta = session.metadata()
+        self.assertEqual(meta["log_date"], "2026-09-14")
+        self.assertEqual(meta["log_time"], "12:34:56")
+        self.assertEqual(session.report[0]["detail"], "日期时间列")
+
+    # ------------------------------------------------------------ 进得来，进侧边栏
+    def test_导入_xlsx_同名不覆盖且能进侧边栏(self):
+        from i3pro import importer
+
+        source = self.simple("场次.xlsx")
+        work = scratch("_xlsx_library")
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True)
+        try:
+            first = importer.import_paths([source], work)
+            second = importer.import_paths([source], work)
+            self.assertEqual(first[0]["file"], "场次.xlsx")
+            self.assertEqual(second[0]["file"], "场次-1.xlsx")
+            library = librarymod.SessionLibrary([work], cache_size=1, maths_root=ROOT)
+            self.assertIn("场次", library.names())
+            summary = library.summary("场次")
+            self.assertEqual(summary["format"], "xlsx")
+            log = library.get("场次")          # 全局数学通道也会挂上来，所以不比总数
+            self.assertTrue(log.has("Vx KF"))
+            self.assertTrue(log.has("TH"))
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+
 class TestXlsxWriter(unittest.TestCase):
     """``src/i3pro/xlsx.py``：标准库写的 OOXML，由一个**独立**读入器逐格验。
 
@@ -5945,6 +6283,20 @@ class TestMathsOverHttp(unittest.TestCase):
 CAN_DATA = ROOT / "can_data"
 DBC_DIR = DATA / "dbc"
 SENSORS_DBC = DBC_DIR / "Sensors.dbc"
+
+#: CAN 那批实测数字取样的 9 份帧表（ticket #37–#40）。点名而不是扫目录：
+#: 实测数字必须能复现，而数据目录里多一份新日志是常态。
+CAN_FIXTURES = (
+    "2026_10_03_173345_ID0001.csv",
+    "2026_10_03_173936_ID0001.csv",
+    "2026_10_03_174748_ID0001.csv",
+    "2026_10_03_175413_ID0001.csv",
+    "2026_10_03_200723_ID0001.csv",
+    "2026_10_03_200755_ID0001.csv",
+    "2026_10_03_201019_ID0001.csv",
+    "2026_10_03_201147_ID0001.csv",
+    "2026_10_03_201402_ID0001.csv",
+)
 DASHBOARD_DBC = DBC_DIR / "E27_Dashboard_AutoX_20260902_pjgps - Internal Display (using Display Creator).dbc"
 
 #: 扫一遍 9 份原始帧表拿到的 ID 集合。扫描本身要几秒，所以整个测试进程只做一次。
@@ -6263,9 +6615,13 @@ class TestCanLog(unittest.TestCase):
     def setUp(self):
         if not CAN_DATA.exists() or not SENSORS_DBC.exists():
             self.skipTest("缺 can_data/ 或 i2pro_data/dbc/")
-        self.files = sorted(CAN_DATA.glob("*.csv"))
-        if len(self.files) < 9:
-            self.skipTest(f"can_data/ 里只有 {len(self.files)} 份文件")
+        # 这批数字（3,684,850 帧 / 43.42% 覆盖率 / 9 份并成 7 场）是**这 9 份文件**
+        # 实测出来的，所以这里点名，而不是"目录里有什么算什么"——往 can_data/ 里丢
+        # 一份新日志是正常的（2026-10-04 就丢过一份），不该让整套用例变红。
+        self.files = [CAN_DATA / name for name in CAN_FIXTURES]
+        missing = [path.name for path in self.files if not path.exists()]
+        if missing:
+            self.skipTest(f"can_data/ 里缺 {len(missing)} 份实测用的帧表：{missing[:2]}")
         self.small = CAN_DATA / "2026_10_03_201147_ID0001.csv"
 
     # ------------------------------------------------------------- 识别与读取

@@ -2622,6 +2622,79 @@ node tools\smoke_viewer.js out\can_moved.html
 
 ---
 
+## A56 · 导入 Excel（`.xlsx` 读成场次，ticket #31）
+
+队友发来的是 Excel，不是 `.ld`。读进来的东西与 `.ld` / CSV **完全同一种场次**：
+进侧边栏、能画图 / 切圈 / 比圈 / 报表 / 导出。
+
+```powershell
+# 命令行（拖到 导入数据.bat 上是同一件事）
+.\i3pro.cmd import "D:\别人的表.xlsx" --data i2pro_data
+.\i3pro.cmd import "D:\多页表.xlsx" --data i2pro_data --sheet "第二张" --map "原始列=TH"
+.\i3pro.cmd info "i2pro_data\别人的表.xlsx"
+```
+
+**通过判据**（单测 `TestXlsxImport` 13 项 + `TestUploadEndpoint` 4 项）：
+
+| 断言 | 说明 |
+| --- | --- |
+| **硬判据 round-trip** | 同一个导出请求写成 CSV 与写成 `.xlsx`，两条都读回来**逐点相同**（`atol=1e-6`，值最大到 100 km/h 量级）；再与 `.ld` 本身逐点对拍 |
+| 两份金标准实跑 | 高避5圈 / 耐久正赛各导一段 20 s × 2 通道的 xlsx 再读回：**1001 行 × 2 通道**（17 KB / 15 KB），逐点一致 |
+| 列名里的单位 | 我们自己的宽表把单位写在列名里（`Vx KF [km/h]`）；读回来拆成**名字 `Vx KF` + 单位 `km/h`**，否则速度、距离轴、对拍全都跟着失效 |
+| 表头与单位行 | 与 CSV 共用同一套判定（`session_from_frame`）：列名走 原名 → 别名 → 手工覆盖，单位三处来源优先级一致 |
+| 选哪张 sheet | 不给就**按顺序试**，用第一张能当通道表读的（自己的导出把「元数据」放第一张，所以不能按位置硬取）；`--sheet` 指定时那张读不出来要报清原因；选过的那张记进 `<场次>.map.json` |
+| 日期时间列 | Excel 的日期单元格 / ISO 文本都折算成**相对秒**，起点写进场次的日期与时间（实测 20 行 100 Hz，首点 0.000000000 s、末点 0.190000 s） |
+| 读不了的形态 | 宏（`vbaProject.bin`）/ 图表（`xl/charts/`）/ 外部链接（`xl/externalLinks/`）/ **公式没有缓存值** / 根本不是 zip：五种各自报错并说下一步，不静默读成空 |
+| 没有时间列 | 拒绝，并说清改哪一列（`--map "原始列=Time"`），**不拿第一列冒充时间** |
+| 同名不覆盖 | 走 `importer.unique_target()` 的 `-1/-2` 后缀 |
+| 中间的空列/文字列 | 不再让后面的列整体左移（见下），跳过的那列进报告 |
+
+**前端这一关怎么验**（规则 ①③）：导入用的那个页面是本地服务现生成的，无头驱动跑在
+**快照 HTML** 上够不到它，所以这一票的交互断言分两处——真浏览器那关走整条导入流程，
+无头驱动验"读进来的场次画得出图"：
+
+```powershell
+# 把一份 xlsx 场次渲染成快照，再过无头断言（437 通道 / 1001 行 / 1.5 MB）
+python -c "import pathlib,sys; sys.path.insert(0,'src'); from i3pro import csvlog, export, ld, render; \
+  log = ld.LogFile.read('i2pro_data/20260908-cjh 高避5圈.ld'); \
+  out = pathlib.Path('out/xlsx_golden.xlsx'); \
+  export.write(log, export.parse_request(log, {'channels':'all','format':'xlsx','rate':'50','from':'0','to':'20'}), out); \
+  log.close(); render.render_html(csvlog.open_session(out), 'out/xlsx_viewer.html', worksheets_dir='.')"
+node tools\smoke_viewer.js out\xlsx_viewer.html
+#   PASS - workbench ran headless (324051 line segments, 341742 point rects, 466 channel rows …)
+
+# 真浏览器：文件选择器收 .xlsx -> 上传 -> 列表出现 -> 点进去能画（6 条断言）
+python tools\verify_clicks.py
+#   #31 导入页的文件选择器收得到 .xlsx — .ld,.ldx,.csv,.xlsx
+#   #31 导入前列表里没有这份 Excel
+#   #31 用页面自己的文件选择器上传后，场次列表里出现了它
+#   #31 这份 Excel 场次能当工作台打开
+#   #31 列名里的 [单位] 拆回成了通道名 + 单位 — ['Vx KF', 'TH', '速度kmh']
+#   #31 单位跟着列名一起读回来了 — {'name': 'Vx KF', 'unit': 'km/h', …}
+```
+
+**顺带修的一处**：无头驱动对抬头的断言原来只认 `.ld` / `.csv`，拿一份 Excel 场次的
+快照去过就会红（"header was not populated"）——它现在也认 `.xlsx`。
+
+**这一票顺带修掉两个真问题**
+
+1. **浏览器上传一直是 500**（`upload` 里残留的 `self.rfile`）。`#26` 把请求闭包拆成
+   `api.py` 那一层时，`upload` 还引用着闭包里的 `self.rfile`——这个名字在新的一层不存在。
+   命令行的 `i3pro import` 不受影响，而且这个端点**一条用例都没有**，所以从那天起
+   "拖进窗口导入"就一直失败（真浏览器那关现在会红）。现在请求体走 `Body.stream()`，
+   按块读，不把上百 MB 的日志整份读进内存；并补了 4 条用例（落盘 / 同名 / 扩展名 / 中断不留 `.part`）。
+2. **中间夹一个空列会让后面的列错位**：旧写法把"整列都是 NaN"的列 `dropna` 掉，再按
+   位置取列。实测 `Time,A,Empty,B` 里，叫 `B` 的通道拿到 10/20/30，而 `Empty` 拿到了
+   本该属于 B 的数字，报告里还写着 B「缺列」——一个错都不报，数值全配错了对。现在不
+   按位置丢列，跳过的那列照实写进报告。文字列在旧写法里则是抛一句 pandas 的
+   `could not convert string to float`，没有下一步。
+
+**接口的接缝**：CSV 与 Excel 两条读取器共用 `csvlog.session_from_frame`（表头在哪、
+单位在哪、哪一列是时间、列名怎么匹配、报告怎么写，只回答一次）。新加一种表格格式 =
+写一个"表头几行 + 一张数据表"的 adapter。
+
+---
+
 测试覆盖：
 
 | 分组 | 内容 |
@@ -2659,6 +2732,8 @@ node tools\smoke_viewer.js out\can_moved.html
 | `TestExportTimestampIndex` | 绝对时间主索引（#27，7 项）：时间戳列 = 场次起点 + 相对秒（与 `epoch_of` 对拍）、长表首列逐字是 `timestamp`、元数据写明"起点精确到秒"且不选它时不出现、距离轴配时间戳是 400、时间轴配 `distance_m` 是 400、没有日期时间的场次说下一步、Excel 里是文本时间戳而不是数字 |
 | `TestXlsxWriter` | 标准库写的 `.xlsx`（#23，5 项）：列名、单元格往返（空值 / NaN / 尖括号与和号）、`MAX_ROWS` 调小后真分表（99+99+99+3，不丢不重）、关掉分表要大声报错、超列数说改用 CSV |
 | `TestApiLayerWithoutASocket` | API 层（#26，5 项）：不起 socket 直接调一个动作、路由表每行都有实现、动作清单就是那 16 个、每个请求都拿得到回复、请求体按需读 |
+| `TestUploadEndpoint` | 浏览器上传（#31，4 项）：上传一份 `.xlsx` 落盘 + 进侧边栏 + 概览（通道数 / 设备 / URL）、同名加 `-1`、扩展名不认就 400、上传中断要吵且不留半截文件。**这个端点在这之前一条用例都没有**，所以 #26 那次重构把 `upload` 里的 `self.rfile` 留在已删除的闭包里后，浏览器上传一直 500 没人发现 |
+| `TestXlsxImport` | 读 Excel（#31，13 项）：普通工作簿读成场次、**同一次导出的 CSV 与 xlsx 读回来逐点相同**、两份金标准各实跑一次（1001 行 × 2 通道）、列名里的 `[单位]` 拆成名字 + 单位、默认挑第一张能当表读的 sheet 且记得住选择、日期时间列折成相对秒并带出场次日期、没有时间列 / 宏 / 图表 / 外链 / 公式无缓存 / 不是 zip 各自报错并给下一步、同名导入不覆盖、中间的空列与文字列不错位 |
 | `TestStructureOfTheSplit` | 结构性重构的守卫（#23 / #24 / #25 / #26，11 项）：`server.py` 只剩 HTTP 管道、动作分派只有一张表、库不反向依赖服务、老名字仍可用、信标住 `beacons.py`、距离轴住 `axes.py`、`laps.py` 只剩切圈、三模块共用同一份对象、**HTTP 用例共用一个夹具**（全场只有一处起服务） |
 | `TestComponentRegistry` | 组件类型注册表（#17 / #19 / #20 / #21，6 项）：每种显示形式都在表里、分派只剩"哪个是图"与"哪一列是文字列"（实测 10 处）、每种形式都声明了怎么画与怎么取数、取数只有一条路（六个端点不许自己 fetch）、自检形式只挂在无头驱动的标记上 |
 | `TestChannelSeam` | 通道接缝（#18，10 项）：那条规则只准写在一个模块里（扫源码）、会话必须显式声明三样、原生通道保留自己的采样率与单位、同名覆盖时保持因子/采样率/单位、Parquet 写出的是派生列本身、挂载与卸载走声明、金标准 437 条通道逐条与旧公式一致（无数学通道时逐点不变） |

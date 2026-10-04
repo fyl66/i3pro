@@ -204,7 +204,7 @@ def _parse_pairs(specs: list[str]) -> dict[str, str]:
 
 
 def _csv_mapping_note(log) -> str:
-    """How each CSV column was matched, and what to do about the rest."""
+    """How each table column was matched, and what to do about the rest."""
     tiers: dict[str, int] = {}
     unmatched: list[str] = []
     for entry in log.report:
@@ -221,6 +221,10 @@ def _csv_mapping_note(log) -> str:
         lines.append(f"      … 其余 {len(unmatched) - 8} 列见 --map")
     if unmatched:
         lines.append('      修正: i3pro import <文件> --map "原始列=通道名" --unit "原始列=单位"')
+    sheets = log.header.get("sheets") if getattr(log, "header", None) else None
+    if sheets:
+        lines.insert(0, f"    读的 sheet: {log.metadata().get('sheet', '')}"
+                        f"（这份工作簿里还有：{'、'.join(sheets)}）")
     return "\n".join(lines)
 
 
@@ -455,7 +459,7 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
         names = library.names()
         if not names:
             where = "、".join(str(d) for d in dirs)
-            print(f"# {where} 里没有 .ld / .csv 场次")
+            print(f"# {where} 里没有 .ld / .csv / .xlsx 场次")
             print("# 下一步：把日志拷进这个目录，或双击 导入数据.bat 拖一个进去。")
             return 1
         out.mkdir(parents=True, exist_ok=True)
@@ -515,11 +519,12 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
 
 
 def cmd_import(args: argparse.Namespace) -> int:
-    """Copy or move .ld/.ldx files into the data folder so they show up."""
+    """Copy or move .ld/.ldx/.csv/.xlsx files into the data folder so they show up."""
     from . import importer
 
     destination = Path(args.data)
     renames, units = _parse_pairs(args.map or []), _parse_pairs(args.unit or [])
+    sheet = getattr(args, "sheet", None)
     results = importer.import_paths(args.paths, destination, move=args.move)
     imported = [r for r in results if "error" not in r]
     failed = [r for r in results if "error" in r]
@@ -527,15 +532,16 @@ def cmd_import(args: argparse.Namespace) -> int:
     for row in imported:
         note = ""
         suffix = Path(row["file"]).suffix.lower()
-        if suffix == ".csv" and (renames or units):
-            csvlog.save_map(row["path"], renames, units)
+        if suffix in (".csv", ".xlsx") and (renames or units or (suffix == ".xlsx" and sheet)):
+            csvlog.save_map(row["path"], renames, units,
+                            sheet=sheet if suffix == ".xlsx" else None)
             note += "已写入列映射 · "
-        if suffix in (".ld", ".csv"):
+        if suffix in (".ld", ".csv", ".xlsx"):
             try:
                 with csvlog.open_session(row["path"]) as log:
                     meta = log.metadata()
                     note = f"{meta['channels']} 通道 · {meta['duration']:.0f} s · {meta['device']}"
-                    if suffix == ".csv":
+                    if suffix in (".csv", ".xlsx"):
                         note += "\n" + _csv_mapping_note(log)
             except Exception as exc:  # imported but unreadable -> say so now
                 note = f"⚠ 无法解析: {type(exc).__name__}: {exc}"
@@ -829,14 +835,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="工作表的根目录 (默认: 仓库根目录，读 worksheets/*.json)")
     p.set_defaults(func=cmd_snapshot)
 
-    p = sub.add_parser("import", help="把 .ld/.ldx/.csv 导入数据目录（可拖拽到 导入数据.bat 上）")
+    p = sub.add_parser("import", help="把 .ld/.ldx/.csv/.xlsx 导入数据目录（可拖拽到 导入数据.bat 上）")
     p.add_argument("paths", nargs="+", help="文件或目录，可多个")
     p.add_argument("--data", default="i2pro_data", help="目标数据目录")
     p.add_argument("--move", action="store_true", help="移动而不是复制")
     p.add_argument("--map", action="append", default=[],
-                   help='CSV 列改名: "原始列=通道名"，可重复；写进 <场次>.map.json')
+                   help='列改名: "原始列=通道名"，可重复；写进 <场次>.map.json')
     p.add_argument("--unit", action="append", default=[],
-                   help='CSV 列单位: "原始列=单位"，可重复')
+                   help='列单位: "原始列=单位"，可重复')
+    p.add_argument("--sheet", default=None,
+                   help="Excel 读哪一张 sheet（默认按顺序试，用第一张能当通道表读的）")
     p.set_defaults(func=cmd_import)
 
     p = sub.add_parser("track", help="圈速柱状速览")

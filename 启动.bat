@@ -21,7 +21,7 @@ set "CAN_DIR=%~dp0can_data"
 
 echo.
 echo  ==============================================================
-echo    i3pro  -  MoTeC .ld data workbench
+echo    i3pro  -  telemetry workbench (.ld / csv / xlsx)
 echo  ==============================================================
 echo    data folder : %DATA_DIR%
 if exist "%CAN_DIR%" echo    can  folder : %CAN_DIR%
@@ -44,7 +44,7 @@ if not "%RC%"=="0" (
   echo    [ERROR] i3pro exited with code %RC%
   echo  --------------------------------------------------------------
   echo    Most likely causes:
-  echo      1. The data folder above has no .ld files.
+     echo      1. The data folder above has no log files (.ld / .csv / .xlsx).
   echo         Put your logs in i2pro_data, or edit DATA_DIR in this file.
   echo      2. Python is missing a package.  Try:
   echo           i3pro.cmd --help

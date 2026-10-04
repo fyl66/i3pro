@@ -106,7 +106,8 @@ class SessionLibrary:
         for root in self.roots:
             if not root.exists():
                 continue
-            for pattern in ("*.ld", "*.csv"):
+            # ``.xlsx`` 也在里面（ticket #31）：Excel 导入的场次与 .ld / CSV 同一种东西。
+            for pattern in ("*.ld", "*.csv", "*.xlsx"):
                 for path in sorted(root.rglob(pattern)):
                     if path.suffix.lower() == ".csv" and canlog.looks_like_frames(path):
                         frames.append(path)

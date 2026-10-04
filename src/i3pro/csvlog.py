@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import math
 import csv
+import datetime
+import re
 from dataclasses import dataclass, field
 import inspect
 from pathlib import Path
@@ -31,7 +33,8 @@ import pandas as pd
 from . import derive, ld as ldmod, render, sidecar
 
 __all__ = ["CsvSession", "read_csv_session", "canonical_names", "ALIASES", "scan_rows",
-           "load_map", "save_map", "MAP_SUFFIX", "open_session"]
+           "load_map", "save_map", "load_sheet", "MAP_SUFFIX", "open_session",
+           "layout_of", "time_index_of", "session_from_frame", "merged_maps"]
 
 #: Column-mapping sidecar written next to a CSV the user corrected by hand.
 #: Same principle as the lap sidecar (ADR-0001): the data file stays untouched.
@@ -73,17 +76,48 @@ def _map_path(path: str | Path) -> Path:
 
 
 def load_map(path: str | Path) -> dict:
-    """Manual column corrections for this CSV, or empty when there are none."""
+    """Manual column corrections for this table, or empty when there are none."""
     data = sidecar.read("csvmap", path)
     return {"renames": dict(data.get("renames") or {}),
             "units": dict(data.get("units") or {})}
 
 
-def save_map(path: str | Path, renames: dict[str, str], units: dict[str, str]) -> Path:
-    merged = load_map(path)
-    merged["renames"].update(renames)
-    merged["units"].update(units)
+def load_sheet(path: str | Path) -> str:
+    """Excel：上一次选的是哪一张 sheet（没选过就是空串）。"""
+    return str(sidecar.read("csvmap", path).get("sheet") or "")
+
+
+def save_map(
+    path: str | Path,
+    renames: dict[str, str],
+    units: dict[str, str],
+    sheet: str | None = None,
+) -> Path:
+    """把手工选择写进 ``<场次>.map.json``。
+
+    在这份**原始** sidecar 上合并，而不是在 :func:`load_map` 的返回值上合并——
+    后者只认得 ``renames`` / ``units``，会把 ``sheet`` 这类别的键悄悄丢掉
+    （真发生过：Excel 选了第三张 sheet，存一次列名覆盖就退回了第一张）。
+    """
+    merged = dict(sidecar.read("csvmap", path))
+    merged["renames"] = {**(merged.get("renames") or {}), **renames}
+    merged["units"] = {**(merged.get("units") or {}), **units}
+    if sheet is not None:
+        merged["sheet"] = str(sheet)
     return sidecar.write("csvmap", path, merged)
+
+
+def merged_maps(
+    path: str | Path,
+    renames: dict[str, str] | None = None,
+    units: dict[str, str] | None = None,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """边车里存的手工映射 + 这次调用显式给的（显式的优先），键都归一化。"""
+    stored = load_map(path)
+    merged_renames = {**stored["renames"], **(renames or {})}
+    merged_units = {**stored["units"], **(units or {})}
+    return ({_normalise(k): v for k, v in merged_renames.items()},
+            {_normalise(k): v for k, v in merged_units.items()})
 
 #: Names our analysis asks for by name. Derived from the constants that already
 #: look channels up, so this list cannot drift from them.
@@ -136,6 +170,20 @@ def _normalise(text: str) -> str:
     """Case- and separator-insensitive key for matching."""
     keep = [c.lower() if c.isalnum() else " " for c in str(text).strip()]
     return " ".join("".join(keep).split())
+
+
+#: ``Vx KF [km/h]``：我们自己导出宽表时把单位写进列名（Excel 里一眼看得出量纲）。
+#: 读回来的时候要把它拆回"名字 + 单位"，否则一条通道换个名字，"两条来源不打架"
+#: 那条对拍和距离轴都会跟着失效——那正是 round-trip 这条硬判据要挡住的东西。
+_BRACKET_UNIT = re.compile(r"^(?P<name>.+?)\s*\[(?P<unit>[^\[\]]{0,24})\]\s*$")
+
+
+def split_unit(raw: str) -> tuple[str, str]:
+    """``"Vx KF [km/h]"`` -> ``("Vx KF", "km/h")``；没有方括号后缀就原样返回。"""
+    match = _BRACKET_UNIT.match(str(raw).strip())
+    if not match:
+        return str(raw).strip(), ""
+    return match.group("name").strip(), match.group("unit").strip()
 
 
 def scan_rows(path: Path, limit: int = 40) -> list[list[str]]:
@@ -213,6 +261,10 @@ class CsvSession:
     #: 和 ``.ld`` 会话一样在这里**声明**，下游走同一条缝（见 channels.py，ticket #18）。
     derived_names: set[str] = field(default_factory=set)
     derived_units: dict[str, str] = field(default_factory=dict)
+    #: 这份表是从什么文件读来的（``csv`` / ``xlsx``）以及读的哪张 sheet。
+    #: 下游只拿它写文案（场次页、导入报告、导出元数据），不参与取值。
+    fmt: str = "csv"
+    sheet: str = ""
 
     @property
     def derived_target(self) -> dict[str, np.ndarray]:
@@ -267,7 +319,8 @@ class CsvSession:
             "duration": self.duration,
             "channels": len(self.channels),
             "file_size": self.path.stat().st_size,
-            "format": "csv",
+            "format": self.fmt,
+            **({"sheet": self.sheet} if self.sheet else {}),
         }
 
     def __repr__(self) -> str:                    # pragma: no cover - cosmetic
@@ -286,21 +339,42 @@ def read_csv_session(
     column name (or its normalised form), they win over automatic matching.
     """
     path = Path(path)
-    stored = load_map(path)
-    merged_renames = {**stored["renames"], **(renames or {})}
-    merged_units = {**stored["units"], **(units or {})}
-    renames = {_normalise(k): v for k, v in merged_renames.items()}
-    units = {_normalise(k): v for k, v in merged_units.items()}
-
     rows = scan_rows(path)
+    _head, skip = layout_of(rows)
+    frame = pd.read_csv(
+        path, header=None, skiprows=skip, skip_blank_lines=True,
+        engine="c", on_bad_lines="skip",
+        encoding="utf-8-sig", encoding_errors="replace",
+    )
+    if frame.empty:
+        raise ValueError(f"{path.name}: 表头之后没有数值行")
+    return session_from_frame(path, rows, frame, renames=renames, units=units,
+                              fmt="csv")
+
+
+def layout_of(rows: list[list[str]]) -> tuple[int, int]:
+    """``(表头行号, 数据起始行号)``——CSV 与 Excel 两条读取器都走这里。"""
     head = _header_index(rows)
-    names = [str(c).strip() for c in rows[head]]
     unit_row = rows[head + 1] if head + 1 < len(rows) else []
-    has_unit_row = bool(unit_row) and not any(_looks_numeric(c) for c in unit_row if c != "")
-    skip = head + (2 if has_unit_row else 1)
+    has_unit_row = bool(unit_row) and not any(
+        _looks_numeric(c) for c in unit_row if c != ""
+    )
+    return head, head + (2 if has_unit_row else 1)
 
-    canonical = {_normalise(n): n for n in canonical_names()}
 
+def time_index_of(names: list[str], resolve, label: str) -> int:
+    """哪一列是时间。在**解析后**的名字上找，所以手工映射也能把某一列命名成 Time。"""
+    for i, raw_name in enumerate(names):
+        if _normalise(resolve(raw_name)[0]) in TIME_NAMES:
+            return i
+    raise ValueError(
+        f"{label}: 找不到时间列（列名里没有 Time / t / Timestamp）。"
+        '用 --map "原始列=Time" 指定哪一列是时间，或在导出时带上时间列 —— '
+        "没有时间轴就无法切圈，也不该拿别的列冒充。"
+    )
+
+
+def _resolver(renames: dict[str, str], canonical: dict[str, str]):
     def resolve(raw_name: str) -> tuple[str, str]:
         key = _normalise(raw_name)
         if key in renames:
@@ -311,39 +385,145 @@ def read_csv_session(
             return ALIASES[key], "别名"
         return str(raw_name).strip(), "未匹配"
 
-    # The time column is found on the *resolved* names, so a manual mapping can
-    # name it too.
-    time_index = None
-    for i, raw_name in enumerate(names):
-        if _normalise(resolve(raw_name)[0]) in TIME_NAMES:
-            time_index = i
-            break
-    if time_index is None:
-        raise ValueError(
-            f"{path.name}: 找不到时间列（列名里没有 Time / t / Timestamp）。"
-            '用 --map "原始列=Time" 指定哪一列是时间，或在导出时带上时间列 —— '
-            "没有时间轴就无法切圈，也不该拿别的列冒充。"
-        )
+    return resolve
 
-    frame = pd.read_csv(
-        path, header=None, skiprows=skip, skip_blank_lines=True,
-        dtype=np.float64, engine="c", on_bad_lines="skip",
-        encoding="utf-8-sig", encoding_errors="replace",
+
+def _floats(series) -> np.ndarray | None:
+    """一列 -> float 数组；只要有一个非空单元格不是数字就返回 ``None``。
+
+    纯数值列走 numpy 的快车道；混着文本的列（"1,234.5"、注释、单位）逐格解析，
+    解析不了就整列交回去让调用方按"非数值列"处理——**不猜、不当 0**。
+    """
+    if pd.api.types.is_bool_dtype(series) or pd.api.types.is_numeric_dtype(series):
+        return series.to_numpy(dtype=np.float64)
+    values = series.to_numpy(dtype=object)
+    out = np.full(values.shape, np.nan, dtype=np.float64)
+    for i, value in enumerate(values):
+        if value is None or value is pd.NaT:
+            continue
+        if isinstance(value, bool):
+            out[i] = float(value)
+            continue
+        if isinstance(value, (int, float, np.integer, np.floating)):
+            out[i] = float(value)
+            continue
+        text = str(value).strip().replace(",", "")
+        if not text:
+            continue
+        try:
+            out[i] = float(text)
+        except ValueError:
+            return None
+    return out
+
+
+def _stamp(value) -> datetime.datetime | None:
+    """一个单元格 -> 时刻。认 Excel 的日期单元格和 ISO 文本，别的一律 ``None``。"""
+    if value is None or value is pd.NaT:
+        return None
+    if isinstance(value, datetime.datetime):
+        return value
+    if isinstance(value, np.datetime64):
+        # numpy 的 datetime64 不能直接转 datetime（ns 精度会溢出），先降到微秒。
+        return value.astype("datetime64[us]").astype(datetime.datetime)
+    if isinstance(value, datetime.date):
+        return datetime.datetime(value.year, value.month, value.day)
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return None                       # 数字在"日期时间列"里没有意义，别乱猜
+    text = str(value).strip()
+    if not text:
+        return None
+    if text[-1] in "Zz":
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _time_values(series) -> tuple[np.ndarray | None, str, str]:
+    """时间列 -> ``(相对秒, 起点时刻的文本, 说明)``。
+
+    三种写法都认：**相对秒**（数字）、**Excel 日期单元格**、**ISO 文本**。后两种
+    按"第一行是起点"折算成相对秒，起点本身留给场次的日期/时间用。
+    """
+    numbers = _floats(series)
+    if numbers is not None:
+        return numbers, "", ""
+    stamps = [_stamp(value) for value in series.to_numpy(dtype=object)]
+    known = [s for s in stamps if s is not None]
+    if not known:
+        return None, "", ""
+    origin = known[0]
+    seconds = np.full(len(stamps), np.nan, dtype=np.float64)
+    for i, stamp in enumerate(stamps):
+        if stamp is None:
+            continue
+        try:
+            seconds[i] = (stamp - origin).total_seconds()
+        except TypeError as exc:      # 一个带时区一个不带：说出来，别猜
+            raise ValueError(
+                f"时间列里有的时刻带时区、有的不带（{exc}）。"
+                "下一步：在 Excel 里把这一列的格式统一，或先另存为 CSV 再导入。"
+            ) from exc
+    return seconds, origin.isoformat(sep=" "), "日期时间列"
+
+
+def session_from_frame(
+    path: str | Path,
+    rows: list[list[str]],
+    frame,
+    *,
+    renames: dict[str, str] | None = None,
+    units: dict[str, str] | None = None,
+    fmt: str = "csv",
+    sheet: str = "",
+) -> CsvSession:
+    """把"表头那几行 + 一张数据表"装配成一个场次（ticket #31）。
+
+    CSV 与 Excel 两条读取器共用这一份：表头在哪一行、有没有单位行、哪一列是时间、
+    列名走原名/别名还是手工覆盖、报告怎么写——都只在这里回答一次。``frame`` 是
+    **已经跳过表头**的数据表，单元格可以是数字、文本、日期（Excel）或数字（CSV）。
+    """
+    path = Path(path)
+    renames, units = merged_maps(path, renames, units)
+    head = _header_index(rows)
+    raw_names = [str(c).strip() for c in rows[head]]
+    pairs = [split_unit(raw) for raw in raw_names]
+    names = [name for name, _unit in pairs]
+    named_units = [unit for _name, unit in pairs]
+    unit_row = rows[head + 1] if head + 1 < len(rows) else []
+    has_unit_row = bool(unit_row) and not any(
+        _looks_numeric(c) for c in unit_row if c != ""
     )
-    frame = frame.dropna(axis=1, how="all")
-    if frame.empty:
-        raise ValueError(f"{path.name}: 表头之后没有数值行")
+    canonical = {_normalise(n): n for n in canonical_names()}
+    resolve = _resolver(renames, canonical)
 
-    time = frame.iloc[:, time_index].to_numpy(dtype=np.float64)
+    time_index = time_index_of(names, resolve, path.name)
+    if time_index >= frame.shape[1]:
+        raise ValueError(f"{path.name}: 表头写了时间列，数据里却没有这一列")
+    time, time_origin, time_note = _time_values(frame.iloc[:, time_index])
+    if time is None:
+        raise ValueError(
+            f"{path.name}: 时间列（{names[time_index]}）里没有可用的时刻。"
+            "这一列要么是相对秒（数字），要么是日期/时间（Excel 单元格或 ISO 文本）；"
+            '如果时间在别的列，用 --map "原始列=Time" 指定。'
+        )
     good = np.isfinite(time)
     time = time[good]
     if time.size < 2:
-        raise ValueError(f"{path.name}: 时间列没有足够的数值")
+        raise ValueError(
+            f"{path.name}: 时间列只有 {time.size} 个可用时刻，至少要有 2 个才能算采样率。"
+            "下一步：补上时间列，或换一份导出（导出时勾上时间轴）。"
+        )
     steps = np.diff(time)
     steps = steps[steps > 0]
     rate = float(1.0 / np.median(steps)) if steps.size else 0.0
     if not math.isfinite(rate) or rate <= 0:
-        raise ValueError(f"{path.name}: 时间列不是单调递增")
+        raise ValueError(
+            f"{path.name}: 时间列不是单调递增。"
+            "下一步：确认这一列真的是时间（不是行号或倒序的时间戳）。"
+        )
 
     # The other two matching signals: the metadata block's declared sample rate,
     # and the unit each canonical channel normally carries.
@@ -362,17 +542,24 @@ def read_csv_session(
     for i, raw_name in enumerate(names):
         key = _normalise(raw_name)
         if i >= frame.shape[1]:
-            report.append({"column": raw_name, "status": "缺列",
+            report.append({"column": raw_names[i], "status": "缺列",
                            "detail": "表头列数多于数据列数"})
             continue
-        values = frame.iloc[:, i].to_numpy(dtype=np.float64)[good]
         if i == time_index:
-            report.append({"column": raw_name, "status": "时间轴", "name": "Time",
+            report.append({"column": raw_names[i], "status": "时间轴", "name": "Time",
                            "matched_by": "时间列", "unit": "s", "rate": rate,
-                           "samples": int(values.size)})
+                           "samples": int(time.size),
+                           **({"detail": time_note, "origin": time_origin}
+                              if time_note else {})})
             continue
+        values = _floats(frame.iloc[:, i])
+        if values is None:
+            report.append({"column": raw_names[i], "status": "跳过（非数值列）",
+                           "detail": "这一列有非数字的格子"})
+            continue
+        values = values[good]
         if values.size and not np.isfinite(values).any():
-            report.append({"column": raw_name, "status": "跳过（非数值列）",
+            report.append({"column": raw_names[i], "status": "跳过（非数值列）",
                            "detail": "整列没有可用数值"})
             continue
 
@@ -391,6 +578,8 @@ def read_csv_session(
         unit = units.get(key, "")
         if not unit and has_unit_row and i < len(unit_row):
             unit = str(unit_row[i]).strip()
+        if not unit:
+            unit = named_units[i]              # 列名里自带的「[单位]」
         expected = CANONICAL_UNITS.get(name)
         warning = ""
         if expected and not unit and matched_by in ("原名", "别名", "手工指定"):
@@ -406,20 +595,27 @@ def read_csv_session(
             channel_id=i, index=len(channels),
         ))
         columns[name] = values
-        report.append({"column": raw_name, "status": "通道", "name": name,
+        report.append({"column": raw_names[i], "status": "通道", "name": name,
                        "matched_by": matched_by, "unit": unit, "rate": rate,
                        "rate_from": rate_from, "warning": warning,
                        "samples": int(values.size)})
 
     if not channels:
         raise ValueError(f"{path.name}: 没有可用的通道列")
+    if not meta.get("Log Date") and time_origin:
+        meta.setdefault("Log Date", time_origin[:10])
+        meta.setdefault("Log Time", time_origin[11:19])
     return CsvSession(
         path=path, channels=channels, columns=columns, time=time,
         sample_rate=rate, duration=float(time[-1] - time[0]),
-        header={"rate_from": rate_from, "metadata": meta},
-        device=meta.get("Device", "CSV"), log_date=meta.get("Log Date", ""),
+        header={"rate_from": rate_from, "metadata": meta,
+                **({"time_origin": time_origin} if time_origin else {}),
+                **({"sheet": sheet} if sheet else {})},
+        device=meta.get("Device") or ("Excel" if fmt == "xlsx" else "CSV"),
+        log_date=meta.get("Log Date", ""),
         log_time=meta.get("Log Time", ""),
         event_name=meta.get("Event") or path.stem, report=report,
+        fmt=fmt, sheet=sheet,
     )
 
 
@@ -429,6 +625,9 @@ def open_session(path: str | Path, **kwargs):
     ``.csv`` 有两种完全不同的东西：i2 Pro / 别的工具导出的**通道表**，和 CAN 记录仪
     写出来的**原始帧表**。它们都叫 ``.csv``，但列名和读法毫无共同之处，所以这里按
     表头特征先分一次流（ticket #38）；认不出是帧表就还是走通道表那条路。
+
+    ``.xlsx`` 走 Excel 那条路（ticket #31）：读法不同（zip 里的 OOXML、日期单元格、
+    共享字符串），但**装配成一个场次**那一步是同一份代码（``session_from_frame``）。
     """
     path = Path(path)
     if path.suffix.lower() == ".csv":
@@ -441,6 +640,10 @@ def open_session(path: str | Path, **kwargs):
         if canlog.looks_like_frames(path):
             return canlog.read_can_session(path, **_accepted_by(canlog.read_can_session, kwargs))
         return read_csv_session(path, **_accepted_by(read_csv_session, kwargs))
+    if path.suffix.lower() == ".xlsx":
+        from . import xlslog
+
+        return xlslog.read_xlsx_session(path, **_accepted_by(xlslog.read_xlsx_session, kwargs))
     return ldmod.LogFile.read(path)
 
 

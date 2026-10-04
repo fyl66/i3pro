@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import io
 import math
 import shutil
 import tempfile
@@ -28,6 +29,7 @@ import numpy as np
 from . import (
     axes as axesmod,
     beacons as beaconsmod,
+    csvlog,
     derive,
     export as exportmod,
     gpsfix,
@@ -42,7 +44,6 @@ from . import (
     spectrum as spectrummod,
     timebase,
 )
-from . import ld as ldmod
 from .library import dumps
 
 __all__ = ["Api", "Body", "Response", "csv_arg", "float_arg", "int_arg", "filter_arg"]
@@ -97,6 +98,27 @@ class Body:
         if self._data is None:
             self._data = self._reader(self.length) if (self._reader and self.length) else b""
         return self._data
+
+    def stream(self):
+        """一个 ``read(n)`` 的流，交给 ``importer.store_stream``。
+
+        上传是一份可能上百 MB 的日志，**不能**先整份读进内存再落盘——这条路径按块读。
+        """
+        if self._data is not None:
+            return io.BytesIO(self._data)
+        reader, left = self._reader, self.length
+
+        class _BodyReader:
+            def read(self, size: int = -1) -> bytes:
+                nonlocal left
+                if left <= 0 or reader is None:
+                    return b""
+                want = left if size is None or size < 0 else min(size, left)
+                chunk = reader(want)
+                left -= len(chunk)
+                return chunk
+
+        return _BodyReader()
 
 
 #: 导出用的临时目录前缀。服务每次启动会把**过时的**这类目录扫掉：上一次服务被强杀时
@@ -908,11 +930,16 @@ class _Call:
         )
 
     def upload(self, query: dict, method: str) -> None:
-        """PUT /api/upload?name=<file.ld> with the raw bytes as the body.
+        """PUT /api/upload?name=<文件名> with the raw bytes as the body.
 
         Raw body instead of multipart keeps this dependency-free (no
         ``cgi``/``email`` parsing to get wrong) and lets the browser stream
         a 100 MB log straight from the file picker.
+
+        ``#26`` 把请求闭包拆成这一层时，这里还在用闭包里的 ``self.rfile``——那个名字
+        在这一层不存在，于是**浏览器上传从此 500**（命令行的 ``i3pro import`` 不受
+        影响，所以一直没人发现）。请求体现在挂在 ``Body`` 上，用它的 ``stream()``：
+        按块读，不整份进内存。
         """
         if method not in ("PUT", "POST"):
                 return self._error(405, "上传请用 PUT")
@@ -932,7 +959,9 @@ class _Call:
                 413, f"文件太大: {length / 1e6:.0f} MB > {MAX_UPLOAD_BYTES / 1e6:.0f} MB"
             )
         try:
-            info = importer.store_stream(self.library.upload_dir(), clean, self.rfile, length)
+            info = importer.store_stream(
+                self.library.upload_dir(), clean, self.body_source.stream(), length
+            )
         except ValueError as exc:
                 return self._error(400, str(exc))
         except OSError as exc:
@@ -940,9 +969,13 @@ class _Call:
 
         summary: dict = {"ok": True, **info}
         target = Path(info["path"])
-        if clean.lower().endswith(".ld"):
+        # 四种场次文件（.ld / .csv / 原始 CAN 帧表 / .xlsx）都在这里给一句概览，
+        # 不是只认 .ld——导入一个 Excel 却听不到"读成了什么"，用户只能自己去猜。
+        if target.suffix.lower() in (".ld", ".csv", ".xlsx"):
             try:
-                with ldmod.LogFile.read(target) as log:
+                with csvlog.open_session(
+                    target, dbc_dir=[self.library.upload_dir() / "dbc"]
+                ) as log:
                     meta = log.metadata()
                     tokens = render.detect(log)
                 summary.update(

@@ -233,13 +233,13 @@ _IMPORT_BLOCK = """
 <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;
             background:#171a21;border:1px solid #2b313c;border-radius:8px;
             padding:10px 12px;margin:0 0 14px">
-  <input id="files" type="file" multiple accept=".ld,.ldx" style="display:none">
+  <input id="files" type="file" multiple accept=".ld,.ldx,.csv,.xlsx" style="display:none">
   <button id="pickBtn" style="background:#1d3b52;border:1px solid #4cc2ff;color:#e6e9ef;
           border-radius:6px;padding:6px 12px;cursor:pointer;font-size:13px">
-    选择 .ld 文件导入
+    选择日志文件导入
   </button>
   <span style="color:#8b94a7;font-size:12px">
-    或者把文件直接拖进这个窗口 · 也可以把 .ld 拖到 <code>导入数据.bat</code> 上
+    .ld / .ldx / .csv / .xlsx · 或者把文件直接拖进这个窗口 · 也可以拖到 <code>导入数据.bat</code> 上
   </span>
   <span id="importMsg" style="color:#4cc2ff;font-size:12px;margin-left:auto"></span>
 </div>
@@ -341,7 +341,7 @@ def index_page(library: SessionLibrary, error: str | None = None) -> str:
 {_IMPORT_BLOCK}
 <table>
  <tr><th>场次</th><th>设备</th><th>日期</th><th>时长</th><th>通道</th><th>完整圈</th><th>最快圈</th></tr>
- {''.join(rows) or '<tr><td colspan="7">没有找到 .ld 文件</td></tr>'}
+ {''.join(rows) or '<tr><td colspan="7">没有找到场次文件（.ld / .csv / .xlsx）</td></tr>'}
 </table>
 </main>
 """

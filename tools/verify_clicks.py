@@ -1567,6 +1567,73 @@ class Checker:
                    "撤销前 %s -> 撤销后 %s" % (names, after_undo))
         self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-undo.png"), self.session)
 
+    def imports(self, base_url, work_dir):
+        """#31：Excel 导入这一关只在这里能验。
+
+        `smoke_viewer.js` 跑在一份**快照 HTML** 上，够不到本地服务现生成的导入页；
+        而"点文件选择器 → 上传 → 列表里多出一个场次"整条都是"点了才出现"的状态，
+        正是这道回归存在的理由。递进去的是**真 File 对象**（走页面自己的 change 事件），
+        不是直接改 input.value。
+        """
+        sys.path.insert(0, os.path.join(ROOT, "src"))
+        from i3pro import xlsx as xlsxmod
+
+        name = "验证用Excel"
+        # 先写在场外：直接写进 work_dir 的话，打开导入页时它已经在列表里了，
+        # "上传之后才出现"这条断言就成了空跑（第一次跑就是这么红的）。
+        staging = tempfile.TemporaryDirectory(prefix="i3pro-verify-import-")
+        sample = os.path.join(staging.name, name + ".xlsx")
+        xlsxmod.write_workbook(sample, [{
+            "name": "数据", "header": ["time_s", "Vx KF [km/h]", "TH"],
+            "rows": [[i / 100.0, i * 0.5, i * 2.0] for i in range(200)],
+            "split": False,
+        }])
+        with open(sample, "rb") as handle:
+            blob = base64.b64encode(handle.read()).decode("ascii")
+        staging.cleanup()
+
+        page = self.browser.open(base_url, wait=0.8)
+        accept = self.browser.js("(document.getElementById('files')||{}).accept||''", page)
+        self.check("#31 导入页的文件选择器收得到 .xlsx", ".xlsx" in (accept or ""), accept)
+        # 判据看的是**表格里的链接**，不是页面上有没有这几个字：上传进度那行也会写
+        # 文件名，拿它当判据就等于没验（第一次跑就是这么假通过的）。
+        listed = ("Array.prototype.some.call(document.querySelectorAll('a'),"
+                  "function(a){return decodeURIComponent(a.getAttribute('href')||'')"
+                  ".indexOf(%r)>=0;})" % name)
+        before = self.browser.js(listed, page)
+        self.check("#31 导入前列表里没有这份 Excel", not before)
+
+        self.browser.js(
+            "(function(){var b=atob('%s'),a=new Uint8Array(b.length);"
+            "for(var i=0;i<b.length;i++)a[i]=b.charCodeAt(i);"
+            "var f=new File([a],'%s.xlsx',{type:'application/vnd.openxmlformats-"
+            "officedocument.spreadsheetml.sheet'});"
+            "var d=new DataTransfer();d.items.add(f);"
+            "var el=document.getElementById('files');el.files=d.files;"
+            "el.dispatchEvent(new Event('change'));return true;})()" % (blob, name),
+            page)
+        appeared = self.browser.wait_for(listed, page, timeout=25)
+        self.check("#31 用页面自己的文件选择器上传后，场次列表里出现了它", appeared)
+        self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-import.png"), page)
+
+        view = self.browser.open(
+            base_url + "session/" + urllib.parse.quote(name), wait=1.2)
+        ready = self.browser.wait_for(
+            "!!(window.i3pro && i3pro.data && i3pro.data.channels"
+            " && i3pro.data.channels.length)", view)
+        self.check("#31 这份 Excel 场次能当工作台打开", ready)
+        if ready:
+            names = json.loads(self.browser.js(
+                "JSON.stringify((i3pro.data.channels||[]).map(function(c){return c.name;}))",
+                view))
+            self.check("#31 列名里的 [单位] 拆回成了通道名 + 单位",
+                       "Vx KF" in names and "TH" in names, names)
+            speed = json.loads(self.browser.js(
+                "JSON.stringify(i3pro.data.channels.filter(function(c){"
+                "return c.name==='Vx KF';})[0]||{})", view))
+            self.check("#31 单位跟着列名一起读回来了", speed.get("unit") == "km/h", speed)
+            self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-import-view.png"),
+                              view)
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="真浏览器交互验收（需要 Edge + 金标准数据）")
@@ -1634,6 +1701,7 @@ def main(argv=None):
             checker.worksheets()
             checker.notes(work_dir, args.session)
             checker.gps(work_dir, args.session)
+            checker.imports("http://127.0.0.1:%d/" % args.port, work_dir)
             errors = browser.page_errors()
             checker.check("整场没有页面级报错", not errors, errors[:3])
         bad = [name for name, ok in checker.results if not ok]

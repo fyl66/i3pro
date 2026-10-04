@@ -22,6 +22,7 @@ from __future__ import annotations
 import math
 import csv
 from dataclasses import dataclass, field
+import inspect
 from pathlib import Path
 
 import numpy as np
@@ -433,11 +434,17 @@ def open_session(path: str | Path, **kwargs):
     if path.suffix.lower() == ".csv":
         from . import canlog
 
+        # 调用方（场次库）把**同一份** kwargs 递给两个读取器：`dbc_dir` 这类只有帧表
+        # 读取器认识。两条路都按各自签名过滤，而不是给其中一条写死白名单——写死白名单
+        # 的那版把 `dbc_dir` 也转给了通道表读取器，于是**每个 CSV 场次的请求都 500**
+        # （真发生过：ticket #38 那次回归，靠恢复金标准数据才暴露出来）。
         if canlog.looks_like_frames(path):
-            allowed = {"dbc_dir", "rate", "merge", "roles", "dbc_file", "write_sidecar",
-                       "use_sidecar"}
-            return canlog.read_can_session(
-                path, **{k: v for k, v in kwargs.items() if k in allowed}
-            )
-        return read_csv_session(path, **kwargs)
+            return canlog.read_can_session(path, **_accepted_by(canlog.read_can_session, kwargs))
+        return read_csv_session(path, **_accepted_by(read_csv_session, kwargs))
     return ldmod.LogFile.read(path)
+
+
+def _accepted_by(func, kwargs: dict) -> dict:
+    """只把 ``func`` 签名里确实有的参数交给它（多出来的属于另一个读取器）。"""
+    allowed = set(inspect.signature(func).parameters)
+    return {key: value for key, value in kwargs.items() if key in allowed}

@@ -422,9 +422,13 @@ def _scan(paths: list[Path], roles: dict[str, str], wanted: set[int], offset: fl
                 if format_at is not None and "扩展" in cells[format_at]:
                     extended_ids.add(frame_id)
                 body = cells[data_at]
+                # 每条 ID 都留一个样例字节：报告里"未解码"的行也要能看见长什么样，
+                # 否则读者分不清"这条没人定义"和"这条定义了但这次没解"（真发生过：
+                # 只给 `wanted` 之外的 ID 存样例，于是别的 DBC 里定义、这次没解的
+                # 那几条在报告里是空白的）。
+                if frame_id not in samples:
+                    samples[frame_id] = _sample_bytes(body)
                 if frame_id not in wanted:
-                    if frame_id not in samples:
-                        samples[frame_id] = _sample_bytes(body)
                     continue
                 try:
                     moment = float(cells[time_at])

@@ -7872,10 +7872,14 @@ function init() {
   }
   initHeader();
   restoreWorksheet();
+  // 恢复出来的那一屏可能来自 URL / 布局记忆（不是某一份工作表文件），但**当前
+  // 用哪一套**是知道的：别名表与落点按它读一次，左边那一栏才不会空着（#36）。
+  loadSheetAliases();
   readHashState();
   buildWorksheet();
   renderLapTable();
   renderChannelList();
+  renderAliasList();
   syncScatterSelectors();
   renderPresetButtons();
   wireSheetManage();

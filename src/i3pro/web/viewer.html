@@ -220,6 +220,22 @@
      下面是可以展开的编辑器。作用域角标是这里唯一需要一眼看出的东西：
      "这条规则到底是只影响本场，还是会影响以后每一场"。 */
   .mdefs { display:flex; flex-direction:column; gap:3px; margin-top:4px; }
+  /* 通道别名（ticket #36）：一条一行，候选是一排小片，后面跟 ↑↓✕。 */
+  .alist { display:flex; flex-direction:column; gap:4px; margin-top:5px; }
+  .alias { border:1px solid var(--line); border-radius:6px; padding:4px 6px; }
+  .alias .ahead { display:flex; align-items:baseline; gap:6px; }
+  .alias .aname { color:var(--fg); font-weight:600; }
+  .alias .aland { color:var(--muted); font-size:11px; margin-left:auto; }
+  .alias .aland.hit { color:var(--good); }
+  .alias .aland.miss { color:#c9a227; }
+  .alias .acands { display:flex; flex-wrap:wrap; gap:3px; margin-top:3px; }
+  .alias .cand { display:inline-flex; align-items:center; gap:2px; font-size:11px;
+                 background:var(--panel); border:1px solid var(--line);
+                 border-radius:4px; padding:0 3px; }
+  .alias .cand .cn { color:var(--fg); }
+  .alias .cand a { color:var(--muted); cursor:pointer; text-decoration:none; }
+  .alias .cand a:hover { color:var(--accent); }
+  .alias .aacts { margin-left:auto; }
   .mdef { display:flex; align-items:baseline; gap:6px; padding:3px 5px; border-radius:4px;
           background:rgba(15,17,21,.58); cursor:pointer; }
   .mdef .mname { color:var(--fg); font-weight:600; }
@@ -422,6 +438,24 @@
         <button id="chVisible">只留可见</button>
       </div>
       <div id="channelList"></div>
+    </div>
+    <!-- 通道别名（ticket #36）：同一套工作表换到别的场次还能用的机制。
+         一条别名 = 有序候选，取第一条在本场次存在的；结果随工作表存。 -->
+    <div class="group" id="aliasGroup">
+      <h2>通道别名 <span class="count" id="aliasCount"></span></h2>
+      <div class="hint">一条别名 = 一列候选通道名，取<b>第一条本场次有的</b>。
+        工作表里写 <code>@车速</code> 就会落到它身上；换台车、换份数据，这张图还在。</div>
+      <div class="alist" id="aliasList"></div>
+      <div class="row">
+        <select id="aliasTarget" title="给哪条别名加候选"></select>
+        <input id="aliasCandidate" type="text" spellcheck="false" placeholder="通道名">
+        <button id="aliasAddCandidate" title="把这条通道加到候选末尾">＋ 候选</button>
+      </div>
+      <div class="row">
+        <input id="aliasNewName" type="text" spellcheck="false" placeholder="新别名，例如 车速">
+        <button id="aliasAddAlias" title="新建一条别名">＋ 别名</button>
+      </div>
+      <div class="hint" id="aliasNote"></div>
     </div>
     <div class="group" id="mathsGroup">
       <h2>数学通道 <span class="count" id="mathsCount"></span></h2>
@@ -1483,10 +1517,44 @@ function componentsOfWorksheet(sheet) {
       x: raw.x, y: raw.y, w: raw.w, h: raw.h, config: raw.config,
     });
     applyPicks(comp, raw.pick, sheet.hints || []);
+    applyAliases(comp, sheet.alias_landing || {});
     // 文件里"怎么挑通道"那条规则跟着组件走，保存时原样写回去（ticket #33）。
     if (raw.pick) comp.pick = JSON.parse(JSON.stringify(raw.pick));
     return comp;
   });
+}
+
+/**
+ * 通道槽里的 `@车速` → 本场次真的通道名（ticket #36）。
+ *
+ * 落不到就**留着那条引用**：ticket #34 的三态会把 `@车速` 判成缺失，通道列表里
+ * 灰着写"本场次没有"——一套判定，不另造一套"别名失败了"的说法。
+ *
+ * `aliasSource` / `aliasResolved` 记下"这一格原来是引用、替换成了什么"：保存时
+ * 只要用户没改过这一格，就把**引用**写回文件（写回真通道名的话，这套工作表
+ * 换到别的场次就又空了）；用户真改过，就按他写的存。
+ */
+function applyAliases(comp, landing) {
+  // 第二次跑（保存之后落点变了）要从**原始引用**重新替换，不能从已经替换过的
+  // 值上再替一次——那时引用已经没了。
+  const source = comp.aliasSource || null;
+  const keys = source ? Object.keys(source) : ALIAS_SLOTS;
+  for (const key of keys) {
+    const value = source ? source[key] : (comp.config ? comp.config[key] : undefined);
+    if (value === undefined || value === null) continue;
+    const list = Array.isArray(value) ? value : [value];
+    let touched = false;
+    const out = list.map((one) => {
+      if (!isAliasReference(one)) return one;
+      touched = true;
+      const hit = landing[one];
+      return hit === undefined || hit === null ? one : hit;
+    });
+    if (!touched) continue;
+    comp.config[key] = Array.isArray(value) ? out : out[0];
+    (comp.aliasSource || (comp.aliasSource = {}))[key] = value;
+    (comp.aliasResolved || (comp.aliasResolved = {}))[key] = comp.config[key];
+  }
 }
 
 /** 名字 -> 组件。每次调用都现造一批（和以前一样，id 由 makeComponent 发）。 */
@@ -1584,6 +1652,12 @@ const state = {
   components: [],
   //: 当前工作表的名字；由 restoreWorksheet() 按布局记忆/工作表文件定下来。
   preset: "",
+  //: 当前工作表的通道别名（ticket #36）与"这一场它们落到了哪条通道"。
+  //: `aliases` 是**可编辑的工作副本**（点保存才写回文件）；`aliasLanding` 是
+  //: 服务端算好的落点表（`aliases.annotate`），前端只查表、不重写规则。
+  aliases: [],
+  aliasLanding: {},
+  aliasesDirty: false,
   focusId: null,
   traces: Object.assign({}, (DATA && DATA.traces) || {}),
   overview: (DATA && DATA.overview) || null,
@@ -1729,9 +1803,38 @@ function allGraphChannels() {
  * 前端不自己扫数据。
  */
 function channelState(name) {
+  // 通道槽里写的是一条**别名引用**（`@车速`）时，判据是"它这一场落到了哪条通道"。
+  // 落地表由服务端算好（`aliases.annotate`），前端只查表——规则只有一处实现。
+  if (isAliasReference(name)) {
+    const hit = aliasLanding(name);
+    if (!hit) return "missing";
+    const ch = CHANNELS.get(hit);
+    if (!ch) return "missing";
+    return ch.has_data === false ? "empty" : "present";
+  }
   const ch = CHANNELS.get(name);
   if (!ch) return "missing";
   return ch.has_data === false ? "empty" : "present";
+}
+
+/** 通道别名（ticket #36）：`@车速` 这种写法。 */
+const ALIAS_PREFIX = "@";
+//: 组件配置里**可以放通道名**的那几个槽。别名替换只在这几个键上做——
+//: 全部字符串都替的话，一条数学表达式里的 `@` 也会被当成别名。
+const ALIAS_SLOTS = ["channels", "channel", "x", "y", "colour", "against"];
+
+function isAliasReference(value) {
+  return typeof value === "string"
+    && value.charAt(0) === ALIAS_PREFIX && value.length > 1;
+}
+
+function aliasName(value) { return isAliasReference(value) ? value.slice(1) : ""; }
+
+/** `@车速` → 本场次落到的通道名；没落地给 null。表来自当前工作表的载荷。 */
+function aliasLanding(reference) {
+  const table = state.aliasLanding || {};
+  const hit = table[reference];
+  return hit === undefined ? null : hit;
 }
 
 function isMissingChannel(name) { return channelState(name) === "missing"; }
@@ -3064,6 +3167,162 @@ function openDisplayMenu(comp, anchor) {
     const hint = makeEl("div", "pophint", menu);
     hint.textContent = "这几项跟着工作表存/还原；全局的「L 图例」「M 测量」仍然管所有组件。";
   });
+}
+
+/* ------------------------------------------ 通道别名（ticket #36）
+ * 左边那一栏是 i2 Pro 的 Channel Status 等价物：每条别名**这一场**落到了哪条
+ * 通道、哪一条一个都没落地，一眼看得见。编辑（增删候选 / 调顺序 / 增删别名）
+ * 改的是 `state.aliases` 这份工作副本，点「保存」才写进工作表文件。
+ *
+ * 落点不由前端算：它随工作表载荷从服务端来（`aliases.annotate`）。改过之后
+ * 先标"待保存"，保存回来那份目录带着新的落点——判定仍然只有一处实现。
+ */
+function aliasDirty() { state.aliasesDirty = true; renderAliasList(); }
+
+function aliasAddAlias(rawName) {
+  const name = String(rawName || "").trim();
+  if (!name) { toast("别名的名字不能是空的：写一个名字，例如 车速"); return; }
+  if (name.indexOf("@") === 0) { toast("名字不要以 @ 开头；写 @ 的是引用它的地方"); return; }
+  if ((state.aliases || []).some((one) => one.name === name)) {
+    toast("已经有一条叫「" + name + "」的别名了；给它加候选就行。");
+    return;
+  }
+  state.aliases = (state.aliases || []).concat([{ name: name, candidates: [] }]);
+  aliasDirty();
+  toast("加了别名「" + name + "」。给它加候选通道，然后在工作表里写 @" + name + "。");
+}
+
+function aliasRemoveAlias(name) {
+  state.aliases = (state.aliases || []).filter((one) => one.name !== name);
+  aliasDirty();
+}
+
+function aliasAddCandidate(name, channel) {
+  const text = String(channel || "").trim();
+  if (!text) { toast("候选通道名不能是空的：从左边通道列表里抄一条，或直接打名字。"); return; }
+  if (text.charAt(0) === "@") { toast("候选只能写真通道名，不能再写别名引用。"); return; }
+  const entry = (state.aliases || []).filter((one) => one.name === name)[0];
+  if (!entry) return;
+  if (entry.candidates.indexOf(text) >= 0) {
+    toast("「" + name + "」的候选里已经有 " + text + " 了。");
+    return;
+  }
+  entry.candidates.push(text);
+  aliasDirty();
+}
+
+function aliasRemoveCandidate(name, index) {
+  const entry = (state.aliases || []).filter((one) => one.name === name)[0];
+  if (!entry) return;
+  entry.candidates.splice(index, 1);
+  aliasDirty();
+}
+
+/** 候选的顺序就是优先级：往前挪一条 = 优先用它。 */
+function aliasMoveCandidate(name, index, delta) {
+  const entry = (state.aliases || []).filter((one) => one.name === name)[0];
+  if (!entry) return;
+  const to = index + delta;
+  if (to < 0 || to >= entry.candidates.length) return;
+  const moved = entry.candidates.splice(index, 1)[0];
+  entry.candidates.splice(to, 0, moved);
+  aliasDirty();
+}
+
+/** 这一场它落在哪：落点表里有就是它，没有（新加的、还没保存）就标"待保存"。 */
+function aliasLandingOf(entry) {
+  const table = state.aliasLanding || {};
+  const reference = "@" + entry.name;
+  if (Object.prototype.hasOwnProperty.call(table, reference)) return table[reference];
+  return undefined;
+}
+
+function renderAliasList() {
+  const host = $("aliasList");
+  if (!host) return;
+  const aliases = state.aliases || [];
+  host.innerHTML = "";
+  $("aliasCount").textContent = aliases.length ? aliases.length + " 条" : "";
+  if (!aliases.length) {
+    const hint = makeEl("p", "hint", host);
+    hint.textContent = "还没有别名。举个例子：给「车速」配候选 "
+      + "Ground Speed、GPS Speed、Vx KF，工作表里就能写 @车速，"
+      + "换一份数据也还画得出来。";
+  }
+  for (const entry of aliases) {
+    const box = makeEl("div", "alias", host);
+    const head = makeEl("div", "ahead", box);
+    makeEl("span", "aname", head).textContent = entry.name;
+    const land = makeEl("span", "aland", head);
+    const hit = aliasLandingOf(entry);
+    if (hit === undefined) {
+      land.textContent = "改过了 · 保存后重新判定";
+    } else if (hit) {
+      land.className = "aland hit";
+      land.textContent = "→ " + hit;
+    } else {
+      land.className = "aland miss";
+      land.textContent = "本场次一条都没落地";
+    }
+    const acts = makeEl("span", "aacts", head);
+    const del = makeEl("a", "", acts);
+    del.textContent = "✕";
+    del.title = "删掉这条别名";
+    del.href = "#";
+    del.addEventListener("click", (event) => {
+      if (event && event.preventDefault) event.preventDefault();
+      aliasRemoveAlias(entry.name);
+    });
+    const cands = makeEl("div", "acands", box);
+    if (!entry.candidates.length) {
+      const none = makeEl("span", "hint", cands);
+      none.textContent = "还没有候选：下面「＋ 候选」加一条通道名。";
+    }
+    entry.candidates.forEach((candidate, index) => {
+      const chip = makeEl("span", "cand", cands);
+      if (hit && hit === candidate) chip.title = "这一场落到的就是它";
+      makeEl("span", "cn", chip).textContent = candidate;
+      const up = makeEl("a", "", chip);
+      up.textContent = "↑";
+      up.title = "往前挪一位（候选顺序就是优先级）";
+      up.href = "#";
+      up.addEventListener("click", (event) => {
+        if (event && event.preventDefault) event.preventDefault();
+        aliasMoveCandidate(entry.name, index, -1);
+      });
+      const down = makeEl("a", "", chip);
+      down.textContent = "↓";
+      down.title = "往后挪一位";
+      down.href = "#";
+      down.addEventListener("click", (event) => {
+        if (event && event.preventDefault) event.preventDefault();
+        aliasMoveCandidate(entry.name, index, 1);
+      });
+      const cut = makeEl("a", "", chip);
+      cut.textContent = "✕";
+      cut.title = "去掉这条候选";
+      cut.href = "#";
+      cut.addEventListener("click", (event) => {
+        if (event && event.preventDefault) event.preventDefault();
+        aliasRemoveCandidate(entry.name, index);
+      });
+    });
+  }
+  const target = $("aliasTarget");
+  if (target) {
+    const keep = target.value;
+    target.innerHTML = aliases.map((one) => '<option value="' + esc(one.name) + '">'
+      + esc(one.name) + "</option>").join("");
+    target.value = aliases.some((one) => one.name === keep)
+      ? keep : (aliases[0] ? aliases[0].name : "");
+    target.disabled = !aliases.length;
+  }
+  const add = $("aliasAddCandidate");
+  if (add) add.disabled = !aliases.length;
+  $("aliasNote").textContent = state.aliasesDirty
+    ? "改过了：点上面那排「保存」写进工作表文件，落点会重新判定。"
+    : "";
+  $("aliasNote").className = state.aliasesDirty ? "hint warn" : "hint";
 }
 
 function renderOverview() {
@@ -7119,6 +7378,7 @@ function applyPreset(name) {
   if (!presets[name]) return;
   state.components = copyComponents(presets[name]);
   state.preset = name;
+  loadSheetAliases();
   state.focusId = null;
   state.view = null;
   state.panelZoom = {};
@@ -7127,8 +7387,26 @@ function applyPreset(name) {
   buildWorksheet();
   renderPresetButtons();
   renderChannelList();
+  renderAliasList();
   syncScatterSelectors();
   refreshWindowTraces(true).then(() => { refreshAllComponentData().then(renderAll); });
+  renderAll();
+}
+
+/** 当前工作表 → `state.aliases`（工作副本）与 `state.aliasLanding`（本场落点）。 */
+function loadSheetAliases() {
+  const sheet = currentSheet();
+  state.aliases = JSON.parse(JSON.stringify((sheet && sheet.aliases) || []));
+  state.aliasLanding = Object.assign({}, (sheet && sheet.alias_landing) || {});
+  state.aliasesDirty = false;
+}
+
+/** 别名改动写回文件之后：拿新的落点重新替换组件里的 `@引用`。 */
+function refreshAliasesFromCatalogue() {
+  loadSheetAliases();
+  for (const comp of state.components) applyAliases(comp, state.aliasLanding);
+  renderAliasList();
+  renderChannelList();
   renderAll();
 }
 
@@ -7169,6 +7447,16 @@ function sheetComponent(comp) {
     if (comp.config[key] === undefined || comp.config[key] === null) continue;
     config[key] = comp.config[key];
   }
+  // 别名驱动的通道槽（ticket #36）：用户没动过就写回**引用**（`@车速`），
+  // 动过就按他写的存——不然换场次就又空了。
+  const source = comp.aliasSource || {};
+  const resolved = comp.aliasResolved || {};
+  for (const key of Object.keys(source)) {
+    if (!(key in config)) continue;
+    if (JSON.stringify(config[key]) === JSON.stringify(resolved[key])) {
+      config[key] = JSON.parse(JSON.stringify(source[key]));
+    }
+  }
   const out = { type: comp.type };
   for (const key of ["x", "y", "w", "h"]) {
     if (typeof comp[key] === "number") out[key] = comp[key];
@@ -7182,12 +7470,19 @@ function currentSheetBody() {
   return state.components.map(sheetComponent);
 }
 
+/** 这一屏的别名表（随「保存」一起写进工作表文件）。 */
+function currentSheetAliases() {
+  return (state.aliases || []).map((one) => Object.assign({}, one));
+}
+
 /** 服务端回的那份目录快照 -> 页面状态。改动之后那排按钮要立刻跟着变。 */
 function applySheetState(data) {
   DATA.worksheets = data.worksheets || [];
   DATA.worksheet_problems = data.worksheet_problems || [];
   resetWorksheetCache();
   renderPresetButtons();
+  // 目录换了（新建 / 改名 / 删除 / 保存回来了），别名表与落点跟着重读一遍。
+  renderAliasList();
 }
 
 async function sheetRequest(path, method, body) {
@@ -7196,7 +7491,9 @@ async function sheetRequest(path, method, body) {
     options.headers = { "Content-Type": "application/json" };
     options.body = JSON.stringify(body);
   }
-  const res = await fetch(DATA.api + "/worksheets" + path, options);
+  // 带上场次：回给我们的那份目录要贴**这一场**的别名落点（ticket #36）。
+  const suffix = DATA.session ? "?session=" + encodeURIComponent(DATA.session) : "";
+  const res = await fetch(DATA.api + "/worksheets" + path + suffix, options);
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
   return data;
@@ -7236,11 +7533,13 @@ async function saveCurrentSheet() {
   }
   try {
     const data = await sheetRequest("/" + encodeURIComponent(sheet.id), "PUT",
-                                    { components: currentSheetBody() });
+                                    { components: currentSheetBody(),
+                                      aliases: currentSheetAliases() });
     applySheetState(data);
     state.preset = data.worksheet.name;
     saveLayout();
     renderPresetButtons();
+    refreshAliasesFromCatalogue();
     toast("已保存到 " + data.worksheet.id + ".json（" + data.worksheet.components.length + " 个组件）");
   } catch (err) {
     toast("保存工作表失败：" + err.message);
@@ -7251,7 +7550,8 @@ async function saveCurrentSheet() {
 async function saveSheetAs(name) {
   try {
     const data = await sheetRequest("", "POST",
-      { sheet: { name: name, components: currentSheetBody() } });
+      { sheet: { name: name, components: currentSheetBody(),
+                 aliases: currentSheetAliases() } });
     applySheetState(data);
     state.preset = data.worksheet.name;
     saveLayout();
@@ -7422,6 +7722,27 @@ function wireSheetManage() {
   $("wsAskInput").addEventListener("keydown", (event) => {
     if (event.key === "Enter") { event.preventDefault(); submitSheetAsk(); }
     if (event.key === "Escape") { event.preventDefault(); hideSheetAsk(); }
+  });
+  // 通道别名（ticket #36）：改名/删别名在列表里点，加别名/加候选在下面两行。
+  $("aliasAddAlias").addEventListener("click", () => {
+    aliasAddAlias($("aliasNewName").value);
+    $("aliasNewName").value = "";
+  });
+  $("aliasNewName").addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    aliasAddAlias($("aliasNewName").value);
+    $("aliasNewName").value = "";
+  });
+  $("aliasAddCandidate").addEventListener("click", () => {
+    aliasAddCandidate($("aliasTarget").value, $("aliasCandidate").value);
+    $("aliasCandidate").value = "";
+  });
+  $("aliasCandidate").addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    aliasAddCandidate($("aliasTarget").value, $("aliasCandidate").value);
+    $("aliasCandidate").value = "";
   });
 }
 
@@ -7759,6 +8080,13 @@ window.i3pro = {
   setChannelColor: setChannelColor, setComponentPalette: setComponentPalette,
   setHeadField: setHeadField, openColorMenu: openColorMenu,
   openDisplayMenu: openDisplayMenu, closePopMenu: closePopMenu,
+  isAliasReference: isAliasReference, aliasName: aliasName,
+  aliasLanding: aliasLanding, applyAliases: applyAliases,
+  aliasAddAlias: aliasAddAlias, aliasAddCandidate: aliasAddCandidate,
+  aliasRemoveAlias: aliasRemoveAlias, aliasRemoveCandidate: aliasRemoveCandidate,
+  aliasMoveCandidate: aliasMoveCandidate, renderAliasList: renderAliasList,
+  loadSheetAliases: loadSheetAliases, currentSheetAliases: currentSheetAliases,
+  refreshAliasesFromCatalogue: refreshAliasesFromCatalogue,
   encodeComponentConfig: encodeComponentConfig,
   buildWorksheet: buildWorksheet, syncScatterSelectors: syncScatterSelectors,
   apiUrl: apiUrl, apiGet: apiGet,

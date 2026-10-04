@@ -44,6 +44,7 @@ from i3pro import (  # noqa: E402
     canlog, channels, csvlog, dbc, derive, gpsfix, laps as lapsmod, ld, library as librarymod,
     maths as mathsmod, motec_csv,
     notes as notesmod, render, report as reportmod, sections as sectionsmod,
+    aliases as aliasesmod,
     palette as palettemod,
     server, sidecar, store, timebase,
     txtlog,
@@ -7818,6 +7819,224 @@ class TestChannelStates(unittest.TestCase):
         self.assertEqual(dead, [], f"这两条通道本该都是满的：{dead}")
         self.assertEqual(channels.state(log, "Vx KF"), channels.PRESENT)
         self.assertEqual(channels.state(log, "FSD13 Distance1"), channels.MISSING)
+
+
+class TestAliases(unittest.TestCase):
+    """通道别名（ticket #36）：同一套工作表换一份数据还能用。
+
+    真实场景就摆在这两份金标准上：**左后轮速在耐久那台车上叫 `SpeedRL`，
+    在高避那台车上没有这条通道**（只有 `Gear Speed1`）。写死哪一个名字都会让
+    另一场空着，这正是 i2 Pro 用 Channel Aliases 解决的问题。
+
+    规矩只有一条：**有序候选，取第一条在本场次存在的**。这条规则只写在
+    `aliases.landing` 一处——页面载荷把结果贴成一张表，前端查表。
+    """
+
+    #: 一条真实用得上、而且在两份金标准上落到**不同**通道的别名。
+    WHEEL = [{"name": "左后轮速", "candidates": ["SpeedRL", "Gear Speed1", "GPS Speed"]}]
+
+    def _open(self, path: Path):
+        if not path.exists():
+            self.skipTest(f"缺金标准数据 {path.name}")
+        log = ld.LogFile.read(path)
+        self.addCleanup(log.close)
+        return log
+
+    # ------------------------------------------------------------ 形状
+    def test_一条别名就是一列有序候选(self):
+        got = aliasesmod.normalise([{"name": "车速", "candidates": ["A", "B", "A"]}])
+        self.assertEqual(got, [{"name": "车速", "candidates": ["A", "B"]}],
+                         "重复的候选要去掉（留着不会改变结果，只会让人以为有两条）")
+
+    def test_坏形状各自说下一步(self):
+        cases = [
+            ("不是一列", {"name": "车速"}),
+            ("一条不是对象", ["车速"]),
+            ("没写名字", [{"candidates": ["A"]}]),
+            ("名字以 @ 开头", [{"name": "@车速", "candidates": ["A"]}]),
+            ("重名", [{"name": "车速", "candidates": ["A"]},
+                      {"name": "车速", "candidates": ["B"]}]),
+            ("没写 candidates", [{"name": "车速"}]),
+            ("候选里有空的", [{"name": "车速", "candidates": ["A", "  "]}]),
+            ("候选里又写别名", [{"name": "车速", "candidates": ["@别的"]}]),
+            ("认不出来的键", [{"name": "车速", "candidates": ["A"], "啥": 1}]),
+        ]
+        for label, value in cases:
+            with self.assertRaises(ValueError, msg=f"{label} 应该被拒"):
+                aliasesmod.normalise(value)
+
+    def test_没有别名这一段的文件读成空表(self):
+        self.assertEqual(aliasesmod.normalise(None), [])
+
+    def test_刚建好还没写候选的别名是合法的(self):
+        """界面上「＋ 别名」与「＋ 候选」是两个动作，中间那一瞬就是空的。"""
+        self.assertEqual(aliasesmod.normalise([{"name": "车速", "candidates": []}]),
+                         [{"name": "车速", "candidates": []}])
+        self.assertIsNone(aliasesmod.status(
+            [{"name": "车速", "candidates": []}], {"Vx KF"})[0]["channel"])
+
+    # ------------------------------------------------------------ 规则
+    def test_取第一条存在的(self):
+        present = {"B", "C"}
+        one = [{"name": "左后轮速", "candidates": ["A", "B", "C"]}]
+        self.assertEqual(aliasesmod.landing(one, "@左后轮速", present), "B",
+                         "A 不在，就该落到 B")
+        self.assertEqual(
+            aliasesmod.landing([{"name": "x", "candidates": ["A", "B"]}], "@x", {"B", "A"}),
+            "A", "顺序是用户排的，A 在前就该用 A")
+
+    def test_一条都不在就是没落地_不静默(self):
+        rows = aliasesmod.status(self.WHEEL, {"GPS Speed"})
+        self.assertEqual(rows[0]["channel"], "GPS Speed")
+        rows = aliasesmod.status(self.WHEEL, {"Vx KF"})
+        self.assertIsNone(rows[0]["channel"], "候选全不在要给 None，不能编一条出来")
+        self.assertEqual(rows[0]["candidates"], ["SpeedRL", "Gear Speed1", "GPS Speed"],
+                         "没落地时也要把候选原样带出去——界面要说清试过哪几条")
+
+    def test_不是引用就不是别名的事(self):
+        self.assertFalse(aliasesmod.is_reference("车速"))
+        self.assertFalse(aliasesmod.is_reference("@"))
+        self.assertFalse(aliasesmod.is_reference(None))
+        self.assertTrue(aliasesmod.is_reference(" @车速 "))
+        self.assertEqual(aliasesmod.name_of(" @车速 "), "车速")
+        self.assertIsNone(aliasesmod.landing(self.WHEEL, "车速", {"SpeedRL"}),
+                          "没带 @ 的当普通通道名，不去别名表里翻")
+        self.assertIsNone(aliasesmod.landing(self.WHEEL, "@没有这条别名", {"SpeedRL"}))
+
+    # ------------------------------------------- 真实场景：两份金标准
+    def test_同一套别名在两份金标准上都落地_而且落到不同的通道(self):
+        hill = {ch.name for ch in self._open(HILL).channels}
+        endurance = {ch.name for ch in self._open(ENDURANCE).channels}
+        hill_row = aliasesmod.status(self.WHEEL, hill)[0]
+        endurance_row = aliasesmod.status(self.WHEEL, endurance)[0]
+        self.assertEqual(hill_row["channel"], "Gear Speed1", "高避那台车的左后轮速在这条通道上")
+        self.assertEqual(endurance_row["channel"], "SpeedRL", "耐久那台车有 SpeedRL")
+        self.assertNotEqual(hill_row["channel"], endurance_row["channel"],
+                            "两份数据落到了同一条通道的话，这条用例什么也没证明")
+
+    def test_annotate_把落点贴到工作表上(self):
+        sheets = [{"id": "a", "name": "分析", "aliases": self.WHEEL, "components": []}]
+        out = aliasesmod.annotate(sheets, {"SpeedRL"})
+        self.assertEqual(out[0]["alias_status"][0]["channel"], "SpeedRL")
+        self.assertEqual(out[0]["alias_landing"], {"@左后轮速": "SpeedRL"})
+        self.assertEqual(sheets[0]["components"], [], "别把原表改了")
+
+    # --------------------------------------------------- 文件格式
+    def test_别名跟着工作表文件走_而且老文件不多写字(self):
+        payload = {
+            "name": "带别名的一套",
+            "components": [{"type": "graph", "config": {"channels": ["@车速"]}}],
+            "aliases": [{"name": "车速", "candidates": ["Vx KF", "GPS Speed"]}],
+        }
+        sheet = worksheetsmod.normalise(payload, "with-alias")
+        self.assertEqual(sheet["aliases"][0]["name"], "车速")
+        exported = worksheetsmod.export_payload(sheet)
+        self.assertEqual(exported["aliases"][0]["candidates"], ["Vx KF", "GPS Speed"])
+        plain = worksheetsmod.normalise(
+            {"name": "老一套", "components": [{"type": "graph"}]}, "plain")
+        self.assertNotIn("aliases", worksheetsmod.export_payload(plain),
+                         "没有别名的老工作表写回时不该多出一个键（七份文件的字节不许变）")
+
+    def test_别名写进文件再读回来一模一样(self):
+        directory = tempfile.TemporaryDirectory(prefix="i3pro-alias-")
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        body = {"name": "别名样例",
+                "components": [{"type": "graph", "config": {"channels": ["@车速", "Vx KF"]}}],
+                "aliases": self.WHEEL}
+        worksheetsmod.write_sheet(root, "alias-demo", body)
+        back = worksheetsmod.load_file(root / "alias-demo.json")
+        self.assertEqual(back["aliases"], self.WHEEL)
+        self.assertEqual(back["components"][0]["config"]["channels"], ["@车速", "Vx KF"])
+
+    def test_保存时给了别名就换_没给就留着文件里那份(self):
+        directory = tempfile.TemporaryDirectory(prefix="i3pro-alias-")
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        worksheetsmod.write_sheet(root, "alias-demo", {
+            "name": "别名样例",
+            "components": [{"type": "graph", "config": {"channels": ["@车速"]}}],
+            "aliases": self.WHEEL,
+        })
+        components = [{"type": "graph", "config": {"channels": ["@车速"]}}]
+        kept = worksheetsmod.replace(root, "alias-demo", components)
+        self.assertEqual(kept["aliases"], self.WHEEL, "没给 aliases 就该保持文件里那一份")
+        newer = [{"name": "车速", "candidates": ["GPS Speed"]}]
+        changed = worksheetsmod.replace(root, "alias-demo", components, aliases=newer)
+        self.assertEqual(changed["aliases"], newer)
+        self.assertEqual(worksheetsmod.load_file(root / "alias-demo.json")["aliases"], newer)
+
+    def test_页面载荷带着落点表(self):
+        log = self._open(HILL)
+        directory = tempfile.TemporaryDirectory(prefix="i3pro-alias-")
+        self.addCleanup(directory.cleanup)
+        (Path(directory.name) / "worksheets").mkdir()
+        worksheetsmod.write_sheet(Path(directory.name) / "worksheets", "alias-demo", {
+            "name": "别名样例",
+            "components": [{"type": "graph", "config": {"channels": ["@左后轮速"]}}],
+            "aliases": self.WHEEL,
+        })
+        payload = render.build_payload(log, worksheets_dir=Path(directory.name))
+        sheet = payload["worksheets"][0]
+        self.assertEqual(sheet["alias_landing"], {"@左后轮速": "Gear Speed1"})
+        self.assertEqual(sheet["alias_status"][0]["candidates"][0], "SpeedRL")
+
+
+class TestAliasesOverHttp(unittest.TestCase):
+    """别名走过 HTTP：PUT 带上 aliases、GET 读回来、目录快照带上本场落点。"""
+
+    def _worksheet_root(self) -> Path:
+        tmp = tempfile.mkdtemp(prefix="i3pro-alias-http-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        base = Path(tmp)
+        shutil.copytree(ROOT / "worksheets", base / "worksheets")
+        return base
+
+    @_needs(HILL)
+    def test_保存别名与落点(self):
+        base = self._worksheet_root()
+        sheet = {"name": "别名样例",
+                 "components": [{"type": "graph", "config": {"channels": ["@左后轮速"]}}],
+                 "aliases": [{"name": "左后轮速",
+                              "candidates": ["SpeedRL", "Gear Speed1"]}]}
+        with http_session(HILL, buckets=50, worksheets_root=base) as http:
+            status, created = http.json("/api/worksheets", "POST", {"sheet": sheet})
+            self.assertEqual(status, 200, created)
+            stem = created["worksheet"]["id"]
+            self.assertEqual(created["worksheet"]["aliases"][0]["candidates"],
+                             ["SpeedRL", "Gear Speed1"])
+
+            # 拿这一场（高避）问一次目录：落点必须是 Gear Speed1。
+            query = "?session=" + urllib.parse.quote(HILL.stem)
+            status, state = http.json("/api/worksheets" + query)
+            self.assertEqual(status, 200, state)
+            one = [row for row in state["worksheets"] if row["id"] == stem][0]
+            self.assertEqual(one["alias_landing"], {"@左后轮速": "Gear Speed1"})
+            self.assertEqual(one["alias_status"][0]["channel"], "Gear Speed1")
+
+            # 保存时带上新的候选表：读回来就是新的，落点跟着变。
+            status, saved = http.json("/api/worksheets/" + stem + query, "PUT", {
+                "components": [{"type": "graph", "config": {"channels": ["@左后轮速"]}}],
+                "aliases": [{"name": "左后轮速", "candidates": ["GPS Speed", "SpeedRL"]}],
+            })
+            self.assertEqual(status, 200, saved)
+            self.assertEqual(saved["worksheet"]["aliases"][0]["candidates"],
+                             ["GPS Speed", "SpeedRL"])
+            self.assertEqual(saved["worksheet"]["alias_landing"],
+                             {"@左后轮速": "GPS Speed"})
+            status, back = http.json("/api/worksheets/" + stem)
+            self.assertEqual(back["aliases"][0]["candidates"], ["GPS Speed", "SpeedRL"])
+
+    @_needs(HILL)
+    def test_坏别名400并说下一步(self):
+        base = self._worksheet_root()
+        with http_session(HILL, buckets=50, worksheets_root=base) as http:
+            status, payload = http.json("/api/worksheets", "POST", {
+                "sheet": {"name": "坏别名",
+                          "components": [{"type": "graph"}],
+                          "aliases": [{"name": "车速", "candidates": "Vx KF"}]}})
+            self.assertEqual(status, 400, payload)
+            self.assertIn("candidates", payload["error"])
 
 
 class TestPalettes(unittest.TestCase):

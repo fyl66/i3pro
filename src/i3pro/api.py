@@ -27,6 +27,7 @@ from urllib.parse import quote
 import numpy as np
 
 from . import (
+    aliases as aliasesmod,
     axes as axesmod,
     beacons as beaconsmod,
     csvlog,
@@ -316,6 +317,10 @@ class _Call:
         ``GET /api/worksheets/<身份>/export``  下载一份 JSON（发给队友）
         """
         directory = worksheetsmod.worksheets_dir(self.library.worksheets_root)
+        # ``?session=<场次>``：让回给前端的那份目录带上**这一场**的别名落点。
+        # 挂在查询串上而不是改路由前缀：工作表是跨场次的文件，换成
+        # ``/session/<名>/worksheets`` 就等于说"这套表属于那个场次"，那是假的。
+        self.sheet_session = (query.get("session") or [""])[0].strip()
         if not parts:
             if method == "POST":
                 return self.create_worksheet(directory)
@@ -340,9 +345,33 @@ class _Call:
         )
 
     def worksheets_state(self, directory) -> dict:
-        """一份"目录现在长什么样"的快照；改动之后回给前端刷新那排按钮。"""
+        """一份"目录现在长什么样"的快照；改动之后回给前端刷新那排按钮。
+
+        ``?session=<场次>`` 会给每份工作表贴上**这一场**的别名落点
+        （``aliases.annotate``）——别名能不能落地取决于本场次有哪些通道，
+        而这一条路线不经过页面载荷，所以得自己问一次。
+        """
         sheets, problems = worksheetsmod.load_directory(directory)
+        name = (getattr(self, "sheet_session", "") or "").strip()
+        if name:
+            try:
+                log = self.library.get(name)
+            except KeyError:
+                log = None
+            if log is not None:
+                sheets = aliasesmod.annotate(sheets, {ch.name for ch in log.channels})
         return {"worksheets": sheets, "worksheet_problems": problems}
+
+    def with_aliases(self, sheet: dict) -> dict:
+        """单独回一份工作表时也贴上本场落点——否则"刚保存完"那一屏看不到落点。"""
+        name = (getattr(self, "sheet_session", "") or "").strip()
+        if not name:
+            return sheet
+        try:
+            log = self.library.get(name)
+        except KeyError:
+            return sheet
+        return aliasesmod.annotate([sheet], {ch.name for ch in log.channels})[0]
 
     def json_body(self) -> dict:
         """请求体读成 JSON 对象；读不出来按项目规则说清"下一步做什么"。"""
@@ -374,7 +403,7 @@ class _Call:
                 directory, body.get("sheet"), name=body.get("name")
             )
         state = self.worksheets_state(directory)
-        state["worksheet"] = sheet
+        state["worksheet"] = self.with_aliases(sheet)
         return self._json(state)
 
     def save_worksheet(self, directory, stem: str) -> Response:
@@ -385,9 +414,10 @@ class _Call:
                 "保存工作表要带上 components（这一屏的组件）；空白的一屏存不了，"
                 "先在工作台上放一个组件再保存。"
             )
-        sheet = worksheetsmod.replace(directory, stem, components)
+        sheet = worksheetsmod.replace(directory, stem, components,
+                                      aliases=body.get("aliases"))
         state = self.worksheets_state(directory)
-        state["worksheet"] = sheet
+        state["worksheet"] = self.with_aliases(sheet)
         return self._json(state)
 
     def rename_worksheet(self, directory, stem: str) -> Response:
@@ -397,7 +427,7 @@ class _Call:
             raise worksheetsmod.WorksheetError("重命名要带上 name（新名字），不能是空的。")
         sheet = worksheetsmod.rename(directory, stem, name)
         state = self.worksheets_state(directory)
-        state["worksheet"] = sheet
+        state["worksheet"] = self.with_aliases(sheet)
         #: 改名前的身份：界面拿它判断"正在用的那一套是不是就是被改名的这一套"。
         state["previous_id"] = stem
         return self._json(state)

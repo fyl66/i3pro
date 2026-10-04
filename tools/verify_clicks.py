@@ -1752,6 +1752,173 @@ class Checker:
         click_at("#wsSave", "保存（收尾还原）")
         time.sleep(0.6)
 
+    def aliases(self, work_dir):
+        """#36：同一套工作表换一份数据还能用——别名真落地、真保存、真读回来。
+
+        造的是真实场景：**左后轮速在耐久那台车上叫 `SpeedRL`，高避那台没有这条
+        通道**（只有 `Gear Speed1`）。所以这条用例导进来一套写 `@左后轮速` 的
+        工作表，在这一场（高避）必须落到 `Gear Speed1`；然后真点着改候选、调顺序、
+        点保存，再回磁盘把文件读出来核对。
+        """
+        bogus = "@左后轮速"
+        sheet = {
+            "schema": 1, "name": "别名样例", "order": 98, "hints": [],
+            "aliases": [{"name": "左后轮速",
+                         "candidates": ["SpeedRL", "Gear Speed1", "GPS Speed"]}],
+            "components": [
+                {"type": "graph", "x": 0, "y": 0, "w": 12, "h": 10,
+                 "config": {"mode": "tiled", "channels": [bogus]}},
+            ],
+        }
+        blob = base64.b64encode(
+            json.dumps(sheet, ensure_ascii=False).encode("utf-8")).decode("ascii")
+        self.js(
+            "(function(){var b=atob('%s'),a=new Uint8Array(b.length);"
+            "for(var i=0;i<b.length;i++)a[i]=b.charCodeAt(i);"
+            "var f=new File([a],'codex-alias.json',{type:'application/json'});"
+            "var d=new DataTransfer();d.items.add(f);"
+            "var el=document.getElementById('wsFile');el.files=d.files;"
+            "el.dispatchEvent(new Event('change'));return true;})()" % blob)
+        appeared = self.browser.wait_for(
+            "(function(){var bs=document.querySelectorAll('#presetRow button');"
+            "for(var i=0;i<bs.length;i++){if(bs[i].textContent==='别名样例')return true;}"
+            "return false;})()",
+            self.session, timeout=20,
+        )
+        self.check("#36 导入一套写着 @左后轮速 的工作表之后，按钮上有了它",
+                   appeared, self.js("i3pro.state.preset"))
+        if not appeared:
+            return
+        raw = self.js(
+            "(function(){var bs=document.querySelectorAll('#presetRow button');"
+            "for(var i=0;i<bs.length;i++){if(bs[i].textContent==='别名样例')"
+            "return JSON.stringify(__center(bs[i]));}return null;})()")
+        point = json.loads(raw) if raw and raw != "null" else None
+        if not point:
+            self.check("#36 「别名样例」在按钮栏里真的点得到", False, raw)
+            return
+        self.browser.click(point["x"], point["y"], self.session)
+        time.sleep(1.0)
+
+        # 落点：高避这场没有 SpeedRL，所以必须落到 Gear Speed1。
+        self.check("#36 引用被判成 present（落到了真通道）",
+                   self.js("i3pro.channelState(%r)" % bogus) == "present",
+                   self.js("i3pro.channelState(%r)" % bogus))
+        self.check("#36 这一场落到的是 Gear Speed1（第一条存在的）",
+                   self.js("i3pro.aliasLanding(%r)" % bogus) == "Gear Speed1",
+                   self.js("i3pro.aliasLanding(%r)" % bogus))
+        self.check("#36 图里画的就是那条落地的通道",
+                   json.loads(self.js(
+                       "JSON.stringify(i3pro.state.components[0].config.channels)"))
+                   == ["Gear Speed1"],
+                   self.js("JSON.stringify(i3pro.state.components[0].config.channels)"))
+
+        # 状态视图（i2 Pro 的 Channel Status 等价物）：这一行写着落到了哪条。
+        row = self.js(
+            "(function(){var rs=document.querySelectorAll('#aliasList .alias');"
+            "for(var i=0;i<rs.length;i++){if(rs[i].textContent.indexOf('左后轮速')>=0){"
+            "var r=rs[i].getBoundingClientRect();"
+            "return JSON.stringify({w:r.width,h:r.height,text:rs[i].textContent});}}"
+            "return null;})()")
+        row = json.loads(row) if row and row != "null" else None
+        self.check("#36 状态视图里有这条别名", bool(row), row)
+        if row:
+            self.check("#36 它写明了落到哪条通道", "Gear Speed1" in row["text"], row["text"])
+            self.check("#36 那一条真的占着屏幕上的位置", row["w"] > 0 and row["h"] > 0, row)
+            self.check("#36 候选一条不少地摆出来了",
+                       all(one in row["text"] for one in ("SpeedRL", "Gear Speed1", "GPS Speed")),
+                       row["text"])
+        # 截图时把那一栏滚进视口：验收说明里"状态视图写着落到哪条"要能一眼复核。
+        self.js("document.getElementById('aliasGroup')"
+                ".scrollIntoView({block:'center'}); true")
+        time.sleep(0.5)
+        self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-alias-status.png"),
+                          self.session)
+
+        # 真点「＋ 别名」新建一条（真键盘打字 + 真点按钮）。
+        self.js("(function(){var i=document.getElementById('aliasNewName');"
+                "i.focus();i.select();return true;})()")
+        self.browser.key("验证别名", self.session)
+        box = json.loads(self.js(
+            "(function(){var b=document.getElementById('aliasAddAlias');"
+            "return JSON.stringify(__center(b));})()"))
+        self.browser.click(box["x"], box["y"], self.session)
+        time.sleep(0.5)
+        self.check("#36 真点「＋ 别名」之后工作副本里多了一条",
+                   self.js("i3pro.state.aliases.map(function(a){return a.name;})"
+                           ".indexOf('验证别名')>=0"),
+                   self.js("JSON.stringify(i3pro.currentSheetAliases())"))
+
+        # 真点候选的 ↑：顺序就是优先级，挪上去就该换人。
+        move = self.js(
+            "(function(){var cs=document.querySelectorAll('#aliasList .cand');"
+            "for(var i=0;i<cs.length;i++){var t=cs[i].textContent;"
+            "if(t.indexOf('GPS Speed')>=0){var a=cs[i].querySelectorAll('a')[0];"
+            "if(!a)return null;var r=a.getBoundingClientRect();"
+            "return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2});}}return null;})()")
+        move = json.loads(move) if move and move != "null" else None
+        self.check("#36 候选上的 ↑ 真的点得到", bool(move), move)
+        if move:
+            self.browser.click(move["x"], move["y"], self.session)
+            time.sleep(0.5)
+            order = json.loads(self.js(
+                "JSON.stringify(i3pro.currentSheetAliases()[0].candidates)"))
+            self.check("#36 真点一下之后候选顺序变了（往前挪了一位）",
+                       order == ["SpeedRL", "GPS Speed", "Gear Speed1"], order)
+            # 再点一次把它顶到第一位——顺序就是优先级，落点必须跟着换人。
+            move = self.js(
+                "(function(){var cs=document.querySelectorAll('#aliasList .cand');"
+                "for(var i=0;i<cs.length;i++){var t=cs[i].textContent;"
+                "if(t.indexOf('GPS Speed')>=0){var a=cs[i].querySelectorAll('a')[0];"
+                "if(!a)return null;var r=a.getBoundingClientRect();"
+                "return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2});}}"
+                "return null;})()")
+            move = json.loads(move) if move and move != "null" else None
+            if move:
+                self.browser.click(move["x"], move["y"], self.session)
+                time.sleep(0.5)
+            order = json.loads(self.js(
+                "JSON.stringify(i3pro.currentSheetAliases()[0].candidates)"))
+            self.check("#36 连点两下之后它排到了第一位",
+                       order == ["GPS Speed", "SpeedRL", "Gear Speed1"], order)
+
+        # 保存 → 回磁盘核对：引用不进配置文件、别名进文件。
+        box = json.loads(self.js(
+            "(function(){return JSON.stringify(__center("
+            "document.getElementById('wsSave')));})()"))
+        self.browser.click(box["x"], box["y"], self.session)
+        time.sleep(0.9)
+        stem = self.js("(i3pro.currentSheet()||{}).id")
+        path = os.path.join(work_dir, "_worksheets_root", "worksheets",
+                            str(stem) + ".json")
+        body = {}
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as handle:
+                body = json.load(handle)
+        self.check("#36 别名写进了 worksheets/%s.json" % stem,
+                   (body.get("aliases") or [{}])[0].get("candidates") ==
+                   ["GPS Speed", "SpeedRL", "Gear Speed1"],
+                   json.dumps(body.get("aliases"), ensure_ascii=False))
+        self.check("#36 组件里存的还是**引用**，不是真通道名（换场次才还能用）",
+                   (body.get("components") or [{}])[0].get("config", {}).get("channels")
+                   == [bogus],
+                   json.dumps((body.get("components") or [{}])[0], ensure_ascii=False)[:200])
+        self.check("#36 保存之后落点跟着新顺序走（GPS Speed 排到了第一位）",
+                   self.js("i3pro.aliasLanding(%r)" % bogus) == "GPS Speed",
+                   self.js("i3pro.aliasLanding(%r)" % bogus))
+        self.check("#36 落点换了之后图里的通道也跟着换",
+                   json.loads(self.js(
+                       "JSON.stringify(i3pro.state.components[0].config.channels)"))
+                   == ["GPS Speed"],
+                   self.js("JSON.stringify(i3pro.state.components[0].config.channels)"))
+
+        # 收尾：切回第一套、滚回视口（后面几个用例按坐标点画布）。
+        self.js("(function(){i3pro.state.cursor=null;i3pro.state.view=null;"
+                "i3pro.applyPreset(i3pro.worksheetCatalogue().sheets[0].name);"
+                "document.querySelector('#worksheet .comp')"
+                ".scrollIntoView({block:'start'});return true;})()")
+        time.sleep(1.0)
+
     def axis(self):
         """横轴随缩放换档（A36）：读真画布**画出来的**刻度文字。
 
@@ -2436,6 +2603,7 @@ def main(argv=None):
             checker.worksheet_editing(work_dir)
             checker.missing_channels(work_dir)
             checker.display_settings(work_dir)
+            checker.aliases(work_dir)
             checker.notes(work_dir, args.session)
             checker.gps(work_dir, args.session)
             checker.imports("http://127.0.0.1:%d/" % args.port, work_dir)

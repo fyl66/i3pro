@@ -3216,6 +3216,102 @@ if (api && exportDlg) {
   check(api.headFields(comp).measure === true, "还原之后抬头开关没回到默认");
 }
 
+/* -------------------- 通道别名（ticket #36） --------------------------------
+ * 规矩只有一条：**有序候选，取第一条在本场次存在的**。它实现一次（Python 的
+ * `aliases.landing`），随页面载荷贴成一张落点表；前端只**查表**，不重写规则。
+ * 这一组钉的是"前端确实只查表"：
+ *   ① `@引用` 落到了就替换成真通道名、落不到就留着（ticket #34 判它 missing）；
+ *   ② 保存时没动过的槽写回**引用**（写回真名的话，换场次又空了）；
+ *   ③ 编辑（增删候选 / 调顺序 / 增删别名）只改工作副本，保存才落盘。
+ * "真点得到、真存进文件"归真浏览器那关（tools/verify_clicks.py）。 */
+{
+  const api = window.i3pro;
+  const comp = api.state.components.filter((c) => c.type === "graph")[0];
+  const real = "Vx KF";
+  const landing = { "@车速": real, "@落不到的": null };
+  const before = comp.config.channels.slice();
+  // 仓库里那七份工作表的图是 `pick` 规则挑出来的（`picked` 里记着"别写回文件"），
+  // 别名那一路是**文件里写死的引用**——这里把 picked 清掉才是在验别名那条路。
+  const pickedBefore = comp.picked;
+  comp.picked = [];
+  comp.config.channels = ["@车速", "@落不到的", before[0]];
+  api.applyAliases(comp, landing);
+  check(comp.config.channels[0] === real,
+    "落到的引用没被替换成真通道名：" + comp.config.channels[0]);
+  check(comp.config.channels[1] === "@落不到的",
+    "落不到的引用被丢掉了（应该留着，交给 ticket #34 判缺失）：" + comp.config.channels[1]);
+  check(comp.config.channels[2] === before[0], "普通通道名被别名替换动到了");
+  check(comp.aliasSource && comp.aliasSource.channels
+    && comp.aliasSource.channels[0] === "@车速",
+    "没记下这一格原来是引用：" + JSON.stringify(comp.aliasSource));
+
+  const written = JSON.parse(JSON.stringify(api.sheetComponent(comp)));
+  check(written.config.channels[0] === "@车速",
+    "保存时把别名写成了真通道名（换场次又空了）：" + written.config.channels[0]);
+  check(written.config.channels[2] === before[0], "普通通道名保存时被写坏了");
+
+  // 用户真改过这一格：那就按他写的存（不再写回引用）。
+  comp.config.channels = [real, before[0]];
+  const edited = JSON.parse(JSON.stringify(api.sheetComponent(comp)));
+  check(edited.config.channels[0] === real,
+    "用户改过的通道槽还是被写回了引用：" + edited.config.channels[0]);
+
+  // 三态：落到的算 present，落不到的算 missing——与"缺通道"是同一条缝。
+  api.state.aliasLanding = landing;
+  check(api.channelState("@车速") === "present", "落到的别名没被判成 present");
+  check(api.channelState("@落不到的") === "missing",
+    "落不到的别名没被判成 missing：" + api.channelState("@落不到的"));
+  check(api.isAliasReference("@车速") && !api.isAliasReference("车速"),
+    "别名引用的写法认错了");
+  api.state.aliasLanding = {};
+
+  // 编辑：增删候选、调顺序、增删别名——都只改工作副本。
+  const aliasesBefore = JSON.parse(JSON.stringify(api.state.aliases || []));
+  api.aliasAddAlias("测试别名");
+  api.aliasAddCandidate("测试别名", "GPS Speed");
+  api.aliasAddCandidate("测试别名", real);
+  const made = (api.state.aliases || []).filter((one) => one.name === "测试别名")[0];
+  check(!!made && made.candidates.length === 2,
+    "加别名 / 加候选没落到工作副本上：" + JSON.stringify(made));
+  api.aliasMoveCandidate("测试别名", 1, -1);
+  check(made.candidates[0] === real, "候选往前挪一位没生效：" + made.candidates);
+  api.aliasRemoveCandidate("测试别名", 0);
+  check(made.candidates.length === 1 && made.candidates[0] === "GPS Speed",
+    "删候选没生效：" + JSON.stringify(made.candidates));
+  check(api.state.aliasesDirty === true, "改过之后没有标成「待保存」");
+  api.renderAliasList();
+  const list = registry.get("aliasList");
+  const rows = (list && list._children) || [];
+  check(rows.length === 1 && String(rows[0]._children[0]._html).indexOf("测试别名") >= 0
+    || rows.length === 1, "别名列表没画出这一条：" + rows.length);
+  api.aliasRemoveAlias("测试别名");
+  check(!(api.state.aliases || []).some((one) => one.name === "测试别名"),
+    "删别名没生效");
+  api.state.aliases = aliasesBefore;
+  api.state.aliasesDirty = false;
+  api.renderAliasList();
+
+  // 交叉引用：坏输入要被挡住，而且说清下一步。
+  api.aliasAddAlias("@带圈的");
+  check(!(api.state.aliases || []).some((one) => one.name === "@带圈的"),
+    "名字带 @ 的别名被收下了");
+  api.aliasAddAlias("空的候选");
+  api.aliasAddCandidate("空的候选", "  ");
+  const empty = (api.state.aliases || []).filter((one) => one.name === "空的候选")[0];
+  check(empty && empty.candidates.length === 0, "空候选被收下了");
+  api.aliasRemoveAlias("空的候选");
+  api.state.aliases = aliasesBefore;
+  api.state.aliasesDirty = false;
+  api.renderAliasList();
+
+  // 还原：组件恢复成没动过的样子。
+  comp.config.channels = before;
+  comp.picked = pickedBefore;
+  delete comp.aliasSource;
+  delete comp.aliasResolved;
+  api.renderAll();
+}
+
 /* --------------------------------------------------------------- DOM checks */
 /* ------------------------- 34. 原始 CAN 帧表（#38 / #39 / #40） --------------
  * 断言导入报告里该有的东西：帧数 / 覆盖率、**每份 DBC 的贡献与哈希**、

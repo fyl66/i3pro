@@ -29,6 +29,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from . import aliases as aliasesmod
+
 __all__ = [
     "SCHEMA",
     "WorksheetError",
@@ -56,7 +58,9 @@ SCHEMA = 1
 #: 没写 ``order`` 的工作表排在哪。够宽，前后都塞得下。
 DEFAULT_ORDER = 50
 
-_TOP_KEYS = {"schema", "name", "order", "hints", "components"}
+#: 一份工作表顶层认得的键。``aliases``（ticket #36）是"这套表要用哪条车速"那类
+#: 有序候选表——它跟着工作表走，不进 ``.ld``、不进日志侧车。
+_TOP_KEYS = {"schema", "name", "order", "hints", "components", "aliases"}
 _COMPONENT_KEYS = {"type", "x", "y", "w", "h", "config", "pick"}
 _PICK_KEYS = {"patterns", "limit", "index", "special"}
 
@@ -136,13 +140,18 @@ def unique_stem(directory: str | Path, stem: str, *, exclude: str | None = None)
 
 def export_payload(sheet: dict) -> dict:
     """一份工作表 → 文件里（或发给队友）的那份 JSON；``id`` 是本地身份，不进文件。"""
-    return {
+    body = {
         "schema": SCHEMA,
         "name": sheet["name"],
         "order": sheet["order"],
         "hints": list(sheet.get("hints") or []),
         "components": [dict(one) for one in sheet["components"]],
     }
+    # 没有别名的老工作表**一个字节都不多写**：仓库里那七份文件保持原样，
+    # 免得"加了一个功能"变成"七份文件全都有 diff"。
+    if sheet.get("aliases"):
+        body["aliases"] = [dict(one) for one in sheet["aliases"]]
+    return body
 
 
 def write_sheet(directory: str | Path, stem: str, payload: Any) -> dict:
@@ -219,15 +228,21 @@ def create(directory: str | Path, payload: Any, *, name: str | None = None) -> d
     return write_sheet(directory, stem, body)
 
 
-def replace(directory: str | Path, stem: str, components: Any) -> dict:
+def replace(
+    directory: str | Path, stem: str, components: Any, aliases: Any = None
+) -> dict:
     """把**已经在文件里的**那套工作表的组件换掉（界面上的"保存"）。
 
     名字 / 排序 / 提示词都留在文件里不动——"保存"保存的是这一屏的形状，不是改名。
+    ``aliases`` 给了就一起换（别名也是"这一屏的形状"的一部分，ticket #36）；
+    不给就保持文件里那一份。
     """
     directory = Path(directory)
     sheet = read_sheet(directory, stem)
     body = export_payload(sheet)
     body["components"] = components
+    if aliases is not None:
+        body["aliases"] = aliases
     return write_sheet(directory, stem, body)
 
 
@@ -424,6 +439,8 @@ def normalise(payload: Any, name: str, where: str | None = None) -> dict:
         raise WorksheetError(f"{spot} 的 name 要是一个字符串，现在是 {title!r}。")
     order = _number(payload.get("order", DEFAULT_ORDER), "order", spot)
     hints = _strings(payload.get("hints", []), "hints", spot) if "hints" in payload else []
+    aliases = aliasesmod.normalise(payload.get("aliases"), spot) \
+        if "aliases" in payload else []
     components = payload.get("components")
     if not isinstance(components, list) or not components:
         raise WorksheetError(
@@ -435,6 +452,8 @@ def normalise(payload: Any, name: str, where: str | None = None) -> dict:
         "name": title.strip(),
         "order": int(order),
         "hints": hints,
+        #: 通道别名（ticket #36）：有序候选，取第一条在本场次存在的。
+        "aliases": aliases,
         "components": [
             _component(item, i, spot) for i, item in enumerate(components)
         ],

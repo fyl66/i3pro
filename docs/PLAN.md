@@ -392,7 +392,9 @@ Drag（直线加速）项目模式、多 Workbook 工程体系。
 
 ## 8. 待确认事项
 
-1. **仓库托管**：代码已推到 **https://github.com/fyl66/i3pro**（private）。
+1. **仓库托管**：代码已推到 **https://github.com/fyl66/i3pro**（**public**，2026-09-13 确认；车队数据与 MoTeC
+   文档靠 `.gitignore` 挡住——`i2pro_data/`、`i2pro-help/`、`*.ld`、`*.ldx`、`*.csv`、`*.xlsx`、`*.idx`、`*.id`、
+   `*.dbc`、`can_data/`）。
    仓库名如果不对（比如你想放进队里的组织仓库），改动很便宜：
    `git remote set-url origin <新地址> && git push -u origin main`。
    ⚠️ 本机 git 直连 github.com 会超时，必须走本机代理：

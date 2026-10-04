@@ -36,6 +36,15 @@
   .ch input { accent-color:var(--accent); flex:0 0 auto; margin:0; }
   .ch .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .ch .unit { color:var(--muted); margin-left:auto; font-size:11px; flex:0 0 auto; }
+  /* 本场次没有的通道：灰着，而且**看得出是灰的**（ticket #34）。
+     灰不写在这个色值上，写在线条与文字一起变灰这件事上——只把文字调暗的话，
+     在暗色主题里和"没勾选"几乎分不出来。 */
+  .ch.missing { opacity:.55; }
+  .ch.missing:hover { opacity:.8; }
+  .ch.missing .nm { text-decoration:line-through solid rgba(255,255,255,.35); }
+  .ch.missing .unit { color:#c9a227; }
+  .ch .unit.dead { color:#c9a227; }
+  .missnote { color:#c9a227; font-size:12px; line-height:1.5; }
   .swatch { width:9px; height:9px; border-radius:2px; flex:0 0 auto; }
   #channelList { max-height:38vh; overflow:auto; }
   .grphead { color:var(--muted); font-size:11px; padding:5px 5px 2px; display:flex; gap:6px; align-items:center; }
@@ -146,6 +155,11 @@
   .lrow .lmm { color:var(--muted); min-width:52px; text-align:right;
                font-variant-numeric:tabular-nums; }
   .lrow .lunit { color:var(--muted); }
+  .lrow .ldead { color:#c9a227; }
+  /* 图上"本场次没有"的那一行：贴在最后一个分栏的底部，灰色调里带一点黄，
+     和"真实通道"那几行的配色区分开（调色板里没有这个色，ticket #34）。 */
+  .lrow.lmissing { position:absolute; left:70px; right:8px; color:#c9a227;
+                   background:rgba(201,162,39,.12); }
   /* Three resize affordances: drag the right edge, the bottom edge, or the
      corner (both). The old single 6 px strip at the very bottom was almost
      impossible to hit because the canvas usually does not fill the body. */
@@ -485,6 +499,12 @@
       </select>
       <label class="chk"><input type="checkbox" id="exportMaths" checked> 含数学通道</label>
     </div>
+    <!-- 本场次没有的通道（ticket #34）：**说清会跳过哪几条**，别让导出的文件
+         看起来"数据少了"却没人解释。可点，点开就是那份灰名单。 -->
+    <div class="frow" id="exportMissingRow" hidden>
+      <label>缺通道</label>
+      <span class="missnote" id="exportMissing"></span>
+    </div>
     <div class="frow">
       <label>采样</label>
       <select id="exportRate"></select>
@@ -553,6 +573,13 @@ const GROUPS = ((DATA && DATA.groups) || []).concat(
     ? [{ key: "__status__", label: "状态与故障", unit: "", channels: DATA.status.slice() }]
     : []
 );
+//: 「本场次没有」那条通道用的灰。它**不属于任何调色板**：调色板是给真实通道
+//: 用的，灰是"这里本该有一条线、但本场次没有"的语义色，两者混在一起就会
+//: 让人以为那条灰线是真的（ticket #34 的用户故事 22）。
+const MISSING_COLOR = "#4a5160";
+//: 服务端这次点名要、但本场次没有的通道（render.build_payload 的 ``missing``）。
+//: 快照与页面抬头拿它说话；工作表里引用的那些由 workbenchMissing() 现算。
+const PAYLOAD_MISSING = new Set((DATA && DATA.missing) || []);
 
 /* ------------------------------------------------------- worksheet model */
 // A worksheet is an ordered list of components, like i2 Pro's
@@ -695,9 +722,14 @@ function typeTitle(comp, rest) {
 
 function graphDefaults() { return { channels: [], mode: "tiled" }; }
 function graphTitle(comp) {
-  const n = (comp.config.channels || []).length;
+  const names = comp.config.channels || [];
+  const n = names.length;
+  const gone = names.filter(isMissingChannel).length;
   const mode = comp.config.mode === "overlapped" ? "重叠" : "分栏";
-  return typeTitle(comp, (n ? n + " 通道 · " : "") + mode);
+  // "缺 N 条"写在标题上（ticket #34）：图少画了一条线时，抬头就是唯一说得清
+  // "为什么少"的地方——不说的话用户只能怀疑是自己选错了。
+  return typeTitle(comp, (n ? n + " 通道 · " : "")
+    + (gone ? "缺 " + gone + " 条 · " : "") + mode);
 }
 function graphNeeds(comp, add) { (comp.config.channels || []).forEach(add); }
 /** 刚加进来的图先看侧边栏勾着的那些通道，别给一张空图。 */
@@ -1140,7 +1172,8 @@ function reportUrl(comp) {
   if (specOf(comp).table === "channels") {
     params.by = cfg.by || "lap";
     if ((cfg.by || "lap") === "section" && cfg.lap) params.lap = cfg.lap;
-    const names = (cfg.channels || []).filter((n) => CHANNELS.has(n))
+    // 存在判定走 channelState（ticket #34 的唯一条缝），不在各处另写 CHANNELS.has。
+    const names = (cfg.channels || []).filter((n) => !isMissingChannel(n))
       .slice(0, MAX_REPORT_CHANNELS);
     if (names.length) params.channels = names.join(",");
   }
@@ -1200,7 +1233,7 @@ function chreportDecode(comp, payload) {
   comp.config.filter = ["all", "corner", "straight"].indexOf(head[2]) >= 0
     ? head[2] : "all";
   comp.config.channels = parts[1]
-    ? parts[1].split("~").filter((n) => CHANNELS.has(n)).slice(0, MAX_REPORT_CHANNELS)
+    ? parts[1].split("~").filter((n) => !isMissingChannel(n)).slice(0, MAX_REPORT_CHANNELS)
     : [];
 }
 
@@ -1647,6 +1680,96 @@ function allGraphChannels() {
     for (const name of comp.config.channels) if (out.indexOf(name) < 0) out.push(name);
   }
   return out;
+}
+
+/* ------------------------------------------------ 通道三态（ticket #34）
+ * i2 Pro 那边"布局换到场次 B 还能不能用"取决于通道在不在。我们这里以前是
+ * **静默丢弃**：服务端跳过、前端 `.filter(CHANNELS.has)` 再滤一遍，图上安静地
+ * 少一条线，一个字都不说——用户看到的是"图坏了"。
+ *
+ * 现在三态**只在这一处判**（`channelState`），通道列表、组件抬头、导出面板、
+ * 页面抬头都问它，谁也不许自己再写一遍 `CHANNELS.has(...)` 当缺失判断：
+ *
+ *   present —— 在，而且整段至少有一个有效样本；
+ *   empty   —— 在，但整段没有有效样本（全空的列），要正常画但标注；
+ *   missing —— 本场次根本没有这条通道，灰显、不画、**绝不自动剔出配置**。
+ *
+ * `has_data` 由服务端 `channels.valid_count` 算（同一个三态定义的 Python 那一半），
+ * 前端不自己扫数据。
+ */
+function channelState(name) {
+  const ch = CHANNELS.get(name);
+  if (!ch) return "missing";
+  return ch.has_data === false ? "empty" : "present";
+}
+
+function isMissingChannel(name) { return channelState(name) === "missing"; }
+function isEmptyChannel(name) { return channelState(name) === "empty"; }
+
+/** 一个组件引用了哪些通道（注册表 #20 的 needs 就是这件事，别再各写一遍）。 */
+function componentChannels(comp) {
+  const out = [];
+  const add = (name) => { if (name && out.indexOf(name) < 0) out.push(name); };
+  const spec = specOf(comp);
+  if (spec && spec.needs) spec.needs(comp, add);
+  return out;
+}
+
+/** 这一套工作表引用了哪些通道——**整表**，不只是当前点中的那个组件。 */
+function worksheetChannels() {
+  const out = [];
+  for (const comp of state.components) {
+    for (const name of componentChannels(comp)) {
+      if (out.indexOf(name) < 0) out.push(name);
+    }
+  }
+  return out;
+}
+
+/** 工作表引用了、但本场次没有的通道（灰显名单 + 导出元数据的 excluded_missing）。 */
+function workbenchMissing() {
+  return worksheetChannels().filter(isMissingChannel);
+}
+
+/** 一句话说清"缺了哪几条"（界面与快照共用同一种说法）。 */
+function missingText(names) {
+  const list = names || [];
+  if (!list.length) return "";
+  const shown = list.slice(0, 3).join("、");
+  return "本场次没有：" + shown + (list.length > 3 ? " 等 " + list.length + " 条" : "");
+}
+
+let missingNoticeKey = null;
+// 抬头那一行的元素**自己拿住**：`initHeader()` 会把 #fileInfo 的 innerHTML 整个
+// 换掉（那一下之后旧节点就不在文档里了），所以它只在那里失效一次、由它清空。
+let missingNoticeEl = null;
+
+/**
+ * 页面抬头那一行：本场次没有的通道（ticket #34 的"快照文案"）。
+ *
+ * 快照是离线文件，打开时还不知道用户会切到哪一套工作表——所以这条跟着**当前
+ * 那一套**走：切一套就重算一次。写在抬眼的地方而不是某个组件里，是因为
+ * "这套表换到本场次有东西对不上"是关于整张表的，不是某一个图的。
+ */
+function renderMissingNotice() {
+  const host = $("fileInfo");
+  if (!host) return;
+  const gone = workbenchMissing();
+  const key = gone.join("\u0001");
+  if (key === missingNoticeKey) return;
+  missingNoticeKey = key;
+  if (!missingNoticeEl) {
+    missingNoticeEl = document.createElement("span");
+    missingNoticeEl.id = "missingNotice";
+    host.appendChild(missingNoticeEl);
+  }
+  const span = missingNoticeEl;
+  span.className = gone.length ? "missnote" : "";
+  span.textContent = gone.length
+    ? " · 本场次没有 " + gone.length + " 条（" + gone.slice(0, 3).join("、")
+      + (gone.length > 3 ? " 等" : "") + "），它们没被从工作表里删掉"
+    : "";
+  span.title = gone.length ? "工作表引用的通道里，本场次没有的：" + gone.join("、") : "";
 }
 
 function channelColor(name, comp) {
@@ -2514,7 +2637,11 @@ function componentTitle(comp) {
 
 function refreshComponentTitle(comp) {
   const bundle = SHEET.get(comp.id);
-  if (bundle && bundle.titleSpan) bundle.titleSpan.textContent = componentTitle(comp);
+  if (!bundle || !bundle.titleSpan) return;
+  // 只在变了的时候写：renderAll 会被拖缩放带着跑很多趟，标题里的"缺 N 条"
+  // 也要跟着更新（ticket #34），但每帧都重设一次 textContent 是白费。
+  const text = componentTitle(comp);
+  if (bundle.titleSpan.textContent !== text) bundle.titleSpan.textContent = text;
 }
 
 function componentAction(comp, act) {
@@ -2555,6 +2682,9 @@ function renderComponents() {
     // 键没变它就是空转，所以每次重画都叫它是安全的。
     if (spec.data) refreshComponentData(comp);
     spec.render(comp, bundle);
+    // 标题里的"缺 N 条"也要跟着这一屏走：换场次 / 换工作表之后它必须更新，
+    // 否则用户看到的是上一套的账（ticket #34）。
+    refreshComponentTitle(comp);
   }
 }
 
@@ -2632,9 +2762,12 @@ function renderGraphComponent(comp, b) {
  */
 function renderGraphHead(comp, b, groups, panels, overlapped) {
   const r = lane();
+  // 这一条图上"本场次没有"的通道（ticket #34）。图上不画，但必须在抬眼的地方
+  // 说清名字——不然用户看到的是"我明明有 6 条通道，图里只有 4 条"。
+  const gone = (comp.config.channels || []).filter(isMissingChannel);
   const signature = groups.map((g) => g.key + ":" + g.channels.join(",")).join(";")
     + "|" + (state.show.measure ? 1 : 0) + "|" + (state.show.legend ? 1 : 0)
-    + "|" + (comp.config.mode || "tiled");
+    + "|" + (comp.config.mode || "tiled") + "|" + gone.join(",");
   b.head.style.display = state.show.legend ? "" : "none";
   if (b.legendKey !== signature) {
     b.head.innerHTML = "";
@@ -2655,10 +2788,24 @@ function renderGraphHead(comp, b, groups, panels, overlapped) {
         const mx = makeEl("span", "lmm", row);
         const av = makeEl("span", "lmm", row);
         makeEl("span", "lunit", row).textContent = (CHANNELS.get(name) || {}).unit || "";
+        // 通道在、但整段没有有效样本（全空列）：正常颜色画，抬头写明是哪一种"没有"。
+        // 这条与"本场次没有"必须分开——混在一起用户就去查错方向了。
+        if (isEmptyChannel(name)) {
+          row.title = name + " · 这条通道整段没有有效样本（列是全空的）";
+          makeEl("span", "ldead", row).textContent = "全程无有效数据";
+        }
         b.valueNodes.push({ name: name, cur: cur, delta: dl, min: mn, max: mx, avg: av });
       }
       stacked += group.channels.length * 15 + 6;
     });
+    if (gone.length) {
+      const last = panels[panels.length - 1];
+      const row = makeEl("div", "lrow lmissing", b.head);
+      // 贴在最后一个分栏的**底部往上 30 px**：再往下就压到横轴的刻度字上了
+      // （第一次真浏览器截图里那行正好盖住 "1:00"）。
+      row.style.top = Math.max(2, last.top + last.panelH - 30) + "px";
+      row.textContent = "本场次没有（不画）：" + gone.join("、");
+    }
     b.legendKey = signature;
   }
   for (const node of b.valueNodes) {
@@ -3621,7 +3768,7 @@ function renderGaugeComponent(comp, b) {
   const ctx = c.ctx;
   ctx.clearRect(0, 0, c.w, c.h);
   const subtype = comp.config.subtype;
-  const chosen = (comp.config.channels || []).filter((n) => CHANNELS.has(n));
+  const chosen = (comp.config.channels || []).filter((n) => !isMissingChannel(n));
   const names = chosen.length ? chosen
     : (subtype === "list" ? allGraphChannels().slice(0, 8) : []);
   if (!names.length) {
@@ -4064,6 +4211,11 @@ function channelReportNote(comp, table, shown) {
   }
   if ((table.missing || []).length) {
     parts.push("本场没有：" + esc((table.missing || []).join("、")));
+  }
+  // 通道在、但整段没有有效样本：与"本场没有"分开说（ticket #34）。这两条混在
+  // 一起的话，用户会去查"名字是不是打错了"，而真正的原因是那列本来就是空的。
+  if ((table.empty || []).length) {
+    parts.push("全程无有效数据：" + esc((table.empty || []).join("、")));
   }
   const embedded = new Set(table.channels || []);
   const absent = (comp.config.channels || []).filter((name) => !embedded.has(name));
@@ -5584,9 +5736,45 @@ function renderChannelList() {
       const row = document.createElement("label");
       row.className = "ch";
       row.title = name + " · " + (ch.unit || "无单位") + " · " + ch.rate + " Hz · " + ch.samples + " 点";
+      // 通道在、但整段没有有效样本：与"本场次没有"分开说明（ticket #34）。
+      const dead = isEmptyChannel(name);
+      if (dead) row.title = name + " · 整段没有有效样本（列是全空的）";
       row.innerHTML = '<input type="checkbox" ' + (on ? "checked" : "") + ">"
         + '<span class="swatch" style="background:' + (on ? channelColor(name, comp) : "#3a4150") + '"></span>'
-        + '<span class="nm">' + name + '</span><span class="unit">' + (ch.unit || "") + "</span>";
+        + '<span class="nm">' + name + '</span>'
+        + '<span class="unit' + (dead ? " dead" : "") + '">'
+        + (dead ? "全程无有效" : (ch.unit || "")) + "</span>";
+      row.querySelector("input").addEventListener("change", (event) => {
+        toggleChannel(name, event.target.checked);
+      });
+      frag.appendChild(row);
+      shown += 1;
+    }
+  }
+  // 工作表引用了、本场次没有的通道（ticket #34）：**列出来、灰着、说清原因**。
+  // 以前它们在这儿根本不出现，用户只能看到"图少了一条线"。
+  // 绝不自动剔除：它们还在组件配置里（勾是勾着的），换回原来的场次原样还在。
+  const missing = workbenchMissing().filter(match);
+  if (missing.length) {
+    const head = document.createElement("div");
+    head.className = "grphead";
+    head.innerHTML = "<span>本场次没有</span>"
+      + '<span class="addall">为什么</span>';
+    head.querySelector(".addall").addEventListener("click", () => {
+      toast("这 " + missing.length + " 条通道是工作表里留着的，本场次的数据里没有。"
+        + "它们不会被自动删掉——换回原来的场次，勾选和配置原样还在。");
+    });
+    frag.appendChild(head);
+    for (const name of missing) {
+      const on = chosen.indexOf(name) >= 0;
+      const row = document.createElement("label");
+      row.className = "ch missing";
+      row.title = name + " · 本场次没有这条通道"
+        + "（工作表里还留着，换回原来的场次就还在）";
+      row.innerHTML = '<input type="checkbox" ' + (on ? "checked" : "") + ">"
+        + '<span class="swatch" style="background:' + MISSING_COLOR + '"></span>'
+        + '<span class="nm">' + name + "</span>"
+        + '<span class="unit">本场次没有</span>';
       row.querySelector("input").addEventListener("change", (event) => {
         toggleChannel(name, event.target.checked);
       });
@@ -5597,7 +5785,8 @@ function renderChannelList() {
   if (!shown) list.innerHTML = "<p class='hint'>没有匹配的通道</p>";
   else list.appendChild(frag);
   $("chCount").textContent = chosen.length + " / " + DATA.channels.length
-    + (comp && comp.type === "graph" ? "" : "（未选中图）");
+    + (comp && comp.type === "graph" ? "" : "（未选中图）")
+    + (missing.length ? "，缺 " + missing.length + " 条" : "");
 }
 
 function toggleChannel(name, on) {
@@ -6128,6 +6317,17 @@ function exportConfig() {
   };
 }
 
+/** 这次导出点名要、但本场次没有的通道（ticket #34）。
+ *
+ * 「全部通道」永远缺不了（服务端按本场次现列），所以只有「侧边栏勾选的」这一档
+ * 会有——而它正是"换场次后工作表还留着旧通道名"的那条路。判据问 `channelState`，
+ * 不在这里另写一遍 `CHANNELS.has`。
+ */
+function exportMissingChannels(cfg) {
+  if (!cfg || cfg.channels !== "selected") return [];
+  return selectedChannels().filter(isMissingChannel);
+}
+
 function applyExportConfig(cfg) {
   // 没有距离轴的场次（实测：没有车速通道、或车速通道整段是死的，例如几十秒
   // 原地不动的 CAN 日志）不能选"指定距离段"——选了服务端只会回一句 400。
@@ -6163,6 +6363,13 @@ function syncExportFields() {
   const typed = cfg.range === "time" || cfg.range === "distance";
   $("exportFromRow").hidden = !typed;
   $("exportRateCustom").hidden = cfg.rate !== "custom";
+  // 侧边栏勾的通道里混着"本场次没有"的（换场次留下的工作表）：先说清会跳过哪几条。
+  const gone = exportMissingChannels(cfg);
+  $("exportMissingRow").hidden = !gone.length;
+  $("exportMissing").textContent = gone.length
+    ? gone.join("、") + "（共 " + gone.length + " 条）——这次导出会跳过它们，"
+      + "并把名字写进元数据的 excluded_missing。"
+    : "";
   $("exportFrom").placeholder = cfg.range === "distance"
     ? "1200m" : "12.5s 或 2026-09-14 12:34:56.789";
   $("exportTo").placeholder = cfg.range === "distance" ? "1850m" : "18.0s 或 12:35:10.123";
@@ -6275,8 +6482,16 @@ function exportURL(cfg, plan) {
     if (!names.length) {
       return { error: "侧边栏一条通道都没勾：先在左边「通道」里勾几条，或者把通道换成「全部通道」。" };
     }
+    const gone = exportMissingChannels(cfg);
+    if (gone.length === names.length) {
+      return { error: "侧边栏勾的通道本场次一条都没有（" + gone.join("、")
+        + "），没有列可以导。换一套工作表，或者把通道换成「全部通道」。" };
+    }
     params.set("channels", "selected");
     params.set("names", names.join(","));
+    // 缺的那几条**明说跳过**：服务端会把它们写进元数据的 excluded_missing。
+    // 不带上这个开关，服务端会按"名字打错了"处理并整单报错（那是命令行的规矩）。
+    if (gone.length) params.set("skip_missing", "1");
   } else {
     params.set("channels", "all");
   }
@@ -6641,7 +6856,8 @@ function readHashState() {
   const params = urlParams();
   const channels = params.get("channels");
   if (channels) {
-    const wanted = channels.split(",").filter((c) => CHANNELS.has(c));
+    // URL 里点名要的通道（分享链接）：本场次没有的跳过——它本来就不是给这场写的。
+    const wanted = channels.split(",").filter((c) => !isMissingChannel(c));
     const comp = graphComponents()[0];
     if (wanted.length && comp) comp.config.channels = wanted;
   }
@@ -7034,11 +7250,15 @@ function renderAll() {
   renderOverview();
   markLapRows();
   setStatus();
+  renderMissingNotice();
 }
 
 /* ------------------------------------------------------------------- init */
 function initHeader() {
   const m = DATA.meta;
+  // 这里会把 #fileInfo 的 innerHTML 整个换掉，上一条缺通道提示的节点也就不在文档里了。
+  missingNoticeEl = null;
+  missingNoticeKey = null;
   $("fileInfo").innerHTML = "<b>" + m.file + "</b> · " + m.device + " " + m.log_date + " "
     + m.log_time + " · " + (m.event || "-") + " · " + m.duration.toFixed(1) + " s @ "
     + m.sample_rate + " Hz · " + m.channels + " 通道 · 速度源 " + (m.speed_channel || "-");
@@ -7272,6 +7492,8 @@ init();
 //   i3pro.addComponentOfType("graph");
 window.i3pro = {
   state: state, data: DATA, renderAll: renderAll, lane: lane,
+  channels: CHANNELS, statusChannels: STATUS, channelGroups: GROUPS,
+  payloadMissing: PAYLOAD_MISSING, renderChannelList: renderChannelList,
   fullRange: fullRange, zoomTo: zoomTo, zoomFactor: zoomFactor,
   groupsFor: groupsFor, selectedChannels: selectedChannels,
   addComponentOfType: addComponentOfType, applyPreset: applyPreset,
@@ -7292,6 +7514,11 @@ window.i3pro = {
   askSheetName: askSheetName, submitSheetAsk: submitSheetAsk, hideSheetAsk: hideSheetAsk,
   resolvePickValue: resolvePickValue,
   renderWorksheetNote: renderWorksheetNote,
+  channelState: channelState, isMissingChannel: isMissingChannel,
+  isEmptyChannel: isEmptyChannel, componentChannels: componentChannels,
+  worksheetChannels: worksheetChannels, workbenchMissing: workbenchMissing,
+  missingText: missingText, renderMissingNotice: renderMissingNotice,
+  exportMissingChannels: exportMissingChannels, syncExportFields: syncExportFields,
   encodeComponentConfig: encodeComponentConfig,
   buildWorksheet: buildWorksheet, syncScatterSelectors: syncScatterSelectors,
   apiUrl: apiUrl, apiGet: apiGet,

@@ -323,6 +323,7 @@ def cmd_export(args: argparse.Namespace) -> int:
             "format": args.format,
             "metadata": "1" if args.metadata else "0",
             "bundle": "1" if args.bundle else "0",
+            "skip_missing": "1" if args.skip_missing else "0",
         }
         if args.from_ is not None:
             params["from"] = args.from_
@@ -369,6 +370,8 @@ def cmd_export(args: argparse.Namespace) -> int:
     )
     for warning in info.get("warnings", []):
         print(f"# 提醒：{warning}")
+    for name in request.excluded_missing:
+        print(f"# 本场次没有 {name} 这条通道，已跳过（写进了元数据的 excluded_missing）。")
     return 0
 
 
@@ -839,6 +842,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="不要元数据")
     p.add_argument("--bundle", action="store_true",
                    help="CSV 与 metadata.json 打成一个 zip")
+    p.add_argument("--skip-missing", action="store_true",
+                   help="--names 里有本场次没有的通道时跳过它们（名单写进元数据的 "
+                        "excluded_missing），而不是报错——界面上那张工作表走的就是这条")
     p.add_argument("--estimate", action="store_true",
                    help="只打印预计行数 / 列数 / 体积，不写文件")
     p.set_defaults(func=cmd_export)

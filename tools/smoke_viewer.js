@@ -2995,6 +2995,101 @@ if (api && exportDlg) {
   check(posts() === before, "快照里点「导出」发了请求");
 }
 
+/* ---------------------- 缺失通道的三态与出口（ticket #34） --------------------
+ * 一票修 bug 的事：以前换场次之后，工作表里那条本场次没有的通道是**静默消失**的
+ * （服务端跳过 + 前端 `.filter` 再滤一遍 + 零文案），用户看到的只有"图少了一条线"。
+ *
+ * 这一组钉四件事：
+ *   ① 三态判定只有一处（`channelState`），而且三种名字各归各的状态；
+ *   ② 缺的通道**列在通道列表里、灰着、带"本场次没有"**，而且**没被从配置里删掉**；
+ *   ③ 组件标题与抬头写着"缺 N 条"；
+ *   ④ 出口写明：导出请求带 `skip_missing=1`、面板上列了名字。
+ * "真点得到、真灰着"归真浏览器那关（tools/verify_clicks.py）。 */
+{
+  const api = window.i3pro;
+  const real = "Vx KF";
+  const bogus = "本场次没有的通道（无烟煤）";
+  check(api.channelState(real) === "present",
+    "本场次存在的通道被判成了别的状态：" + api.channelState(real));
+  check(api.channelState(bogus) === "missing",
+    "本场次没有的通道没被判成 missing：" + api.channelState(bogus));
+
+  // 三态里的"empty"（通道在、整段没有有效样本）在快照里没有天然的样本：
+  // 临时把一条真实通道的 has_data 翻成 false，验的是**判定与文案分得开**。
+  const probe = api.channels.get(real);
+  const wasHasData = probe.has_data;
+  probe.has_data = false;
+  check(api.channelState(real) === "empty",
+    "整段没有有效样本的通道被和「本场次没有」混成一种了：" + api.channelState(real));
+  check(api.workbenchMissing().indexOf(real) < 0,
+    "「整段没数据」的通道被算进了「本场次没有」那份名单");
+  probe.has_data = wasHasData;
+  check(api.channelState(real) === "present", "探针没还原回去");
+
+  // 往当前那张图上挂一条本场次没有的通道——就是"换场次之后常见的状态"。
+  const comp = api.state.components.filter((c) => c.type === "graph")[0];
+  const before = comp.config.channels.slice();
+  comp.config.channels.push(bogus);
+  api.state.focusId = comp.id;
+  api.renderAll();
+  api.renderChannelList();
+  api.renderMissingNotice();
+
+  check(api.workbenchMissing().indexOf(bogus) >= 0,
+    "工作表引用了本场次没有的通道，workbenchMissing() 却没认出来：" + api.workbenchMissing());
+  check(api.selectedChannels().indexOf(bogus) >= 0,
+    "缺的通道被**自动剔除**出配置了（换回原场次时勾选就没了）");
+  check(api.componentTitle(comp).indexOf("缺 1 条") >= 0,
+    "组件标题没写「缺 N 条」：" + api.componentTitle(comp));
+
+  // 通道列表那一行：假 DOM 里 className 是普通属性、行内容是 _html，
+  // "真的灰了、真的点得到"归真浏览器那关（tools/verify_clicks.py）。
+  const list = registry.get("channelList");
+  const rows = (list && list._children ? list._children : [])
+    .filter((c) => String(c.className).indexOf("missing") >= 0);
+  const row = rows.filter((r) => String(r._html).indexOf(bogus) >= 0)[0];
+  check(!!row, "通道列表里没有那条灰掉的缺通道");
+  if (row) {
+    check(row._html.indexOf("本场次没有") >= 0,
+      "灰是灰了，但没说清是哪一种「没有」：" + row._html);
+    check(row._html.indexOf("checked") >= 0,
+      "缺的通道在列表里没保持勾选（看起来像被剔除了）");
+  }
+  // 页面抬头那条（快照文案）：它是挂在 #fileInfo 里的一个 span，假 DOM 拿得到。
+  const info = registry.get("fileInfo");
+  const notice = (info && info._children ? info._children : [])
+    .filter((c) => c.id === "missingNotice")[0];
+  check(!!notice && String(notice.textContent).indexOf(bogus) >= 0,
+    "页面抬头没写缺了哪几条：" + (notice ? notice.textContent : "(没有这个元素)"));
+
+  // 出口：导出面板把这条通道当"跳过并写进元数据"，而不是当成会把整单打回的错。
+  const cfg = api.exportConfig();
+  cfg.channels = "selected";
+  const gone = api.exportMissingChannels(cfg);
+  check(gone.indexOf(bogus) >= 0, "导出面板没认出这次会跳过哪几条：" + gone);
+  const url = api.exportURL(cfg);
+  check(!url.error, "导出被整单打回了（缺通道不该让导出做不成）：" + url.error);
+  if (url.href) {
+    check(url.href.indexOf("skip_missing=1") >= 0,
+      "导出请求没带 skip_missing=1，服务端会当成名字打错：" + url.href);
+    check(decodeURIComponent(url.href).indexOf(bogus) >= 0,
+      "缺的那条不在导出名单里（元数据就写不出 excluded_missing）");
+  }
+
+  // 还原：把探针那条撤掉，状态要跟着回到"一条都不缺"。
+  comp.config.channels = before;
+  api.renderAll();
+  api.renderChannelList();
+  api.renderMissingNotice();
+  check(api.workbenchMissing().length === 0,
+    "撤掉之后还有残留的缺通道：" + api.workbenchMissing());
+  check((registry.get("channelList")._children || [])
+          .filter((c) => String(c.className).indexOf("missing") >= 0).length === 0,
+    "通道列表里还留着灰掉的缺通道");
+  check(String(notice.textContent) === "",
+    "撤掉之后页面抬头还写着缺通道：" + notice.textContent);
+}
+
 /* --------------------------------------------------------------- DOM checks */
 /* ------------------------- 34. 原始 CAN 帧表（#38 / #39 / #40） --------------
  * 断言导入报告里该有的东西：帧数 / 覆盖率、**每份 DBC 的贡献与哈希**、

@@ -39,7 +39,7 @@ from typing import Iterable, Sequence
 
 import numpy as np
 
-from . import derive, laps as lapsmod, sections as sectionsmod, timebase
+from . import channels as channelsmod, derive, laps as lapsmod, sections as sectionsmod, timebase
 
 __all__ = [
     "STAT_LABELS",
@@ -408,7 +408,12 @@ def channel_report(
         else:
             windows = section_windows(log, laps, config, kind=kind, lap_label=label)
 
-    chosen = [name for name in channels if name and log.has(name)]
+    # 哪几条在、哪几条不在：问 channels.resolve（三态只判一次，ticket #34）。
+    # 以前这里自己写了一遍 ``log.has``，于是"缺失"的说法在服务端与前端各有一份。
+    verdict = channelsmod.resolve(log, channels)
+    chosen = [name for name, state in verdict["states"].items()
+              if state != channelsmod.MISSING]
+    dead = set(verdict["empty"])
     columns: list[dict] = [
         {"key": "group", "label": "分组", "type": "text"},
         {"key": "lap", "label": "圈", "type": "text"},
@@ -456,7 +461,6 @@ def channel_report(
             )
 
     units = {name: log.channel(name).unit for name in chosen}
-    missing = [name for name in channels if name and not log.has(name)]
     return {
         "kind": "channels",
         "columns": columns,
@@ -465,7 +469,9 @@ def channel_report(
         "filter": kind or "all",
         "channels": chosen,
         "units": units,
-        "missing": missing,
+        "missing": verdict["missing"],
+        # 通道在、但整段没有有效样本：与"本场次没有"分开报（ticket #34）。
+        "empty": [name for name in chosen if name in dead],
         "lap": None if by == "lap" else (
             None if reference is None and lap_label is None else str(lap_label or reference.label)
         ),

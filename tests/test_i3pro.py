@@ -2207,6 +2207,11 @@ class _MathSession:
             return self.derived[key]
         return self.columns[key]
 
+    #: ticket #34 起，会话还要能被问到**原始样本**（判"整段有没有有效样本"用）。
+    #: 这个桩的列本来就是浮点列，原始样本就是它自己。
+    def raw(self, name) -> np.ndarray:
+        return self.values(name)
+
     def time_base(self) -> np.ndarray:
         return np.arange(self.channels[0].sample_count) / self.sample_rate
 
@@ -2872,7 +2877,9 @@ class TestChannelSeam(unittest.TestCase):
         self.assertEqual(
             render.channel_index(session),
             [{"name": "计数器", "unit": "圈", "rate": rate,
-              "samples": ramp.size, "derived": True}],
+              "samples": ramp.size, "derived": True,
+              #: #34 加的：界面上要能分开"本场没有这条"和"有但整段是空的"。
+              "has_data": True}],
         )
 
     def test_a_derived_column_reaches_parquet_as_itself(self):
@@ -2917,7 +2924,10 @@ class TestChannelSeam(unittest.TestCase):
                     index[position],
                     {"name": channel.name, "unit": channel.unit,
                      "rate": channel.sample_rate, "samples": channel.sample_count,
-                     "derived": False},
+                     #: `has_data` 是 ticket #34 新加的字段（同一份通道索引，
+                     #: 界面上"缺一条"与"这条是空的"要靠它分开）；除它之外
+                     #: 每一项都必须与旧实现逐字段相同。
+                     "has_data": True, "derived": False},
                     f"{channel.name}: 通道索引与旧实现不一致",
                 )
             slowest = min(log.channels, key=lambda ch: ch.sample_rate)
@@ -3424,6 +3434,10 @@ class _TableLog:
 
     def values(self, name):
         return self._channels[name if isinstance(name, str) else name.name]._values
+
+    #: ticket #34：会话要能被问到原始样本（`channels.valid_count` 用）。
+    def raw(self, name):
+        return self.values(name)
 
 
 class TestReport(unittest.TestCase):
@@ -7683,6 +7697,169 @@ class TestTextImport(unittest.TestCase):
         self.assertEqual(len(laps), wanted,
                          f"空格子把圈吃掉了：{len(laps)} 圈，应该有 {wanted} 圈")
         self.assertGreaterEqual(len([l for l in laps if l.complete]), 3)
+
+
+class TestChannelStates(unittest.TestCase):
+    """缺失通道的**三态**（ticket #34）：present / empty / missing。
+
+    以前"缺通道"是静默丢弃（服务端跳过 + 前端 `.filter` 再滤一遍 + 零文案），
+    用户看到的是"图坏了"。这一票把它变成看得见的状态，而且**三条状态必须分开**：
+
+    * ``missing`` —— 本场次根本没有这条通道（灰显、不画、绝不自动剔除）；
+    * ``empty``   —— 通道在，但整段没有一个有效样本（正常画，文案说清是哪种"没有"）；
+    * 当前窗口没样本 —— **不作提示**（那只是缩放的结果，不是数据的问题）。
+
+    判据是"三态只有一处实现"：`channels.resolve` / `channels.state` 是那一处，
+    通道索引、报告、导出元数据、页面载荷都问它。所以这里既钉行为，也钉"别人问的是它"。
+    """
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="i3pro-state-"))
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def csv_session(self, name: str = "三态.csv"):
+        """一列有数，外加一条**整段是 NaN 的数学通道**——那就是 ``empty`` 的样子。
+
+        为什么用数学通道造这条状态：CSV 导入会把**整列空**的列直接跳过
+        （``csvlog`` 的"整列没有可用数值"），所以"通道在但一个有效样本都没有"
+        在导入路径上到不了界面；数学通道会（表达式算出全 NaN 时）。CAN 那条路
+        同理——没有报文的信号列就是全 NaN 挂着。
+        """
+        path = self.dir / name
+        path.write_text(
+            "Time,Vx KF [km/h]\n0.000,10\n0.010,20\n0.020,30\n0.030,40\n",
+            encoding="utf-8",
+        )
+        session = csvlog.open_session(path)
+        mathsmod.attach(
+            session, {"全空数学通道": np.full(session.time.size, np.nan)}, [])
+        return session
+
+    # ------------------------------------------------------------- 三态本身
+    def test_三态分开_本场没有的与整段没数据的不是一回事(self):
+        session = self.csv_session()
+        self.assertEqual(channels.state(session, "Vx KF"), channels.PRESENT)
+        self.assertEqual(channels.state(session, "全空数学通道"), channels.EMPTY)
+        self.assertEqual(channels.state(session, "本场根本没有"), channels.MISSING)
+
+    def test_state_不知道的名字与空名字都算缺(self):
+        session = self.csv_session()
+        for name in ("", None, "   ", " 不存在的通道 "):
+            self.assertEqual(channels.state(session, name), channels.MISSING,
+                             f"{name!r} 该按「本场没有」算")
+
+    def test_resolve_保序去重_空名字跳过(self):
+        session = self.csv_session()
+        got = channels.resolve(
+            session, ["Vx KF", "没有的", "Vx KF", "", "全空数学通道"])
+        self.assertEqual(list(got["states"]), ["Vx KF", "没有的", "全空数学通道"])
+        self.assertEqual(got["present"], ["Vx KF"])
+        self.assertEqual(got["missing"], ["没有的"])
+        self.assertEqual(got["empty"], ["全空数学通道"])
+
+    def test_有效样本数按真的能用的行算(self):
+        """``sample_count`` 是"写了几行"，不是"有几行能用"——两者必须分开。"""
+        session = self.csv_session()
+        self.assertEqual(channels.valid_count(session, session.channel("Vx KF")), 4)
+        self.assertEqual(
+            channels.valid_count(session, session.channel("全空数学通道")), 0)
+        self.assertEqual(session.channel("全空数学通道").sample_count, 4,
+                         "这一列确实有 4 行，只是每行都是 NaN")
+
+    # ------------------------------------------------- 三态在载荷与出口里
+    def test_通道索引带着has_data_界面不用自己扫数据(self):
+        session = self.csv_session()
+        index = {c["name"]: c for c in render.channel_index(session)}
+        self.assertTrue(index["Vx KF"]["has_data"])
+        self.assertFalse(index["全空数学通道"]["has_data"])
+
+    def test_页面载荷把缺的通道带出去而不是静默丢掉(self):
+        """#34 的修 bug 那一半：以前 `build_payload` 在这里直接 `if log.has`。"""
+        session = self.csv_session()
+        payload = render.build_payload(session)
+        self.assertEqual(payload["missing"], [])
+        payload = render.build_payload(session, channels=["Vx KF", "缺掉的通道"])
+        self.assertEqual(payload["missing"], ["缺掉的通道"])
+        self.assertIn("Vx KF", payload["selected"])
+        self.assertNotIn("缺掉的通道", payload["selected"])
+
+    def test_通道报告把缺失与空列分开报(self):
+        session = self.csv_session()
+        table = reportmod.channel_report(
+            session, [], None, ["Vx KF", "全空数学通道", "缺掉的通道"], by="lap",
+        )
+        self.assertEqual(table["missing"], ["缺掉的通道"])
+        self.assertEqual(table["empty"], ["全空数学通道"])
+        self.assertEqual(table["channels"], ["Vx KF", "全空数学通道"])
+
+    def test_金标准场次上的通道报告把缺的挑出来(self):
+        """真数据上：点一条本场没有的通道，报告要把它列进 missing 而不是悄悄少一行。"""
+        if not HILL.exists():
+            self.skipTest(f"缺金标准数据 {HILL.name}")
+        log = ld.LogFile.read(HILL)
+        self.addCleanup(log.close)
+        laps = lapsmod.detect_laps(log)
+        table = reportmod.channel_report(
+            log, laps, None, ["Vx KF", "缺掉的通道"], by="lap",
+        )
+        self.assertEqual(table["missing"], ["缺掉的通道"])
+        self.assertEqual(table["empty"], [])
+        self.assertEqual([row[4] for row in table["rows"]][:2], ["Vx KF", "Vx KF"])
+
+    # ------------------------------------------------------- 真数据上的三态
+    def test_金标准场次里没有空列(self):
+        if not HILL.exists():
+            self.skipTest(f"缺金标准数据 {HILL.name}")
+        log = ld.LogFile.read(HILL)
+        self.addCleanup(log.close)
+        index = render.channel_index(log)
+        dead = [c["name"] for c in index if not c["has_data"]]
+        self.assertEqual(dead, [], f"这两条通道本该都是满的：{dead}")
+        self.assertEqual(channels.state(log, "Vx KF"), channels.PRESENT)
+        self.assertEqual(channels.state(log, "FSD13 Distance1"), channels.MISSING)
+
+
+class TestMissingChannelsOnExport(_ExportBase):
+    """缺失通道要一路走到出口：导出的元数据里必须有 `excluded_missing`（ticket #34）。"""
+
+    def test_点名要了本场没有的通道_默认仍然报错并说下一步(self):
+        with self.assertRaises(exportmod.ExportError) as ctx:
+            self.request(names="Vx KF,缺掉的通道")
+        self.assertIn("skip_missing=1", str(ctx.exception),
+                      "报错要说清「确实想跳过就加这个开关」，只报「没有」等于没说")
+
+    def test_明说跳过时导出照走_名单进元数据(self):
+        request = self.request(names="Vx KF,缺掉的通道", skip_missing="1")
+        self.assertEqual(request.excluded_missing, ("缺掉的通道",))
+        self.assertEqual(request.channels, ("Vx KF",))
+        self.assertIn("本场次没有", request.channel_source)
+        meta = exportmod.metadata(self.log, request, 100, 2)
+        self.assertEqual(meta["excluded_missing"], ["缺掉的通道"])
+        # 空也要在：队友的脚本不该靠"有没有这个键"来猜这次缺没缺。
+        clean = self.request(names="Vx KF")
+        self.assertEqual(exportmod.metadata(self.log, clean, 100, 2)["excluded_missing"], [])
+
+    def test_Excel的元数据sheet里也写着它(self):
+        request = self.request(names="Vx KF,缺掉的通道", skip_missing="1")
+        rows = list(exportmod._metadata_rows(
+            exportmod.metadata(self.log, request, 100, 2)))
+        hit = [row for row in rows if row[0] == "本场次没有（已跳过）"]
+        self.assertEqual(len(hit), 1, f"Excel 元数据里没写缺了哪几条：{rows[-4:]}")
+        self.assertIn("缺掉的通道", hit[0][1])
+
+    def test_一条都不剩时要报错说下一步(self):
+        with self.assertRaises(exportmod.ExportError) as ctx:
+            self.request(names="缺一,缺二", skip_missing="1")
+        self.assertIn("全部通道", str(ctx.exception))
+
+    def test_导出的文件里真的没有那条通道的列(self):
+        request = self.request(names="Vx KF,缺掉的通道", skip_missing="1",
+                               rate="10", format="csv")
+        out = self.tmp() / "kept.csv"
+        exportmod.write(self.log, request, out)
+        header = out.read_text(encoding="utf-8-sig").splitlines()[0]
+        self.assertIn("Vx KF", header)
+        self.assertNotIn("缺掉的通道", header)
 
 
 if __name__ == "__main__":

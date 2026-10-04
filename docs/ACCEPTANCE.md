@@ -2831,6 +2831,57 @@ channel(s) outside tolerance`；两份金标准快照各 `PASS`（7 圈 / 471 �
 `.gitignore` 补了 `*.tsv`（`*.txt` 不加——`request/*.txt` 是**要进仓库**的需求文档，
 全局忽略会让它们看起来像没被跟踪）。
 
+## A59 · 缺失通道可见：三态分开、灰显、绝不自动剔除（ticket #34）
+
+到 A58 为止，一份工作表换到没有那条通道的场次时，那条通道是**静默消失**的：服务端
+`if log.has(...)` 跳过、前端再 `.filter(CHANNELS.has)` 滤一遍、零文案。用户看到的是
+"这条图坏了"——所以这一票首先是**修 bug**，其次才是加显示。
+
+```powershell
+# 1) 单测：三态 + 报告 + 载荷 + 导出元数据（14 项）
+python -m unittest tests.test_i3pro.TestChannelStates tests.test_i3pro.TestMissingChannelsOnExport -v
+
+# 2) 真浏览器：导入一套引用本场没有通道的工作表，点进去看那张灰名单，再真导一次
+python tools\verify_clicks.py     # 148 项检查：148 通过，0 失败（其中 #34 有 21 条）
+
+# 3) 无头：三态判定只有一处 + 通道列表那一行 + 导出请求带 skip_missing=1
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
+```
+
+**通过判据**（`TestChannelStates` 9 项 ＋ `TestMissingChannelsOnExport` 5 项 ＋
+真浏览器 21 条 ＋ 无头 19 条）：
+
+| 断言 | 说明 |
+| --- | --- |
+| **三态只有一处实现** | `channels.state()` / `channels.resolve()`（Python）与 `channelState()`（前端）是唯一的判定点；通道列表、组件抬头、页面抬头、通道报告、导出元数据、导出面板都问它，源码里 `.filter(CHANNELS.has)` 当"缺不缺"的写法已经清零 |
+| 三种"没有"分得开 | `present` / `empty`（通道在、整段没有一个有效样本）/ `missing`（本场次根本没有）。实测：`Vx KF` → `present`、一条全 NaN 的数学通道 → `empty`、`FSD13 Distance1` 在高避场次 → `missing` |
+| **本场没有的不许被自动剔除** | 真浏览器里那条通道仍留在 `comp.config.channels` 里（勾还勾着）；切回原来的场次，勾选与配置原样还在 |
+| 通道列表里看得见 | 真 Edge 量出来的 `getComputedStyle(row).opacity` = **0.55**、`getBoundingClientRect()` = **289 × 22.84 px**、文字是 `本场没有的通道（验收样例）本场次没有` |
+| 组件抬头写着缺几条 | 标题实测 `时间/距离图 · 2 通道 · 缺 1 条 · 分栏`；图上另有一行 `.lrow.lmissing`，实测 **1160 × 15 px**，文字 `本场次没有（不画）：…` |
+| 页面抬头写着缺几条 | `#missingNotice` 实测 `· 本场次没有 1 条（…），它们没被从工作表里删掉`（快照里同样有——它跟着当前工作表算） |
+| 通道报告分开报 | `channel_report()` 的 `missing` / `empty` 两组互不串门；合成数据里"空列"进 `empty`、"没这条"进 `missing` |
+| 导出的元数据有 `excluded_missing` | 真浏览器真导出：下下来的 zip 里 `metadata.json` 的 `excluded_missing` = `['本场没有的通道（验收样例）']`；**空的时候这个键也在**（队友的脚本不该靠"有没有这个键"猜） |
+| 缺的通道不许把整单打回 | 界面走的那条路带 `skip_missing=1`（实测 URL 里带这个参数），缺的那条不进数据列、也不进 `channels`；**命令行**默认仍然是硬报错，报错里写明"确实想跳过就加 `skip_missing=1`"——打错一个字就静默少一列是另一种坑 |
+
+**这一票撞出来的两件事**
+
+1. **`channel_index` 差点把页面载荷拖慢三分之一。** 首版用 `log.values(channel)`
+   算"有没有有效样本"，实测耐久金标准 payload 从 **0.659 s → 0.881 s**——`values()`
+   本身是整份数据的 `astype` 拷贝（342 条通道 0.168 s）。改成问会话的 `raw()`
+   （`.ld` 是 mmap 视图，整数样本不可能是 NaN，直接跳过扫描）之后回到 **0.660 s**，
+   与改动前持平（同一台机器、同一份数据、三次取最小值）。
+2. **"整列空的通道"在导入路径上根本到不了界面。** `csvlog` 会把整列没有可用数值的
+   列直接跳过（那是它该做的），所以 `empty` 这条状态真正的来源是**数学通道**
+   （表达式算出一列 NaN）与没有报文的 CAN 信号列。单测与真浏览器验的都是这两条真路。
+
+**一条副作用**：会话契约从"三样"变成"四样"——`channels.valid_count` 要问会话的
+`raw(channel)`。没声明的会话会拿到一条带下一步的 `TypeError`，而不是悄悄退回慢路径。
+
+**回归四项（本机实测）**：`Ran 407 tests` + `OK`；`verify_ld_vs_csv` `PASS - 0
+channel(s) outside tolerance`；两份金标准快照各 `PASS`（7 圈 / 471 通道行、
+26 圈 / 377 通道行）；真浏览器 **148 项检查：148 通过，0 失败**；
+`smoke_viewer.js` 里的 `check(` 共 **531** 条。
+
 ---
 
 测试覆盖：
@@ -2862,7 +2913,7 @@ channel(s) outside tolerance`；两份金标准快照各 `PASS`（7 圈 / 471 �
 | `TestIndependentParsers` | 第二套实现交叉验证、213 通道 CSV 全量对照 |
 | `TestBeaconUndo` | 撤销的纯函数层：什么是"同一版"、什么时候没有可撤销的一步、交回去的是上一版本身 |
 | `TestBeaconUndoOverHttp` | 撤销走真实 `PUT`：改名 / 插入 / 删除各自一步回到原样、`trusted` 迁移、落盘、一次无改动的保存不吃掉上一步、没有可撤销的一步时 400 并说明下一步、页面注入的 `laps_can_undo` 三态 |
-| `TestViewerScript` | 无头驱动前端：脚本里 **498 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
+| `TestViewerScript` | 无头驱动前端：脚本里 **531 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
 | `TestWorksheets` | 工作表（#30，12 项）：仓库里那七份文件全都读得出来（名字 / 身份 / 顺序 / 组件类型）、随版本发布的那几份**不写死通道名**（挑通道一律走 `pick`）、坏文件不连累别人、七种坏法各自的下一步（坏 JSON / schema 不认 / 键打错 / 尺寸非法 / 空组件列 / 空规则 / 规则键打错）、重名被挡、目录不存在与目录为空、载荷在快照与本地服务两条路上都带工作表（含 `--worksheets` 换目录只影响那一个载荷）、**搬进文件之后与搬之前逐字段一致**（夹具是硬编码那版倒出来的） |
 | `TestExportRangeResolution` | 导出的范围解析（#23，4 项）：裸时钟沿用场次那天、范围左闭右闭、颠倒/越界各自说下一步、距离段填的是米而 `t_start` 才是秒 |
 | `TestExportRanges` / `TestExportSampling` / `TestExportFiles` / `TestExportErrors` / `TestExportPerformance` | 导出的数据面（#23，17 项）：auto 保留原始采样点且含起止点、绝对时间与相对秒逐字节相同、距离轴不倒退、统一采样率不留空格、`linear`/`hold`/`mean` 各给各的数、`plan` 行数 = 实际行数、CSV 带 BOM、zip 里的 `metadata.json`、长表只写有值的格子、xlsx 的 openpyxl 往返、五类坏输入的下一步、分块写的峰值内存守门 |
@@ -2884,3 +2935,5 @@ channel(s) outside tolerance`；两份金标准快照各 `PASS`（7 圈 / 471 �
 | `TestDbcMerge` | 多份 DBC 取并集（#40，5 项）：各管各的 ID 都进并集、逐字相同的定义**不算冲突**、同一条 ID 两种定义按覆盖帧数选并写进冲突表、帧数相同时按文件名定序（可复现）、标准帧与扩展帧同号不互相盖住 |
 | `TestCanLog` | 原始 CAN 帧表（#38 / #39 / #40，12 项）：帧表不被当成通道表、会话落在主时间基上且真实更新率另行记录、零阶保持与按帧时间戳重算逐点一致、**并集**后的帧数/ID 数/覆盖率 43.42%/61 条通道/每条通道的来源 DBC/诊断 ID、跑起来的日志有距离轴而原地不动的没有、固定一份 DBC 仍可用、合成的 ID 冲突进报告、侧车记下角色与 `dbc_mode` 并可用角色覆盖、找不到 DBC 时说下一步、9 份并成 7 场（含实测的 26 µs 与 249 µs 依据）与关掉并场时的 9 场、场次库每个记录一个条目、单份 91 MB ≤ 5 s |
 | `TestTextImport` | 读分隔文本（#32，19 项）：四种分隔符（逗号 / Tab / 分号 / 竖线）与**连续空白**都读成同一个场次**且数值逐点相同**、预览说出的通道名与真正导入的一致（预览=导入）、分隔符猜错时预览里看得见并能改对、侧车记住解析方式（并且不被列名覆盖冲掉、空值=改回自动）、没有时间列时拒绝并给下一步、按固定采样率生成的时间列可复现（两次读逐点相同、报告里带 `generated`）、**表里本来就有时间列时生成选项不许盖掉它**、表头行指错会说清有几行、没有表头行时列名退化成 `列1/列2`、同一张表的 CSV 与 TXT 读回来逐点相同（含"分隔符不是逗号的 `.csv`"）、导入页带齐四个下拉框、API 暂存→预览→提交→侧车、取消会删掉暂存文件（过期的编号给 404 + 下一步）、坏选项给 400 且列出能用的值、命令行 `--preview` 不动文件且 `--rate` 落到侧车、暂存目录只清一小时前的、**稀疏 GPS 列不许把圈吃掉**（导出→读回仍是同样的圈数） |
+| `TestChannelStates` | 缺失通道的三态（#34，9 项）：present / empty / missing 分得开、不知道的名字与空名字都算缺、`resolve` 保序去重、`valid_count` 与 `sample_count` 是两件事、通道索引带 `has_data`、页面载荷把缺的**带出去**而不是静默丢掉、通道报告把 missing 与 empty 分两组、金标准 437 条通道里没有空列 |
+| `TestMissingChannelsOnExport` | 缺失通道走到出口（#34，5 项）：默认硬报错并说"确实想跳过就加 `skip_missing=1`"、明说跳过时名单进 `excluded_missing`（**空的时候键也在**）、Excel 元数据 sheet 里也写着这一行、一条都不剩时说下一步、导出的 CSV 里真的没有那一列 |

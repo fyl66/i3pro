@@ -36,6 +36,7 @@ import tempfile
 import time
 import urllib.parse
 import urllib.request
+import zipfile
 
 # Windows 控制台默认是 GBK，界面里的 ↶ / ⤢ / 中文引号打不出来，直接
 # UnicodeEncodeError 崩在半途——断言结果没输出完比不跑还糟。强制 UTF-8。
@@ -1416,6 +1417,163 @@ class Checker:
                    self.js("i3pro.cursorTime()") is not None, "x=%s y=%s" % (x, y))
         self.js("(function(){i3pro.state.cursor=null;i3pro.renderAll();return true;})()")
 
+    def missing_channels(self, work_dir):
+        """#34：本场次没有的通道要**看得见**，而且不准被偷偷剔掉。
+
+        这一关只有真浏览器算数：灰不灰是**算出来的样式**（`getComputedStyle` 的
+        opacity / 划线），假 DOM 里既没有样式也没有布局；"这一行在屏幕上"更是
+        `getBoundingClientRect` 说了算。
+
+        造法走的是真路：把一套"引用了一条本场次没有的通道"的工作表从**文件选择器
+        导进去**（和队友把表发给我、我导入它是同一件事），切到那一套，再看那张
+        灰名单。最后真跑一次导出，把那几条写进元数据的 `excluded_missing` 也要
+        在**真文件**里读到——断言到"接口收到了参数"不够。
+        """
+        bogus = "本场没有的通道（验收样例）"
+        sheet = {
+            "schema": 1, "name": "缺通道样例", "order": 99, "hints": [],
+            "components": [
+                {"type": "graph", "x": 0, "y": 0, "w": 12, "h": 10,
+                 "config": {"mode": "tiled", "channels": ["Vx KF", bogus]}},
+            ],
+        }
+        blob = base64.b64encode(
+            json.dumps(sheet, ensure_ascii=False).encode("utf-8")).decode("ascii")
+        self.js(
+            "(function(){var b=atob('%s'),a=new Uint8Array(b.length);"
+            "for(var i=0;i<b.length;i++)a[i]=b.charCodeAt(i);"
+            "var f=new File([a],'codex-missing.json',{type:'application/json'});"
+            "var d=new DataTransfer();d.items.add(f);"
+            "var el=document.getElementById('wsFile');el.files=d.files;"
+            "el.dispatchEvent(new Event('change'));return true;})()" % blob)
+        appeared = self.browser.wait_for(
+            "(function(){var bs=document.querySelectorAll('#presetRow button');"
+            "for(var i=0;i<bs.length;i++){if(bs[i].textContent==='缺通道样例')return true;}"
+            "return false;})()",
+            self.session, timeout=20,
+        )
+        self.check("#34 导入那一套引用了本场没有通道的工作表之后，按钮上有了它",
+                   appeared,
+                   self.js("i3pro.state.preset"))
+        if not appeared:
+            return
+
+        # 真的点那个按钮切过去（不是 applyPreset 直接调函数）。
+        raw = self.js(
+            "(function(){var bs=document.querySelectorAll('#presetRow button');"
+            "for(var i=0;i<bs.length;i++){if(bs[i].textContent==='缺通道样例')"
+            "return JSON.stringify(__center(bs[i]));}return null;})()")
+        point = json.loads(raw) if raw and raw != "null" else None
+        self.check("#34 那一套在按钮栏里真的点得到", bool(point) and point.get("w", 0) > 0,
+                   point)
+        if not point:
+            return
+        self.browser.click(point["x"], point["y"], self.session)
+        time.sleep(1.0)
+        self.check("#34 切过去之后，本场没有的那条被判成 missing",
+                   self.js("i3pro.channelState(%r)" % bogus) == "missing",
+                   self.js("i3pro.channelState(%r)" % bogus))
+        self.check("#34 本场有的那条还是 present",
+                   self.js("i3pro.channelState('Vx KF')") == "present")
+        self.check("#34 缺的那条还在组件配置里（没有被自动剔除）",
+                   self.js("i3pro.selectedChannels().indexOf(%r) >= 0" % bogus),
+                   self.js("JSON.stringify(i3pro.selectedChannels())")[:200])
+        self.check("#34 组件标题写着缺了几条",
+                   "缺 1 条" in str(self.js(
+                       "(function(){var c=i3pro.state.components[0];"
+                       "return i3pro.componentTitle(c);})()")),
+                   self.js("i3pro.componentTitle(i3pro.state.components[0])"))
+
+        # 通道列表里那一行：真的在屏幕上、真的灰着、真的写着原因。
+        row = self.js(
+            "(function(){var rs=document.querySelectorAll('#channelList .ch.missing');"
+            "for(var i=0;i<rs.length;i++){if(rs[i].textContent.indexOf(%r)>=0){"
+            "var r=rs[i].getBoundingClientRect();var s=getComputedStyle(rs[i]);"
+            "return JSON.stringify({w:r.width,h:r.height,top:r.top,"
+            "opacity:parseFloat(s.opacity),text:rs[i].textContent,"
+            "box:rs[i].querySelector('input')?rs[i].querySelector('input').checked:null});}}"
+            "return null;})()" % bogus)
+        got = json.loads(row) if row and row != "null" else None
+        self.check("#34 通道列表里真有那条灰掉的缺通道", bool(got), got)
+        if got:
+            self.check("#34 它真的灰着（算出来的 opacity < 1）", got["opacity"] < 1, got)
+            self.check("#34 它真的占着屏幕上的位置（不是没渲染）",
+                       got["w"] > 0 and got["h"] > 0, got)
+            self.check("#34 它写明了「本场次没有」", "本场次没有" in got["text"], got["text"])
+            self.check("#34 它的勾还在（换回原场次时勾选不会丢）", got["box"] is True, got)
+
+        # 图上那一条"本场次没有（不画）"。
+        head = self.js(
+            "(function(){var e=document.querySelector('.lrow.lmissing');"
+            "if(!e)return null;var r=e.getBoundingClientRect();"
+            "return JSON.stringify({w:r.width,h:r.height,text:e.textContent});})()")
+        head = json.loads(head) if head and head != "null" else None
+        self.check("#34 图上写着「本场次没有（不画）」那一行", bool(head), head)
+        if head:
+            self.check("#34 那一行真的画在图上（有宽高）", head["w"] > 0 and head["h"] > 0, head)
+            self.check("#34 那一行点名了缺哪条", bogus in head["text"], head["text"])
+
+        self.check("#34 页面抬头也写着缺了几条",
+                   bogus in str(self.js(
+                       "(document.getElementById('missingNotice')||{}).textContent")),
+                   self.js("(document.getElementById('missingNotice')||{}).textContent"))
+        # 再把通道列表那一行滚到屏幕中间留一张图：验收说明里那句"灰着且带文案"
+        # 只有截图能一眼复核（数字是给回归用的）。
+        self.js(
+            "(function(){var rs=document.querySelectorAll('#channelList .ch.missing');"
+            "for(var i=0;i<rs.length;i++){if(rs[i].textContent.indexOf(%r)>=0){"
+            "rs[i].scrollIntoView({block:'center'});return true;}}return false;})()" % bogus)
+        time.sleep(0.6)
+        self.browser.shot(
+            os.path.join(ROOT, "out", "shots", "verify-missing-channel.png"), self.session)
+
+        # 导出：缺的那条**跳过并写进元数据**，真文件里读得到。
+        download_dir = os.path.join(work_dir, "_downloads")
+        shutil.rmtree(download_dir, ignore_errors=True)
+        os.makedirs(download_dir)
+        self.browser.call("Browser.setDownloadBehavior",
+                          {"behavior": "allow", "downloadPath": download_dir})
+        self.js(
+            "i3pro.applyExportConfig({range:'time',from:'10',to:'12',channels:'selected',"
+            "maths:true,rate:'10',custom:'',resample:'linear',meta:true,axis:'time',"
+            "format:'csv',layout:'wide'}); i3pro.refreshExportPlan(); true")
+        time.sleep(0.6)
+        self.check("#34 导出面板把要跳过的那几条列了出来",
+                   bogus in str(self.js("document.getElementById('exportMissing').textContent")),
+                   self.js("document.getElementById('exportMissing').textContent"))
+        self.check("#34 面板上那一行真的显示出来了",
+                   not self.js("document.getElementById('exportMissingRow').hidden"))
+        url = str(self.js(
+            "(function(){var u=i3pro.exportURL(i3pro.exportConfig());"
+            "return u.href||u.error||'';})()"))
+        self.check("#34 导出请求带着 skip_missing=1", "skip_missing=1" in url, url)
+        self.js("i3pro.runExport()")
+        landed = []
+        for _ in range(60):
+            landed = [n for n in os.listdir(download_dir)
+                      if n.endswith(".zip") and not n.endswith(".crdownload")]
+            if landed:
+                break
+            time.sleep(0.2)
+        self.check("#34 缺着一条也真的导出来了（不是整单打回）", bool(landed), landed)
+        if landed:
+            with zipfile.ZipFile(os.path.join(download_dir, landed[0])) as zf:
+                names = zf.namelist()
+                meta = json.loads(zf.read("metadata.json").decode("utf-8")) \
+                    if "metadata.json" in names else {}
+            self.check("#34 元数据里写着 excluded_missing（真文件里读出来的）",
+                       meta.get("excluded_missing") == [bogus],
+                       "names=%s meta=%s" % (names, meta.get("excluded_missing")))
+            self.check("#34 缺的那条没有变成一列数据",
+                       bogus not in str(meta.get("channels")))
+
+        # 收尾：切回第一套，把主图滚回视口（后面几个用例按坐标点画布）。
+        self.js("(function(){i3pro.state.cursor=null;i3pro.state.view=null;"
+                "i3pro.applyPreset(i3pro.worksheetCatalogue().sheets[0].name);"
+                "document.querySelector('#worksheet .comp')"
+                ".scrollIntoView({block:'start'});return true;})()")
+        time.sleep(1.0)
+
     def axis(self):
         """横轴随缩放换档（A36）：读真画布**画出来的**刻度文字。
 
@@ -2098,6 +2256,7 @@ def main(argv=None):
             checker.axis()
             checker.worksheets()
             checker.worksheet_editing(work_dir)
+            checker.missing_channels(work_dir)
             checker.notes(work_dir, args.session)
             checker.gps(work_dir, args.session)
             checker.imports("http://127.0.0.1:%d/" % args.port, work_dir)

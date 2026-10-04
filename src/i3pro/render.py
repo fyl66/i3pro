@@ -961,7 +961,11 @@ def build_payload(
     recognized = detect(log)
     chosen_ref, chosen_cmp = default_lap_pair(log, recognized, ref, cmp)
 
-    selected = [c for c in (channels or pick_channels(log)) if log.has(c)]
+    # 通道解析只有一处实现（channels.resolve，ticket #34）：**缺的通道留在
+    # ``missing`` 里带出去**，不再在这里静默丢掉——丢掉了界面就没法说"缺哪条"。
+    asked = list(channels or pick_channels(log))
+    resolved = channelsmod.resolve(log, asked)
+    selected = [n for n, verdict in resolved["states"].items() if verdict != channelsmod.MISSING]
     traces: dict[str, dict] = {}
     if api_base is None:
         for name in selected:
@@ -991,6 +995,9 @@ def build_payload(
             "duration": log.duration,
         },
         "channels": channel_index(log),
+        # 这次要的通道里，本场次没有的那几条（ticket #34）。快照与页面抬头拿它
+        # 说清"少的是哪几条"——以前它们是**静默消失**的，用户看到的是"图坏了"。
+        "missing": resolved["missing"],
         "groups": channel_groups,
         "status": status_channels,
         "selected": selected,

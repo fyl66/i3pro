@@ -30,19 +30,38 @@ import numpy as np
 
 __all__ = [
     "DERIVED_TARGET",
+    "EMPTY",
+    "MISSING",
+    "PRESENT",
     "attach",
     "clear",
     "hold_factor",
     "is_derived",
     "names",
+    "resolve",
     "sample_rate",
     "slot",
+    "state",
     "unit",
     "units",
+    "valid_count",
 ]
 
 #: 会话类上那个「数学通道的列放哪」的属性名。
 DERIVED_TARGET = "derived_target"
+
+#: 一条通道在本场次的三种状态（ticket #34）：**必须分开**，不能都叫"缺失"。
+#:
+#: * ``PRESENT`` —— 通道在，而且至少有一个有效样本；
+#: * ``EMPTY``   —— 通道在，但整段没有一个有效样本（全空列 / 全 NaN）；
+#: * ``MISSING`` —— 本场次根本没有这条通道。
+#:
+#: 三种状态的**差别**只有一个地方实现（下面这两个函数）：通道列表、组件抬头、
+#: 导出元数据、快照文案都问它们，别各写一遍——各写一遍的下场是"灰是灰了，
+#: 但灰的是哪种灰"每个界面说法不同。
+PRESENT = "present"
+EMPTY = "empty"
+MISSING = "missing"
 
 
 def _declared(session, attribute: str, consequence: str):
@@ -131,7 +150,75 @@ def info(session, channel) -> dict:
         "unit": unit(session, channel),
         "rate": displayed,
         "samples": channel.sample_count,
+        "has_data": valid_count(session, channel) > 0,
         "derived": is_derived(session, channel),
+    }
+
+
+def valid_count(session, channel) -> int:
+    """这一条通道在**整段场次**里有多少个有效样本（非 NaN、非 Inf）。
+
+    ``sample_count`` 是"文件里写了几行"，不是"有几行能用"：我们自己导出的
+    auto 宽表里，慢通道是留空的，读回来就是一列 NaN。两者一个是"长度"、
+    一个是"有没有数据"，混用就会出现"这条通道明明空着，界面却说它好好的"。
+    """
+    if is_derived(session, channel):
+        # 数学通道的列本来就挂在场次上、而且是浮点——直接问它，不必过 values()。
+        values = np.asarray(slot(session)[channel.name], dtype=np.float64)
+        return int(np.isfinite(values).sum()) if values.size else 0
+    # 原生通道问会话要**原始样本**：``.ld`` 那边是 mmap 视图（不用拷贝），CSV 是那一列。
+    # 这条也是显式契约的一部分——会话没声明 ``raw`` 就报错并说下一步，别偷偷退回
+    # ``values()``：那样答案一样、代价却是整份数据的拷贝，静默降级没人会发现。
+    reader = getattr(session, "raw", None)
+    if reader is None:
+        raise TypeError(
+            f"{type(session).__name__} 没有声明 raw(channel)——"
+            "判「这条通道整段有没有有效样本」要看它自己的原始样本。"
+            "在会话类上补一个 raw() 即可（见 ld.LogFile / csvlog.CsvSession）。"
+        )
+    raw = np.asarray(reader(channel))
+    if raw.size == 0:
+        return 0
+    # 整数样本**不可能是 NaN**，所以这一类不用扫。``.ld`` 的 342 条通道实测：
+    # 光 ``values()`` 那一趟整份拷贝就要 0.17 s，而答案恒等于"全有效"。
+    if raw.dtype.kind in "iu":
+        return int(raw.size)
+    values = np.asarray(raw, dtype=np.float64)
+    return int(np.isfinite(values).sum()) if values.size else 0
+
+
+def state(session, name: str) -> str:
+    """通道名 → :data:`PRESENT` / :data:`EMPTY` / :data:`MISSING`。
+
+    **三态的判定只有这一处**（见上面那三个常量）。名字不是字符串、或者场次读不到
+    通道时按"没有"处理：这个函数回答的是"画得出来吗"，不是"参数合法吗"。
+    """
+    if not isinstance(name, str) or not name or not session.has(name):
+        return MISSING
+    return PRESENT if valid_count(session, session.channel(name)) else EMPTY
+
+
+def resolve(session, names) -> dict:
+    """一组通道名 → ``{states, present, empty, missing}``（顺序跟着输入走）。
+
+    重复的名字只算第一次出现的位置；空名字（``None`` / ``""``）直接跳过——调用方
+    手里的通道名大多来自"可选的下拉框"，空值不是"缺一条通道"。
+    """
+    states: dict[str, str] = {}
+    buckets: dict[str, list[str]] = {PRESENT: [], EMPTY: [], MISSING: []}
+    for raw in names or ():
+        name = raw if isinstance(raw, str) else ""
+        name = name.strip()
+        if not name or name in states:
+            continue
+        verdict = state(session, name)
+        states[name] = verdict
+        buckets[verdict].append(name)
+    return {
+        "states": states,
+        "present": buckets[PRESENT],
+        "empty": buckets[EMPTY],
+        "missing": buckets[MISSING],
     }
 
 

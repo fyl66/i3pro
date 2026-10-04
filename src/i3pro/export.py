@@ -110,6 +110,10 @@ class Request:
     #: 由 ``_time_window`` 从距离序列上定位（取首次到达，和 ``/at`` 一个语义）。
     t_start: float = 0.0
     t_end: float = 0.0
+    #: 这次点名要、但**本场次没有**的通道（ticket #34）。它们不进数据列，但要写进
+    #: 元数据的 ``excluded_missing``——文件里少了几列，队友得知道是"本来就没有"，
+    #: 而不是"导出漏了"。名单来自 ``channels.resolve``（三态只在那里判一次）。
+    excluded_missing: tuple[str, ...] = ()
 
     def rate_label(self) -> str:
         return "auto" if self.rate is None else f"{self.rate:g}Hz"
@@ -257,7 +261,7 @@ def parse_request(log: ldmod.LogFile, params: dict) -> Request:
         )
 
     maths = _flag(params, "maths", True)
-    channels, channel_source = _parse_channels(log, params, maths)
+    channels, channel_source, excluded_missing = _parse_channels(log, params, maths)
     if not channels:
         raise ExportError(
             "这次导出一条通道都没有：把 channels 换成 all，或者用 names= 至少给一条通道名。"
@@ -326,6 +330,7 @@ def parse_request(log: ldmod.LogFile, params: dict) -> Request:
         channel_source=channel_source,
         maths=maths,
         index=index,
+        excluded_missing=tuple(excluded_missing),
     )
     t_start, t_end = _time_window(log, request)
     return dataclasses_replace(request, t_start=t_start, t_end=t_end)
@@ -356,7 +361,13 @@ def _time_window(log: ldmod.LogFile, req: Request) -> tuple[float, float]:
 
 
 def _parse_channels(log: ldmod.LogFile, params: dict, maths: bool):
-    """通道来源：``all`` 或 ``selected`` + ``names``；数学通道单独一个开关。"""
+    """通道来源：``all`` 或 ``selected`` + ``names``；数学通道单独一个开关。
+
+    返回 ``(通道, 来源说明, 本场次没有的通道)``。第三条是 ticket #34 加的：
+    界面上那张工作表引用了一条本场次没有的通道时，**导到底**比"整单报错"有用，
+    但必须是用户明说过的（``skip_missing=1``）——命令行打错一个字就静默少一列，
+    那是另一种坑。
+    """
     source = (_text(params, "channels") or "all").lower()
     if source not in ("all", "selected"):
         raise ExportError(
@@ -365,7 +376,7 @@ def _parse_channels(log: ldmod.LogFile, params: dict, maths: bool):
     available = [ch.name for ch in log.channels]
     derived = set(channelsmod.names(log))
     if source == "all":
-        return [n for n in available if maths or n not in derived], "全部通道"
+        return [n for n in available if maths or n not in derived], "全部通道", []
     raw = _text(params, "names") or ""
     wanted = [n.strip() for n in raw.split(",") if n.strip()]
     if not wanted:
@@ -373,13 +384,23 @@ def _parse_channels(log: ldmod.LogFile, params: dict, maths: bool):
             "channels=selected 时要给 names=<逗号分隔的通道名>，"
             "例如 names=Vx KF,G Force Long。"
         )
-    missing = [n for n in wanted if not log.has(n)]
-    if missing:
+    # 三态只有一处判定（channels.resolve）——这里问的是同一件事，不另写一遍。
+    verdict = channelsmod.resolve(log, wanted)
+    missing = verdict["missing"]
+    if missing and not _flag(params, "skip_missing", False):
         hint = available[0] if available else "（本场次没有通道）"
         raise ExportError(
             f"本场次没有 {missing[0]!r} 这条通道，所以没法导出。"
             f"通道名要跟 /api/session/<名>/info 里的一致（例如 {hint!r}），"
             f"逗号分隔、名字里的空格要照写。"
+            f"（确实是工作表里留着、本场没有的通道，就加 skip_missing=1："
+            f"它会跳过这几条并把名字写进元数据的 excluded_missing。）"
+        )
+    wanted = [n for n in wanted if n not in set(missing)]
+    if not wanted:
+        raise ExportError(
+            f"这次点名的通道本场次一条都没有（{'、'.join(missing)}），"
+            "没有列可以导。换一套工作表，或者把通道换成「全部通道」。"
         )
     if not maths:
         skipped = [n for n in wanted if n in derived]
@@ -389,7 +410,10 @@ def _parse_channels(log: ldmod.LogFile, params: dict, maths: bool):
                 f"names 里只有数学通道（{'、'.join(skipped)}），而 maths=0 关掉了它们。"
                 f"把 maths 换成 1，或者换成原生通道。"
             )
-    return wanted, f"手动勾选 {len(wanted)} 条"
+    label = f"手动勾选 {len(wanted)} 条"
+    if missing:
+        label += f"，另 {len(missing)} 条本场次没有已跳过"
+    return wanted, label, missing
 
 
 # ------------------------------------------------------------------ 取数
@@ -730,6 +754,9 @@ def metadata(log: ldmod.LogFile, req: Request, rows: int, columns: int) -> dict:
             for name in req.channels
         ],
         "source_meta": log.metadata(),
+        # 本场次没有、被跳过的通道（ticket #34）。**空也要写**：字段不在和
+        # "这次一条都没缺"是两件事，队友的脚本不该靠"有没有这个键"来猜。
+        "excluded_missing": list(req.excluded_missing),
         "exported_at": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
     if req.index == "timestamp":
@@ -763,6 +790,10 @@ def _metadata_rows(meta: dict):
         unit = channel["unit"] or "（无单位）"
         kind = "数学通道" if channel["derived"] else "原生通道"
         yield [channel["name"], f"{unit} · {channel['sample_rate']:g} Hz · {kind}"]
+    if meta.get("excluded_missing"):
+        # 少了列要写在"为什么少"的旁边，不能只写"通道数 12"（ticket #34）。
+        yield ["本场次没有（已跳过）",
+               "、".join(meta["excluded_missing"]) + f"（共 {len(meta['excluded_missing'])} 条）"]
     yield ["导出时间", meta["exported_at"]]
 
 

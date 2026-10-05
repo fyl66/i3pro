@@ -71,8 +71,10 @@ GROUP_WINDOW_S = 1.0
 #: 露馅：墙钟只差几分钟，而相对时钟从 412 s 掉回 0 s。
 GROUP_TOLERANCE_S = 0.05
 
-#: OBD/UDS 诊断请求与响应的 ID 区间。实测那 6 个"各 37,252 帧"的 ID 全在这里面
-#: （当时车上插着诊断电脑），分析时不该被当成车辆数据。
+#: OBD/UDS 诊断请求与响应的 ID 区间（0x7DF 起）。**它不等于"这段里都不是车辆数据"**：
+#: 实测 S-Motion Correvit 传感器就发在 0x7E0–0x7E8（ticket #42 补上那份 DBC 之后，
+#: 这 6 个 ID 解出了 21 条通道）。所以这里只给"**没有 DBC** 的 ID"一个提示，措辞也
+#: 只能是"可能"——真正的判据永远是"有没有 DBC 解得开"。
 DIAGNOSTIC_IDS = range(0x7DF, 0x7E8)
 
 
@@ -318,14 +320,45 @@ def coverage_of(databases: list[tuple[str, dbcmod.Database]], counts: dict[int, 
     }
 
 
+def _dbc_files(directory: Path) -> list[tuple[str, Path]]:
+    """目录（**含子目录**）下的 DBC：``(报告里用的名字, 路径)``。
+
+    名字带相对路径（``261004/Xsens_MTi_600_series.dbc``）——同一份 DBC 可能出现在
+    不止一层里，报告上要分得清用的是哪一份；顶层文件仍然只写文件名，老报告里的
+    标签不会因为这次改动而变。排序稳定，同样的目录永远给同样的顺序。
+    """
+    out: list[tuple[str, Path]] = []
+    # 顶层先出、子目录后出：同一份 DBC 在两处都有（实测 ``TH.dbc`` 与
+    # ``261004/ECU_To_MoTeC/TH.dbc`` 同哈希）时，报告上用的还是那个短名字。
+    paths = sorted(directory.rglob("*.dbc"),
+                   key=lambda path: (len(path.relative_to(directory).parts), str(path)))
+    for path in paths:
+        relative = path.relative_to(directory)
+        label = path.name if relative.parent == Path(".") else relative.as_posix()
+        out.append((label, path))
+    return out
+
+
 def load_databases(
     directories: list[Path] | Path, only: str | None = None
 ) -> tuple[Path, list[tuple[str, dbcmod.Database]]]:
-    """在候选目录里找 DBC：``only`` 指定时找那一份，否则读找到的第一个目录下的全部。
+    """在候选目录里找 DBC：``only`` 指定时找那一份，否则把找到的**并起来**。
 
-    返回 ``(用了哪个目录, [(文件名, 库)])``。候选目录是有顺序的：数据目录自己的
-    ``dbc/`` 优先，其次是别处配置的（场次库会把每个数据根的 ``dbc/`` 都递进来——
-    原始帧日志在 ``can_data/``，而 DBC 放在 ``i2pro_data/dbc/``）。
+    三条规矩（第一条是 ticket #42 修的）：
+
+    * **子目录也算**：车队按批次分文件夹（实测 ``i2pro_data/dbc/261004/``），旧版
+      只 ``glob("*.dbc")`` 顶层，新加的 DBC 一条都不参与解码——实测同一份日志
+      **61 条通道 → 124 条**（S-Motion 的地面速度、Xsens MTi 的姿态/经纬度、
+      ``sw260425`` 的方向盘转角都在里面）；
+    * **同一个目录里逐字节相同的只留一份**（实测 ``Sensors.dbc`` 与
+      ``261004/Sensors10.4.dbc`` 同哈希、``261004/ECU_To_MoTeC/*`` 与顶层那几份
+      同哈希），报告里不会出现两份一模一样的贡献；
+    * **候选目录之间仍然是"第一个有 DBC 的目录说了算"**：显式给一个 ``dbc_dir``
+      就应该能隔离出一套 DBC 来（固定用某一份、测试里造冲突都靠它）。要找子目录里的
+      文件，递归已经覆盖了，不需要再并目录。
+
+    返回 ``(用了哪个目录, [(报告里的名字, 库)])``；名字是**相对那个目录**的路径，
+    所以报告算 sha256 时 ``目录 / 名字`` 永远拼得对。
     """
     if isinstance(directories, (str, Path)):
         directories = [Path(directories)]
@@ -337,27 +370,28 @@ def load_databases(
         tried.append(directory)
         if not directory.is_dir():
             continue
-        if only:
-            path = directory / only
-            if path.is_file():
-                text = path.read_text(encoding="utf-8", errors="replace")
-                return directory, [(path.name, dbcmod.parse(text, source=path.name))]
-            continue
-        found = [
-            (path.name, dbcmod.parse(path.read_text(encoding="utf-8", errors="replace"),
-                                     source=path.name))
-            for path in sorted(directory.glob("*.dbc"))
-        ]
+        found: list[tuple[str, dbcmod.Database]] = []
+        seen: set[str] = set()
+        for label, path in _dbc_files(directory):
+            if only and path.name != only:
+                continue
+            blob = path.read_bytes()
+            digest = hashlib.sha256(blob).hexdigest()
+            if digest in seen:
+                continue
+            seen.add(digest)
+            found.append((label, dbcmod.parse(blob.decode("utf-8", errors="replace"),
+                                              source=label)))
         if found:
             return directory, found
     if only:
         raise ValueError(
             f"侧车里写的 DBC {only} 不在任何候选目录里"
-            f"（找过：{'、'.join(str(d) for d in tried)}）。"
+            f"（找过：{'、'.join(str(d) for d in tried)}，含子目录）。"
             "把这份 DBC 放进去，或者把侧车里的 dbc 字段改成实际的文件名。"
         )
     raise ValueError(
-        "找不到任何 DBC。把本车的 DBC 放进数据目录的 dbc/ 里"
+        "找不到任何 DBC。把本车的 DBC 放进数据目录的 dbc/ 里（含子目录）"
         f"（找过：{'、'.join(str(d) for d in tried)}）——"
         "没有 DBC 就只能看到一堆读不懂的字节。"
     )

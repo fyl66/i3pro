@@ -27,6 +27,7 @@ __all__ = [
     "speed_channel",
     "speed_series",
     "distance_series",
+    "gps_pair",
     "gps_distance",
     "gps_track",
     "to_meters",
@@ -88,6 +89,43 @@ GPS_PAIRS = (
     ("PosLat", "PosLon"),
     ("Latitude", "Longitude"),
 )
+
+#: 经纬度的词头。同一条总线上的第三方传感器会在后面加自己的后缀
+#: （Xsens MTi 解出来的是 ``latitude_MTI`` / ``longitude_MTI``），所以配对要看
+#: "同一后缀"而不是只认写死的那几个全名。
+_LAT_HEADS = ("latitude", "poslat", "lat")
+_LON_HEADS = ("longitude", "poslon", "lon")
+
+
+def gps_pair(log: ldmod.LogFile) -> tuple[str, str] | None:
+    """本场次里那一对经纬度通道；一条都不齐就返回 ``None``。
+
+    两步，都是纯名字判断（不碰数值）：
+
+    1. :data:`GPS_PAIRS` 里写死的那三对，按"去掉空格/下划线/大小写"匹配
+       （``GPS Latitude`` / ``GPSPosLat`` 这类写法差异都能认）；
+    2. **同一后缀**的一对：前缀恰好是认得的词、后缀逐字相同——
+       ``latitude_MTI`` / ``longitude_MTI`` 就是这么配上的（ticket #42 加）。
+       只比前缀不比对后缀的话，``Lateral`` / ``Longitudinal`` 会被误当成经纬度。
+
+    结果只跟场次里的通道名有关，所以同样的输入永远给同样的答案。
+    """
+    table = name_table(log)
+    for lat_name, lon_name in GPS_PAIRS:
+        lat_ch = resolve_channel(log, lat_name, table)
+        lon_ch = resolve_channel(log, lon_name, table)
+        if lat_ch and lon_ch and lat_ch != lon_ch:
+            return lat_ch, lon_ch
+    for key in sorted(table):
+        for head in _LAT_HEADS:
+            if not key.startswith(head):
+                continue
+            tail = key[len(head):]
+            for lon_head in _LON_HEADS:
+                other = table.get(lon_head + tail)
+                if other and other != table[key]:
+                    return table[key], other
+    return None
 
 
 def speed_channel(log: ldmod.LogFile) -> str | None:
@@ -216,7 +254,7 @@ def gps_track(
     ``jumps`` / ``holes`` / ``dropped``。
     """
     config = gpsfix.resolve(log, fix, scope)
-    pair = next(((la, lo) for la, lo in GPS_PAIRS if log.has(la) and log.has(lo)), None)
+    pair = gps_pair(log)
     if pair is None:
         raise ValueError(f"{log.path.name}: no GPS latitude/longitude channels")
     lat_ch, lon_ch = pair

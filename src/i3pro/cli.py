@@ -89,7 +89,9 @@ def cmd_info(args: argparse.Namespace) -> int:
         if unknown:
             print(f"  读不懂的 ID {len(unknown)} 个（前 5 个）：")
             for row in unknown[:5]:
-                mark = "（诊断流量）" if row["diagnostic"] else ""
+                # 只能写"可能"：0x7DF 起那段是 OBD/UDS 的区间，但没 DBC 时
+                # 这段也可能是传感器（实测 S-Motion 就在 0x7E0–0x7E8）。
+                mark = "（可能是诊断流量）" if row["diagnostic"] else ""
                 print(f"    {row['id']:>6}  {row['frames']:>8} 帧  "
                       f"{row['rate']:>7.2f} Hz  {row['sample']}{mark}")
     return 0

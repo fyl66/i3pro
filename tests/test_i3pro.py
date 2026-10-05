@@ -392,6 +392,61 @@ class TestDerived(unittest.TestCase):
             self.assertLess(span_x, 2000)  # a test-track sized loop, not a road trip
 
 
+class _NamedLog:
+    """只回答"有哪些通道"的最小场次：给名字解析这类纯函数用。"""
+
+    def __init__(self, names):
+        self.path = Path("合成场次.ld")
+        self._channels = {name: _TableChannel(name, "", 10.0, np.zeros(4))
+                          for name in names}
+        # 会话必须显式声明的三样（`channels.names` 会来问，见 channels._declared）
+        self.derived = {}
+        self.derived_names = set()
+        self.derived_units = {}
+
+    @property
+    def channels(self):
+        return list(self._channels.values())
+
+    def has(self, name):
+        return name in self._channels
+
+    def channel(self, name):
+        return self._channels[name]
+
+    def values(self, name):
+        return self._channels[name]._values
+
+
+class TestGpsPair(unittest.TestCase):
+    """ticket #42：经纬度配对——写死那几对之外的写法也要认出来。
+
+    为什么值这个：CAN 线解出来的经纬度叫 ``latitude_MTI`` / ``longitude_MTI``，
+    旧版只认三个死名字，于是"新 DBC 里有 GPS"这句话在界面上落不了地。
+    """
+
+    def test_写死的那几对先认(self):
+        log = _NamedLog(["GPS Latitude", "GPS Longitude",
+                         "latitude_MTI", "longitude_MTI"])
+        self.assertEqual(derive.gps_pair(log), ("GPS Latitude", "GPS Longitude"))
+
+    def test_同一后缀的一对也认(self):
+        self.assertEqual(derive.gps_pair(_NamedLog(["latitude_MTI", "longitude_MTI"])),
+                         ("latitude_MTI", "longitude_MTI"))
+        # 空格 / 下划线 / 大小写的写法差异照旧能对上（resolve_channel 的规矩）
+        self.assertEqual(derive.gps_pair(_NamedLog(["Pos Lat", "Pos Lon"])),
+                         ("Pos Lat", "Pos Lon"))
+
+    def test_只给一半_或者只是像的一对_都不算(self):
+        self.assertIsNone(derive.gps_pair(_NamedLog(["latitude_MTI"])))
+        self.assertIsNone(derive.gps_pair(_NamedLog(["Lateral", "Longitudinal"])))
+        self.assertIsNone(derive.gps_pair(_NamedLog([])))
+
+    @_needs(HILL)
+    def test_金标准场次上的配对没变(self):
+        with ld.LogFile.read(HILL) as log:
+            self.assertEqual(derive.gps_pair(log), ("GPS Latitude", "GPS Longitude"))
+
 class TestLaps(unittest.TestCase):
     @_needs(HILL)
     def test_gps_laps_hill_climb(self):
@@ -5899,6 +5954,16 @@ class TestSpectrumOverHttp(unittest.TestCase):
             finally:
                 http.close()
 
+#: 随版本发布的那 7 套工作表（ticket #30）。
+#:
+#: 车队会往 ``worksheets/`` 里加自己存的（那正是 ticket #33 做的功能），所以下面
+#: 几条只认**这 7 个身份**，不数目录里一共有几份——不然用户存一套自己的工作表，
+#: 仓库的测试就红了。
+SHIPPED_WORKSHEETS = ("analysis", "compare", "powertrain", "chassis",
+                      "driver", "dash", "report")
+SHIPPED_WORKSHEET_NAMES = ("分析", "对比", "动力", "底盘", "车手", "仪表台", "报表")
+
+
 class TestWorksheets(unittest.TestCase):
     """ticket #30：顶上那排按钮 = 仓库里 `worksheets/*.json` 里的文件。
 
@@ -5932,16 +5997,12 @@ class TestWorksheets(unittest.TestCase):
     def test_仓库里那七套工作表都能读出来(self):
         sheets, problems = worksheetsmod.load_dir()
         self.assertEqual(problems, [], "仓库里的工作表必须全部读得出来")
-        self.assertEqual(
-            [s["name"] for s in sheets],
-            ["分析", "对比", "动力", "底盘", "车手", "仪表台", "报表"],
-        )
+        shipped = [sheet for sheet in sheets if sheet["id"] in SHIPPED_WORKSHEETS]
+        self.assertEqual([s["id"] for s in shipped], list(SHIPPED_WORKSHEETS))
         # 文件名是身份（ASCII，将来要进 URL），显示名是按钮上的字
-        self.assertEqual(
-            [s["id"] for s in sheets],
-            ["analysis", "compare", "powertrain", "chassis", "driver", "dash", "report"],
-        )
+        self.assertEqual([s["name"] for s in shipped], list(SHIPPED_WORKSHEET_NAMES))
         self.assertEqual([s["order"] for s in sheets], sorted(s["order"] for s in sheets))
+        # 目录里每一份（含用户自己存的）都要读得出来、画得出来
         for sheet in sheets:
             self.assertTrue(sheet["components"], f"{sheet['name']} 一个组件都没有")
             for comp in sheet["components"]:
@@ -5954,6 +6015,7 @@ class TestWorksheets(unittest.TestCase):
         随版本发布的那 7 套必须靠 `pick` 挑——这条挡住"顺手把解析出来的通道名存回去"。
         """
         sheets, _ = worksheetsmod.load_dir()
+        sheets = [sheet for sheet in sheets if sheet["id"] in SHIPPED_WORKSHEETS]
         selectors = {"channels", "channel", "colour", "x", "y", "against"}
         for sheet in sheets:
             for comp in sheet["components"]:
@@ -5971,7 +6033,10 @@ class TestWorksheets(unittest.TestCase):
         after = self._resolved_on(HILL) if HILL.exists() else None
         if after is None:
             self.skipTest("没有金标准数据，跑不了这条（要在有数据的机器上跑）")
-        self.assertEqual(sorted(after), sorted(before), "工作表的名字变了")
+        # 夹具里那 7 套必须逐字段一致；目录里**多**出来的是用户自己存的，
+        # 允许存在（ticket #33 之后这是正常状态）。
+        self.assertTrue(set(before) <= set(after),
+                        f"少了几套：{sorted(set(before) - set(after))}")
         for name in before:
             self.assertEqual(after[name], before[name], f"{name} 这套搬完不一样了")
 
@@ -6094,7 +6159,8 @@ class TestWorksheets(unittest.TestCase):
         with http_session(HILL, buckets=50) as http:
             status, info = http.json(f"/api/session/{http.quoted}/info")
             self.assertEqual(status, 200)
-            self.assertEqual(len(info["worksheets"]), 7, info.get("worksheet_problems"))
+            self.assertTrue(set(SHIPPED_WORKSHEETS) <= {s["id"] for s in info["worksheets"]},
+                            [s["id"] for s in info["worksheets"]])
             self.assertEqual(info["worksheet_problems"], [])
             self.assertEqual(info["worksheets"][0]["name"], "分析")
 
@@ -6290,7 +6356,10 @@ class TestWorksheetEditingOverHttp(unittest.TestCase):
             try:
                 status, state = http.json("/api/worksheets")
                 self.assertEqual(status, 200)
-                self.assertEqual(len(state["worksheets"]), 7)
+                # 不数总数：worksheets/ 里可能有车队自己存的（ticket #33 就是干这个的）
+                start = len(state["worksheets"])
+                self.assertTrue(set(SHIPPED_WORKSHEETS)
+                                <= {s["id"] for s in state["worksheets"]})
                 self.assertEqual(state["worksheet_problems"], [])
 
                 # 新建（界面的"另存为"）：中文名落到 sheet.json，排到最后
@@ -6300,7 +6369,7 @@ class TestWorksheetEditingOverHttp(unittest.TestCase):
                 self.assertEqual((state["worksheet"]["id"], state["worksheet"]["name"]),
                                  ("sheet", "验证用"))
                 self.assertTrue((directory / "sheet.json").exists())
-                self.assertEqual(len(state["worksheets"]), 8)
+                self.assertEqual(len(state["worksheets"]), start + 1)
                 self.assertEqual(state["worksheets"][-1]["name"], "验证用")
 
                 # 同名再来一次：加后缀，前一份一个字节都不动
@@ -6918,6 +6987,55 @@ class TestDbcMerge(unittest.TestCase):
         self.assertEqual(conflicts, [])
 
 
+class TestDbcDiscovery(unittest.TestCase):
+    """ticket #42：DBC 的**发现**规则——子目录也算、同内容只留一份。
+
+    合成目录，不依赖车队数据，所以在任何机器上都跑。
+    """
+
+    ONE = ('VERSION ""\n\nBO_ 100 A: 8 X\n'
+           ' SG_ a : 0|8@1+ (1,0) [0|255] "" X\n')
+    TWO = ('VERSION ""\n\nBO_ 101 B: 8 X\n'
+           ' SG_ b : 0|8@1+ (1,0) [0|255] "" X\n')
+
+    def _tree(self) -> Path:
+        tmp = tempfile.mkdtemp(prefix="i3pro-dbc-tree-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        root = Path(tmp) / "dbc"
+        (root / "261004").mkdir(parents=True)
+        (root / "one.dbc").write_text(self.ONE, encoding="utf-8")
+        (root / "261004" / "two.dbc").write_text(self.TWO, encoding="utf-8")
+        # 子目录里再放一份与顶层逐字节相同的：它不该再贡献一次
+        (root / "261004" / "one-copy.dbc").write_text(self.ONE, encoding="utf-8")
+        return root
+
+    def test_子目录里的_DBC_也算(self):
+        root = self._tree()
+        used, found = canlog.load_databases([root])
+        self.assertEqual(used, root)
+        self.assertEqual([name for name, _ in found], ["one.dbc", "261004/two.dbc"])
+        ids = {message.frame_id for _name, database in found
+               for message in database.messages_only}
+        self.assertEqual(ids, {100, 101})
+
+    def test_同一个目录里逐字节相同的只留一份(self):
+        root = self._tree()
+        _used, found = canlog.load_databases([root])
+        self.assertEqual(len(found), 2, [name for name, _ in found])
+        self.assertNotIn("261004/one-copy.dbc", [name for name, _ in found])
+
+    def test_点名一份时会进子目录去找(self):
+        root = self._tree()
+        used, found = canlog.load_databases([root], only="two.dbc")
+        self.assertEqual((used, [name for name, _ in found]), (root, ["261004/two.dbc"]))
+
+    def test_找不到时说的话带上子目录(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError) as caught:
+                canlog.load_databases([Path(tmp) / "没有这个目录"])
+        self.assertIn("含子目录", str(caught.exception))
+
+
 class TestCanLog(unittest.TestCase):
     """原始 CAN 帧表 -> 场次（ticket #38）与并场（ticket #39）。
 
@@ -6962,7 +7080,10 @@ class TestCanLog(unittest.TestCase):
             self.assertEqual(channel.sample_rate, 100.0)          # 落在主时间基上
             self.assertIsNotNone(channel.update_rate)             # 真实更新率另有记录
             self.assertGreater(channel.update_rate, 0)
-        self.assertEqual(len(session.channels), 61)
+        # 实测 2026-10-05（含 261004/ 子目录那批 DBC）是 98 条；这个数跟着 DBC
+        # 目录走，往 dbc/ 里加文件就要顺手重测一遍。
+        self.assertEqual(len(session.channels), 98)
+        self.assertEqual(len(session.channels), len(session.can["channels"]))
 
     def test_zero_order_hold_lands_every_frame_on_the_master_grid(self):
         """每条已定义报文的值变化时刻，必须与它的帧时间戳逐点对齐。
@@ -6999,10 +7120,15 @@ class TestCanLog(unittest.TestCase):
         self.assertGreater(np.count_nonzero(np.diff(expected)), 10)
 
     def test_the_report_carries_the_measured_numbers(self):
-        """9 份文件 = 7 次记录；13 份 DBC **取并集**之后的实测数字。
+        """9 份文件 = 7 次记录；DBC **取并集**之后的实测数字。
 
         只挑一份的话是 Sensors.dbc 的 46 条 / 24.6%——用户后来补的 11 份 DBC
         一条都不参与解码（ticket #40 的那个 bug）。并集把它变成 61 条 / 43.42%。
+
+        ticket #42 之后还要**递归进子目录**：``dbc/261004/`` 里那批（S-Motion 的
+        地面速度、Xsens MTi 的姿态与经纬度、``sw260425`` 的方向盘转角）也进来了，
+        于是同一批日志变成 **16 份 DBC / 124 条通道 / 81.77%**（第一场 82.34%）。
+        子目录那一层多出来的 63 条通道里，就包含本场次唯一可用的经纬度。
         """
         groups = canlog.group_recordings(self.files)
         sessions = [canlog.read_can_session([item["path"] for item in group["items"]],
@@ -7021,10 +7147,10 @@ class TestCanLog(unittest.TestCase):
         self.assertTrue(can["merged"])
         self.assertEqual(len(can["sources"]), 2)
         self.assertEqual(can["dbc"]["method"], "union")
-        self.assertEqual(len(can["dbc"]["files"]), 13)
-        self.assertEqual(can["dbc"]["messages"], 91)
-        self.assertEqual(len(can["channels"]), 61)
-        self.assertAlmostEqual(can["coverage"], 0.4018, places=3)
+        self.assertEqual(len(can["dbc"]["files"]), 16)
+        self.assertEqual(can["dbc"]["messages"], 127)
+        self.assertEqual(len(can["channels"]), 124)
+        self.assertAlmostEqual(can["coverage"], 0.8234, places=3)
         # 每条通道 → 来自哪份 DBC；每份 DBC → 贡献了哪些 ID 与多少条通道
         self.assertTrue(all(row["dbc"] for row in can["channels"]))
         by_file = {row["file"]: row for row in can["dbc"]["files"]}
@@ -7043,20 +7169,21 @@ class TestCanLog(unittest.TestCase):
         undecoded = can["undecoded"]
         self.assertEqual(sum(row["frames"] for row in undecoded) + can["covered_frames"],
                          can["frames"])
-        # 全部 7 场加起来才是实测的 1,600,064 帧被覆盖（43.42%）
+        # 全部 7 场加起来是实测的 3,013,146 帧被覆盖（81.77%）
         covered = sum(item.can["covered_frames"] for item in sessions)
-        self.assertEqual(covered, 1600064)
-        self.assertAlmostEqual(covered / 3684850, 0.4342, places=3)
+        self.assertEqual(covered, 3013146)
+        self.assertAlmostEqual(covered / 3684850, 0.8177, places=3)
         totals: dict[str, int] = {}
         for item in sessions:
             for row in item.can["undecoded"]:
                 totals[row["id"]] = totals.get(row["id"], 0) + row["frames"]
         # 剩下的最大一块读不懂的是 0xCC（139,050 帧，约 100 Hz）
         self.assertEqual(max(totals.items(), key=lambda pair: pair[1]), ("0xCC", 139050))
-        diagnostic = {row["id"] for row in undecoded if row["diagnostic"]}
-        self.assertTrue(diagnostic.issubset({"0x7E0", "0x7E2", "0x7E3", "0x7E4", "0x7E6", "0x7E7"}))
-        self.assertTrue(all(row["diagnostic"] for row in undecoded
-                            if row["id"].startswith("0x7E")))
+        # 0x7E0–0x7E8 **不再**是"读不懂的诊断流量"：那是 S-Motion Correvit 传感器，
+        # 261004/ 里那份 DBC 一进来就解出来了（ticket #42 顺带纠正了这条误判）。
+        self.assertEqual({row["id"] for row in undecoded if row["diagnostic"]}, set())
+        self.assertEqual({row["id"] for row in undecoded
+                          if row["id"].startswith("0x7E")}, set())
         self.assertTrue(all(row["sample"] for row in undecoded))
         self.assertEqual([row["frames"] for row in undecoded],
                          sorted((row["frames"] for row in undecoded), reverse=True))
@@ -7140,7 +7267,7 @@ class TestCanLog(unittest.TestCase):
         try:
             session = canlog.read_can_session([copy], dbc_dir=[DBC_DIR])
             self.assertEqual(session.can["dbc"]["method"], "union")
-            self.assertEqual(len(session.channels), 61)
+            self.assertEqual(len(session.channels), 98)   # 实测 2026-10-05（含子目录）
             stored = sidecar.read("canmap", copy)
             # 并集不写单个文件名，只把"这次用的是并集"记下来
             self.assertNotIn("dbc", stored)
@@ -7203,15 +7330,27 @@ class TestCanLog(unittest.TestCase):
                 shutil.copy2(path, work / path.name)
             library = librarymod.SessionLibrary([work, DATA], cache_size=1, maths_root=ROOT)
             names = [name for name in library.names() if name.startswith("2026_10_03")]
-            self.assertEqual(len(names), 7)
+            # 这 9 份文件 = 7 次记录。**不数总数**：DATA 里可能还有别的
+            # ``2026_10_03_*`` 日志（2026-10-04 就多了一份 145454），那是正常
+            # 的数据增长，不该让这条变红——所以只认这 9 份并出来的那 7 场。
+            self.assertTrue({
+                "2026_10_03_173345_ID0001+1", "2026_10_03_174748_ID0001+1",
+                "2026_10_03_200723_ID0001", "2026_10_03_200755_ID0001",
+                "2026_10_03_201019_ID0001", "2026_10_03_201147_ID0001",
+                "2026_10_03_201402_ID0001",
+            } <= set(names), sorted(names))
             merged = [name for name in names if name.endswith("+1")]
             self.assertEqual(len(merged), 2)
-            summary = library.summary(names[0])
+            # 点名那一场，不拿 ``names[0]``：DATA 里可能还有更早的
+            # ``2026_10_03_*`` 日志（用户 2026-10-04 就加过一份 145454），
+            # 排序一变，``names[0]`` 就不是这一场了。
+            summary = library.summary("2026_10_03_173345_ID0001+1")
             self.assertEqual(summary["format"], "can")
-            # 61 条来自 DBC 并集，外加全局数学通道 `速度kmh`——它的表达式是
-            # `'Vx KF'`（空格），而 CAN 那条叫 `Vx_KF`（下划线）；名字匹配允许
-            # 空格/下划线互换，所以同一个定义两边的数据都能用（实测）。
-            self.assertEqual(summary["channels"], 62)
+            # 124 条来自 DBC 并集（含 dbc/261004/ 子目录那批），外加全局数学通道
+            # `速度kmh`——它的表达式是 `'Vx KF'`（空格），而 CAN 那条叫 `Vx_KF`
+            # （下划线）；名字匹配允许空格/下划线互换，所以同一个定义两边的数据都能用
+            # （实测）。
+            self.assertEqual(summary["channels"], 125)
             # 列表缓存：第二次不再解码（第一次要解码全部 CAN 场次，几秒）
             first = library.listing()
             second = library.listing()
@@ -7314,6 +7453,29 @@ class TestSpeedChannelResolution(unittest.TestCase):
                 self.skipTest(f"缺 {path.name}")
             with ld.LogFile.read(path) as log:
                 self.assertEqual(render.display_speed_channel(log), "Vx KF")
+
+
+    def test_一段_CAN_日志能认出_MTi_的经纬度(self):
+        """端到端：DBC 子目录 + 配对规则一起，才让这场 CAN 有 GPS。
+
+        实测这场（2026_10_03_173345）的 MTi 定位是**冻住的**——15 份日志里坐标
+        跨度最大 49 m，而同一段车跑了 4 km 以上（``∫|Vx_KF|dt``）。所以这条只钉
+        "认得出、算得出"，不断言轨迹形状：哪天真跟上了，它自动变成一条真轨迹。
+        """
+        frames = CAN_DATA / "2026_10_03_173345_ID0001.csv"
+        if not frames.exists():
+            self.skipTest("can_data/ 里缺这份帧表")
+        session = canlog.read_can_session([frames], dbc_dir=[DBC_DIR],
+                                          write_sidecar=False, use_sidecar=False)
+        self.assertEqual(derive.gps_pair(session), ("latitude_MTI", "longitude_MTI"))
+        track = derive.gps_track(session)
+        self.assertEqual(len(track["x"]), len(track["y"]))
+        self.assertTrue(np.all(np.isfinite(track["x"])))
+        self.assertTrue(np.all(np.isfinite(track["y"])))
+        # 这一对确实来自子目录里那份 DBC（DBC 发现改成递归之后才看得见）
+        row = next(entry for entry in session.can["channels"]
+                   if entry["name"] == "latitude_MTI")
+        self.assertEqual(row["dbc"], "261004/Xsens_MTi_600_series.dbc")
 
 
 class TestCanSessionSurface(unittest.TestCase):

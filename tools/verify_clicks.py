@@ -1259,7 +1259,12 @@ class Checker:
 
         self.check("#33 服务读的是副本目录（车队仓库里的 worksheets/ 不能是它）",
                    os.path.isdir(root) and sorted(os.listdir(root)) != [], root)
-        self.check("#33 副本里起始就是仓库里那几套工作表", len(files()) == 7, files())
+        # 只认**随版本发布的那几套**：车队自己存的（比如 fyl-sensor.json）也会在这
+        # 个目录里，那是功能本身，不该让这条变红。
+        shipped = {"analysis.json", "chassis.json", "compare.json", "dash.json",
+                   "driver.json", "powertrain.json", "report.json"}
+        self.check("#33 副本里起始就带着仓库里那几套工作表",
+                   shipped <= set(files()), files())
         self.check("#33 工作表那一栏多了一排管理按钮",
                    self.js("document.querySelectorAll('#sheetManage button').length") == 7,
                    self.js("document.querySelectorAll('#sheetManage button').length"))

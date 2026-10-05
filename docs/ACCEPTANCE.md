@@ -2977,6 +2977,54 @@ channel(s) outside tolerance`；两份金标准快照各 `PASS`（7 圈 / 471 �
 26 圈 / 377 通道行）；真浏览器 **188 项检查：188 通过，0 失败**；
 `smoke_viewer.js` 里的 `check(` 共 **577** 条。
 
+## A62 · DBC 目录递归 + 经纬度配对（ticket #42）
+
+车队把新 DBC 按批次放在**子目录**里（`i2pro_data/dbc/261004/`），而 `load_databases`
+只 `glob("*.dbc")` 顶层——新加的 DBC **一条都不参与解码**，而且界面上看不出少了什么。
+同一票还把经纬度配对放宽：CAN 线解出来的叫 `latitude_MTI` / `longitude_MTI`，
+旧版只认三个写死的全名。
+
+```powershell
+# 1) 发现规则与配对规则（合成数据，任何机器都跑）
+python -m unittest tests.test_i3pro.TestDbcDiscovery tests.test_i3pro.TestGpsPair -v
+
+# 2) 实测覆盖：同一批 9 份日志，DBC 集合变了之后解出多少（数字见下表）
+python -m unittest tests.test_i3pro.TestCanLog -v
+
+# 3) 真浏览器那关照旧
+python tools\verify_clicks.py
+```
+
+**通过判据**（`TestDbcDiscovery` 4 项 ＋ `TestGpsPair` 4 项 ＋ `TestCanLog` 里的实测数字）：
+
+| 断言 | 实测 |
+| --- | --- |
+| **子目录里的 DBC 也算** | 同一批 9 份日志（3,684,850 帧）：DBC 从 **13 份 → 16 份**、报文 91 → **127**、通道 61 → **124** |
+| 覆盖率 | **1,600,064 帧 = 43.42% → 3,013,146 帧 = 81.77%**（第一场 82.34%）；只挑一份 `Sensors.dbc` 仍是 46 条 / 24.6% |
+| 多出来的是什么 | 子目录那 4 份贡献 **63 条通道**：S-Motion 的 `Vel`/`VelX`/`VelY`（光学地面速度 50 Hz）、Xsens MTi 的 `latitude_MTI`/`longitude_MTI`/`accX_MTI`/`gyrX_MTI`/`yaw_MTI`…（100 Hz）、`sw260425` 的 `LWS_ANGLE`/`LWS_SPEED`（方向盘转角） |
+| 同一个目录里逐字节相同的只留一份 | `Sensors.dbc` 与 `261004/Sensors10.4.dbc` 同 sha256、`261004/ECU_To_MoTeC/*` 与顶层那 11 份同 sha256 → 报告里不会出现两份一样的贡献 |
+| 目录之间仍是"第一个有 DBC 的说了算" | 显式给一个 `dbc_dir` 能隔离出一套 DBC（"固定用某一份"和测试里造冲突都靠它）；要找子目录靠递归，不靠多给目录 |
+| 点名一份时会进子目录去找 | `load_databases(root, only="two.dbc")` → `261004/two.dbc` |
+| 经纬度配对放宽到"同一后缀的一对" | `latitude_MTI`/`longitude_MTI` 认得出；`Lateral`/`Longitudinal` 这种"只是像"的不认；金标准 `.ld` 仍是 `GPS Latitude`/`GPS Longitude` |
+| CAN 场次端到端 | `2026_10_03_173345` 那份日志：`gps_pair` 给 `("latitude_MTI", "longitude_MTI")`，`gps_track` 算得出 x/y，且这一对确实来自 `261004/Xsens_MTi_600_series.dbc` |
+
+**两件必须如实说明的事**
+
+1. **0x7E0–0x7E8 以前被当成"诊断流量"，那是误判。** 它们是 S-Motion Correvit 传感器
+   （`BO_ 2016 Vel_Angle` 等 9 条报文），这份 DBC 一进来就解出 21 条通道。报告与 CLI
+   里那句判语现在改成"**可能**是诊断流量"——没有 DBC 时它只是猜测，真正的判据永远是
+   "有没有 DBC 解得开"。
+2. **MTi 的经纬度能解出来，但定位是冻住的。** 15 份日志实测：坐标跨度**最大 49 m**，
+   而同一段车跑了 **4 km 以上**（`2026_10_03_173345`：`∫|Vx_KF|dt ≈ 20.0 km`，
+   距离轴末值 5,546.8 m）。所以 CAN 场次现在"有经纬度通道、配对也认得出"，
+   但**画不出真轨迹**——轨迹会是一小团（约 45 m × 22 m）。这条只钉"认得出、算得出"，
+   不断言轨迹形状：MTi 真跟上车之后，同一条用例自动变成一条真轨迹。要查的是车上
+   那台 Xsens 的 GNSS（天线 / 是否进了 GNSS 模式），不是解析。
+
+**回归四项（本机实测）**：`Ran 440 tests` + `OK`；`verify_ld_vs_csv` `PASS - 0 channel(s)
+outside tolerance`；两份金标准快照各 `PASS`（7 圈 / 471 通道行、26 圈 / 377 通道行）；
+真浏览器 **188 项检查：188 通过，0 失败**。
+
 ---
 
 测试覆盖：

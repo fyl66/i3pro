@@ -7176,8 +7176,9 @@ function openExportDialog() {
 }
 
 /* ------------------------------------------------------- CAN import report */
-// 原始帧表导入之后，"有多少帧我读不懂"是必须说清楚的一件事：实测 75.4% 的帧没有
-// DBC 定义，其中 6 个是当时插着诊断电脑的 OBD/UDS 流量（0x7E0…0x7E7）。这些数字
+// 原始帧表导入之后，"有多少帧我读不懂"是必须说清楚的一件事。没 DBC 的 ID 只能给
+// 一个**猜测**：0x7DF 起那段是 OBD/UDS 的区间，但 S-Motion 传感器也发在 0x7E0–0x7E8
+// ——所以只写"可能"，别把猜的说成判定的。这些数字
 // 由 Python 侧算好放在 DATA.meta.can 里，界面只负责照实显示——两边各算一遍迟早会
 // 对不上（ticket #39 的验收条目就是"两处数字一致"）。
 function canReport() { return (DATA.meta && DATA.meta.can) || null; }
@@ -7241,7 +7242,7 @@ function renderCanReport() {
     + "<td><code>" + esc(row.id) + "</code></td>"
     + '<td class="num">' + row.frames.toLocaleString() + "</td>"
     + '<td class="num">' + row.rate.toFixed(2) + "</td>"
-    + "<td>" + (row.diagnostic ? "诊断流量（OBD/UDS）" : "车辆数据？") + "</td>"
++ "<td>" + (row.diagnostic ? "可能是诊断流量（OBD/UDS）" : "车辆数据？") + "</td>"
     + '<td><code>' + esc(row.sample || "-") + "</code></td></tr>").join("");
   $("canTableWrap").innerHTML =
     channelTable

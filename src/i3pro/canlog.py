@@ -585,6 +585,8 @@ def read_can_session(
     channel_rows: list[dict] = []
     report: list[dict] = []
     too_short = 0
+    empty_branches: list[dict] = []
+    stray_selectors: list[dict] = []
     seen_names: dict[str, list[str]] = {}
     for frame_id in covered_ids:
         message = database.find(frame_id, frame_id in scan["extended_ids"])
@@ -593,12 +595,6 @@ def read_can_session(
 
     for frame_id in covered_ids:
         message = database.find(frame_id, frame_id in scan["extended_ids"])
-        if message.multiplexed:
-            raise dbcmod.DbcError(
-                f"报文 {message.name}（0x{message.frame_id:X}）用了多路复用，本轮不支持"
-                "解码成通道：同一个报文里不同信号的字节位置取决于选择子的取值。"
-                "下一步：把它拆成不带复用的 DBC 再导。"
-            )
         moments, payloads = per_id.get(frame_id, ([], []))
         if not moments:
             continue
@@ -606,12 +602,52 @@ def read_can_session(
         times = np.asarray(moments, dtype=np.float64)[order]
         payloads = [payloads[index] for index in order]
         matrix = _payload_matrix(payloads)
+        # 多路复用（ticket #43）：同一个 ID 上不同分支分时出现，所以先算一次选择子，
+        # 每条信号只认**自己那一路的帧**——把它们单独保持到主时间基上。
+        # 按普通信号解会把别路的字节当成自己的值；而"给不匹配的格子填 NaN"会让
+        # 100 Hz 网格上一半的格子是空的（两条分支交替发），那不是数据的样子。
+        selector = None
+        selector_signal = dbcmod.multiplexer_of(message)
+        if selector_signal is not None:
+            raw = _signal_values(selector_signal, matrix)
+            if raw is not None:
+                scale = selector_signal.factor or 1.0
+                selector = np.rint(
+                    (raw - selector_signal.offset) / scale
+                ).astype(np.int64)
+                # 选择子取到 DBC 里没有的分支：这几帧不属于任何一路。**不报错**
+                # （那会把整条报文的所有分支都拖下水），但要计数并报出来。
+                known = {value for value in
+                         (dbcmod.branch_of(one) for one in message.signals)
+                         if value is not None}
+                stray = ~np.isin(selector, sorted(known) or [-1])
+                if stray.any():
+                    values = np.unique(selector[stray]).tolist()
+                    stray_selectors.append({
+                        "message": message.name, "frames": int(stray.sum()),
+                        "values": values[:6],
+                    })
         for signal in message.signals:
             values = _signal_values(signal, matrix)
             if values is None:
                 too_short += 1
                 continue
-            index = np.searchsorted(times, axis, side="right") - 1
+            own_times = times
+            branch = dbcmod.branch_of(signal)
+            if branch is not None:
+                if selector is None:
+                    too_short += 1
+                    continue
+                keep = selector == branch
+                if not keep.any():
+                    # 这一路这次一帧都没有：不出通道，但要在报告里看得见
+                    empty_branches.append({
+                        "message": message.name, "signal": signal.name,
+                        "branch": branch,
+                    })
+                    continue
+                values, own_times = values[keep], times[keep]
+            index = np.searchsorted(own_times, axis, side="right") - 1
             leading = int(index[0] + 1) if index.size and index[0] >= 0 else 0
             index = np.clip(index, 0, len(values) - 1)
             name = signal.name
@@ -619,7 +655,7 @@ def read_can_session(
                 # 实测 Channel_0 同时出现在两条报文里：撞名时用报文名当命名空间。
                 name = f"{message.name}.{signal.name}"
             columns[name] = values[index]
-            update_rate = _rate_of(times)
+            update_rate = _rate_of(own_times)
             # 显示精度跟着 factor 走：factor 0.0025 的胎温要看到 4 位小数，
             # factor 1 的计数一位都不需要。
             decimals = max(0, min(6, int(math.ceil(-math.log10(abs(signal.factor)))))) \
@@ -629,10 +665,12 @@ def read_can_session(
             channel_rows.append({
                 "name": name, "message": message.name, "signal": signal.name,
                 "unit": signal.unit, "update_rate": update_rate,
-                "samples": int(len(times)),
-                "leading_gap_s": float(axis[leading - 1] - times[0]) if leading > 1 and len(times) else 0.0,
+                "samples": int(own_times.size),
+                "leading_gap_s": (float(axis[leading - 1] - own_times[0])
+                                  if leading > 1 and own_times.size else 0.0),
                 "decimals": decimals,
                 "dbc": source,
+                "branch": branch,
             })
             report.append({
                 "column": f"0x{message.frame_id:X}", "status": "通道", "name": name,
@@ -712,6 +750,23 @@ def read_can_session(
         notes.append(f"ID {row['id']} 有不止一份定义：{row['reason']}")
     if too_short:
         notes.append(f"有 {too_short} 条信号因为某一帧的字节数不够而整条跳过（DBC 与日志可能不是同一版）。")
+    if empty_branches:
+        shown = "、".join(f"{row['message']}.{row['signal']}(第 {row['branch']} 路)"
+                          for row in empty_branches[:4])
+        notes.append(
+            f"多路复用里有 {len(empty_branches)} 条分支信号这次一帧都没有"
+            f"（{shown}{'…' if len(empty_branches) > 4 else ''}）——"
+            "是这条报文这次没发那一路，不是解码失败。"
+        )
+    if stray_selectors:
+        shown = "、".join(
+            f"{row['message']} {row['frames']} 帧（取值 {'/'.join(str(v) for v in row['values'])}）"
+            for row in stray_selectors[:3]
+        )
+        notes.append(
+            f"多路复用里有 {len(stray_selectors)} 条报文出现了 DBC 没定义的选择子分支"
+            f"：{shown}——那几帧不属于任何一路，已经跳过（不是整条报文解不了）。"
+        )
     if len(databases) > 1:
         dead = [row["file"] for row in by_file if row["covered_frames"] == 0]
         if dead:
@@ -770,6 +825,10 @@ def read_can_session(
         "bytes": sum(path.stat().st_size for path in given),
         "channels": channel_rows,
         "undecoded": undecoded,
+        #: 多路复用里"这次一帧都没有"的分支（不是解码失败，是这一路没发）
+        "empty_branches": empty_branches,
+        #: 多路复用里"选择子取值不在 DBC 里"的帧（跳过了，但要能看见）
+        "stray_selectors": stray_selectors,
         "notes": notes,
     }
     session = CanSession(

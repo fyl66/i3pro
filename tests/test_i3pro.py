@@ -17,6 +17,7 @@ import contextlib
 import atexit
 import csv
 import dataclasses
+import hashlib
 import io
 import os
 import re
@@ -6721,6 +6722,57 @@ class TestDbc(unittest.TestCase):
     真数据用例管数字（报文数 / 信号数 / 46 条通道）与 ``cantools`` 逐信号对拍。
     """
 
+    #: 多路复用（ticket #43）：byte0 是帧类型，后 6 字节按帧类型分别是加速度或角速度。
+    #: 这是 `i2pro_data/dbc/IMU.dbc` 里 0x780–0x783 的简化版（保留 7 字节 DLC）。
+    MULTIPLEXED = """
+VERSION ""
+
+BO_ 1920 IMU_RawData: 7 IMU
+ SG_ FrameType M : 0|8@1+ (1,0) [0|255] "" ECU
+ SG_ ACC_X m1 : 15|16@0- (0.001795651245,0) [-58.8399|58.838105] "m/s2" ECU
+ SG_ ACC_Y m1 : 31|16@0- (0.001795651245,0) [-58.8399|58.838105] "m/s2" ECU
+ SG_ GYR_X m2 : 15|16@0- (0.015258789062,0) [-500|499.984742] "dps" ECU
+ SG_ GYR_Y m2 : 31|16@0- (0.015258789062,0) [-500|499.984742] "dps" ECU
+"""
+
+    def test_多路复用只解选择子指的那一路(self):
+        """**该不该有这条信号**是这里最容易错的地方：多解一条就是把别路的字节当自己的。"""
+        database = dbc.parse(self.MULTIPLEXED)
+        message = database.find(1920)
+        acc = bytes([1, 0, 0x10, 0x00, 0x20, 0x00, 0x00])
+        gyr = bytes([2, 0, 0x10, 0x00, 0x20, 0x00, 0x00])
+        self.assertEqual(sorted(dbc.decode(message, acc)),
+                         ["ACC_X", "ACC_Y", "FrameType"])
+        self.assertEqual(sorted(dbc.decode(message, gyr)),
+                         ["FrameType", "GYR_X", "GYR_Y"])
+        # 选择子那一帧也要如实报出来（1 加速度帧 / 2 角速度帧）
+        self.assertEqual(dbc.decode(message, acc)["FrameType"], 1.0)
+        self.assertEqual(dbc.decode(message, gyr)["FrameType"], 2.0)
+        # 没定义过的路：只有选择子本身
+        self.assertEqual(sorted(dbc.decode(message, bytes([7] + [0] * 6))), ["FrameType"])
+
+    def test_多路复用与cantools逐帧一致(self):
+        cantools = _cantools()
+        if cantools is None:
+            self.skipTest("没装 cantools（测试期裁判）")
+        reference = cantools.database.load_string(self.MULTIPLEXED,
+                                                 database_format="dbc")
+        ours = dbc.parse(self.MULTIPLEXED)
+        message = ours.find(1920)
+        their_message = reference.get_message_by_frame_id(1920)
+        random = __import__("random")
+        random.seed(20261005)
+        # 只比两边都认的选择子：取到 DBC 里没有的分支时 cantools 抛 DecodeError，
+        # 我们选择"跳过那几帧"（见 dbc.decode 的说明）——那一处差异单独钉在上面。
+        for selector in (1, 2):
+            payload = bytes([selector]) + bytes(random.randrange(256) for _ in range(6))
+            mine = dbc.decode(message, payload)
+            theirs = their_message.decode(payload, decode_choices=False, scaling=True)
+            self.assertEqual(set(mine), set(theirs),
+                             f"选择子 {selector} 时两边的信号集合不一样")
+            for name, want in theirs.items():
+                self.assertAlmostEqual(mine[name], float(want), places=9, msg=name)
+
     SYNTHETIC = """
 BO_ 291 Mixed_Endian: 8 Vector__XXX
  SG_ Big_At_Seven : 7|16@0+ (1,0) [0|65535] "V" Vector__XXX
@@ -6787,7 +6839,11 @@ BO_TX_BU_ 291 : Vector__XXX;
         self.assertIn("VECTOR__INDEPENDENT_SIG_MSG", db.skipped[0])
         self.assertEqual(db.signal_count, 6)              # 伪报文里的那条不算
 
-    def test_multiplexed_message_is_refused_with_a_next_step(self):
+    def test_多路复用_选择子零点零_也算一路(self):
+        """ticket #43 之前这里是"遇到复用就报错"；现在按标准语义解。
+
+        ``m0`` 是合法的一路（选择子取 0 时才有它）——不能把它当成"没有选择子"。
+        """
         db = dbc.parse("""
 BO_ 100 Muxed: 8 Node
  SG_ Selector M : 0|8@0+ (1,0) [0|255] "" Node
@@ -6795,10 +6851,11 @@ BO_ 100 Muxed: 8 Node
 """)
         message = db.messages[(False, 100)]
         self.assertTrue(message.multiplexed)
-        with self.assertRaises(dbc.DbcError) as caught:
-            dbc.decode(message, bytes(8))
-        self.assertIn("多路复用", str(caught.exception))
-        self.assertIn("下一步", str(caught.exception))
+        self.assertEqual(dbc.branch_of(message.signal("On_Zero")), 0)
+        self.assertEqual(dbc.multiplexer_of(message).name, "Selector")
+        # 选择子 0：这一路在；选择子 5：DBC 里没有这一路，只剩选择子本身
+        self.assertEqual(sorted(dbc.decode(message, bytes(8))), ["On_Zero", "Selector"])
+        self.assertEqual(sorted(dbc.decode(message, bytes([5] + [0] * 7))), ["Selector"])
 
     def test_payload_length_wins_over_the_dbc_dlc(self):
         """实测 ``0x66D``：DBC 写 4，日志里发 8 字节。短了要吵，长了照解。"""
@@ -7147,10 +7204,17 @@ class TestCanLog(unittest.TestCase):
         self.assertTrue(can["merged"])
         self.assertEqual(len(can["sources"]), 2)
         self.assertEqual(can["dbc"]["method"], "union")
-        self.assertEqual(len(can["dbc"]["files"]), 16)
-        self.assertEqual(can["dbc"]["messages"], 127)
-        self.assertEqual(len(can["channels"]), 124)
-        self.assertAlmostEqual(can["coverage"], 0.8234, places=3)
+        # 份数**从目录现算**：车队会不断往 dbc/ 里加（2026-10-05 加了 IMU.dbc / IVT.dbc），
+        # 写死就每加一份红一次。真正要钉的是"一份不漏、逐字节相同的只算一次"。
+        on_disk: dict[str, str] = {}
+        for path in DBC_DIR.rglob("*.dbc"):
+            on_disk.setdefault(hashlib.sha256(path.read_bytes()).hexdigest(), path.name)
+        self.assertEqual(len(can["dbc"]["files"]), len(on_disk))
+        # 下面这几个是**实测下限**（2026-10-05：18 份 / 137 条报文 / 124 条通道 /
+        # 82.34%）：往上加 DBC 只会让它们变大，掉下来就是回归。
+        self.assertGreaterEqual(can["dbc"]["messages"], 127)
+        self.assertGreaterEqual(len(can["channels"]), 124)
+        self.assertGreaterEqual(round(can["coverage"], 4), 0.8234)
         # 每条通道 → 来自哪份 DBC；每份 DBC → 贡献了哪些 ID 与多少条通道
         self.assertTrue(all(row["dbc"] for row in can["channels"]))
         by_file = {row["file"]: row for row in can["dbc"]["files"]}
@@ -7453,6 +7517,38 @@ class TestSpeedChannelResolution(unittest.TestCase):
                 self.skipTest(f"缺 {path.name}")
             with ld.LogFile.read(path) as log:
                 self.assertEqual(render.display_speed_channel(log), "Vx KF")
+
+
+    def test_多路复用的_IMU_报文解成了两条通道(self):
+        """0x781/0x782 是**双帧报文**：byte0 选帧类型，后 6 字节是 ACC 或 GYR。
+
+        实测 `i2pro_data/2026_10_05_164008_ID0001.csv`（cantools 逐帧对拍，含
+        "这一帧该不该有这条信号"）：0x781 共 5,436 帧 → ACC/GYR 各 **2,718**；
+        0x782 共 34,902 帧 → 各 **17,451**。两路各自的真实更新率都是 47.67 Hz，
+        而报文本身约 95 Hz——按普通信号解会把角速度的字节当成加速度。
+        """
+        frames = DATA / "2026_10_05_164008_ID0001.csv"
+        if not frames.exists():
+            self.skipTest("缺这份帧表（IMU 双帧报文那批）")
+        session = canlog.read_can_session([frames], dbc_dir=[DBC_DIR],
+                                          write_sidecar=False, use_sidecar=False)
+        rows = {row["name"]: row for row in session.can["channels"]}
+        first = rows["IMU_RawData_Copy_1.ACC_X"]
+        self.assertEqual(first["branch"], 1)
+        self.assertEqual(rows["IMU_RawData_Copy_1.GYR_X"]["branch"], 2)
+        self.assertEqual(first["samples"], 2718)
+        self.assertEqual(rows["IMU_RawData_Copy_2.GYR_X"]["samples"], 17451)
+        for name in ("IMU_RawData_Copy_1.ACC_X", "IMU_RawData_Copy_1.GYR_X"):
+            self.assertAlmostEqual(rows[name]["update_rate"], 47.67, places=1)
+        # 两路是**不同的数**：ACC 那一路不该拿到角速度的字节（反之亦然）
+        acc = np.asarray(session.raw("IMU_RawData_Copy_1.ACC_X"), dtype=float)
+        gyr = np.asarray(session.raw("IMU_RawData_Copy_1.GYR_X"), dtype=float)
+        self.assertEqual(acc.size, timebase.axis(session).size)
+        self.assertTrue(np.isfinite(acc).all() and np.isfinite(gyr).all())
+        self.assertFalse(np.allclose(acc, gyr))
+        # 选择子那一列也留着：1 = 加速度帧、2 = 角速度帧
+        selector = np.asarray(session.raw("IMU_RawData_Copy_1.FrameType"), dtype=float)
+        self.assertEqual(sorted(set(np.unique(selector))), [1.0, 2.0])
 
 
     def test_一段_CAN_日志能认出_MTi_的经纬度(self):

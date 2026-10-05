@@ -23,9 +23,11 @@
    是错的**；两种都有真用例，并且用 ``cantools`` 逐信号对拍。
 2. **用日志里实际的载荷长度**，不是 DBC 里写的 DLC。实测 ``0x66D``：DBC 写 4，
    日志里发的是 8 字节——按 DBC 的长度截，多出来的部分就被当成"下一帧"。
-3. **多路复用**。``M`` / ``m<n>`` 标记的信号在同一个报文里分时出现，按普通信号解会
-   把别路的字节当成自己的值。实测两份 DBC 都没有真正的复用，但遇到就要**明确报错**
-   （见 :func:`decode`），不许猜。
+3. **多路复用**。``M`` / ``m<n>`` 标记的信号在同一个报文里分时出现：一条报文里
+   byte0 是帧类型（选择子），后 6 字节按帧类型分别是三轴加速度或三轴角速度。
+   按普通信号解会把别路的字节当成自己的值——所以 :func:`decode` 先读选择子，
+   只解**这一帧该有的**那一路，别的路这一帧干脆不出现（不是 0，也不是上一帧的值）。
+   实测 `i2pro_data/dbc/IMU.dbc` 的 0x780–0x783 就是这么发的（ticket #43）。
 
 ``BO_`` 的 ID 最高位（``0x80000000``）表示扩展帧，:class:`Message` 把它拆成
 ``frame_id`` + ``extended`` 两个字段——这样"标准帧 0x123"和"扩展帧 0x123"是两条不同的
@@ -38,7 +40,8 @@ import re
 from dataclasses import dataclass, field
 
 __all__ = [
-    "DbcError", "Database", "Message", "Signal", "decode", "merge", "parse",
+    "DbcError", "Database", "Message", "Signal", "branch_of", "decode", "merge",
+    "multiplexer_of", "parse",
     "signal_value",
 ]
 
@@ -417,21 +420,67 @@ def signal_value(signal: Signal, payload: bytes) -> float | None:
     return raw * signal.factor + signal.offset
 
 
+def branch_of(signal: Signal) -> int | None:
+    """这条信号属于哪一路：``m3`` → ``3``；选择子 ``M`` 与普通信号 → ``None``。
+
+    不叫 ``multiplexer_of``：``M`` 那条自己也是"多路复用"的一部分，但它说的是
+    "**我**是选择子"，不是"我属于第几路"。
+    """
+    marker = signal.multiplexer or ""
+    if not marker.startswith("m") or not marker[1:].isdigit():
+        return None
+    return int(marker[1:])
+
+
+def multiplexer_of(message: Message) -> Signal | None:
+    """这条报文的选择子（标 ``M`` 的那条）；没有多路复用就是 ``None``。"""
+    for signal in message.signals:
+        if signal.multiplexer == "M":
+            return signal
+    return None
+
+
 def decode(message: Message, payload: bytes) -> dict[str, float]:
-    """解一条报文里的**所有**信号，返回 ``{信号名: 物理量}``。
+    """解这一帧里**该有的**信号，返回 ``{信号名: 物理量}``。
+
+    多路复用（``M`` / ``m<n>``）按标准语义解：先读选择子那一条的**原始整数**，
+    再只解"选择子等于这个分支"的信号——别的分支这一帧**不出现在结果里**
+    （不是 0，也不是上一帧的值）。调用方拿它当"这一帧没有这条"，例如
+    `canlog` 就只把这一路的帧保持到主时间基上。
 
     解不了就抛 :class:`DbcError`，交给调用方记进导入报告——**不返回 0 冒充成功**。
+
+    **与 cantools 的一处故意不同**：选择子取到一个 DBC 里没定义的分支时，
+    cantools 抛 ``DecodeError``，我们返回"只有选择子"的字典。理由是这里的调用方是
+    导入管线——一条坏帧不该把**这条报文的所有分支**都拖成导不进来（实测车上会发
+    DBC 里还没有的帧类型）。那几帧不属于任何一路，会在导入报告里单独计数。
     """
-    if message.multiplexed:
-        raise DbcError(
-            f"报文 {message.name}（0x{message.frame_id:X}）用了多路复用"
-            "（信号带 M / m<n> 标记），本轮不支持：同一个报文里不同信号的字节位置"
-            "取决于选择子的取值，按普通信号解会把别路的字节当成自己的值。"
-            "下一步：把这条报文的选择子各路拆成独立的 DBC 文件再导，"
-            "或者先在 CANdb++ 里把它展开成不带复用的定义。"
-        )
+    selector: int | None = None
+    selector_signal = multiplexer_of(message)
+    if selector_signal is not None:
+        raw = raw_value(selector_signal, payload)
+        if raw is None:
+            raise DbcError(
+                f"报文 {message.name}（0x{message.frame_id:X}）的这一帧只有 "
+                f"{len(payload)} 字节，读不出选择子 {selector_signal.name}"
+                f"（起始位 {selector_signal.start_bit}、{selector_signal.length} 位）。"
+                "核对 DBC 与日志是不是同一版。"
+            )
+        selector = int(raw)
     values: dict[str, float] = {}
     for signal in message.signals:
+        branch = branch_of(signal)
+        if branch is not None:
+            if selector is None:
+                raise DbcError(
+                    f"报文 {message.name}（0x{message.frame_id:X}）的信号 "
+                    f"{signal.name} 标了分支 {signal.multiplexer}，可这条报文里"
+                    "没有选择子（M 标记）。这份 DBC 是坏的："
+                    "下一步用 CANdb++ / cantools 重新导出，"
+                    "或给选择子那一条补上 M 标记。"
+                )
+            if branch != selector:
+                continue
         value = signal_value(signal, payload)
         if value is None:
             raise DbcError(

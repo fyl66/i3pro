@@ -283,6 +283,10 @@ i2 Pro 的结构是 `Project → Workbook → Worksheet → Component`。我们�
     127 条报文 / 124 条通道 / 覆盖 81.77%**，多出来的是 S-Motion 的光学地面速度、
     Xsens MTi 的姿态与经纬度、`sw260425` 的方向盘转角；经纬度的配对规则同时放宽到
     "同一后缀的一对"（`latitude_MTI` / `longitude_MTI`），见 A62。
+    ticket #43 起**多路复用报文**（`M` / `m<n>`）按选择子分路解：`IMU.dbc` 的
+    0x780–0x783 是双帧报文（byte0 选帧类型，后 6 字节分时是加速度或角速度），
+    现在解成 `ACC_X/Y/Z` 与 `GYR_X/Y/Z` 两组通道，各自的真实更新率单独记；
+    与 cantools 逐帧对拍 40,338 帧（含"这一帧该不该有这条信号"）0 处不一致，见 A63。
 14. **多套工作表**（ticket #30，验收 A49）——**完成**：`worksheets/*.json`（与
     `maths/global.json` 同构），随版本发布的那七套不写死通道名（挑通道一律走 `pick`），
     localStorage 只记"这个场次上次用哪一套"。它是缺失通道灰显 / 别名 / 配色 / 抬头开关的

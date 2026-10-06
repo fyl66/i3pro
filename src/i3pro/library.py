@@ -17,7 +17,7 @@ from urllib.parse import quote
 
 import numpy as np
 
-from . import beacons as beaconsmod, canlog, csvlog, maths, render, sidecar
+from . import beacons as beaconsmod, cache, canlog, csvlog, maths, render, sidecar
 from . import ld as ldmod
 
 __all__ = ["SessionLibrary", "dumps", "json_safe"]
@@ -46,13 +46,8 @@ def dumps(value) -> str:
     return json.dumps(json_safe(value), ensure_ascii=False, allow_nan=False)
 
 
-def _file_stamp(path: str | Path) -> tuple:
-    """``(存在?, mtime_ns, size)``：判断一份侧车文件改没改过的便宜办法。"""
-    try:
-        stat = Path(path).stat()
-    except OSError:
-        return (False, 0, 0)
-    return (True, stat.st_mtime_ns, stat.st_size)
+#: 指纹怎么算、缓存坏了怎么办，只有 :mod:`i3pro.cache` 一处实现（ticket #49）。
+_file_stamp = cache.file_stamp
 
 
 def open_session(path: str | Path, *, dbc_dirs=()):
@@ -185,8 +180,10 @@ class SessionLibrary:
 
     # ------------------------------------------------------------- discovery
     def _groups(self, frames: list[Path]) -> list[dict]:
+        # 指纹的形状是 list（要能进 JSON 再比回来，见 i3pro.cache）；这里拼成 tuple
+        # 只是为了当字典键用，所以逐层转一下。
         stamp = tuple(
-            (str(path),) + _file_stamp(path) for path in frames
+            (str(path), *(_file_stamp(path) or [])) for path in frames
         )
         with self._lock:
             if self._group_cache is not None and self._group_cache[0] == stamp:
@@ -259,8 +256,8 @@ class SessionLibrary:
         key = str(path)
         stamp = (
             id(log),
-            _file_stamp(maths.config_path(path)),
-            _file_stamp(maths.global_path(self.maths_root)),
+            tuple(_file_stamp(maths.config_path(path))),
+            tuple(_file_stamp(maths.global_path(self.maths_root))),
         )
         if self._maths_attached.get(key) == stamp:
             return
@@ -361,6 +358,7 @@ class SessionLibrary:
         """列表缓存的钥匙：每一场（含圈侧车）的文件指纹 + DBC 目录的指纹。
 
         三样里动一样，指纹就变——改了 DBC 之后通道数会变，那条也必须重算。
+        指纹怎么算在 :mod:`i3pro.cache`（ticket #49）。
         """
         return {
             "sessions": [
@@ -368,35 +366,19 @@ class SessionLibrary:
                  *_file_stamp(sidecar.path_of("laps", path))]
                 for name, path in sorted(paths.items())
             ],
-            "dbc": [
-                [str(path.relative_to(root)), int(path.stat().st_size),
-                 int(path.stat().st_mtime_ns)]
-                for root in self.roots if (root / "dbc").is_dir()
-                for path in sorted((root / "dbc").rglob("*.dbc"))
-            ],
+            "dbc": [stamp
+                    for root in self.roots
+                    if (stamp := cache.tree_stamp(root / "dbc")) is not None],
         }
 
     def _read_index_cache(self, stamp: dict) -> list[dict] | None:
         """磁盘缓存读得出来、指纹也对得上才作数（缓存坏了当没有）。"""
-        try:
-            data = json.loads(self.index_cache.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        if not isinstance(data, dict) or data.get("stamp") != stamp:
-            return None
-        rows = data.get("rows")
+        rows = cache.read_json(self.index_cache, stamp)
         return rows if isinstance(rows, list) and rows else None
 
     def _write_index_cache(self, stamp: dict, rows: list[dict]) -> None:
         """写不进去也不吵：缓存只是省时间，不是数据。"""
-        try:
-            self.index_cache.parent.mkdir(parents=True, exist_ok=True)
-            temp = self.index_cache.with_name(self.index_cache.name + ".part")
-            temp.write_text(json.dumps({"stamp": stamp, "rows": rows},
-                                       ensure_ascii=False), encoding="utf-8")
-            temp.replace(self.index_cache)
-        except OSError:
-            pass
+        cache.write_json(self.index_cache, stamp, rows)
 
     # -------------------------------------------------------------- lap edits
     def remember_laps(self, path: str | Path, config: beaconsmod.LapConfig) -> None:

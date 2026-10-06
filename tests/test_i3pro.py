@@ -43,8 +43,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from i3pro import (  # noqa: E402
-    canlog, channelref, channels, csvlog, dbc, derive, gpsfix, laps as lapsmod, ld,
-    library as librarymod,
+    cache, canlog, channelref, channels, csvlog, dbc, derive, gpsfix,
+    laps as lapsmod, ld, library as librarymod,
     maths as mathsmod, motec_csv,
     notes as notesmod, render, report as reportmod, sections as sectionsmod,
     aliases as aliasesmod,
@@ -8235,6 +8235,97 @@ class TestChannelStates(unittest.TestCase):
         self.assertEqual(dead, [], f"这两条通道本该都是满的：{dead}")
         self.assertEqual(channels.state(log, "Vx KF"), channels.PRESENT)
         self.assertEqual(channels.state(log, "FSD13 Distance1"), channels.MISSING)
+
+
+class TestCacheStamps(unittest.TestCase):
+    """ticket #49：指纹怎么算、缓存坏了怎么办，只有 `i3pro.cache` 一处实现。"""
+
+    def _tmp(self) -> Path:
+        tmp = Path(tempfile.mkdtemp(prefix="i3pro-cache-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        return tmp
+
+    def test_文件指纹是_json_存得下来的形状(self):
+        """最阴的一脚：tuple 一进 JSON 就变 list，比回来永远不等，缓存于是**每次
+        都判过期**——不报错，只是白算（列表那次就是 36 秒）。"""
+        tmp = self._tmp()
+        target = tmp / "a.txt"
+        target.write_text("hello", encoding="utf-8")
+        stamp = cache.file_stamp(target)
+        self.assertIsInstance(stamp, list)
+        self.assertEqual(json.loads(json.dumps(stamp)), stamp, "存进 JSON 再比回来要相等")
+        self.assertEqual(stamp[0], "a.txt")
+        self.assertEqual(stamp[1], 5)
+        self.assertEqual(cache.file_stamp(tmp / "没有.txt")[1:], [-1, -1])
+        target.write_text("hello2", encoding="utf-8")
+        self.assertNotEqual(cache.file_stamp(target), stamp, "内容变了指纹要变")
+
+    def test_目录指纹排序且能递归(self):
+        tmp = self._tmp()
+        (tmp / "dbc" / "261004").mkdir(parents=True)
+        (tmp / "dbc" / "b.dbc").write_text("x", encoding="utf-8")
+        (tmp / "dbc" / "a.dbc").write_text("y", encoding="utf-8")
+        (tmp / "dbc" / "261004" / "c.dbc").write_text("z", encoding="utf-8")
+        stamp = cache.tree_stamp(tmp / "dbc")
+        self.assertEqual([row[0] for row in stamp], ["a.dbc", "b.dbc", "261004/c.dbc"])
+        self.assertIsNone(cache.tree_stamp(tmp / "没有这个目录"))
+
+    def test_内容指纹看内容(self):
+        tmp = self._tmp()
+        target = tmp / "Sensors.dbc"
+        target.write_text("BO_ 1 A: 8 X\n", encoding="utf-8")
+        stamp = cache.content_stamp(target)
+        self.assertEqual(stamp[0], "Sensors.dbc")
+        self.assertEqual(len(stamp[1]), 64)                 # sha256
+        self.assertEqual(cache.content_stamp(tmp / "没有.dbc")[1], "")
+        # 只改 mtime（内容一样）→ 内容指纹不变，而文件指纹会变
+        os.utime(target, (1, 1))
+        self.assertEqual(cache.content_stamp(target), stamp)
+
+    def test_坏缓存当没有_写不进去不吵(self):
+        tmp = self._tmp()
+        path = tmp / "cache.json"
+        self.assertIsNone(cache.read_json(path, {"a": 1}), "没有这份缓存")
+        self.assertTrue(cache.write_json(path, {"a": 1}, [1, 2, 3]))
+        self.assertEqual(cache.read_json(path, {"a": 1}), [1, 2, 3])
+        self.assertIsNone(cache.read_json(path, {"a": 2}), "指纹对不上就不算数")
+        path.write_text("{ 这不是 JSON", encoding="utf-8")
+        self.assertIsNone(cache.read_json(path, {"a": 1}))
+        path.write_text("[1, 2, 3]", encoding="utf-8")
+        self.assertIsNone(cache.read_json(path, {"a": 1}), "结构不对也当没有")
+        # 只读目录 / 父路径是个文件：写不进去返回 False，不许抛
+        (tmp / "blocked").write_text("我是个文件", encoding="utf-8")
+        self.assertFalse(cache.write_json(tmp / "blocked" / "x.json", {}, []))
+        self.assertFalse((tmp / "blocked" / "x.json.part").exists(), "别留半份")
+
+    @_needs(HILL)
+    def test_改一个文件或一份_DBC_都会让列表缓存失效(self):
+        """#45 那两层缓存最怕的是**陈旧**：侧边栏数字错了没人看得出来。"""
+        tmp = self._tmp()
+        root = tmp / "data"
+        (root / "dbc").mkdir(parents=True)
+        shutil.copy2(HILL, root / HILL.name)
+        (root / "dbc" / "TH.dbc").write_text("BO_ 193 A: 8 X\n", encoding="utf-8")
+        index_cache = tmp / "index.json"
+        library = librarymod.SessionLibrary([root], maths_root=root,
+                                            index_cache=index_cache)
+        stamp = library._index_stamp(library._paths())
+        rows = library.listing()
+        self.assertTrue(index_cache.exists(), "列表算完要落盘")
+        self.assertEqual(cache.read_json(index_cache, stamp), rows)
+        # 场次文件动一下（mtime 变）→ 钥匙就变，旧缓存不作数
+        os.utime(root / HILL.name, (1, 1))
+        self.assertNotEqual(library._index_stamp(library._paths()), stamp)
+        # DBC 动一下（哪怕只加一份）→ 钥匙也要变（通道数会跟着变）
+        stamp = library._index_stamp(library._paths())
+        (root / "dbc" / "extra.dbc").write_text("BO_ 194 B: 8 X\n", encoding="utf-8")
+        self.assertNotEqual(library._index_stamp(library._paths()), stamp)
+        # 缓存文件被写坏：照常出结果，不抛
+        index_cache.write_text("{ 坏了", encoding="utf-8")
+        fresh = librarymod.SessionLibrary([root], maths_root=root,
+                                          index_cache=index_cache)
+        self.assertEqual([row["name"] for row in fresh.listing()],
+                         [row["name"] for row in rows])
 
 
 class TestSessionForAnalysis(unittest.TestCase):

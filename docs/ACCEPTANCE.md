@@ -3344,6 +3344,49 @@ outside tolerance`；两份金标准快照各 `PASS`（7 圈 / 471 通道行、2
 
 ---
 
+## A70 · 缓存与指纹收成一个 module（ticket #49）
+
+#45 把侧边栏从 36 s 压回 0.04 s，代价是**四处缓存各写一遍**"什么算变了、缓存坏了
+怎么办"：场次对象（内存）、数学通道挂载（本地/全局定义文件的 mtime）、侧边栏列表
+（内存 + `%TEMP%` 里那份磁盘缓存）、CAN 摘要（写进 `<场次>.can.json` 侧车）。
+指纹于是有**三种形状**（`(存在, mtime, size)` / `[名字, size, mtime]` / 内容 sha256），
+"坏了当没有"写了两遍，而**最容易踩的那一脚没有任何地方写着**：
+
+> 指纹要能写进 JSON 再比回来，所以形状必须是 `list` —— `tuple` 一进 JSON 就变 `list`，
+> 比回来永远不等，缓存于是**每次都判"过期"**。不报错，只是白算（列表那次就是 36 秒）。
+
+```powershell
+# 1) 指纹与缓存策略（合成数据，任何机器都跑）
+python -m unittest tests.test_i3pro.TestCacheStamps -v
+
+# 2) 列表缓存真的会失效（改了文件 / 改了 DBC / 缓存写坏）
+python -m unittest tests.test_i3pro.TestCacheStamps.test_改一个文件或一份_DBC_都会让列表缓存失效 -v
+```
+
+新增 `src/i3pro/cache.py`：`file_stamp`（`[名字, 字节数, mtime_ns]`）、`content_stamp`
+（`[名字, sha256]`，给 DBC 这种"内容决定解码"的文件）、`tree_stamp`（目录树）、
+`read_json` / `write_json`（指纹对得上才作数、原子写、坏缓存当没有）。四处缓存都改成
+它的 caller，`library._file_stamp` 与 `canlog._stamp` 两处私有实现删掉。
+
+**通过判据**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 文件指纹是 JSON 存得下来的形状 | `json.loads(json.dumps(stamp)) == stamp`；文件不在给 `-1`；内容一变指纹就变 |
+| 目录指纹递归、顺序稳定 | 先浅后深、同层按路径（与 `canlog._dbc_files` 取文件同序）；目录不在给 `None` |
+| 内容指纹只看内容 | 只改 mtime（`os.utime`）内容指纹不变、文件指纹变；sha256 长度 64 |
+| **坏缓存当没有** | 没有 / 坏 JSON / 结构不对 / 指纹对不上，四种都返回 `None`，**都不抛** |
+| 写不进去不吵 | 父路径是个文件 → 返回 `False`，**不留 `.part`**（缓存不是数据） |
+| 改一个文件就让列表缓存失效 | 场次文件 `utime` 一动，`_index_stamp` 就变（旧缓存不作数） |
+| 改一份 DBC 也让列表缓存失效 | `dbc/` 里加一份 → 钥匙变（"改了 DBC 通道数会变"那条） |
+| 缓存写坏照常出结果 | 把 `index_cache` 写成半截 JSON → 新建的 `SessionLibrary` 照常列出同样的场次 |
+
+**回归四项（本机实测）**：`Ran 467 tests` + `OK`；`verify_ld_vs_csv` `PASS - 0 channel(s)
+outside tolerance`；两份金标准快照各 `PASS`（7 圈 / 471 通道行、26 圈 / 377 通道行）；
+真浏览器 **188 项检查：188 通过，0 失败**。
+
+---
+
 测试覆盖：
 
 | 分组 | 内容 |

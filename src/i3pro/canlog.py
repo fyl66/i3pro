@@ -39,7 +39,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import dbc as dbcmod, derive as derivemod, ld as ldmod, sidecar
+from . import cache, dbc as dbcmod, derive as derivemod, ld as ldmod, sidecar
 from .csvlog import CsvSession
 
 __all__ = [
@@ -418,14 +418,8 @@ def dbc_sources(
     )
 
 
-def _stamp(path: str | Path) -> list:
-    """``[名字, 字节数, mtime_ns]``：判"这份文件还是不是当初那一份"。"""
-    path = Path(path)
-    try:
-        info = path.stat()
-    except OSError:
-        return [path.name, -1, -1]
-    return [path.name, int(info.st_size), int(info.st_mtime_ns)]
+#: 指纹怎么算只有一处（:mod:`i3pro.cache`，ticket #49）。
+_stamp = cache.file_stamp
 
 
 def _dbc_stamp(directories, only: str | None) -> list | None:
@@ -434,8 +428,8 @@ def _dbc_stamp(directories, only: str | None) -> list | None:
         _directory, sources = dbc_sources(directories, only)
     except ValueError:
         return None
-    return [[label, hashlib.sha256(path.read_bytes()).hexdigest()]
-            for label, path in sources]
+    # 内容指纹：改一行 DBC 就得让摘要重算，而 mtime 可能被工具保留。
+    return [[label, cache.content_stamp(path)[1]] for label, path in sources]
 
 
 def cache_summary(

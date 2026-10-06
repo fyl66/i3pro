@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from . import aliases as aliasesmod
+from . import channelref
 from . import channels as channelsmod
 from . import derive, gpsfix, histogram as histogrammod, laps as lapsmod
 from . import notes as notesmod, report as reportmod, sections as sectionsmod
@@ -957,7 +958,9 @@ def build_payload(
     sheets, sheet_problems = worksheetsmod.load_dir(worksheets_dir)
     # 每条别名**这一场**落到了哪条通道（ticket #36）。判定只有 aliases.landing
     # 一处实现，页面这边只是把结果贴上——前端查表，不重写一遍规则。
-    sheets = aliasesmod.annotate(sheets, {ch.name for ch in log.channels})
+    # 候选池 = **原生 + 数学通道**（channelref.known_names）：CONTEXT.md 写着数学通道
+    # "除此之外与原生通道完全一样"，所以别名也该能落到它上面（ticket #46 修）。
+    sheets = aliasesmod.annotate(sheets, channelref.known_names(log))
     try:
         distance = derive.distance_series(log)[: time.size]
     except ValueError:

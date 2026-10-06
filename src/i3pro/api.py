@@ -30,6 +30,7 @@ from . import (
     aliases as aliasesmod,
     axes as axesmod,
     beacons as beaconsmod,
+    channelref,
     csvlog,
     derive,
     export as exportmod,
@@ -359,7 +360,7 @@ class _Call:
             except KeyError:
                 log = None
             if log is not None:
-                sheets = aliasesmod.annotate(sheets, {ch.name for ch in log.channels})
+                sheets = aliasesmod.annotate(sheets, channelref.known_names(log))
         return {"worksheets": sheets, "worksheet_problems": problems}
 
     def with_aliases(self, sheet: dict) -> dict:
@@ -371,7 +372,7 @@ class _Call:
             log = self.library.get(name)
         except KeyError:
             return sheet
-        return aliasesmod.annotate([sheet], {ch.name for ch in log.channels})[0]
+        return aliasesmod.annotate([sheet], channelref.known_names(log))[0]
 
     def json_body(self) -> dict:
         """请求体读成 JSON 对象；读不出来按项目规则说清"下一步做什么"。"""

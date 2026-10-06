@@ -43,7 +43,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from i3pro import (  # noqa: E402
-    canlog, channels, csvlog, dbc, derive, gpsfix, laps as lapsmod, ld, library as librarymod,
+    canlog, channelref, channels, csvlog, dbc, derive, gpsfix, laps as lapsmod, ld,
+    library as librarymod,
     maths as mathsmod, motec_csv,
     notes as notesmod, render, report as reportmod, sections as sectionsmod,
     aliases as aliasesmod,
@@ -8234,6 +8235,96 @@ class TestChannelStates(unittest.TestCase):
         self.assertEqual(dead, [], f"这两条通道本该都是满的：{dead}")
         self.assertEqual(channels.state(log, "Vx KF"), channels.PRESENT)
         self.assertEqual(channels.state(log, "FSD13 Distance1"), channels.MISSING)
+
+
+class TestChannelReference(unittest.TestCase):
+    """ticket #46：「这个名字指哪条通道」只有一处实现。
+
+    以前五套规则各写一遍（导入改名表 / derive 去空格匹配 / derive 同后缀配经纬度 /
+    maths 表达式里再匹配一次 / 别名候选链），而且互相绊倒过两次。这里钉住共用的那几条，
+    以及同一票修掉的两处不一致。
+    """
+
+    def test_规范化只看字母数字(self):
+        for text in ("Vx KF", "Vx_KF", "vx-kf", " vx.kf "):
+            self.assertEqual(channelref.normalise(text), "vxkf", text)
+        self.assertEqual(channelref.normalise(""), "")
+        self.assertEqual(channelref.normalise(None), "")
+
+    def test_原样优先_其次同一化_再其次没有(self):
+        known = {"Vx KF", "GPS Speed"}
+        self.assertEqual(channelref.lookup(known, "Vx KF"), "Vx KF")
+        self.assertEqual(channelref.lookup(known, "vx_kf"), "Vx KF")
+        self.assertEqual(channelref.lookup(known, "GPS  Speed"), "GPS Speed")
+        self.assertIsNone(channelref.lookup(known, "没有这条"))
+        self.assertIsNone(channelref.lookup(known, ""))
+        self.assertIsNone(channelref.lookup(known, None))
+
+    def test_撞名时两种策略都在(self):
+        """`lookup` 确定性优先（排序第一条），`lookup_unique` 命中多条就认输。"""
+        known = {"Vx KF", "Vx_KF"}
+        self.assertEqual(channelref.lookup(known, "vxkf"), "Vx KF")
+        self.assertIsNone(channelref.lookup_unique(known, "vxkf"))
+        # 只有一条时两个都认
+        self.assertEqual(channelref.lookup_unique({"Vx KF"}, "vx_kf"), "Vx KF")
+
+    def test_同后缀才能配成一对(self):
+        heads = ("latitude", "poslat", "lat")
+        tails = ("longitude", "poslon", "lon")
+        self.assertEqual(
+            channelref.suffix_pair({"latitude_MTI", "longitude_MTI"}, heads, tails),
+            ("latitude_MTI", "longitude_MTI"),
+        )
+        # 只是"像"的一对不算：前缀对上了，后缀也得逐字相同
+        self.assertIsNone(
+            channelref.suffix_pair({"Lateral", "Longitudinal"}, heads, tails))
+        self.assertIsNone(channelref.suffix_pair({"latitude_MTI"}, heads, tails))
+
+    def test_有序候选取第一条存在的(self):
+        self.assertEqual(channelref.first_present(["A", "B", "C"], {"B", "C"}), "B")
+        self.assertIsNone(channelref.first_present(["A"], {"B"}))
+        self.assertIsNone(channelref.first_present([], {"A"}))
+
+    def test_数学通道也算可引用的通道(self):
+        """ticket #46 修的不一致：别名过去只认原生通道，永远落不到数学通道上。
+
+        CONTEXT.md 写的是"数学通道除此之外与原生通道完全一样（可画图、可散点、
+        可切圈、可进报表）"——那"可被别名引到"也该一样。
+        """
+        log = _NamedLog(["Vx KF"])
+        log.derived_names.add("速度kmh")
+        self.assertIn("速度kmh", channelref.known_names(log))
+        self.assertIn("Vx KF", channelref.known_names(log))
+        self.assertEqual(
+            aliasesmod.landing(
+                [{"name": "车速", "candidates": ["Vx KF", "速度kmh"]}],
+                "@车速", channelref.known_names(log)),
+            "Vx KF",
+        )
+        self.assertEqual(
+            aliasesmod.landing(
+                [{"name": "车速", "candidates": ["没有的", "速度kmh"]}],
+                "@车速", channelref.known_names(log)),
+            "速度kmh",
+        )
+
+    def test_导入归一表撞名时结果固定(self):
+        """名单里出现两个"规范化之后一样"的写法时，取排序第一条，不是"谁最后写谁赢"。
+
+        这条挡的是 ticket #46 记下的那次真事故：往 `SPEED_CANDIDATES` 里多写一个
+        `Vx_KF`，一张列叫 `Vx KF` 的表就会被改名成 `Vx_KF`。
+        """
+        from unittest import mock
+
+        with mock.patch.object(csvlog, "canonical_names",
+                               lambda: ["Vx_KF", "Vx KF", "GPS Speed"]):
+            table = csvlog.canonical_table()
+        self.assertEqual(table["vxkf"], "Vx KF")        # 排序后 'Vx KF' < 'Vx_KF'
+        self.assertEqual(table["gpsspeed"], "GPS Speed")
+        # 反过来给也一样：排序决定，跟传进来的顺序无关
+        with mock.patch.object(csvlog, "canonical_names",
+                               lambda: ["GPS Speed", "Vx KF", "Vx_KF"]):
+            self.assertEqual(csvlog.canonical_table()["vxkf"], "Vx KF")
 
 
 class TestAliases(unittest.TestCase):

@@ -24,6 +24,8 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+from . import channelref
+
 __all__ = [
     "PREFIX",
     "annotate",
@@ -127,14 +129,10 @@ def landing(entries: Iterable[dict], reference: Any, present: Iterable[str]) -> 
     wanted = name_of(reference)
     if not wanted:
         return None
-    known = present if isinstance(present, (set, frozenset)) else set(present)
     for entry in entries or ():
         if entry.get("name") != wanted:
             continue
-        for candidate in entry.get("candidates") or ():
-            if candidate in known:
-                return candidate
-        return None
+        return channelref.first_present(entry.get("candidates") or (), present)
     return None
 
 
@@ -144,10 +142,9 @@ def status(entries: Iterable[dict], present: Iterable[str]) -> list[dict]:
     没落地的条目 ``channel`` 是 ``None``，界面按 ticket #34 的同一套三态把它显示成
     "本场次没有"，而不是另写一套"别名失败了"的说法。
     """
-    known = present if isinstance(present, (set, frozenset)) else set(present)
     rows: list[dict] = []
     for entry in entries or ():
-        hit = next((c for c in entry.get("candidates") or () if c in known), None)
+        hit = channelref.first_present(entry.get("candidates") or (), present)
         rows.append(
             {
                 "name": entry.get("name", ""),
@@ -166,10 +163,9 @@ def annotate(sheets: Iterable[dict], present: Iterable[str]) -> list[dict]:
     ``alias_landing`` 是给前端查表用的平表（``"@车速" -> "Vx KF"`` 或 ``None``）：
     判定只有 :func:`landing` 一处实现，前端只做查表，不重写一遍规则。
     """
-    known = present if isinstance(present, (set, frozenset)) else set(present)
     out = []
     for sheet in sheets:
-        rows = status(sheet.get("aliases") or [], known)
+        rows = status(sheet.get("aliases") or [], present)
         out.append(
             {
                 **sheet,

@@ -27,6 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import channelref
 from . import derive
 from . import sidecar
 from . import timebase
@@ -182,17 +183,14 @@ def _canonical_name(name: str, known: Iterable[str] | None) -> str:
 
     单引号里的名字按说应当逐字一致，但用户是从别处复制来的、或者照着自己记的
     写法打的，同样只差一个空格或大小写——那就和没加引号时一个待遇，别逼他改三次。
-    对不上（或者对上好几条）就原样返回，交给"本场次没有这个通道"那条报错去解释。
+
+    判定在 :func:`i3pro.channelref.lookup_unique`（"谁指哪条通道"只有那一处实现）：
+    对不上、**或者对上不止一条**，都原样返回，交给"本场次没有这个通道"那条报错去解释。
     """
     if not known:
         return name
-    if name in known:
-        return name
-    squashed = _squash(name)
-    if not squashed:
-        return name
-    hits = [item for item in known if _squash(item) == squashed]
-    return hits[0] if len(hits) == 1 else name
+    hit = channelref.lookup_unique(known, name)
+    return name if hit is None else hit
 
 
 def _tokenize(

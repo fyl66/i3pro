@@ -3215,6 +3215,51 @@ outside tolerance`；两份金标准快照各 `PASS`（7 圈 / 471 通道行、2
 
 ---
 
+## A67 · 通道引用：五套规则收成一个 module（ticket #46）
+
+「用户写的这个通道名字，本场次指哪条通道」这件事，到 #45 为止被写了**五遍**：
+导入 CSV 的改名表（`csvlog`）、去空格匹配（`derive.resolve_channel`）、同后缀配经纬度
+（`derive.gps_pair`）、数学通道表达式里再匹配一次（`maths._canonical_name`）、
+工作表别名候选链（`aliases`）。它们互相绊倒过：`derive.resolve_channel` 的说明里
+记着那次事故——往 `SPEED_CANDIDATES` 多写一个"同一化的写法"（`Vx_KF`），一张列叫
+`Vx KF` 的表**导入时会被改名**。
+
+```powershell
+# 1) 新 module 的规则（合成数据，任何机器都跑）
+python -m unittest tests.test_i3pro.TestChannelReference -v
+
+# 2) 五条老路径照旧：导入 / 数学通道 / 别名 / 速度 / GPS
+python -m unittest tests.test_i3pro.TestCsvSession tests.test_i3pro.TestMaths `
+  tests.test_i3pro.TestAliases tests.test_i3pro.TestSpeedChannelResolution -v
+```
+
+**通过判据**（新 module 7 项 ＋ 五条老路径 96 项照旧全过）：
+
+| 断言 | 实测 |
+| --- | --- |
+| 规范化只有一处 | `Vx KF` / `Vx_KF` / `vx-kf` / ` Vx.KF ` 都给 `vxkf`；空名字给空串 |
+| 两种歧义策略**都有**、都说得清 | `lookup` 撞名取排序第一条（确定性优先，"这场用了哪条速度"不能随字典顺序漂移）；`lookup_unique` 撞名给 `None`（数学通道用它，宁可不猜） |
+| 同后缀才配一对 | `latitude_MTI` / `longitude_MTI` 配得上；`Lateral` / `Longitudinal` 配不上 |
+| 有序候选取第一条存在的 | `["A","B","C"]` + 本场有 `{B,C}` → `B` |
+| **导入归一表撞名时结果固定** | 名单里同时有 `Vx KF` 与 `Vx_KF` 时取排序第一条；把名单顺序倒过来结果一样（以前是"字典最后写进去的赢"，那正是上面那次改名事故的机制） |
+| **数学通道也算可引用的通道** | `channelref.known_names()` = 原生 + 数学通道；别名候选 `["没有的", "速度kmh"]` 现在能落到数学通道 `速度kmh` 上（以前只认原生通道，永远落不到） |
+| 五条老路径行为不变 | 96 条用例全过：CSV 列名匹配 / 数学通道 `FSD13Distance1`、`Vx KF`、`vx kf`、`FSD13-Distance1` / 别名落地 / 速度通道挑选 / GPS 配对 |
+
+**这一票修掉的两处不一致**（都是"同一件事两份规则"的后果）：
+
+1. 别名候选池原来只有原生通道（`{ch.name for ch in log.channels}`），而 `derive` 那边
+   用的是"原生 + 数学通道"。CONTEXT.md 写的是数学通道"除此之外与原生通道完全一样"，
+   所以统一到 `channelref.known_names()`——别名现在也能落到数学通道上。
+2. `csvlog._normalise` 是自己的第二套规范化（把非字母数字换成空格），`ALIASES` 的键
+   是按它写的字面量。统一到 `channelref.normalise` 之后，字面量不用跟着规则变形：
+   键在导入时现算（`_ALIAS_WORDS` → `ALIASES`）。
+
+**回归四项（本机实测）**：`Ran 454 tests` + `OK`；`verify_ld_vs_csv` `PASS - 0 channel(s)
+outside tolerance`；两份金标准快照各 `PASS`（7 圈 / 471 通道行、26 圈 / 377 通道行）；
+真浏览器 **188 项检查：188 通过，0 失败**。
+
+---
+
 测试覆盖：
 
 | 分组 | 内容 |

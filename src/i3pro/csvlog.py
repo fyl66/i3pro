@@ -30,7 +30,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import derive, ld as ldmod, render, sidecar
+from . import channelref, derive, ld as ldmod, render, sidecar
 
 __all__ = ["CsvSession", "read_csv_session", "canonical_names", "ALIASES", "scan_rows",
            "load_map", "save_map", "load_sheet", "load_options", "save_options",
@@ -43,7 +43,9 @@ __all__ = ["CsvSession", "read_csv_session", "canonical_names", "ALIASES", "scan
 MAP_SUFFIX = sidecar.kind_of("csvmap").suffix
 
 #: Column names that mean "this is the time axis".
-TIME_NAMES = frozenset({"time", "t", "timestamp", "times", "time s"})
+#: 时间是特殊的一列：这些写法都算时间轴。键是 :func:`channelref.normalise` 的规范形，
+#: 所以 ``time s`` 与 ``times`` 是同一个键（只写一个就够）。
+TIME_NAMES = frozenset({"time", "t", "timestamp", "times"})
 
 #: ``layout_of(header=...)`` 用这个值表示"这份表**没有表头行**"：列名退化成
 #: ``列1`` / ``列2`` …，所有行都是数据（ticket #32）。没有它的话，"只有数字的
@@ -171,10 +173,29 @@ def canonical_names() -> list[str]:
     return sorted(names)
 
 
+def canonical_table() -> dict[str, str]:
+    """``normalise(列名) -> 我们用的通道名``：名单里出现两个"规范化之后一样"的写法
+    （``Vx KF`` 与 ``Vx_KF``）时取**排序后的第一条**——结果是确定的，而不是"字典
+    最后写进去的那个赢"。
+
+    这条以前没有：往 :data:`derive.SPEED_CANDIDATES` 里多写一个"同一化的写法"，
+    就会让**导入的 CSV 列被改名**（实测：一张列叫 ``Vx KF`` 的表被改成了 ``Vx_KF``）。
+    现在匹配规则在 :mod:`i3pro.channelref` 一处，那份名单**不需要**再放两个写法；
+    万一同一个键还是撞上了，至少结果稳定、能解释。
+    """
+    table: dict[str, str] = {}
+    for name in sorted(canonical_names()):
+        table.setdefault(channelref.normalise(name), name)
+    return table
+
+
 #: Foreign spellings seen in other teams' / other tools' exports, mapped onto the
 #: names our analysis uses. Deliberately conservative: a column is only renamed
 #: when the mapping is unambiguous, and the report always says what happened.
-ALIASES = {
+#:
+#: 键按"人话"写（空格分隔），查表时用的键由 :func:`_alias_keys` 现算——
+#: 规范化规则只有 :func:`channelref.normalise` 一处，字面量不用跟着它变形。
+_ALIAS_WORDS = {
     "t": "Time",
     "timestamp": "Time",
     "gps speed": "GPS Speed",
@@ -207,11 +228,13 @@ ALIASES = {
     "lap distance": "Distance",
 }
 
+#: 给 `_ALIAS_WORDS` 的键套上统一的规范形；**这是查表时真正用的那张**。
+ALIASES = {channelref.normalise(key): value for key, value in _ALIAS_WORDS.items()}
 
-def _normalise(text: str) -> str:
-    """Case- and separator-insensitive key for matching."""
-    keep = [c.lower() if c.isalnum() else " " for c in str(text).strip()]
-    return " ".join("".join(keep).split())
+
+#: 列名匹配用的规范形统一在 :mod:`i3pro.channelref`（那里的 :func:`normalise`）——
+#: 这一份以前自己又写了一遍（把非字母数字换成空格），两套规则差一点点就够绊倒人。
+_normalise = channelref.normalise
 
 
 #: ``Vx KF [km/h]``：我们自己导出宽表时把单位写进列名（Excel 里一眼看得出量纲）。
@@ -601,7 +624,7 @@ def session_from_frame(
         names = [name for name, _unit in pairs]
         named_units = [unit for _name, unit in pairs]
     unit_cells = list(rows[head + 1]) if has_unit_row and head + 1 < len(rows) else []
-    canonical = {_normalise(n): n for n in canonical_names()}
+    canonical = canonical_table()
     resolve = _resolver(renames, canonical)
 
     generated = False

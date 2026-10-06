@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import channelref
 from . import channels as channelsmod
 from . import gpsfix
 from . import ld as ldmod
@@ -45,23 +46,13 @@ SPEED_CANDIDATES = (
 )
 
 
-def _squashed(text: str) -> str:
-    """去掉空格/下划线/大小写之后的键，用来认"同一个名字的两种写法"。"""
-    return "".join(character for character in text.lower() if character.isalnum())
-
-
 def name_table(log: ldmod.LogFile) -> dict[str, str]:
-    """``_squashed(名字) -> 真名``，给 :func:`resolve_channel` 一次建好反复用。
+    """``normalise(名字) -> 真名``，给 :func:`resolve_channel` 一次建好反复用。
 
-    同一个键落回多条通道时取**排序后的第一条**，所以同样的输入永远给同样的答案
-    （不然"这场用了哪条速度"会随字典顺序漂移）。
+    规则本身在 :mod:`i3pro.channelref`（"谁指哪条通道"只有那一处实现）；
+    这里只是"本场次有哪些通道"这一个领域问题的入口。
     """
-    # 原生通道在 ``log.channels`` 里，数学通道在 ``channels.names()`` 里（那是个活集合）
-    known = {channel.name for channel in log.channels} | set(channelsmod.names(log))
-    table: dict[str, str] = {}
-    for name in sorted(known):
-        table.setdefault(_squashed(name), name)
-    return table
+    return channelref.name_table(channelref.known_names(log))
 
 
 def resolve_channel(
@@ -73,15 +64,14 @@ def resolve_channel(
     与 CAN 线（``i2pro_data/dbc/TH.dbc`` 的 ``0xC1 Throttle_INFO``）解出来的
     ``Vx_KF`` 是同一个量。
 
-    这两种写法**不能**都写进 :data:`SPEED_CANDIDATES`：``csvlog.canonical_names()``
-    拿它当列名归一表，多写一个同一化的名字会让导入的 CSV 列被改名（实测：一张
-    列叫 ``Vx KF`` 的表被改成了 ``Vx_KF``）。所以匹配规则只写在这里一处。
+    规则在 :func:`i3pro.channelref.lookup` 一处实现；``table`` 是给"一次问很多遍"
+    的调用方省事的（:func:`name_table` 建一次）。
     """
-    if log.has(name):
+    known = channelref.known_names(log)
+    if isinstance(name, str) and name in known:
         return name
-    if table is None:
-        table = name_table(log)
-    return table.get(_squashed(name))
+    return channelref.lookup(known, name,
+                             table=table if table is not None else name_table(log))
 
 
 GPS_PAIRS = (
@@ -116,16 +106,9 @@ def gps_pair(log: ldmod.LogFile) -> tuple[str, str] | None:
         lon_ch = resolve_channel(log, lon_name, table)
         if lat_ch and lon_ch and lat_ch != lon_ch:
             return lat_ch, lon_ch
-    for key in sorted(table):
-        for head in _LAT_HEADS:
-            if not key.startswith(head):
-                continue
-            tail = key[len(head):]
-            for lon_head in _LON_HEADS:
-                other = table.get(lon_head + tail)
-                if other and other != table[key]:
-                    return table[key], other
-    return None
+    # 同后缀的一对（latitude_MTI / longitude_MTI）：算法在 channelref，
+    # 词头是本领域的词汇，留在这里。
+    return channelref.suffix_pair(channelref.known_names(log), _LAT_HEADS, _LON_HEADS)
 
 
 def speed_channel(log: ldmod.LogFile) -> str | None:

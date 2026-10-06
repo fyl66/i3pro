@@ -367,6 +367,22 @@ def load_databases(
     返回 ``(用了哪个目录, [(报告里的名字, 库)])``；名字是**相对那个目录**的路径，
     所以报告算 sha256 时 ``目录 / 名字`` 永远拼得对。
     """
+    directory, sources = dbc_sources(directories, only)
+    return directory, [
+        (label, dbcmod.parse(path.read_text(encoding="utf-8", errors="replace"),
+                             source=label))
+        for label, path in sources
+    ]
+
+
+def dbc_sources(
+    directories: list[Path] | Path, only: str | None = None
+) -> tuple[Path, list[tuple[str, Path]]]:
+    """:func:`load_databases` 的发现那一半：``(用了哪个目录, [(名字, 路径)])``。
+
+    只找文件、不解析——"侧车里的摘要还算不算数"要拿这份列表算指纹（见
+    :func:`cached_summary`），为此把 18 份 DBC 再解析一遍是浪费。
+    """
     if isinstance(directories, (str, Path)):
         directories = [Path(directories)]
     tried: list[Path] = []
@@ -377,18 +393,16 @@ def load_databases(
         tried.append(directory)
         if not directory.is_dir():
             continue
-        found: list[tuple[str, dbcmod.Database]] = []
+        found: list[tuple[str, Path]] = []
         seen: set[str] = set()
         for label, path in _dbc_files(directory):
             if only and path.name != only:
                 continue
-            blob = path.read_bytes()
-            digest = hashlib.sha256(blob).hexdigest()
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
             if digest in seen:
                 continue
             seen.add(digest)
-            found.append((label, dbcmod.parse(blob.decode("utf-8", errors="replace"),
-                                              source=label)))
+            found.append((label, path))
         if found:
             return directory, found
     if only:
@@ -402,6 +416,73 @@ def load_databases(
         f"（找过：{'、'.join(str(d) for d in tried)}）——"
         "没有 DBC 就只能看到一堆读不懂的字节。"
     )
+
+
+def _stamp(path: str | Path) -> list:
+    """``[名字, 字节数, mtime_ns]``：判"这份文件还是不是当初那一份"。"""
+    path = Path(path)
+    try:
+        info = path.stat()
+    except OSError:
+        return [path.name, -1, -1]
+    return [path.name, int(info.st_size), int(info.st_mtime_ns)]
+
+
+def _dbc_stamp(directories, only: str | None) -> list | None:
+    """当前这套 DBC 的 ``[[名字, sha256], …]``；一份都没有时给 ``None``。"""
+    try:
+        _directory, sources = dbc_sources(directories, only)
+    except ValueError:
+        return None
+    return [[label, hashlib.sha256(path.read_bytes()).hexdigest()]
+            for label, path in sources]
+
+
+def cache_summary(
+    session_path: str | Path, facts: dict, *, names: list[str],
+    directories, only: str | None = None,
+) -> None:
+    """把侧边栏要的摘要写进 ``.can.json``（写不进去也不吵：缓存不是数据）。
+
+    侧边栏要为每一场算摘要：``.ld`` 读个头就行，**CAN 场次却要整场解码一次**。
+    实测 41 场数据下 ``SessionLibrary.listing()`` 要 **32.3 s**（第二次走内存缓存
+    0.01 s）——队友打开页面就得等半分钟。所以把摘要连同"它当时是基于什么算的"
+    一起写下来：源文件 / DBC 文件 / 圈侧车三样都没变就直接用，变了一样就重算。
+    """
+    here = Path(session_path).parent
+    laps = sidecar.path_of("laps", session_path)
+    stamp = {
+        "sources": [_stamp(here / name) for name in names],
+        "dbc": _dbc_stamp(directories, only),
+        "laps": _stamp(laps) if laps.exists() else None,
+    }
+    try:
+        write_can_map(session_path, summary={"facts": facts, "stamp": stamp})
+    except OSError:
+        pass          # 只读目录 / 权限不够：那就每次重算，别让列表挂掉
+
+
+def cached_summary(session_path: str | Path, directories) -> dict | None:
+    """侧车里那份摘要还算不算数；不算（或没有）就返回 ``None``，让调用方重算。"""
+    stored = sidecar.read("canmap", session_path) or {}
+    block = stored.get("summary") or {}
+    facts, stamp = block.get("facts"), block.get("stamp")
+    if not isinstance(facts, dict) or not isinstance(stamp, dict):
+        return None
+    sources = stamp.get("sources")
+    if not isinstance(sources, list) or not sources:
+        return None
+    here = Path(session_path).parent
+    if [_stamp(here / str(row[0])) for row in sources] != sources:
+        return None                      # 帧表（或它的分卷）动过了
+    pinned = stored.get("dbc") if stored.get("dbc_mode") == "file" else None
+    if _dbc_stamp(directories, pinned if isinstance(pinned, str) else None) \
+            != stamp.get("dbc"):
+        return None                      # DBC 目录动过了
+    laps = sidecar.path_of("laps", session_path)
+    if (_stamp(laps) if laps.exists() else None) != stamp.get("laps"):
+        return None                      # 圈 / 信标改过了
+    return facts
 
 
 @dataclass

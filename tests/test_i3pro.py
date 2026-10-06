@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from unittest import mock
 import threading
 import time
 import unittest
@@ -7471,6 +7472,47 @@ class TestCanLog(unittest.TestCase):
         self.assertLess(merged_seconds, 8.0)
 
 
+class TestListingCache(unittest.TestCase):
+    """ticket #45：侧边栏列表的磁盘缓存——冷启动不许再为每一场算一遍摘要。
+
+    实测 41 场数据下全算一遍 36 s（CAN 场次整场解码 + 27 场 `.ld` 的打开/数学通道/
+    切圈），落到磁盘之后新实例 **0.04 s**。这两条钉的就是"用没用上"与"该失效时失效"。
+    """
+
+    @_needs(HILL)
+    def test_冷启动读磁盘缓存_不再为每一场算摘要(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "listing.json"
+            root = Path(tmp) / "data"
+            root.mkdir()
+            shutil.copy2(HILL, root / HILL.name)
+            room = librarymod.SessionLibrary([root], cache_size=1, maths_root=ROOT,
+                                             index_cache=cache)
+            fresh = librarymod.SessionLibrary([root], cache_size=1, maths_root=ROOT,
+                                              index_cache=cache)
+            stale = librarymod.SessionLibrary([root], cache_size=1, maths_root=ROOT,
+                                              index_cache=cache)
+            try:
+                rows = room.listing()
+                self.assertTrue(rows and rows[0]["name"] == HILL.stem, rows[:1])
+                self.assertTrue(cache.exists(), "列表没有落到磁盘")
+                # 新实例：把 summary 封掉——还能给出同样的行，就说明读的是磁盘缓存
+                with mock.patch.object(librarymod.SessionLibrary, "summary",
+                                       side_effect=AssertionError("不该重算")):
+                    again = fresh.listing()
+                self.assertEqual([r["name"] for r in again], [r["name"] for r in rows])
+                # 数据动了一下（mtime 变了）：指纹失效，必须重算
+                os.utime(root / HILL.name, None)
+                with mock.patch.object(librarymod.SessionLibrary, "summary",
+                                       side_effect=RuntimeError("重算了")):
+                    rows = stale.listing()
+                self.assertTrue(any("error" in row for row in rows),
+                                "文件动过之后还在用旧缓存")
+            finally:
+                for room_ in (room, fresh, stale):
+                    room_.close()
+
+
 class TestSpeedChannelResolution(unittest.TestCase):
     """同一个量在两条数据线上叫两个名字：``.ld`` 是 ``Vx KF``，CAN 是 ``Vx_KF``。
 
@@ -7577,6 +7619,13 @@ class TestSpeedChannelResolution(unittest.TestCase):
         self.assertEqual(sorted(set(np.unique(selector))), [1.0, 2.0])
 
 
+class TestCanAgainstMoTeC(unittest.TestCase):
+    """CAN 侧的三条交叉检查（ticket #42/#43/#44）：总线、多路复用、摘要缓存。
+
+    （它们原来落在 `TestSpeedChannelResolution` 的尾巴上——那个类名讲的是"名字
+    归一"，跟这几条没关系。类名与内容对不上，下一个人就会找不到。）
+    """
+
     def test_同一_ID_出现在两条总线上要吵出来(self):
         """DBC 只按 ID 认报文，所以"0x660 在 ch1 和 ch3 上都出现"必须报出来。
 
@@ -7628,6 +7677,36 @@ class TestSpeedChannelResolution(unittest.TestCase):
         self.assertEqual(current["samples"], 8684)
         stray = {row["id"]: row["bus"] for row in session.can["undecoded"]}
         self.assertEqual(stray.get("0x527"), "ch3")
+
+    def test_帧表摘要写进侧车_DBC_动过就不算数(self):
+        """`.can.json` 里的摘要给侧边栏用：源文件 / DBC / 圈侧车动一样就得重算。"""
+        frames = CAN_DATA / "2026_10_03_201147_ID0001.csv"
+        if not frames.exists():
+            self.skipTest("缺那份小帧表")
+        work = scratch("_can_summary")
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True)
+        copy = work / frames.name
+        shutil.copy2(frames, copy)
+        dbc_dir = work / "dbc"
+        dbc_dir.mkdir()
+        shutil.copy2(SENSORS_DBC, dbc_dir / SENSORS_DBC.name)
+        try:
+            canlog.read_can_session([copy], dbc_dir=[dbc_dir])
+            canlog.cache_summary(copy, {"device": "CAN", "channels": 46},
+                                 names=[copy.name], directories=[dbc_dir])
+            self.assertIsNotNone(canlog.cached_summary(copy, [dbc_dir]))
+            # 圈侧车动一下：不该再信那份摘要
+            sidecar.write("laps", copy, {"mode": "auto"})
+            self.assertIsNone(canlog.cached_summary(copy, [dbc_dir]))
+            canlog.cache_summary(copy, {"device": "CAN", "channels": 46},
+                                 names=[copy.name], directories=[dbc_dir])
+            # DBC 内容动一下（内容指纹，不是 mtime）：也不该再信
+            target = dbc_dir / SENSORS_DBC.name
+            target.write_text(target.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+            self.assertIsNone(canlog.cached_summary(copy, [dbc_dir]))
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
 
     def test_一段_CAN_日志能认出_MTi_的经纬度(self):
         """端到端：DBC 子目录 + 配对规则一起，才让这场 CAN 有 GPS。

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import tempfile
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -63,6 +64,7 @@ class SessionLibrary:
         cache_size: int = 3,
         maths_root: str | Path | None = None,
         worksheets_root: str | Path | None = None,
+        index_cache: str | Path | None = None,
     ):
         self.roots = [Path(r) for r in roots]
         self.cache_size = max(1, cache_size)
@@ -70,6 +72,11 @@ class SessionLibrary:
         self.maths_root = maths_root
         #: 工作表（``<仓库>/worksheets/*.json``）的根目录（ticket #30）。
         self.worksheets_root = worksheets_root
+        #: 侧边栏列表的磁盘缓存。默认放临时目录（缓存不是数据，别往车队数据目录里塞）；
+        #: 指纹对不上就当没有，见 :meth:`listing`。
+        self.index_cache = Path(index_cache) if index_cache is not None else (
+            Path(tempfile.gettempdir()) / "i3pro-listing-cache.json"
+        )
         self._lock = threading.Lock()
         self._cache: OrderedDict[str, ldmod.LogFile] = OrderedDict()
         self._maths_cache = maths.DerivedCache()
@@ -203,6 +210,17 @@ class SessionLibrary:
         return tuple(definition.name for definition in effective.definitions)
 
     def summary(self, name: str) -> dict:
+        # 帧表（CAN）那一场"算摘要"= 整场解码一次：实测 41 场要 32.3 s。导入时
+        # 已经把摘要写进 `.can.json` 了，这里先读缓存——源文件 / DBC / 圈侧车
+        # 三样指纹都没变就直接用（见 `canlog.cached_summary`）。
+        path = self.path_of(name)
+        is_frames = bool(path is not None and path.suffix.lower() == ".csv"
+                         and canlog.looks_like_frames(path))
+        if is_frames:
+            cached = canlog.cached_summary(path, self._dbc_dirs())
+            if cached is not None:
+                return _json_safe({**cached, "name": name,
+                                   "url": f"/session/{quote(name)}"})
         log = self.get(name)
         laps = render.detect(log)
         complete = [l for l in laps if l.complete]
@@ -213,27 +231,83 @@ class SessionLibrary:
         meta["best_lap"] = None if best is None else round(best, 3)
         meta["name"] = name
         meta["url"] = f"/session/{quote(name)}"
-        return _json_safe(meta)
+        out = _json_safe(meta)
+        if is_frames:
+            report = getattr(log, "can", {}) or {}
+            names = list(report.get("sources") or [path.name])
+            canlog.cache_summary(path, out, names=names, directories=self._dbc_dirs(),
+                                 only=report.get("dbc", {}).get("pinned"))
+        return out
+
+    def _dbc_dirs(self) -> list[Path]:
+        """这场次可能在哪些目录里找 DBC（和 :meth:`get` 用的是同一套）。"""
+        return [root / "dbc" for root in self.roots]
 
     def listing(self) -> list[dict]:
         paths = self._paths()
-        stamp = tuple(
-            (name, str(path)) + _file_stamp(path)
-            + _file_stamp(sidecar.path_of("laps", path))
-            for name, path in sorted(paths.items())
-        )
+        stamp = self._index_stamp(paths)
         with self._lock:
             if self._listing_cache is not None and self._listing_cache[0] == stamp:
                 return self._listing_cache[1]
+        # 磁盘上那份还算不算数：算数就直接用——**冷启动一次都不重算**。
+        # 实测 41 场数据下全算一遍要 36 s（27 场 .ld 的摘要各约 0.18 s：打开 +
+        # 数学通道 + 切圈；CAN 场次那部分已由 `.can.json` 里的摘要缓存兜住）。
+        cached = self._read_index_cache(stamp)
+        if cached is not None:
+            with self._lock:
+                self._listing_cache = (stamp, cached)
+            return cached
         out: list[dict] = []
         for name in paths:
             try:
                 out.append(self.summary(name))
             except Exception as exc:  # a broken file must not kill the index
                 out.append({"name": name, "error": str(exc)})
+        self._write_index_cache(stamp, out)
         with self._lock:
             self._listing_cache = (stamp, out)
         return out
+
+    def _index_stamp(self, paths: dict[str, Path]) -> dict:
+        """列表缓存的钥匙：每一场（含圈侧车）的文件指纹 + DBC 目录的指纹。
+
+        三样里动一样，指纹就变——改了 DBC 之后通道数会变，那条也必须重算。
+        """
+        return {
+            "sessions": [
+                [name, str(path), *_file_stamp(path),
+                 *_file_stamp(sidecar.path_of("laps", path))]
+                for name, path in sorted(paths.items())
+            ],
+            "dbc": [
+                [str(path.relative_to(root)), int(path.stat().st_size),
+                 int(path.stat().st_mtime_ns)]
+                for root in self.roots if (root / "dbc").is_dir()
+                for path in sorted((root / "dbc").rglob("*.dbc"))
+            ],
+        }
+
+    def _read_index_cache(self, stamp: dict) -> list[dict] | None:
+        """磁盘缓存读得出来、指纹也对得上才作数（缓存坏了当没有）。"""
+        try:
+            data = json.loads(self.index_cache.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict) or data.get("stamp") != stamp:
+            return None
+        rows = data.get("rows")
+        return rows if isinstance(rows, list) and rows else None
+
+    def _write_index_cache(self, stamp: dict, rows: list[dict]) -> None:
+        """写不进去也不吵：缓存只是省时间，不是数据。"""
+        try:
+            self.index_cache.parent.mkdir(parents=True, exist_ok=True)
+            temp = self.index_cache.with_name(self.index_cache.name + ".part")
+            temp.write_text(json.dumps({"stamp": stamp, "rows": rows},
+                                       ensure_ascii=False), encoding="utf-8")
+            temp.replace(self.index_cache)
+        except OSError:
+            pass
 
     # -------------------------------------------------------------- lap edits
     def remember_laps(self, path: str | Path, config: beaconsmod.LapConfig) -> None:

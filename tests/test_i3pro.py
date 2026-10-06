@@ -6384,24 +6384,27 @@ class TestWorksheetEditingOverHttp(unittest.TestCase):
                 status, state = http.json("/api/worksheets", "POST", {
                     "sheet": {"name": "验证用", "components": [{"type": "graph"}]}})
                 self.assertEqual(status, 200, state)
-                self.assertEqual((state["worksheet"]["id"], state["worksheet"]["name"]),
-                                 ("sheet", "验证用"))
-                self.assertTrue((directory / "sheet.json").exists())
+                # 不钉死文件名：仓库里可能**已经**有 sheet.json / sheet-1.json
+                # （车队自己新建的工作表就叫这些名字），钉死会在数据一长就红。
+                first_id = state["worksheet"]["id"]
+                self.assertEqual(state["worksheet"]["name"], "验证用")
+                self.assertTrue(first_id.startswith("sheet"), first_id)
+                self.assertTrue((directory / f"{first_id}.json").exists())
                 self.assertEqual(len(state["worksheets"]), start + 1)
                 self.assertEqual(state["worksheets"][-1]["name"], "验证用")
 
                 # 同名再来一次：加后缀，前一份一个字节都不动
-                before = (directory / "sheet.json").read_bytes()
+                before = (directory / f"{first_id}.json").read_bytes()
                 status, state = http.json("/api/worksheets", "POST", {
                     "sheet": {"name": "验证用", "components": [{"type": "graph"}]}})
                 self.assertEqual(status, 200, state)
-                self.assertEqual(state["worksheet"]["id"], "sheet-2")
+                self.assertNotEqual(state["worksheet"]["id"], first_id)
                 self.assertEqual(state["worksheet"]["name"], "验证用 2")
-                self.assertEqual((directory / "sheet.json").read_bytes(), before)
+                self.assertEqual((directory / f"{first_id}.json").read_bytes(), before)
 
                 # 保存：只换组件，名字与排序留在文件里
                 status, state = http.json(
-                    "/api/worksheets/sheet", "PUT",
+                    f"/api/worksheets/{first_id}", "PUT",
                     {"components": [{"type": "track", "x": 0, "y": 0, "w": 4, "h": 4}]})
                 self.assertEqual(status, 200, state)
                 self.assertEqual([c["type"] for c in state["worksheet"]["components"]],
@@ -6409,17 +6412,18 @@ class TestWorksheetEditingOverHttp(unittest.TestCase):
                 self.assertEqual(state["worksheet"]["name"], "验证用")
 
                 # 空的一屏不许存：页面上会出现一套画不出来的工作表
-                status, body = http.json("/api/worksheets/sheet", "PUT", {"components": []})
+                status, body = http.json(f"/api/worksheets/{first_id}", "PUT",
+                                         {"components": []})
                 self.assertEqual(status, 400)
                 self.assertIn("components", body["error"])
 
                 # 改名：文件名跟着变，旧文件删掉
-                status, state = http.json("/api/worksheets/sheet/rename", "POST",
-                                          {"name": "renamed"})
+                status, state = http.json(f"/api/worksheets/{first_id}/rename",
+                                          "POST", {"name": "renamed"})
                 self.assertEqual(status, 200, state)
                 self.assertEqual(state["worksheet"]["id"], "renamed")
-                self.assertEqual(state["previous_id"], "sheet")
-                self.assertFalse((directory / "sheet.json").exists(),
+                self.assertEqual(state["previous_id"], first_id)
+                self.assertFalse((directory / f"{first_id}.json").exists(),
                                  "改名之后旧文件还在，按钮上会多出一套")
                 self.assertTrue((directory / "renamed.json").exists())
 
@@ -7409,6 +7413,38 @@ class TestCanLog(unittest.TestCase):
                                             write_sidecar=False) for path in self.files]
         self.assertEqual(len(sessions), 9)
         self.assertEqual(sum(session.can["frames"] for session in sessions), 3684850)
+
+    def test_跨天的墙钟不会把同一天的分卷切开(self):
+        """文件名里的日期要参与排序与判据——墙钟列只有**时刻**，没有日期。
+
+        实测：data 目录里多了别的日期的日志之后，`10-05 17:52` 那份正好插进
+        `10-03 17:47` 与 `10-03 17:54` 之间，把本该并成一场的两卷切开了（侧边栏里
+        于是多出一场）。这条用合成帧表复现，不依赖车队数据。
+        """
+        work = Path(tempfile.mkdtemp(prefix="i3pro-groups-"))
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+
+        def make(name, first_wall, last_wall, first_t, last_t):
+            lines = ["序号,系统时间,时间标识,CAN通道,ID号,帧类型,帧格式,CAN类型,长度,数据"]
+            for index, (wall, rel) in enumerate(((first_wall, first_t),
+                                                 (last_wall, last_t))):
+                lines.append(f'{index},="{wall},{rel},ch1,0x1,数据帧,标准帧,CAN,8,'
+                             "x| 00 00 00 00 00 00 00 00")
+            path = work / name
+            path.write_text("\n".join(lines) + "\n", encoding="gbk")
+            return path
+
+        first = make("2026_10_03_174748_ID0001.csv", "17:47:48.137053",
+                     "17:54:13.761700", "0.000000", "385.624646")
+        second = make("2026_10_03_175413_ID0001.csv", "17:54:13.761949",
+                      "17:54:40.354978", "385.624895", "412.217924")
+        other = make("2026_10_05_175226_ID0001.csv", "17:52:26.139000",
+                     "17:57:03.236000", "0.000000", "277.097000")
+        groups = canlog.group_recordings([first, second, other])
+        merged = [[item["path"].name for item in group["items"]] for group in groups]
+        self.assertIn(["2026_10_03_174748_ID0001.csv", "2026_10_03_175413_ID0001.csv"],
+                      merged, merged)
+        self.assertIn(["2026_10_05_175226_ID0001.csv"], merged, merged)
 
     def test_the_library_shows_one_entry_per_recording(self):
         work = scratch("_can_library")

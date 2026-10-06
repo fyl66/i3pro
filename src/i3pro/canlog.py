@@ -274,6 +274,17 @@ def summarise(path: str | Path, roles: dict[str, str] | None = None) -> dict:
     }
 
 
+def _wall_day(path: str | Path) -> str:
+    """文件名里的日期（``2026_10_03_173345_ID0001.csv`` → ``2026-10-03``）；认不出给空串。
+
+    墙钟那一列（``系统时间``）只有**时刻**（``17:33:45.395073``），没有日期。所以只按它
+    排序时，跨天的日志会互相穿插——实测：data 目录里多了别的日期的日志之后，
+    ``10-05 17:52`` 那份正好插进 ``10-03 17:47`` 与 ``10-03 17:54`` 之间，把本该并成
+    一场的两卷切开了（侧边栏里于是多出一场）。日期从文件名拿：那是记录仪自己的命名。
+    """
+    return _stamp_from_name(Path(path).name)[0]
+
+
 def group_recordings(
     paths: list[str | Path],
     window_s: float = GROUP_WINDOW_S,
@@ -284,10 +295,14 @@ def group_recordings(
     判据是**两个时钟同时接上**：墙钟的间隔在 ``window_s`` 之内，而且
     ``相对时钟的增量``与``墙钟的间隔``一致（``tolerance_s`` 以内）。只看墙钟会把
     两次相隔几分钟的记录并到一起；只看相对时钟会把"归零重开"的并到一起。
+    排序与判据都要带上**文件名里的日期**（见 :func:`_wall_day`）：墙钟列只有时刻。
     """
     summaries = sorted(
         (summarise(path) for path in paths),
-        key=lambda item: (item["first_wall"] if not math.isnan(item["first_wall"]) else item["first_t"]),
+        key=lambda item: (
+            _wall_day(item["path"]),
+            item["first_wall"] if not math.isnan(item["first_wall"]) else item["first_t"],
+        ),
     )
     groups: list[dict] = []
     for item in summaries:
@@ -297,7 +312,11 @@ def group_recordings(
             last = previous["items"][-1]
             wall_gap = item["first_wall"] - last["last_wall"]
             clock_gap = (item["first_t"] - last["last_t"]) - wall_gap
+            # 名字里没日期时退回原来的判据（只看时钟）——不因为"认不出日期"就不并。
+            day_a, day_b = _wall_day(last["path"]), _wall_day(item["path"])
             if (
+                (not day_a or not day_b or day_a == day_b)
+                and
                 not math.isnan(wall_gap) and not math.isnan(clock_gap)
                 and 0 <= wall_gap <= window_s and abs(clock_gap) <= tolerance_s
             ):

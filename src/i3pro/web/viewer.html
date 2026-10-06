@@ -7240,6 +7240,7 @@ function renderCanReport() {
   }
   const body = rows.map((row) => "<tr" + (row.diagnostic ? ' class="diag"' : "") + ">"
     + "<td><code>" + esc(row.id) + "</code></td>"
+    + "<td>" + esc(row.bus || "-") + "</td>"
     + '<td class="num">' + row.frames.toLocaleString() + "</td>"
     + '<td class="num">' + row.rate.toFixed(2) + "</td>"
 + "<td>" + (row.diagnostic ? "可能是诊断流量（OBD/UDS）" : "车辆数据？") + "</td>"
@@ -7248,7 +7249,7 @@ function renderCanReport() {
     channelTable
     + '<div class="plan">读不懂的 ID（共 ' + rows.length + " 个，"
     + rows.reduce((sum, row) => sum + row.frames, 0).toLocaleString() + " 帧）——不生成字节通道：</div>"
-    + "<table><tr><th>ID</th><th class=\"num\">帧数</th><th class=\"num\">帧率</th>"
+    + "<table><tr><th>ID</th><th>总线</th><th class=\"num\">帧数</th><th class=\"num\">帧率</th>"
     + "<th>类型</th><th>前 8 字节</th></tr>" + body + "</table>";
 }
 

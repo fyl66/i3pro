@@ -93,7 +93,8 @@ def cmd_info(args: argparse.Namespace) -> int:
                 # 这段也可能是传感器（实测 S-Motion 就在 0x7E0–0x7E8）。
                 mark = "（可能是诊断流量）" if row["diagnostic"] else ""
                 print(f"    {row['id']:>6}  {row['frames']:>8} 帧  "
-                      f"{row['rate']:>7.2f} Hz  {row['sample']}{mark}")
+                      f"{row['rate']:>7.2f} Hz  总线 {row.get('bus') or '?':<6}  "
+                      f"{row['sample']}{mark}")
     return 0
 
 

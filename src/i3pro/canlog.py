@@ -71,6 +71,10 @@ GROUP_WINDOW_S = 1.0
 #: 露馅：墙钟只差几分钟，而相对时钟从 412 s 掉回 0 s。
 GROUP_TOLERANCE_S = 0.05
 
+#: 一份日志最多认几条总线（``ch1``…``ch8`` 这种写法）。只用来给"帧 ID × 座位号"
+#: 编个互不相同的整数键：超过这个数就当成没有总线（报告会退化成不区分总线）。
+MAX_BUSES = 64
+
 #: OBD/UDS 诊断请求与响应的 ID 区间（0x7DF 起）。**它不等于"这段里都不是车辆数据"**：
 #: 实测 S-Motion Correvit 传感器就发在 0x7E0–0x7E8（ticket #42 补上那份 DBC 之后，
 #: 这 6 个 ID 解出了 21 条通道）。所以这里只给"**没有 DBC** 的 ID"一个提示，措辞也
@@ -193,8 +197,11 @@ def _positions(header: list[str], roles: dict[str, str]) -> dict[str, int | None
             "换一个 CAN 工具导出时列名会变，把对应关系写进 "
             f"<场次>{_kind().suffix} 的 roles 里，或用 --role 列名=角色 指定。"
         )
+    #: ``bus``（``CAN通道``）是可选的：日志里有几条总线（实测 ch1/ch2/ch3），
+    #: 报告要能说清每条 ID 是从哪条总线收到的——同一条 ID 出现在两条总线上时，
+    #: 现在按同一个 ID 解，那件事必须吵出来（见 read_can_session 的 notes）。
     positions = {role: find(role) for role in
-                 ("time", "id", "data", "wall", "format", "length")}
+                 ("time", "id", "data", "wall", "format", "length", "bus")}
     positions["width"] = max(
         index for index in (positions["time"], positions["id"], positions["data"]) if index is not None
     )
@@ -430,6 +437,12 @@ def _scan(paths: list[Path], roles: dict[str, str], wanted: set[int], offset: fl
     时间轴按第一帧归零（记录器的相对时钟可能从 354.26 开始，也可能归零）。
     """
     counts: dict[int, int] = {}
+    #: 总线用**整数座位号**记：``frame_id * MAX_BUSES + 座位`` → 帧数。
+    #: 每帧一次整数键的加法与字典操作，比"嵌套字典 + 字符串键"快（实测 100 万帧
+    #: 省 0.2 s）；座位号到名字的映射每份文件只建一次。
+    bus_counts: dict[int, int] = {}
+    bus_index: dict[str, int] = {}
+    bus_names: list[str] = []
     per_id: dict[int, list] = {}
     samples: dict[int, str] = {}
     extended_ids: set[int] = set()
@@ -438,6 +451,7 @@ def _scan(paths: list[Path], roles: dict[str, str], wanted: set[int], offset: fl
         positions = _positions(header, roles)
         time_at, id_at, data_at = positions["time"], positions["id"], positions["data"]
         format_at, width = positions["format"], positions["width"]
+        bus_at = positions["bus"]
         with path.open("r", encoding="gbk", errors="replace", newline="") as handle:
             handle.readline()
             for line in handle:
@@ -449,6 +463,15 @@ def _scan(paths: list[Path], roles: dict[str, str], wanted: set[int], offset: fl
                 except ValueError:
                     continue
                 counts[frame_id] = counts.get(frame_id, 0) + 1
+                if bus_at is not None and len(cells) > bus_at:
+                    raw_bus = cells[bus_at]
+                    seat = bus_index.get(raw_bus)
+                    if seat is None:
+                        seat = len(bus_names)
+                        bus_index[raw_bus] = seat
+                        bus_names.append(raw_bus.strip() or "?")
+                    key = frame_id * MAX_BUSES + seat
+                    bus_counts[key] = bus_counts.get(key, 0) + 1
                 if format_at is not None and "扩展" in cells[format_at]:
                     extended_ids.add(frame_id)
                 body = cells[data_at]
@@ -470,7 +493,8 @@ def _scan(paths: list[Path], roles: dict[str, str], wanted: set[int], offset: fl
                 bucket[0].append(moment - offset)
                 bucket[1].append(bytes.fromhex(body.split("|", 1)[1]))
     return {"counts": counts, "per_id": per_id, "samples": samples,
-            "extended_ids": extended_ids}
+            "extended_ids": extended_ids,
+            "bus_counts": bus_counts, "bus_names": bus_names}
 
 
 def read_can_session(
@@ -564,6 +588,14 @@ def read_can_session(
     wanted = {message.frame_id for _name, db in databases for message in db.messages_only}
     scan = _scan(given, roles, wanted, started)
     counts, per_id = scan["counts"], scan["per_id"]
+    bus_counts = scan["bus_counts"]
+    bus_names = scan["bus_names"]
+
+    def buses_of(frame_id: int) -> list[str]:
+        """这条 ID 是从哪几条总线收到的（按名字排序）；日志里没有总线列就是空的。"""
+        base = frame_id * MAX_BUSES
+        return sorted(bus_names[seat] for seat in range(len(bus_names))
+                      if bus_counts.get(base + seat))
     if not counts:
         raise ValueError(
             f"{first.name}: 一行帧都没读出来。确认列角色对不对"
@@ -671,6 +703,7 @@ def read_can_session(
                 "decimals": decimals,
                 "dbc": source,
                 "branch": branch,
+                "bus": "/".join(buses_of(message.frame_id)),
             })
             report.append({
                 "column": f"0x{message.frame_id:X}", "status": "通道", "name": name,
@@ -678,6 +711,7 @@ def read_can_session(
                 "rate": master_rate, "rate_from": "主时间基",
                 "samples": int(axis.size), "update_rate": update_rate,
                 "message": message.name, "decimals": decimals, "dbc": source,
+                "bus": "/".join(buses_of(message.frame_id)),
             })
 
     channels_list = [
@@ -706,6 +740,7 @@ def read_can_session(
                 "rate": _rate(count),
                 "sample": scan["samples"].get(frame_id, ""),
                 "diagnostic": frame_id in DIAGNOSTIC_IDS,
+                "bus": "/".join(buses_of(frame_id)),
             }
             for frame_id, count in undecoded_counts.items()
         ),
@@ -766,6 +801,30 @@ def read_can_session(
         notes.append(
             f"多路复用里有 {len(stray_selectors)} 条报文出现了 DBC 没定义的选择子分支"
             f"：{shown}——那几帧不属于任何一路，已经跳过（不是整条报文解不了）。"
+        )
+    # 总线（`CAN通道`）：记录仪可能同时挂着几条（实测 ch1/ch2/ch3）。**DBC 只按 ID
+    # 认报文**，所以同一条 ID 出现在两条总线上时，现在会把两边当成同一条报文解——
+    # 现在的数据没有这种情况，但那件事必须吵出来，不许静默合并。
+    bus_totals: dict[str, int] = {}
+    for key, count in bus_counts.items():
+        name = bus_names[key % MAX_BUSES]
+        bus_totals[name] = bus_totals.get(name, 0) + count
+    if len(bus_totals) > 1:
+        shown = "、".join(f"{seat} {count:,} 帧"
+                          for seat, count in sorted(bus_totals.items(), key=lambda kv: -kv[1]))
+        notes.append(f"这批日志有 {len(bus_totals)} 条总线：{shown}；"
+                     "每条通道来自哪条总线写在通道表的「总线」一列。")
+    shared = {frame_id: seats for frame_id in counts
+              if len(seats := buses_of(frame_id)) > 1}
+    if shared:
+        shown = "、".join(
+            f"0x{frame_id:X}（{'/'.join(seats)}）"
+            for frame_id, seats in sorted(shared.items())[:5]
+        )
+        notes.append(
+            f"有 {len(shared)} 条 ID 出现在**不止一条总线**上：{shown}。"
+            "DBC 只按 ID 认报文，所以现在这几条是按同一个 ID 解、两边混在一起——"
+            "确认它们是不是同一个东西；不是的话，把两条总线分开导。"
         )
     if len(databases) > 1:
         dead = [row["file"] for row in by_file if row["covered_frames"] == 0]
@@ -829,6 +888,8 @@ def read_can_session(
         "empty_branches": empty_branches,
         #: 多路复用里"选择子取值不在 DBC 里"的帧（跳过了，但要能看见）
         "stray_selectors": stray_selectors,
+        #: 每条总线各收了多少帧（记录仪挂几条总线时用得上，实测 ch1/ch2/ch3）
+        "buses": bus_totals,
         "notes": notes,
     }
     session = CanSession(

@@ -53,7 +53,22 @@ from i3pro import (  # noqa: E402
     export as exportmod, xlsx as xlsxmod,
 )
 
-DATA = ROOT / "i2pro_data"
+#: 车队数据放哪：默认仓库里的 ``i2pro_data/``，但**可以另放**——数据目录动一下就让
+#: 整套回归跑不了，不值得。指到别处：
+#:
+#:     $env:I3PRO_DATA = "E:\桌面\LTS-mimo\实测数据\E02"     # 日常工作数据
+#:     $env:I3PRO_GOLDEN = "D:\i3pro-golden"                  # 两份金标准单独放
+#:
+#: 金标（高避 / 耐久）只给需要它的用例用，缺了自动跳过——所以它们可以只放在自己那一处，
+#: 不跟着日常数据走（用户 2026-10-06 的反馈）。
+DATA = Path(os.environ.get("I3PRO_DATA") or (ROOT / "i2pro_data"))
+GOLDEN = Path(os.environ.get("I3PRO_GOLDEN") or DATA)
+
+
+def golden(name: str) -> Path:
+    """一份金标场次：先找 ``I3PRO_GOLDEN``，找不到再看日常数据目录。"""
+    candidate = GOLDEN / name
+    return candidate if candidate.exists() else DATA / name
 
 
 def _borrow_sidecar(session: Path) -> tuple[Path, bytes | None]:
@@ -122,7 +137,7 @@ def _stage(name: str) -> Path:
 
     源文件不存在时原样返回（``@_needs`` 会据此跳过，不算通过）。
     """
-    source = DATA / name
+    source = golden(name)
     target = STAGE / name
     if source.exists():
         shutil.copy2(source, target)

@@ -68,6 +68,19 @@ python tools\verify_clicks.py                # 真浏览器真鼠标：188 项�
 事件，跑在 `i2pro_data` 的副本上（`out\_verify_data_<端口>`），所以随便点都不碰车队数据。
 没有 Edge 的机器会打印 SKIP 退出，那不算通过。
 
+**数据放哪可以改**（2026-10-06 起）。默认还是仓库里的 `i2pro_data/`，但车队数据与两份
+金标准可以放在别处——数据目录一挪，上面这四条就跑不了了，那不叫"没坏"：
+
+```powershell
+$env:I3PRO_DATA   = "E:\桌面\LTS-mimo\实测数据\E02"   # 日常数据（.ld / .csv / CAN 帧表与 DBC）
+$env:I3PRO_GOLDEN = "D:\i3pro-golden"                # 只放两份金标准，不跟日常数据走
+python -m unittest discover -s tests
+python tools\verify_ld_vs_csv.py                     # 裁判要的 .ld/.csv 成对文件也从 I3PRO_DATA 找
+```
+
+两份金标准是 `20260908-cjh 高避5圈.ld`（验功能）与 `20260524-耐久正赛.ld`（验性能）。
+金标缺了就自动 skip；**跳过不算通过**。
+
 ## 8. 不能碰的东西
 
 * `i2pro_data/`、`i2pro-help/` 不进仓库（前者是车队数据，后者是 MoTeC 版权材料）。

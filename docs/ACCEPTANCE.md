@@ -3106,22 +3106,72 @@ python -m unittest tests.test_i3pro.TestCanLog -v
 `IMU.dbc` / `IVT.dbc` 是新加的——`TestCanLog` 里"DBC 份数与报文数"不再写死，
 改成**从目录现算**（实测下限：≥124 条通道、≥82% 覆盖）。
 
-**回归四项——这一轮跑不全，如实记下来**：`i2pro_data/` 里的 16 场 `.ld` 与 MoTeC
-对照 CSV 在 2026-10-06 被挪出了仓库目录，于是
+**回归四项（2026-10-06 重测，金标已放回）**：
 
 ```text
-python -m unittest discover -s tests   → Ran 398 tests，OK (skipped=110)
-python tools\verify_ld_vs_csv.py        → no .ld/.csv pairs found in i2pro_data（退出码非 0）
-两份金标准快照 / node tools\smoke_viewer.js → 跳过（要 .ld 才能重新生成）
-python tools\verify_clicks.py           → SKIP（同样的原因）
+python -m unittest discover -s tests  → Ran 445 tests，1 error
+                                         （TestServer.test_http_api_end_to_end：
+                                          /api/sessions 在 41 场数据下要 32.3 s，超了 30 s 的客户端超时）
+python tools\verify_ld_vs_csv.py       → PASS - 0 channel(s) outside tolerance
+两份金标准快照 + node tools\smoke_viewer.js → 均 PASS（7 圈 / 471 行、26 圈 / 377 行）
+python tools\verify_clicks.py          → 188 项检查：188 通过，0 失败
 ```
 
-能跑的那部分全过：`TestCanLog` **12 项**（含合成的双总线用例与真的 ch3/IVT 用例）、
-`TestDbc` 15 项、`TestDbcDiscovery` 4 项、`TestGpsPair` 4 项。
-**按规则 7，跳过不算通过**——等数据回到 `i2pro_data/`（或指明新位置）之后要重跑这四条。
-耐力那场在 `E:\桌面\LTS-mimo\实测数据\E02\` 是 `.ld`/`.ldx`/`.csv` 齐全的；高避那场
-本机只剩 `out\_verify_data_8741\` 里的字节副本（`.ld`+`.ldx`），它的 MoTeC 对照 CSV
-已经找不到——也就是说 `verify_ld_vs_csv` 这条裁判现在**没法执行**。
+那条超时是**新发现的真问题**（不是本轮改动引入）：侧边栏列表要为每一场算摘要，
+CAN 场次等于整场重解码一次。实测 `SessionLibrary.listing()` **32.3 s / 41 场**，
+第二次走内存缓存 0.01 s。修法（下一票）：导入时把摘要写进 `<场次>.can.json`，
+列表读侧车、按 DBC 指纹判断失效——现在还没做。
+
+---
+
+## A65 · CAN 解码 vs MoTeC 同场记录（对照分析，2026-10-06）
+
+车队把**同一次跑车**的 MoTeC `.ld` 与 CAN 帧表都放进来了。两边记的是**同一批 CAN
+帧**——`.ld` 是 MoTeC 自己解的，我们是自己解的——所以这是一位独立裁判（和
+`verify_ld_vs_csv` 那条一个道理，只是裁判从"MoTeC 导出的 CSV"换成了"MoTeC 记的 `.ld`"）。
+
+**先配对**：按墙钟猜是不行的（实测差 100 s 级）。用 1 Hz 的 `Vx` 互相关粗搜
+（±40 min）再细搜（±3 s），相关系数才算得出来：
+
+| CAN 帧表 | MoTeC `.ld` | 相关系数 | 时移 |
+| --- | --- | --- | --- |
+| `2026_10_05_152948` + `153603` | `20261005-jhy高避烧保险掉高压.ld` | **1.000** | −21.99 s |
+| `2026_10_05_164008` | `20261005-底马八字前动态练习.ld` | **0.994** | −295 s |
+| `2026_10_05_174142` | `cjh阶跃+脉冲.ld` | **1.000** | −21 s |
+
+（`2026_10_05_112317`/`112945` 与任何一份 10-05 的 `.ld` 都对不上：最好的也只有
+0.80，多半那一段车上没同时开 MoTeC。）
+
+**再逐通道比**（第一对，时移 −21.99 s，45 601 点）：
+
+| 通道 | 中位差 | 95 分位 | 相关 |
+| --- | --- | --- | --- |
+| `gyrZ_MTI` | 0.0020 rad/s | 0.0064 | **1.0000** |
+| `accY_MTI` | 0.0112 m/s² | 0.0761 | **1.0000** |
+| `accX_MTI` | 0.0119 m/s² | 0.0428 | **0.9999** |
+| `Timestamp_MTI` | 3 µs | 97 µs | 0.9999 |
+| `roll_MTI` | 0.0069° | 0.0141 | 0.9995 |
+| `FL_Aero_Ride_Height` | 0.0401 cm | 0.0698 | 0.9993 |
+| `FR_Aero_Ride_Height` | 0.0509 cm | 0.0795 | 0.9991 |
+| `yaw_MTI` | 0.78°（360° 环绕） | 0.79° | 0.9988 |
+| `velY_MTI` | 0.0156 m/s | 2.98 | 0.9935 |
+
+**结论**：DBC 解析 → 按位提取 → factor/offset → 落到主时间基这条链，**和 MoTeC 自己
+的解逐点一致**，差值都在显示精度量级（`acc` 那 0.01 是 float32 的量化）。
+
+**同名字但不是一个源的通道**（也一样有用——别拿它们互相对账）：
+
+| 通道 | 现象 | 判断 |
+| --- | --- | --- |
+| `FR/RR_Brake_Disc_Temperature` | 中位差 29.4 / 25.6 °C，`FL/RL` 两边都恒 0.0034 | 两边不是同一个传感器（`.ld` 里 FR/RR 是另一路；FL/RL 是死的） |
+| `LV` | 中位差 2.23 V，相关 −0.35 | `.ld` 那个 `LV` 不是 ECU 的 `0x?` 那条 |
+| `RR/RL_Aero_Ride_Height` | 中位差 0.05 cm 但相关 0.39/0.23 | 数值接近、不同步——有一边是卡住的 |
+| `latitude/longitude_MTI` | 中位差比量程（0.002°）还大 | MTi 定位本来就是冻住的（见 A62） |
+| 四条 `*_Suspension_Load` | 中位差 0.10–0.16 V / 量程 0.85 V，相关 ≈0 | 同名不同源（量程都对不上） |
+
+**这一票没做什么**：没有把这条对照做成命令（`tools/verify_can_vs_ld.py`）——配对与
+时移都还是探针（`out\_probe_matrix.py` / `_probe_compare2.py`）。要做成常驻验收，
+下一票把它固化成工具 + 判据（"相关 ≥ 0.999 且中位差在显示精度内"）。
 
 ---
 

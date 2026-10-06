@@ -13,6 +13,7 @@ Run:  python tools/verify_ld_vs_csv.py
 from __future__ import annotations
 
 import sys
+import os
 from pathlib import Path
 
 import numpy as np
@@ -22,7 +23,11 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from i3pro import ld, motec_csv  # noqa: E402
 
-DATA = ROOT / "i2pro_data"
+#: 裁判要的两份东西（``.ld`` 与 MoTeC 自己导出的同名 ``.csv``）放哪。默认仓库里的
+#: ``i2pro_data/``，但可以另放——用户把数据挪走之后这条就没法跑了（2026-10-06 实测）：
+#:
+#:     $env:I3PRO_DATA = "E:\桌面\LTS-mimo\实测数据\E02"   # 有 .ld/.csv 成对的那种目录
+DATA = Path(os.environ.get("I3PRO_DATA") or (ROOT / "i2pro_data"))
 
 
 def compare(stem: str, sample_limit: int = 20000, verbose: bool = False) -> dict:

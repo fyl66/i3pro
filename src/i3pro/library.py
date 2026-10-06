@@ -55,6 +55,95 @@ def _file_stamp(path: str | Path) -> tuple:
     return (True, stat.st_mtime_ns, stat.st_size)
 
 
+def open_session(path: str | Path, *, dbc_dirs=()):
+    """打开一份日志文件；CAN 帧表按给定的目录找 DBC。
+
+    这是**打开**这一半，命令行与场次库共用（ticket #48）。以前命令行直接调
+    `csvlog.open_session`，场次库另写一遍，于是"哪条路带上 DBC 目录约定"变成了
+    两处各自记着的事。
+    """
+    directories = [Path(item) for item in dbc_dirs]
+    return csvlog.open_session(path, dbc_dir=directories or None)
+
+
+def attach_maths(log, *, maths_root: str | Path | None = None, cache=None) -> list[dict]:
+    """把这个场次生效的数学通道挂上去（本地 + 全局），返回**算不出来的那些**。
+
+    这是**挂数学通道**这一半，命令行与场次库共用（ticket #48）。
+    """
+    _added, errors = maths.apply_to_session(log, maths_root, cache)
+    return errors
+
+
+def extra_definitions(where: str | Path) -> tuple[list, list[dict]]:
+    """读一份"额外的数学定义"，返回 ``(定义, 问题)``。
+
+    ``where`` 是**文件**就只读它，是**目录**就当全局定义的根
+    （``<目录>/maths/global.json``）。命令行 `--maths-file` 的说明一直写着"额外的
+    数学通道定义文件"，实现却把它当根目录用，所以传文件时**静默不生效**（实测：
+    定义里那条通道在 export 里报"本场次没有"）。这里把两种写法都认下来。
+    """
+    target = Path(where)
+    if target.is_dir():
+        target = maths.global_path(target)
+    if not target.is_file():
+        return [], [{"name": "", "expr": "",
+                     "error": f"{where} 既不是文件也不是目录；--maths-file 要指向一份"
+                              "定义文件，或一个含 maths/global.json 的根目录。"}]
+    try:
+        definition_set = maths.MathSet.load(target, scope="global")
+    except maths.MathError as exc:
+        return [], [{"name": "", "expr": "", "error": str(exc)}]
+    return list(definition_set.definitions), []
+
+
+def open_for_analysis(
+    path: str | Path,
+    *,
+    maths_root: str | Path | None = None,
+    dbc_dirs=(),
+    cache=None,
+    extra_maths_file: str | Path | None = None,
+) -> tuple[object, list[dict]]:
+    """打开一场**能算的**场次：``(场次, 数学通道算不出来的那些)``。
+
+    命令行每条命令都该用它（ticket #48）：以前只有 convert / export / render 手写挂
+    数学通道，info / channels / laps / delta / track / report 直接开裸场次，于是同一个
+    通道名在一条命令里存在、在另一条里不存在（实测：`i3pro report --channels 测试通道`
+    报"0 行 · 通道 （无）"，而同一条通道 `i3pro export` 能导出 46400 行）。
+    """
+    log = open_session(path, dbc_dirs=dbc_dirs)
+    if not extra_maths_file:
+        return log, attach_maths(log, maths_root=maths_root, cache=cache)
+    # 有额外定义时**整批只挂一次**：`maths.attach()` 开头会 `detach()`（"定义一变
+    # 整批清空重算"是它的规矩），分两次挂会把第一次挂的那批清掉——这一条是写这版时
+    # 实测踩到的（先挂本地+全局，再挂额外文件，结果只剩额外文件那几条）。
+    errors: list[dict] = []
+    definitions: list = []
+    try:
+        effective = maths.load_effective(log.path, maths_root)
+        definitions = list(effective.definitions)
+    except maths.MathError as exc:
+        errors.append({"name": "", "expr": "", "error": str(exc)})
+    extra, problems = extra_definitions(extra_maths_file)
+    errors += problems
+    known = {one.name for one in definitions}
+    for one in extra:
+        if one.name in known:
+            errors.append({
+                "name": one.name, "expr": one.expr,
+                "error": "额外定义里的这条和本场次已有的同名，不覆盖它"
+                         "（要改请改本地/全局定义）。",
+            })
+        else:
+            definitions.append(one)
+    if not definitions:
+        return log, errors
+    values, failures = maths.resolve_available(log, definitions, cache, log.path)
+    maths.attach(log, values, definitions)
+    return log, errors + failures
+
+
 class SessionLibrary:
     """Discover ``.ld`` files under one or more roots and cache parsed logs."""
 
@@ -154,7 +243,7 @@ class SessionLibrary:
                 return self._cache[key]
         # CAN 场次要一份 DBC 才能解码；DBC 放在各个数据根的 dbc/ 里，挨着场次的
         # 那个目录最优先（原始帧日志在 can_data/，DBC 在 i2pro_data/dbc/）。
-        log = csvlog.open_session(path, dbc_dir=[root / "dbc" for root in self.roots])
+        log = open_session(path, dbc_dirs=self._dbc_dirs())
         with self._lock:
             self._cache[key] = log
             while len(self._cache) > self.cache_size:

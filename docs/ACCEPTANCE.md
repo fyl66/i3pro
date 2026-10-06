@@ -3296,6 +3296,54 @@ outside tolerance`；两份金标准快照各 `PASS`（7 圈 / 471 通道行、2
 
 ---
 
+## A69 · 命令行与界面走同一条"取数路"（ticket #48）
+
+到 #47 为止，"打开一场、挂上数学通道"有**三个各自为政的实现**：场次库那条（缓存 +
+DBC 目录 + 失效戳）、命令行里手写的三处（`convert` / `export` / `render`）、以及另外
+**八条命令根本不挂**（`info` / `channels` / `laps` / `delta` / `track` / `report` …）。
+症状可复现——同一个场次、同一条通道：
+
+```
+i3pro report … --table channels --channels 测试通道   →  0 行 · 通道 （无）
+i3pro export … --channels 测试通道 --estimate         →  rows: 46400
+```
+
+顺带还有一个**旗标说谎**：`--maths-file` 的说明写着"额外的数学通道定义文件"，实现却把
+它当根目录用（`<它>/maths/global.json`），所以传文件时**静默不生效**（定义里那条通道
+在 `export` 里报"本场次没有"）。
+
+```powershell
+# 1) 命令行真的看得见数学通道（就是上面那条症状）
+python -m unittest tests.test_i3pro.TestSessionForAnalysis -v
+
+# 2) 手动复核（把金标准复制一份、旁边放一份 <场次>.maths.json）
+.\i3pro.cmd report "<副本>.ld" --table channels --channels 测试通道 --limit 2
+.\i3pro.cmd export "<副本>.ld" --channels 额外通道 --estimate --maths-file extra.json
+```
+
+**通过判据**：
+
+| 断言 | 实测 |
+| --- | --- |
+| `report` 看得见数学通道 | 改动前 `0 行 · 通道 （无）`；现在 `通道报告：按圈分组 · 7 行 · 通道 测试通道` |
+| `--maths-file` 传**文件**算数 | 改动前 `导出不了：本场次没有 '额外通道' 这条通道`；现在 `"rows": 46400` |
+| `--maths-file` 传**目录**也照样认 | 当"全局定义的根"读 `<目录>/maths/global.json`（两种写法都测了） |
+| 同名不覆盖、而且**报出来** | 额外文件里与本地/全局同名的条目被跳过，返回一行"不覆盖它（要改请改本地/全局定义）" |
+| 死路要说下一步 | 给一个不存在的路径 → "既不是文件也不是目录；--maths-file 要指向一份定义文件，或一个含 maths/global.json 的根目录" |
+| `info` 的通道数**不受影响** | 仍是 442（原生通道数；数学通道是另算的派生列，不算进 `metadata()["channels"]`） |
+| 命令行与服务端同一个答案 | 两边都走 `library.open_for_analysis()`；`SessionLibrary.get()` 也改成走 `library.open_session()` |
+
+**写这一版时踩到并修掉的坑**：`maths.attach()` 开头会 `detach()`（"定义一变整批清空
+重算"是它的规矩），所以"先挂本地+全局、再挂额外文件"会把第一批**清掉**——实测第一批
+只剩额外文件那几条。现在额外定义**并进定义表、一次挂完**（`TestSessionForAnalysis`
+里那条"额外定义：文件与目录都认、同名不覆盖"就是它的回归）。
+
+**回归四项（本机实测）**：`Ran 462 tests` + `OK`；`verify_ld_vs_csv` `PASS - 0 channel(s)
+outside tolerance`；两份金标准快照各 `PASS`（7 圈 / 471 通道行、26 圈 / 377 通道行）；
+真浏览器 **188 项检查：188 通过，0 失败**。
+
+---
+
 测试覆盖：
 
 | 分组 | 内容 |

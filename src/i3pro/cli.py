@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import json
 import sys
@@ -18,8 +19,37 @@ from . import ld as ldmod
 from . import render as rendermod
 from . import report as reportmod
 from . import store
-from . import maths as mathsmod
 from . import timebase
+
+
+@contextlib.contextmanager
+def _session(args: argparse.Namespace, path):
+    """打开一场**能算的**场次：命令行每条命令走同一条路（ticket #48）。
+
+    到 #47 为止只有 `convert` / `export` / `render` 手写挂数学通道，其余的
+    （`info` / `channels` / `laps` / `delta` / `track` / `report`）开的是裸场次，
+    于是同一条通道名在一条命令里存在、在另一条里没有——实测
+    `i3pro report --table channels --channels 测试通道` 报"0 行 · 通道 （无）"，
+    而同一条通道 `i3pro export` 能导出 46,400 行。
+
+    `--maths` 在 `convert` / `render` / `snapshot` 上是**根目录**，在 `export` 上是
+    一个**开关**（要不要把数学通道写进文件）——这里按类型分开处理，不再让一个名字
+    有三种含义混着走。
+    """
+    root = getattr(args, "maths", None)
+    if isinstance(root, bool):          # export 的 --maths 是开关，不是目录
+        root = None
+    log, errors = librarymod.open_for_analysis(
+        path,
+        maths_root=root,
+        extra_maths_file=getattr(args, "maths_file", None),
+    )
+    try:
+        for item in errors:
+            print(f"# 数学通道 {item['name'] or '(定义文件)'} 算不出来: {item['error']}")
+        yield log
+    finally:
+        log.close()
 
 
 def _utf8_console() -> None:
@@ -46,7 +76,7 @@ def cmd_info(args: argparse.Namespace) -> int:
     rows = []
     can_reports = []
     for path in args.files:
-        with csvlog.open_session(path) as log:
+        with _session(args, path) as log:
             meta = log.metadata()
             # 原始 CAN 帧表：帧数、覆盖率、"读不懂的 ID" 才是重点，单独打一段
             # （ticket #38/#39；界面上的"CAN 导入报告"读的是同一份数据）。
@@ -99,7 +129,7 @@ def cmd_info(args: argparse.Namespace) -> int:
 
 
 def cmd_channels(args: argparse.Namespace) -> int:
-    with csvlog.open_session(args.file) as log:
+    with _session(args, args.file) as log:
         rows = []
         for ch in log.channels:
             if args.filter and args.filter.lower() not in ch.name.lower():
@@ -125,10 +155,7 @@ def cmd_channels(args: argparse.Namespace) -> int:
 def cmd_convert(args: argparse.Namespace) -> int:
     channels = [c.strip() for c in args.channels.split(",")] if args.channels else None
     for path in args.files:
-        with csvlog.open_session(path) as log:
-            _added, maths_errors = mathsmod.apply_to_session(log, args.maths)
-            for item in maths_errors:
-                print(f"# 数学通道 {item['name'] or '(定义文件)'} 算不出来: {item['error']}")
+        with _session(args, path) as log:
             pq_path, meta_path = store.write_parquet(
                 log, args.out, channels=channels, master_rate=args.rate
             )
@@ -137,7 +164,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
 
 
 def cmd_laps(args: argparse.Namespace) -> int:
-    with csvlog.open_session(args.file) as log:
+    with _session(args, args.file) as log:
         if args.mode or args.gate:
             config = lapsmod.load_config(args.file)
             if args.mode:
@@ -237,7 +264,7 @@ def cmd_delta(args: argparse.Namespace) -> int:
         if args.channels
         else ["Ground Speed", "G Force Long", "Brake Signal", "Throttle"]
     )
-    with csvlog.open_session(args.file) as log:
+    with _session(args, args.file) as log:
         try:
             laps = lapsmod.detect_laps(log)
         except ValueError as exc:
@@ -309,10 +336,7 @@ def cmd_export(args: argparse.Namespace) -> int:
     "保持"上去、第一列叫 ``Time``；现在默认 ``--rate auto``（保留各通道原始采样点、
     主索引列叫 ``time_s``），要旧行为就写 ``--rate 100 --resample hold``。
     """
-    with csvlog.open_session(args.file) as log:
-        _added, maths_errors = mathsmod.apply_to_session(log, args.maths_file)
-        for item in maths_errors:
-            print(f"# 数学通道 {item['name'] or '(定义文件)'} 算不出来: {item['error']}")
+    with _session(args, args.file) as log:
         names = args.names or args.channels
         params = {
             "channels": "selected" if names and names.lower() != "all" else "all",
@@ -402,10 +426,7 @@ def cmd_series(args: argparse.Namespace) -> int:
 def cmd_render(args: argparse.Namespace) -> int:
     channels = [c.strip() for c in args.channels.split(",")] if args.channels else None
     out = Path(args.out) if args.out else Path("out") / f"{Path(args.file).stem}.html"
-    with csvlog.open_session(args.file) as log:
-        _added, maths_errors = mathsmod.apply_to_session(log, args.maths)
-        for item in maths_errors:
-            print(f"# 数学通道 {item['name'] or '(定义文件)'} 算不出来: {item['error']}")
+    with _session(args, args.file) as log:
         out = rendermod.render_html(
             log, out, channels=channels, ref=args.ref, cmp=args.cmp, buckets=args.buckets,
             worksheets_dir=args.worksheets,
@@ -552,6 +573,8 @@ def cmd_import(args: argparse.Namespace) -> int:
             note += "已记住解析方式 · "
         if suffix in (".ld", ".csv", ".xlsx", ".txt", ".tsv"):
             try:
+                # 这里**故意**不用 `_session`：导入报告只要原生通道数 / 时长 / 设备，
+                # 挂数学通道是白算一遍（25 场就是好几秒），而且会改"通道 N"那个数。
                 with csvlog.open_session(row["path"]) as log:
                     meta = log.metadata()
                     note = f"{meta['channels']} 通道 · {meta['duration']:.0f} s · {meta['device']}"
@@ -684,7 +707,7 @@ def _snapshot_index(rows: list[dict], data_dirs: str) -> str:
 
 def cmd_track(args: argparse.Namespace) -> int:
     """Print a coarse ASCII trace of the detected lap times (quick sanity check)."""
-    with csvlog.open_session(args.file) as log:
+    with _session(args, args.file) as log:
         try:
             laps = lapsmod.detect_laps(log)
         except ValueError as exc:
@@ -700,7 +723,7 @@ def cmd_track(args: argparse.Namespace) -> int:
 
 def cmd_report(args: argparse.Namespace) -> int:
     """时间报告 / 通道报告。数字和界面上是同一份（``render.report_payload``）。"""
-    with csvlog.open_session(args.file) as log:
+    with _session(args, args.file) as log:
         laps = rendermod.detect(log)
         channels = None
         if args.channels:
@@ -819,7 +842,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-maths", dest="maths", action="store_false",
                    help="只导出原生通道")
     p.add_argument("--maths-file", default=None,
-                   help="额外的数学通道定义文件（同 convert --maths）")
+                   help="额外挂一份数学定义：给**定义文件**（只读它）或给含 maths/global.json "
+                        "的目录（当全局根）；同名不覆盖，跳过的会打印出来")
     p.add_argument("--from", dest="from_", default=None,
                    help="起点：相对秒（12.5）或绝对时间（与 --absolute 一起）")
     p.add_argument("--to", default=None, help="终点：同 --from 的写法")

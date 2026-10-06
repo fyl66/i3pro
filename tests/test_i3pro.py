@@ -8237,6 +8237,112 @@ class TestChannelStates(unittest.TestCase):
         self.assertEqual(channels.state(log, "FSD13 Distance1"), channels.MISSING)
 
 
+class TestSessionForAnalysis(unittest.TestCase):
+    """ticket #48：命令行与场次库共用"打开一场**能算的**场次"这一条路。
+
+    到 #47 为止只有 `convert` / `export` / `render` 手写挂数学通道，另外八条命令
+    （`info` / `channels` / `laps` / `delta` / `track` / `report` …）开的是裸场次，
+    于是同一个通道名在一条命令里存在、在另一条里没有。
+    """
+
+    def _copy(self, name: str, definitions: dict | None = None) -> Path:
+        tmp = tempfile.mkdtemp(prefix="i3pro-cli-session-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        target = Path(tmp) / f"{name}.ld"
+        shutil.copy2(HILL, target)
+        if definitions is not None:
+            (Path(tmp) / f"{name}.maths.json").write_text(
+                json.dumps(definitions, ensure_ascii=False), encoding="utf-8")
+        return target
+
+    @_needs(HILL)
+    def test_命令行里也看得见数学通道(self):
+        """就是那条症状：`report` 以前报"0 行 · 通道 （无）"。"""
+        from i3pro import cli
+
+        target = self._copy("probe", {"definitions": [
+            {"name": "测试通道", "expr": "Vx KF * 2", "unit": "km/h"}]})
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = cli.main(["report", str(target), "--table", "channels",
+                             "--channels", "测试通道", "--limit", "2"])
+        output = buffer.getvalue()
+        self.assertEqual(code, 0, output)
+        self.assertIn("通道 测试通道", output)
+        self.assertNotIn("0 行", output)
+
+    @_needs(HILL)
+    def test_一条命令带出来的场次已经挂好数学通道(self):
+        target = self._copy("probe", {"definitions": [
+            {"name": "测试通道", "expr": "Vx KF * 2"}]})
+        log, errors = librarymod.open_for_analysis(target)
+        try:
+            self.assertIn("测试通道", channels.names(log))
+            # 仓库全局定义里有两条引用本场没有的通道，它们**该**报错（那是既有行为），
+            # 所以只钉"我们这条不在错误里"。
+            self.assertNotIn("测试通道", [row["name"] for row in errors])
+        finally:
+            log.close()
+
+    @_needs(HILL)
+    def test_额外定义_文件与目录都认_同名不覆盖(self):
+        target = self._copy("probe", {"definitions": [
+            {"name": "本地通道", "expr": "Vx KF * 2"}]})
+        extra = target.with_name("extra.json")
+        extra.write_text(json.dumps({"definitions": [
+            {"name": "额外通道", "expr": "Vx KF * 3"},
+            {"name": "本地通道", "expr": "Vx KF * 9"}]}, ensure_ascii=False),
+            encoding="utf-8")
+        nested = target.parent / "root" / "maths"
+        nested.mkdir(parents=True)
+        (nested / "global.json").write_text(json.dumps({"definitions": [
+            {"name": "根目录通道", "expr": "Vx KF * 4"}]}, ensure_ascii=False),
+            encoding="utf-8")
+
+        log, errors = librarymod.open_for_analysis(target, extra_maths_file=extra)
+        try:
+            names = channels.names(log)
+            self.assertIn("额外通道", names)
+            self.assertIn("本地通道", names)
+            self.assertTrue(any("不覆盖" in row["error"] for row in errors), errors)
+        finally:
+            log.close()
+        # 给目录：当"全局定义的根"（<目录>/maths/global.json）
+        log, errors = librarymod.open_for_analysis(
+            target, extra_maths_file=target.parent / "root")
+        try:
+            self.assertIn("根目录通道", channels.names(log))
+        finally:
+            log.close()
+        # 给一条死路：说清下一步，而不是静默
+        log, errors = librarymod.open_for_analysis(
+            target, extra_maths_file=target.parent / "没有这个文件")
+        try:
+            self.assertTrue(any("既不是文件也不是目录" in row["error"]
+                                for row in errors), errors)
+        finally:
+            log.close()
+
+    @_needs(HILL)
+    def test_maths_file_传文件也算数(self):
+        """`--maths-file` 的说明写着"定义文件"，实现却当根目录用（传文件静默不生效）。"""
+        from i3pro import cli
+
+        target = self._copy("probe")
+        extra = target.with_name("extra.json")
+        extra.write_text(json.dumps({"definitions": [
+            {"name": "额外通道", "expr": "Vx KF * 3"}]}, ensure_ascii=False),
+            encoding="utf-8")
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = cli.main(["export", str(target), "--channels", "额外通道",
+                             "--estimate", "--maths-file", str(extra)])
+        output = buffer.getvalue()
+        self.assertEqual(code, 0, output)
+        self.assertIn('"rows": 46400', output)   # 改动前这里报"本场次没有 '额外通道'"
+        self.assertNotIn("导出不了", output)
+
+
 class TestCanSeams(unittest.TestCase):
     """ticket #47：`read_can_session` 从 424 行拆成"编排 + 四个帮手"之后，
     **帮手自己可以直接测**——其中几条分支真数据里根本没有，以前根本测不到。

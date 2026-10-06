@@ -3260,6 +3260,42 @@ outside tolerance`；两份金标准快照各 `PASS`（7 圈 / 471 通道行、2
 
 ---
 
+## A68 · `read_can_session` 拆成编排 + 帮手（ticket #47）
+
+到 #45 为止，`canlog.read_can_session` 是**一个 424 行的函数**（全仓库最长，第二名 185），
+体内依次做八件事：读侧车/列角色 → 找 DBC 目录并取并集 → 扫帧（计数 / 总线 / 样例）→
+每条报文解码（含多路复用的分支）→ 落主时间基并生成通道行 → 拼报告与注释 → 读写摘要缓存
+→ 构造场次。最近五个提交里 `canlog.py` 被改了 **4 次**（#42 递归、#43 复用、#44 总线、
+#45 摘要缓存），每一次都在同一段 400 行的编排里找位置。
+
+```powershell
+# 1) 编排函数的行数（改之前 424）
+python -c "import ast,pathlib;t=ast.parse(pathlib.Path('src/i3pro/canlog.py').read_text(encoding='utf-8'));f=next(n for n in ast.walk(t) if isinstance(n,ast.FunctionDef) and n.name=='read_can_session');print(f.end_lineno-f.lineno+1)"
+
+# 2) 新缝的单测（4 项）
+python -m unittest tests.test_i3pro.TestCanSeams -v
+
+# 3) CAN 那 14 条端到端用例照旧
+python -m unittest tests.test_i3pro.TestCanLog tests.test_i3pro.TestCanSessionSurface -v
+```
+
+**通过判据**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 编排函数短下来 | **424 → 220 行**；拆出来的帮手：`_decode_channels` 111、`_report_notes` 107、`_scan` 71、其余四个各 < 30 |
+| 对外 interface 不变 | `read_can_session(paths, …)` 签名与返回值一字未动；14 条 CAN 端到端用例（报告里每一项都断言过）全过 |
+| **新缝本身能单测** | 新增 `TestCanSeams` 4 项：总线归属 / 总线帧数汇总 / 未解码表（排序·帧率·"可能是诊断"提示）/ 报告注释 / `_decode_channels` 直接喂合成帧 |
+| 以前测不到的分支现在有了 | "同一条 ID 出现在**两条总线**上"真数据里没有（实测 ch1/ch2/ch3 各管各的），所以那条警告以前完全没被测过；现在用合成计数直接触发并断言报告里写出来 |
+| 多路复用分路可单测 | 直接给 `_decode_channels` 三帧加速度 + 两帧角速度：两条通道各自的帧数（3 / 2）、分支号（1 / 2）、值（`0x1000 × 0.001795…`）都对，且两路的值不相等 |
+| 行为零变化 | 除上面的新用例，**没有一条老用例被改动**；四道回归全绿 |
+
+**回归四项（本机实测）**：`Ran 458 tests` + `OK`；`verify_ld_vs_csv` `PASS - 0 channel(s)
+outside tolerance`；两份金标准快照各 `PASS`（7 圈 / 471 通道行、26 圈 / 377 通道行）；
+真浏览器 **188 项检查：188 通过，0 失败**。
+
+---
+
 测试覆盖：
 
 | 分组 | 内容 |

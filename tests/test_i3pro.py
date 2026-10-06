@@ -8237,6 +8237,86 @@ class TestChannelStates(unittest.TestCase):
         self.assertEqual(channels.state(log, "FSD13 Distance1"), channels.MISSING)
 
 
+class TestCanSeams(unittest.TestCase):
+    """ticket #47：`read_can_session` 从 424 行拆成"编排 + 四个帮手"之后，
+    **帮手自己可以直接测**——其中几条分支真数据里根本没有，以前根本测不到。
+    """
+
+    def test_一条_ID_出现在两条总线上时列出来(self):
+        # bus_counts 的键是 frame_id * MAX_BUSES + 座位号
+        bus_counts = {0x123 * 64 + 0: 5, 0x123 * 64 + 1: 7, 0x456 * 64 + 0: 9}
+        names = ["ch1", "ch2"]
+        self.assertEqual(canlog._buses_of(0x123, bus_counts, names), ["ch1", "ch2"])
+        self.assertEqual(canlog._buses_of(0x456, bus_counts, names), ["ch1"])
+        self.assertEqual(canlog._buses_of(0x789, bus_counts, names), [])
+        self.assertEqual(canlog._bus_totals(bus_counts, names), {"ch1": 14, "ch2": 7})
+
+    def test_未解码表按帧数从多到少(self):
+        rows = canlog._undecoded_rows(
+            {0x1: 10, 0x2: 30}, {0x2: "x| 01 02"}, duration=2.0,
+            bus_counts={}, bus_names=[],
+        )
+        self.assertEqual([row["id"] for row in rows], ["0x2", "0x1"])
+        self.assertEqual(rows[0]["rate"], 15.0)
+        self.assertEqual(rows[0]["sample"], "x| 01 02")
+        self.assertFalse(rows[0]["diagnostic"])
+        # 0x7DF–0x7E7 只是**提示**"可能是诊断"（实测 S-Motion 也发在 0x7E0）
+        self.assertTrue(canlog._undecoded_rows(
+            {0x7E0: 1}, {}, 1.0, {}, [])[0]["diagnostic"])
+
+    def test_同一条_ID_跨两条总线要在报告里吵出来(self):
+        """真数据里没有这种情况（实测 ch1/ch2/ch3 各管各的），所以这条以前测不到——
+        而它正是"DBC 只按 ID 认报文"会静默出错的地方。"""
+        counts = {0x123: 12, 0x456: 9}
+        bus_counts = {0x123 * 64 + 0: 5, 0x123 * 64 + 1: 7, 0x456 * 64 + 0: 9}
+        notes = canlog._report_notes(
+            legacy_pin=None, conflicts=[], databases=[("a.dbc", object())],
+            too_short=0, empty_branches=[], stray_selectors=[],
+            bus_totals=canlog._bus_totals(bus_counts, ["ch1", "ch2"]),
+            by_file=[{"file": "a.dbc", "covered_frames": 21}], counts=counts,
+            extended_ids=set(), bus_counts=bus_counts, bus_names=["ch1", "ch2"],
+        )
+        joined = " ".join(notes)
+        self.assertIn("2 条总线", joined)
+        self.assertIn("不止一条总线", joined)
+        self.assertIn("0x123", joined)
+
+    def test_解码缝_多路复用按分支各归各的列(self):
+        """直接喂一批帧给 `_decode_channels`：三帧加速度 + 两帧角速度。"""
+        parsed = dbc.parse(TestDbc.MULTIPLEXED)
+        database, origin, _conflicts = dbc.merge([("imu.dbc", parsed)])
+        # 载荷：byte0 = 帧类型；ACC_X 在 15|16@0（第 1–2 字节）、ACC_Y 在 31|16@0
+        # （第 3–4 字节）——`@0` 是 Motorola（大端）编号，高位在前。
+        payloads = [
+            bytes([1, 0x10, 0x00, 0x20, 0x00, 0x00, 0x00]),
+            bytes([1, 0x11, 0x00, 0x21, 0x00, 0x00, 0x00]),
+            bytes([1, 0x12, 0x00, 0x22, 0x00, 0x00, 0x00]),
+            bytes([2, 0x30, 0x00, 0x40, 0x00, 0x00, 0x00]),
+            bytes([2, 0x31, 0x00, 0x41, 0x00, 0x00, 0x00]),
+        ]
+        times = [0.0, 0.01, 0.02, 0.03, 0.04]
+        per_id = {1920: (list(times), payloads)}
+        axis = np.arange(5) / 100.0
+        decoded = canlog._decode_channels(
+            database, covered_ids=[1920], per_id=per_id, axis=axis,
+            master_rate=100.0, origin=origin, extended_ids=set(),
+            bus_counts={}, bus_names=[],
+        )
+        rows = {row["signal"]: row for row in decoded.channels}
+        self.assertEqual(rows["ACC_X"]["branch"], 1)
+        self.assertEqual(rows["ACC_X"]["samples"], 3)
+        self.assertEqual(rows["GYR_X"]["branch"], 2)
+        self.assertEqual(rows["GYR_X"]["samples"], 2)
+        self.assertEqual(decoded.too_short, 0)
+        self.assertEqual(decoded.empty_branches, [])
+        # 两路各自的值：ACC 那一路不该拿到角速度的字节
+        acc = decoded.columns["ACC_X"]
+        gyr = decoded.columns["GYR_X"]
+        self.assertAlmostEqual(acc[0], 0x1000 * 0.001795651245, places=9)
+        self.assertAlmostEqual(gyr[3], 0x3000 * 0.015258789062, places=9)
+        self.assertNotAlmostEqual(acc[0], gyr[3])
+
+
 class TestChannelReference(unittest.TestCase):
     """ticket #46：「这个名字指哪条通道」只有一处实现。
 

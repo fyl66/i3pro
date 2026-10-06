@@ -578,6 +578,310 @@ def _scan(paths: list[Path], roles: dict[str, str], wanted: set[int], offset: fl
             "bus_counts": bus_counts, "bus_names": bus_names}
 
 
+def _buses_of(frame_id: int, bus_counts: dict[int, int],
+              bus_names: list[str]) -> list[str]:
+    """这条 ID 是从哪几条总线收到的（按名字排序）；日志里没有总线列就是空的。"""
+    base = frame_id * MAX_BUSES
+    return sorted(bus_names[seat] for seat in range(len(bus_names))
+                  if bus_counts.get(base + seat))
+
+
+def _bus_totals(bus_counts: dict[int, int], bus_names: list[str]) -> dict[str, int]:
+    """每条总线各收了多少帧（记录仪挂几条总线时用得上，实测 ch1/ch2/ch3）。"""
+    totals: dict[str, int] = {}
+    for key, count in bus_counts.items():
+        name = bus_names[key % MAX_BUSES]
+        totals[name] = totals.get(name, 0) + count
+    return totals
+
+
+@dataclass
+class _Decoded:
+    """一批帧解出来的东西：列 + 两套报告行 + 三种"没解成通道"的计数。
+
+    "哪条信号没解出来、为什么"是 CAN 导入最容易出错的地方，所以它跟列一起返回，
+    而不是让调用方自己去猜（ticket #47 从 424 行的 read_can_session 里拆出来）。
+    """
+
+    columns: dict[str, np.ndarray]
+    channels: list[dict]
+    report: list[dict]
+    #: 某一帧的字节数不够，整条信号跳过
+    too_short: int = 0
+    #: 多路复用里"这次一帧都没有"的分支（不是解码失败，是这一路没发）
+    empty_branches: list[dict] = field(default_factory=list)
+    #: 多路复用里"选择子取值不在 DBC 里"的帧（跳过了，但要能看见）
+    stray_selectors: list[dict] = field(default_factory=list)
+
+
+def _decode_channels(
+    database,
+    covered_ids: list[int],
+    per_id: dict[int, list],
+    axis: np.ndarray,
+    master_rate: float,
+    origin: dict,
+    extended_ids: set[int],
+    bus_counts: dict[int, int],
+    bus_names: list[str],
+) -> _Decoded:
+    """把每条被覆盖的报文解成"落在主时间基上的列" + 两套报告行。
+
+    这里回答的是一个领域问题：**这 ID 上这些字节，本场次是哪些通道、值是多少**。
+    多路复用（`M` / `m<n>`）按选择子分路：同一个 ID 上不同分支的帧各归各的列，
+    各自零阶保持到主时间基（ticket #43）。
+
+    撞名（实测 `Channel_0` 同时出现在两条报文里）用报文名当命名空间——不然两条通道
+    会互相盖住，图上只剩一条。
+    """
+    seen_names: dict[str, list[str]] = {}
+    for frame_id in covered_ids:
+        message = database.find(frame_id, frame_id in extended_ids)
+        for signal in message.signals:
+            seen_names.setdefault(signal.name, []).append(message.name)
+
+    decoded = _Decoded(columns={}, channels=[], report=[])
+    for frame_id in covered_ids:
+        message = database.find(frame_id, frame_id in extended_ids)
+        moments, payloads = per_id.get(frame_id, ([], []))
+        if not moments:
+            continue
+        order = np.argsort(np.asarray(moments, dtype=np.float64), kind="stable")
+        times = np.asarray(moments, dtype=np.float64)[order]
+        payloads = [payloads[index] for index in order]
+        matrix = _payload_matrix(payloads)
+        # 多路复用：先算一次选择子，每条信号只认**自己那一路的帧**。按普通信号解会把
+        # 别路的字节当成自己的值；而"给不匹配的格子填 NaN"会让 100 Hz 网格上一半是
+        # 空的（两条分支交替发），那不是数据的样子。
+        selector = None
+        selector_signal = dbcmod.multiplexer_of(message)
+        if selector_signal is not None:
+            raw = _signal_values(selector_signal, matrix)
+            if raw is not None:
+                scale = selector_signal.factor or 1.0
+                selector = np.rint(
+                    (raw - selector_signal.offset) / scale
+                ).astype(np.int64)
+                # 选择子取到 DBC 里没有的分支：这几帧不属于任何一路。**不报错**
+                # （那会把整条报文的所有分支都拖下水），但要计数并报出来。
+                known = {value for value in
+                         (dbcmod.branch_of(one) for one in message.signals)
+                         if value is not None}
+                stray = ~np.isin(selector, sorted(known) or [-1])
+                if stray.any():
+                    decoded.stray_selectors.append({
+                        "message": message.name, "frames": int(stray.sum()),
+                        "values": np.unique(selector[stray]).tolist()[:6],
+                    })
+        for signal in message.signals:
+            values = _signal_values(signal, matrix)
+            if values is None:
+                decoded.too_short += 1
+                continue
+            own_times = times
+            branch = dbcmod.branch_of(signal)
+            if branch is not None:
+                if selector is None:
+                    decoded.too_short += 1
+                    continue
+                keep = selector == branch
+                if not keep.any():
+                    decoded.empty_branches.append({
+                        "message": message.name, "signal": signal.name,
+                        "branch": branch,
+                    })
+                    continue
+                values, own_times = values[keep], times[keep]
+            index = np.searchsorted(own_times, axis, side="right") - 1
+            leading = int(index[0] + 1) if index.size and index[0] >= 0 else 0
+            index = np.clip(index, 0, len(values) - 1)
+            name = signal.name
+            if len(seen_names.get(signal.name, [])) > 1:
+                name = f"{message.name}.{signal.name}"
+            decoded.columns[name] = values[index]
+            update_rate = _rate_of(own_times)
+            # 显示精度跟着 factor 走：factor 0.0025 的胎温要看到 4 位小数，
+            # factor 1 的计数一位都不需要。
+            decimals = max(0, min(6, int(math.ceil(-math.log10(abs(signal.factor)))))) \
+                if signal.factor else 0
+            # 这条通道来自哪份 DBC（并集之后必须能回答，否则"少了一条"没法查）。
+            source = origin.get((message.extended, message.frame_id), "")
+            bus_text = "/".join(_buses_of(message.frame_id, bus_counts, bus_names))
+            decoded.channels.append({
+                "name": name, "message": message.name, "signal": signal.name,
+                "unit": signal.unit, "update_rate": update_rate,
+                "samples": int(own_times.size),
+                "leading_gap_s": (float(axis[leading - 1] - own_times[0])
+                                  if leading > 1 and own_times.size else 0.0),
+                "decimals": decimals, "dbc": source, "branch": branch,
+                "bus": bus_text,
+            })
+            decoded.report.append({
+                "column": f"0x{message.frame_id:X}", "status": "通道", "name": name,
+                "matched_by": f"DBC:{source}", "unit": signal.unit,
+                "rate": master_rate, "rate_from": "主时间基",
+                "samples": int(axis.size), "update_rate": update_rate,
+                "message": message.name, "decimals": decimals, "dbc": source,
+                "bus": bus_text,
+            })
+    return decoded
+
+
+def _undecoded_rows(undecoded_counts: dict[int, int], samples: dict[int, str],
+                    duration: float, bus_counts: dict[int, int],
+                    bus_names: list[str]) -> list[dict]:
+    """读不懂的 ID 一张表：帧数从多到少，带总线、一帧样例字节与"可能是诊断"的提示。"""
+    def rate(count: int) -> float:
+        return round(count / duration, 2) if duration > 0 else 0.0
+
+    return sorted(
+        (
+            {
+                "id": f"0x{frame_id:X}", "frames": count, "rate": rate(count),
+                "sample": samples.get(frame_id, ""),
+                "diagnostic": frame_id in DIAGNOSTIC_IDS,
+                "bus": "/".join(_buses_of(frame_id, bus_counts, bus_names)),
+            }
+            for frame_id, count in undecoded_counts.items()
+        ),
+        key=lambda row: -row["frames"],
+    )
+
+
+def _dbc_contribution(databases, origin: dict, counts: dict[int, int],
+                      extended_ids: set[int], covered_by: dict[str, int],
+                      channel_rows: list[dict], directory: Path) -> list[dict]:
+    """每份 DBC 贡献了哪些 ID / 多少帧 / sha256：可复现，也能一眼看出"哪份没用上"。"""
+    by_file: list[dict] = []
+    for name, entry in databases:
+        owned = sorted(
+            f"0x{key[1]:X}" for key, source in origin.items() if source == name
+        )
+        hits = [frame_id for frame_id in counts
+                if entry.covers(frame_id, frame_id in extended_ids)]
+        by_file.append({
+            "file": name,
+            "sha256": hashlib.sha256((directory / name).read_bytes()).hexdigest(),
+            "messages": len(entry.messages),
+            "signals": entry.signal_count,
+            "covered_frames": covered_by.get(name, 0),
+            "covered_ids": sorted(f"0x{frame_id:X}" for frame_id in hits),
+            # 并集里真正归它名下的 ID：与 hit 不同——撞 ID 时只有胜出的那份算数
+            "used_ids": owned,
+            "channels": sum(1 for row in channel_rows if row["dbc"] == name),
+        })
+    return by_file
+
+
+def _report_notes(
+    *,
+    legacy_pin: str | None,
+    conflicts: list[dict],
+    databases: list,
+    too_short: int,
+    empty_branches: list[dict],
+    stray_selectors: list[dict],
+    bus_totals: dict[str, int],
+    by_file: list[dict],
+    counts: dict[int, int],
+    extended_ids: set[int],
+    bus_counts: dict[int, int],
+    bus_names: list[str],
+) -> list[str]:
+    """导入报告里那些**必须吵出来**的话。
+
+    静默的两种下场这里都堵上了：① 少了东西不说（并集里哪份 DBC 一条都没用上、
+    哪条分支这次没发）；② 混了东西不说（同一条 ID 出现在两条总线上——DBC 只按 ID
+    认报文，现在会把两边混着解）。
+    """
+    notes: list[str] = []
+    if legacy_pin:
+        notes.append(
+            f"侧车里记着旧版本的「用了 {legacy_pin}」，本次按并集解"
+            "（旧版本每次导入都会自动写这一条，和「点名固定一份」长得一样）。"
+            "要固定成一份：把侧车的 dbc 写成文件名，并把 dbc_mode 设成 \"file\"。"
+        )
+    if not conflicts and len(databases) > 1:
+        notes.append(f"{len(databases)} 份 DBC 按并集解码，没有一条 ID 被重复定义。")
+    for row in conflicts:
+        notes.append(f"ID {row['id']} 有不止一份定义：{row['reason']}")
+    if too_short:
+        notes.append(f"有 {too_short} 条信号因为某一帧的字节数不够而整条跳过"
+                     "（DBC 与日志可能不是同一版）。")
+    if empty_branches:
+        shown = "、".join(f"{row['message']}.{row['signal']}(第 {row['branch']} 路)"
+                          for row in empty_branches[:4])
+        notes.append(
+            f"多路复用里有 {len(empty_branches)} 条分支信号这次一帧都没有"
+            f"（{shown}{'…' if len(empty_branches) > 4 else ''}）——"
+            "是这条报文这次没发那一路，不是解码失败。"
+        )
+    if stray_selectors:
+        shown = "、".join(
+            f"{row['message']} {row['frames']} 帧"
+            f"（取值 {'/'.join(str(v) for v in row['values'])}）"
+            for row in stray_selectors[:3]
+        )
+        notes.append(
+            f"多路复用里有 {len(stray_selectors)} 条报文出现了 DBC 没定义的选择子分支"
+            f"：{shown}——那几帧不属于任何一路，已经跳过（不是整条报文解不了）。"
+        )
+    # 总线（`CAN通道`）：记录仪可能同时挂着几条（实测 ch1/ch2/ch3）。**DBC 只按 ID
+    # 认报文**，所以同一条 ID 出现在两条总线上时必须吵出来，不许静默合并。
+    if len(bus_totals) > 1:
+        shown = "、".join(
+            f"{seat} {count:,} 帧"
+            for seat, count in sorted(bus_totals.items(), key=lambda kv: -kv[1])
+        )
+        notes.append(f"这批日志有 {len(bus_totals)} 条总线：{shown}；"
+                     "每条通道来自哪条总线写在通道表的「总线」一列。")
+    shared = {frame_id: seats for frame_id in counts
+              if len(seats := _buses_of(frame_id, bus_counts, bus_names)) > 1}
+    if shared:
+        shown = "、".join(
+            f"0x{frame_id:X}（{'/'.join(seats)}）"
+            for frame_id, seats in sorted(shared.items())[:5]
+        )
+        notes.append(
+            f"有 {len(shared)} 条 ID 出现在**不止一条总线**上：{shown}。"
+            "DBC 只按 ID 认报文，所以现在这几条是按同一个 ID 解、两边混在一起——"
+            "确认它们是不是同一个东西；不是的话，把两条总线分开导。"
+        )
+    if len(databases) > 1:
+        dead = [row["file"] for row in by_file if row["covered_frames"] == 0]
+        if dead:
+            notes.append(
+                f"{len(dead)} 份 DBC 的 ID 在这批日志里一条都没出现"
+                "（车上的布局和它不一致）：" + "、".join(dead) + "。"
+            )
+            # "布局对不上"与"记录仪根本没接那条总线"是两种原因，报告要说清是哪一种
+            # （ticket #38 的验收点名了那份 dashboard DBC）。判据两条：这份 DBC 的
+            # 报文**全是扩展帧**，而这批日志里**一帧扩展帧都没有**。
+            if not extended_ids:
+                by_entry = dict(databases)
+                buses = [
+                    name for name in dead
+                    if by_entry.get(name) is not None
+                    and by_entry[name].messages
+                    and all(extended for extended, _frame in by_entry[name].messages)
+                ]
+                if buses:
+                    # 按 DBC 文件里的写法印（扩展帧在 `BO_` 里带 0x80000000 标记），
+                    # 这样用户能在自己的 DBC 里搜到这个号。
+                    ids = sorted({
+                        frame | (0x80000000 if extended else 0)
+                        for name in buses
+                        for extended, frame in by_entry[name].messages
+                    })
+                    span = f"0x{ids[0]:X}–0x{ids[-1]:X}"
+                    notes.append(
+                        f"其中 {'、'.join(buses)} 的报文**全是扩展帧**（{span}，"
+                        f"共 {len(ids)} 个 ID），而这批日志里一帧扩展帧都没有——"
+                        "不是布局对不上，是记录仪没接那条总线。"
+                    )
+    return notes
+
+
 def read_can_session(
     paths: list[str | Path] | str | Path,
     *,
@@ -672,11 +976,6 @@ def read_can_session(
     bus_counts = scan["bus_counts"]
     bus_names = scan["bus_names"]
 
-    def buses_of(frame_id: int) -> list[str]:
-        """这条 ID 是从哪几条总线收到的（按名字排序）；日志里没有总线列就是空的。"""
-        base = frame_id * MAX_BUSES
-        return sorted(bus_names[seat] for seat in range(len(bus_names))
-                      if bus_counts.get(base + seat))
     if not counts:
         raise ValueError(
             f"{first.name}: 一行帧都没读出来。确认列角色对不对"
@@ -694,106 +993,14 @@ def read_can_session(
     ]
     undecoded_counts = {frame_id: count for frame_id, count in counts.items()
                         if frame_id not in set(covered_ids)}
-    columns: dict[str, np.ndarray] = {}
-    channel_rows: list[dict] = []
-    report: list[dict] = []
-    too_short = 0
-    empty_branches: list[dict] = []
-    stray_selectors: list[dict] = []
-    seen_names: dict[str, list[str]] = {}
-    for frame_id in covered_ids:
-        message = database.find(frame_id, frame_id in scan["extended_ids"])
-        for signal in message.signals:
-            seen_names.setdefault(signal.name, []).append(message.name)
-
-    for frame_id in covered_ids:
-        message = database.find(frame_id, frame_id in scan["extended_ids"])
-        moments, payloads = per_id.get(frame_id, ([], []))
-        if not moments:
-            continue
-        order = np.argsort(np.asarray(moments, dtype=np.float64), kind="stable")
-        times = np.asarray(moments, dtype=np.float64)[order]
-        payloads = [payloads[index] for index in order]
-        matrix = _payload_matrix(payloads)
-        # 多路复用（ticket #43）：同一个 ID 上不同分支分时出现，所以先算一次选择子，
-        # 每条信号只认**自己那一路的帧**——把它们单独保持到主时间基上。
-        # 按普通信号解会把别路的字节当成自己的值；而"给不匹配的格子填 NaN"会让
-        # 100 Hz 网格上一半的格子是空的（两条分支交替发），那不是数据的样子。
-        selector = None
-        selector_signal = dbcmod.multiplexer_of(message)
-        if selector_signal is not None:
-            raw = _signal_values(selector_signal, matrix)
-            if raw is not None:
-                scale = selector_signal.factor or 1.0
-                selector = np.rint(
-                    (raw - selector_signal.offset) / scale
-                ).astype(np.int64)
-                # 选择子取到 DBC 里没有的分支：这几帧不属于任何一路。**不报错**
-                # （那会把整条报文的所有分支都拖下水），但要计数并报出来。
-                known = {value for value in
-                         (dbcmod.branch_of(one) for one in message.signals)
-                         if value is not None}
-                stray = ~np.isin(selector, sorted(known) or [-1])
-                if stray.any():
-                    values = np.unique(selector[stray]).tolist()
-                    stray_selectors.append({
-                        "message": message.name, "frames": int(stray.sum()),
-                        "values": values[:6],
-                    })
-        for signal in message.signals:
-            values = _signal_values(signal, matrix)
-            if values is None:
-                too_short += 1
-                continue
-            own_times = times
-            branch = dbcmod.branch_of(signal)
-            if branch is not None:
-                if selector is None:
-                    too_short += 1
-                    continue
-                keep = selector == branch
-                if not keep.any():
-                    # 这一路这次一帧都没有：不出通道，但要在报告里看得见
-                    empty_branches.append({
-                        "message": message.name, "signal": signal.name,
-                        "branch": branch,
-                    })
-                    continue
-                values, own_times = values[keep], times[keep]
-            index = np.searchsorted(own_times, axis, side="right") - 1
-            leading = int(index[0] + 1) if index.size and index[0] >= 0 else 0
-            index = np.clip(index, 0, len(values) - 1)
-            name = signal.name
-            if len(seen_names.get(signal.name, [])) > 1:
-                # 实测 Channel_0 同时出现在两条报文里：撞名时用报文名当命名空间。
-                name = f"{message.name}.{signal.name}"
-            columns[name] = values[index]
-            update_rate = _rate_of(own_times)
-            # 显示精度跟着 factor 走：factor 0.0025 的胎温要看到 4 位小数，
-            # factor 1 的计数一位都不需要。
-            decimals = max(0, min(6, int(math.ceil(-math.log10(abs(signal.factor)))))) \
-                if signal.factor else 0
-            # 这条通道来自哪份 DBC（并集之后必须能回答，否则"少了一条"没法查）。
-            source = origin.get((message.extended, message.frame_id), "")
-            channel_rows.append({
-                "name": name, "message": message.name, "signal": signal.name,
-                "unit": signal.unit, "update_rate": update_rate,
-                "samples": int(own_times.size),
-                "leading_gap_s": (float(axis[leading - 1] - own_times[0])
-                                  if leading > 1 and own_times.size else 0.0),
-                "decimals": decimals,
-                "dbc": source,
-                "branch": branch,
-                "bus": "/".join(buses_of(message.frame_id)),
-            })
-            report.append({
-                "column": f"0x{message.frame_id:X}", "status": "通道", "name": name,
-                "matched_by": f"DBC:{source}", "unit": signal.unit,
-                "rate": master_rate, "rate_from": "主时间基",
-                "samples": int(axis.size), "update_rate": update_rate,
-                "message": message.name, "decimals": decimals, "dbc": source,
-                "bus": "/".join(buses_of(message.frame_id)),
-            })
+    # 解码（含多路复用分路）与两张报告表都在 _decode_channels 里——加一种新的解码规则
+    # 只碰那一个函数，不用在 400 行的编排里找位置。
+    decoded = _decode_channels(database, covered_ids, per_id, axis, master_rate,
+                               origin, scan["extended_ids"], bus_counts, bus_names)
+    columns, channel_rows, report = decoded.columns, decoded.channels, decoded.report
+    too_short = decoded.too_short
+    empty_branches = decoded.empty_branches
+    stray_selectors = decoded.stray_selectors
 
     channels_list = [
         ldmod.Channel(
@@ -811,134 +1018,27 @@ def read_can_session(
     covered_frames = sum(count for frame_id, count in counts.items() if frame_id in covered)
     total_frames = sum(counts.values())
 
-    def _rate(count: int) -> float:
-        return round(count / duration, 2) if duration > 0 else 0.0
-
-    undecoded = sorted(
-        (
-            {
-                "id": f"0x{frame_id:X}", "frames": count,
-                "rate": _rate(count),
-                "sample": scan["samples"].get(frame_id, ""),
-                "diagnostic": frame_id in DIAGNOSTIC_IDS,
-                "bus": "/".join(buses_of(frame_id)),
-            }
-            for frame_id, count in undecoded_counts.items()
-        ),
-        key=lambda row: -row["frames"],
-    )
+    undecoded = _undecoded_rows(undecoded_counts, scan["samples"], duration,
+                                bus_counts, bus_names)
     recording_evidence: list[str] = []
     if merge:
         for group in group_recordings(given) if len(given) > 1 else []:
             recording_evidence.extend(group["evidence"])
     stamp = _stamp_from_name(first.name)
 
-    # 每份 DBC 贡献了哪些 ID / 多少帧 / sha256：可复现，也能一眼看出"哪份没用上"。
-    by_file: list[dict] = []
-    for name, entry in databases:
-        owned = sorted(
-            f"0x{key[1]:X}" for key, source in origin.items() if source == name
-        )
-        hits = [frame_id for frame_id in counts
-                if entry.covers(frame_id, frame_id in scan["extended_ids"])]
-        by_file.append({
-            "file": name,
-            "sha256": hashlib.sha256((directory / name).read_bytes()).hexdigest(),
-            "messages": len(entry.messages),
-            "signals": entry.signal_count,
-            "covered_frames": covered_by.get(name, 0),
-            "covered_ids": sorted(f"0x{frame_id:X}" for frame_id in hits),
-            # 并集里真正归它名下的 ID：与 hit 不同——撞 ID 时只有胜出的那份算数
-            "used_ids": owned,
-            "channels": sum(1 for row in channel_rows if row["dbc"] == name),
-        })
+    by_file = _dbc_contribution(databases, origin, counts, scan["extended_ids"],
+                                covered_by, channel_rows, directory)
 
-    notes: list[str] = []
-    if legacy_pin:
-        notes.append(
-            f"侧车里记着旧版本的「用了 {legacy_pin}」，本次按并集解"
-            "（旧版本每次导入都会自动写这一条，和「点名固定一份」长得一样）。"
-            "要固定成一份：把侧车的 dbc 写成文件名，并把 dbc_mode 设成 \"file\"。"
-        )
-    if not conflicts and len(databases) > 1:
-        notes.append(f"{len(databases)} 份 DBC 按并集解码，没有一条 ID 被重复定义。")
-    for row in conflicts:
-        notes.append(f"ID {row['id']} 有不止一份定义：{row['reason']}")
-    if too_short:
-        notes.append(f"有 {too_short} 条信号因为某一帧的字节数不够而整条跳过（DBC 与日志可能不是同一版）。")
-    if empty_branches:
-        shown = "、".join(f"{row['message']}.{row['signal']}(第 {row['branch']} 路)"
-                          for row in empty_branches[:4])
-        notes.append(
-            f"多路复用里有 {len(empty_branches)} 条分支信号这次一帧都没有"
-            f"（{shown}{'…' if len(empty_branches) > 4 else ''}）——"
-            "是这条报文这次没发那一路，不是解码失败。"
-        )
-    if stray_selectors:
-        shown = "、".join(
-            f"{row['message']} {row['frames']} 帧（取值 {'/'.join(str(v) for v in row['values'])}）"
-            for row in stray_selectors[:3]
-        )
-        notes.append(
-            f"多路复用里有 {len(stray_selectors)} 条报文出现了 DBC 没定义的选择子分支"
-            f"：{shown}——那几帧不属于任何一路，已经跳过（不是整条报文解不了）。"
-        )
-    # 总线（`CAN通道`）：记录仪可能同时挂着几条（实测 ch1/ch2/ch3）。**DBC 只按 ID
-    # 认报文**，所以同一条 ID 出现在两条总线上时，现在会把两边当成同一条报文解——
-    # 现在的数据没有这种情况，但那件事必须吵出来，不许静默合并。
-    bus_totals: dict[str, int] = {}
-    for key, count in bus_counts.items():
-        name = bus_names[key % MAX_BUSES]
-        bus_totals[name] = bus_totals.get(name, 0) + count
-    if len(bus_totals) > 1:
-        shown = "、".join(f"{seat} {count:,} 帧"
-                          for seat, count in sorted(bus_totals.items(), key=lambda kv: -kv[1]))
-        notes.append(f"这批日志有 {len(bus_totals)} 条总线：{shown}；"
-                     "每条通道来自哪条总线写在通道表的「总线」一列。")
-    shared = {frame_id: seats for frame_id in counts
-              if len(seats := buses_of(frame_id)) > 1}
-    if shared:
-        shown = "、".join(
-            f"0x{frame_id:X}（{'/'.join(seats)}）"
-            for frame_id, seats in sorted(shared.items())[:5]
-        )
-        notes.append(
-            f"有 {len(shared)} 条 ID 出现在**不止一条总线**上：{shown}。"
-            "DBC 只按 ID 认报文，所以现在这几条是按同一个 ID 解、两边混在一起——"
-            "确认它们是不是同一个东西；不是的话，把两条总线分开导。"
-        )
-    if len(databases) > 1:
-        dead = [row["file"] for row in by_file if row["covered_frames"] == 0]
-        if dead:
-            notes.append(
-                f"{len(dead)} 份 DBC 的 ID 在这批日志里一条都没出现（车上的布局和它不一致）："
-                + "、".join(dead) + "。"
-            )
-            # "布局对不上"与"记录仪根本没接那条总线"是两种原因，报告要说清是哪一种
-            # （ticket #38 的验收点名了那份 dashboard DBC）。判据两条：这份 DBC 的
-            # 报文**全是扩展帧**，而这批日志里**一帧扩展帧都没有**。
-            if not scan["extended_ids"]:
-                by_entry = dict(databases)
-                buses = [
-                    name for name in dead
-                    if by_entry.get(name) is not None
-                    and by_entry[name].messages
-                    and all(extended for extended, _frame in by_entry[name].messages)
-                ]
-                if buses:
-                    # 按 DBC 文件里的写法印（扩展帧在 `BO_` 里带 0x80000000 标记），
-                    # 这样用户能在自己的 DBC 里搜到这个号。
-                    ids = sorted({
-                        frame | (0x80000000 if extended else 0)
-                        for name in buses
-                        for extended, frame in by_entry[name].messages
-                    })
-                    span = f"0x{ids[0]:X}–0x{ids[-1]:X}"
-                    notes.append(
-                        f"其中 {'、'.join(buses)} 的报文**全是扩展帧**（{span}，"
-                        f"共 {len(ids)} 个 ID），而这批日志里一帧扩展帧都没有——"
-                        "不是布局对不上，是记录仪没接那条总线。"
-                    )
+    bus_totals = _bus_totals(bus_counts, bus_names)
+    # 报告里那些"要吵出来"的话集中在 _report_notes：加一条新的警告
+    # 只碰那一个函数。
+    notes = _report_notes(
+        legacy_pin=legacy_pin, conflicts=conflicts, databases=databases,
+        too_short=too_short, empty_branches=empty_branches,
+        stray_selectors=stray_selectors, bus_totals=bus_totals, by_file=by_file,
+        counts=counts, extended_ids=scan["extended_ids"],
+        bus_counts=bus_counts, bus_names=bus_names,
+    )
 
     can = {
         "frames": total_frames,

@@ -1,0 +1,120 @@
+VERSION ""
+
+
+NS_ : 
+	NS_DESC_
+	CM_
+	BA_DEF_
+	BA_
+	VAL_
+	CAT_DEF_
+	CAT_
+	FILTER
+	BA_DEF_DEF_
+	EV_DATA_
+	ENVVAR_DATA_
+	SGTYPE_
+	SGTYPE_VAL_
+	BA_DEF_SGTYPE_
+	BA_SGTYPE_
+	SIG_TYPE_REF_
+	VAL_TABLE_
+	SIG_GROUP_
+	SIG_VALTYPE_
+	SIGTYPE_VALTYPE_
+	BO_TX_BU_
+	BA_DEF_REL_
+	BA_REL_
+	BA_DEF_DEF_REL_
+	BU_SG_REL_
+	BU_EV_REL_
+	BU_BO_REL_
+	SG_MUL_VAL_
+
+BS_:
+
+BU_: IMU ECU
+VAL_TABLE_ IMU_FrameType 2 "陀螺仪帧(GYR)" 1 "加速度帧(ACC)" ;
+
+
+BO_ 1923 IMU_RawData_Copy_3: 7 Vector__XXX
+ SG_ FrameType M : 0|8@1+ (1,0) [0|255] "" Vector__XXX
+ SG_ ACC_X m1 : 15|16@0- (0.001795651245,0) [-58.8399|58.838105] "m/s2" Vector__XXX
+ SG_ ACC_Y m1 : 31|16@0- (0.001795651245,0) [-58.8399|58.838105] "m/s2" Vector__XXX
+ SG_ ACC_Z m1 : 47|16@0- (0.001795651245,0) [-58.8399|58.838105] "m/s2" Vector__XXX
+ SG_ GYR_X m2 : 15|16@0- (0.015258789062,0) [-500|499.984742] "dps" Vector__XXX
+ SG_ GYR_Y m2 : 31|16@0- (0.015258789062,0) [-500|499.984742] "dps" Vector__XXX
+ SG_ GYR_Z m2 : 47|16@0- (0.015258789062,0) [-500|499.984742] "dps" Vector__XXX
+
+BO_ 1922 IMU_RawData_Copy_2: 7 Vector__XXX
+ SG_ FrameType M : 0|8@1+ (1,0) [0|255] "" Vector__XXX
+ SG_ ACC_X m1 : 15|16@0- (0.001795651245,0) [-58.8399|58.838105] "m/s2" Vector__XXX
+ SG_ ACC_Y m1 : 31|16@0- (0.001795651245,0) [-58.8399|58.838105] "m/s2" Vector__XXX
+ SG_ ACC_Z m1 : 47|16@0- (0.001795651245,0) [-58.8399|58.838105] "m/s2" Vector__XXX
+ SG_ GYR_X m2 : 15|16@0- (0.015258789062,0) [-500|499.984742] "dps" Vector__XXX
+ SG_ GYR_Y m2 : 31|16@0- (0.015258789062,0) [-500|499.984742] "dps" Vector__XXX
+ SG_ GYR_Z m2 : 47|16@0- (0.015258789062,0) [-500|499.984742] "dps" Vector__XXX
+
+BO_ 1921 IMU_RawData_Copy_1: 7 Vector__XXX
+ SG_ FrameType M : 0|8@1+ (1,0) [0|255] "" Vector__XXX
+ SG_ ACC_X m1 : 15|16@0- (0.001795651245,0) [-58.8399|58.838105] "m/s2" Vector__XXX
+ SG_ ACC_Y m1 : 31|16@0- (0.001795651245,0) [-58.8399|58.838105] "m/s2" Vector__XXX
+ SG_ ACC_Z m1 : 47|16@0- (0.001795651245,0) [-58.8399|58.838105] "m/s2" Vector__XXX
+ SG_ GYR_X m2 : 15|16@0- (0.015258789062,0) [-500|499.984742] "dps" Vector__XXX
+ SG_ GYR_Y m2 : 31|16@0- (0.015258789062,0) [-500|499.984742] "dps" Vector__XXX
+ SG_ GYR_Z m2 : 47|16@0- (0.015258789062,0) [-500|499.984742] "dps" Vector__XXX
+
+BO_ 1920 IMU_RawData: 7 IMU
+ SG_ FrameType M : 0|8@1+ (1,0) [0|255] ""  ECU
+ SG_ ACC_X m1 : 15|16@0- (0.001795651245,0) [-58.8399|58.838105] "m/s2"  ECU
+ SG_ ACC_Y m1 : 31|16@0- (0.001795651245,0) [-58.8399|58.838105] "m/s2"  ECU
+ SG_ ACC_Z m1 : 47|16@0- (0.001795651245,0) [-58.8399|58.838105] "m/s2"  ECU
+ SG_ GYR_X m2 : 15|16@0- (0.015258789062,0) [-500|499.984742] "dps"  ECU
+ SG_ GYR_Y m2 : 31|16@0- (0.015258789062,0) [-500|499.984742] "dps"  ECU
+ SG_ GYR_Z m2 : 47|16@0- (0.015258789062,0) [-500|499.984742] "dps"  ECU
+
+
+
+CM_ "STM32F103C8T6 + BMI088 -> ECU | CAN1 500kbps | StdId=0x7B(123) | ~200Hz";
+CM_ BO_ 1923 "7字节双帧复用: byte0 = 帧类型(0x01 加速度 / 0x02 陀螺仪), 其余 6 字节为 3 轴 int16; 高字节在前(Motorola/Big-Endian)";
+CM_ SG_ 1923 FrameType "帧类型标记: 1=加速度帧, 2=陀螺仪帧";
+CM_ SG_ 1923 ACC_X "加速度 X 轴 (m/s^2), 量程 +/-6g, 1 LSB = 0.001795651245 m/s^2";
+CM_ SG_ 1923 ACC_Y "加速度 Y 轴 (m/s^2), 量程 +/-6g";
+CM_ SG_ 1923 ACC_Z "加速度 Z 轴 (m/s^2), 量程 +/-6g";
+CM_ SG_ 1923 GYR_X "陀螺仪 X 轴 (dps), 量程 +/-500dps, 1 LSB = 0.015258789062 dps";
+CM_ SG_ 1923 GYR_Y "陀螺仪 Y 轴 (dps), 量程 +/-500dps";
+CM_ SG_ 1923 GYR_Z "陀螺仪 Z 轴 (dps), 量程 +/-500dps";
+CM_ BO_ 1922 "7字节双帧复用: byte0 = 帧类型(0x01 加速度 / 0x02 陀螺仪), 其余 6 字节为 3 轴 int16; 高字节在前(Motorola/Big-Endian)";
+CM_ SG_ 1922 FrameType "帧类型标记: 1=加速度帧, 2=陀螺仪帧";
+CM_ SG_ 1922 ACC_X "加速度 X 轴 (m/s^2), 量程 +/-6g, 1 LSB = 0.001795651245 m/s^2";
+CM_ SG_ 1922 ACC_Y "加速度 Y 轴 (m/s^2), 量程 +/-6g";
+CM_ SG_ 1922 ACC_Z "加速度 Z 轴 (m/s^2), 量程 +/-6g";
+CM_ SG_ 1922 GYR_X "陀螺仪 X 轴 (dps), 量程 +/-500dps, 1 LSB = 0.015258789062 dps";
+CM_ SG_ 1922 GYR_Y "陀螺仪 Y 轴 (dps), 量程 +/-500dps";
+CM_ SG_ 1922 GYR_Z "陀螺仪 Z 轴 (dps), 量程 +/-500dps";
+CM_ BO_ 1921 "7字节双帧复用: byte0 = 帧类型(0x01 加速度 / 0x02 陀螺仪), 其余 6 字节为 3 轴 int16; 高字节在前(Motorola/Big-Endian)";
+CM_ SG_ 1921 FrameType "帧类型标记: 1=加速度帧, 2=陀螺仪帧";
+CM_ SG_ 1921 ACC_X "加速度 X 轴 (m/s^2), 量程 +/-6g, 1 LSB = 0.001795651245 m/s^2";
+CM_ SG_ 1921 ACC_Y "加速度 Y 轴 (m/s^2), 量程 +/-6g";
+CM_ SG_ 1921 ACC_Z "加速度 Z 轴 (m/s^2), 量程 +/-6g";
+CM_ SG_ 1921 GYR_X "陀螺仪 X 轴 (dps), 量程 +/-500dps, 1 LSB = 0.015258789062 dps";
+CM_ SG_ 1921 GYR_Y "陀螺仪 Y 轴 (dps), 量程 +/-500dps";
+CM_ SG_ 1921 GYR_Z "陀螺仪 Z 轴 (dps), 量程 +/-500dps";
+CM_ BO_ 1920 "7字节双帧复用: byte0 = 帧类型(0x01 加速度 / 0x02 陀螺仪), 其余 6 字节为 3 轴 int16; 高字节在前(Motorola/Big-Endian)";
+CM_ SG_ 1920 FrameType "帧类型标记: 1=加速度帧, 2=陀螺仪帧";
+CM_ SG_ 1920 ACC_X "加速度 X 轴 (m/s^2), 量程 +/-6g, 1 LSB = 0.001795651245 m/s^2";
+CM_ SG_ 1920 ACC_Y "加速度 Y 轴 (m/s^2), 量程 +/-6g";
+CM_ SG_ 1920 ACC_Z "加速度 Z 轴 (m/s^2), 量程 +/-6g";
+CM_ SG_ 1920 GYR_X "陀螺仪 X 轴 (dps), 量程 +/-500dps, 1 LSB = 0.015258789062 dps";
+CM_ SG_ 1920 GYR_Y "陀螺仪 Y 轴 (dps), 量程 +/-500dps";
+CM_ SG_ 1920 GYR_Z "陀螺仪 Z 轴 (dps), 量程 +/-500dps";
+BA_DEF_  "MultiplexExtEnabled" ENUM  "No","Yes";
+BA_DEF_  "BusType" STRING ;
+BA_DEF_DEF_  "MultiplexExtEnabled" "No";
+BA_DEF_DEF_  "BusType" "CAN";
+BA_ "BusType" "CAN";
+VAL_ 1923 FrameType 1 "加速度帧(ACC)" 2 "陀螺仪帧(GYR)" ;
+VAL_ 1922 FrameType 1 "加速度帧(ACC)" 2 "陀螺仪帧(GYR)" ;
+VAL_ 1921 FrameType 1 "加速度帧(ACC)" 2 "陀螺仪帧(GYR)" ;
+VAL_ 1920 FrameType 1 "加速度帧(ACC)" 2 "陀螺仪帧(GYR)" ;
+

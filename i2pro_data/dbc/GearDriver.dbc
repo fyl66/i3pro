@@ -1,0 +1,70 @@
+VERSION ""
+
+
+NS_ : 
+	NS_DESC_
+	CM_
+	BA_DEF_
+	BA_
+	VAL_
+	CAT_DEF_
+	CAT_
+	FILTER
+	BA_DEF_DEF_
+	EV_DATA_
+	ENVVAR_DATA_
+	SGTYPE_
+	SGTYPE_VAL_
+	BA_DEF_SGTYPE_
+	BA_SGTYPE_
+	SIG_TYPE_REF_
+	VAL_TABLE_
+	SIG_GROUP_
+	SIG_VALTYPE_
+	SIGTYPE_VALTYPE_
+	BO_TX_BU_
+	BA_DEF_REL_
+	BA_REL_
+	BA_DEF_DEF_REL_
+	BU_SG_REL_
+	BU_EV_REL_
+	BU_BO_REL_
+	SG_MUL_VAL_
+
+BS_:
+
+BU_:
+
+
+BO_ 201 DriverGear_INFO: 8 Vector__XXX
+ SG_ Aceinna_Yaw_Angular_Rate : 3|13@1- (1,0) [-4096|4095] "" Vector__XXX
+ SG_ SOC_flag6 : 57|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ SOC_flag21 : 60|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ SOC_flag16 : 59|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ SOC_flag11 : 58|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ SOC_flag1 : 56|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ SOC_flag46 : 52|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ SOC_flag41 : 51|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ SOC_flag36 : 50|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ SOC_flag31 : 49|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ SOC_flag26 : 48|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ SOC_flag71 : 44|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ SOC_flag66 : 43|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ SOC_flag61 : 42|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ SOC_flag56 : 41|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ SOC_flag51 : 40|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ SOC_flag96 : 36|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ SOC_flag91 : 35|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ SOC_flag86 : 34|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ SOC_flag81 : 33|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ SOC_flag76 : 32|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ SW_Angle : 16|16@1- (0.01,0) [-327.68|327.67] "deg" Vector__XXX
+ SG_ DriverGear : 0|3@1+ (1,0) [0|65535] "" Vector__XXX
+
+
+
+BA_DEF_  "MultiplexExtEnabled" ENUM  "No","Yes";
+BA_DEF_  "BusType" STRING ;
+BA_DEF_DEF_  "MultiplexExtEnabled" "No";
+BA_DEF_DEF_  "BusType" "CAN";
+

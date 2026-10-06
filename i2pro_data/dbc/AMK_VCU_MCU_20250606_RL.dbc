@@ -1,0 +1,151 @@
+VERSION ""
+
+
+NS_ : 
+	NS_DESC_
+	CM_
+	BA_DEF_
+	BA_
+	VAL_
+	CAT_DEF_
+	CAT_
+	FILTER
+	BA_DEF_DEF_
+	EV_DATA_
+	ENVVAR_DATA_
+	SGTYPE_
+	SGTYPE_VAL_
+	BA_DEF_SGTYPE_
+	BA_SGTYPE_
+	SIG_TYPE_REF_
+	VAL_TABLE_
+	SIG_GROUP_
+	SIG_VALTYPE_
+	SIGTYPE_VALTYPE_
+	BO_TX_BU_
+	BA_DEF_REL_
+	BA_REL_
+	BA_DEF_DEF_REL_
+	BU_SG_REL_
+	BU_EV_REL_
+	BU_BO_REL_
+	SG_MUL_VAL_
+
+BS_:
+
+BU_: VCU3 MCU3
+
+
+BO_ 649 MCU3RL_289: 8 MCU3
+ SG_ MCU3_RL_ErrorInfo : 32|16@1+ (1,0) [0|65535] "" Vector__XXX
+ SG_ MCU3_RL_TempIGBT : 48|16@1+ (0.1,0) [0|0] "℃" Vector__XXX
+ SG_ MCU3_RL_TempInverter : 16|16@1+ (0.1,0) [0|0] "℃" Vector__XXX
+ SG_ MCU3_RL_TempMotor : 0|16@1+ (0.1,0) [0|0] "℃" Vector__XXX
+
+BO_ 392 VCU3RL_0x188: 8 VCU3
+ SG_ VCU3_RL_TorqueLimitNegativ : 48|16@1- (1,0) [0|0] "0.1%" Vector__XXX
+ SG_ VCU3_RL_DcOn : 9|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ VCU3_RL_ErrorReset : 11|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ VCU3_RL_Enable : 10|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ VCU3_RL_InverterOn : 8|1@1+ (1,0) [0|0] "" Vector__XXX
+ SG_ VCU3_RL_Torquerequest : 16|16@1- (0.01,0) [0|0] "NM" Vector__XXX
+ SG_ VCU3_RL_TorqueLimitPositiv : 32|16@1- (1,0) [0|0] "0.1%" Vector__XXX
+
+BO_ 647 MCU3RL_287: 8 MCU3
+ SG_ MCU3_RL_TorqueCurrent : 32|16@1- (0.00654296875,0) [0|65535] "Arms" Vector__XXX
+ SG_ MCU3_RL_ManetizingCurrent : 48|16@1- (0.00654296875,0) [-214.4|214.39345703125] "Arms" Vector__XXX
+ SG_ MCU3_RL_ActualVelocity : 16|16@1- (1,0) [-32768|32767] "rpm" Vector__XXX
+ SG_ MCU3_RL_DcOn : 12|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ MCU3_RL_QuitInverterOn : 13|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ MCU3_RL_Error : 9|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ MCU3_RL_QuitDcOn : 11|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ MCU3_RL_InverterOn : 14|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ MCU3_RL_SystemReady : 8|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ MCU3_RL_Warning : 10|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ MCU3_RL_Derating : 15|1@1+ (1,0) [0|1] "" Vector__XXX
+
+
+
+CM_ "Version:V1.2 , Date:2015/4/1 , Author:郑轶 , Review: , Approval: , Description:
+1、C50EB项目2015_EP2阶段EVBUS网段报文设计；
+ ;
+Version:V1.2 , Date:2015/4/3 , Author:郑轶 , Review: , Approval: , Description:
+2、通讯协议模板由Hi.sure试用版改为为正式版
+ ;
+Version:V1.2 , Date:2015/4/20 , Author:郑轶 , Review: , Approval: , Description:
+3、更改0x430帧和0x451帧的报文周期，以用来精确瞬时电耗的计算（刘明丁，张利敏）；
+ ;
+Version:V1.2 , Date:2015/4/29 , Author:郑轶 , Review: , Approval: , Description:
+4、";
+CM_ SG_ 649 MCU3_RL_ErrorInfo "故障码";
+CM_ SG_ 649 MCU3_RL_TempIGBT "IGBT温度";
+CM_ SG_ 649 MCU3_RL_TempInverter "冷却水板温度";
+CM_ SG_ 649 MCU3_RL_TempMotor "电机温度";
+CM_ SG_ 392 VCU3_RL_TorqueLimitNegativ "驱动电机目标负转矩";
+CM_ SG_ 392 VCU3_RL_DcOn "HV Activation";
+CM_ SG_ 392 VCU3_RL_ErrorReset "Remove Error";
+CM_ SG_ 392 VCU3_RL_Enable "Driver Enable";
+CM_ SG_ 392 VCU3_RL_InverterOn "Controller Enable";
+CM_ SG_ 392 VCU3_RL_Torquerequest "电机目标转速";
+CM_ SG_ 392 VCU3_RL_TorqueLimitPositiv "驱动电机目标正转矩";
+CM_ SG_ 647 MCU3_RL_TorqueCurrent "转矩电流Iq";
+CM_ SG_ 647 MCU3_RL_ManetizingCurrent "弱磁电流Id";
+CM_ SG_ 647 MCU3_RL_ActualVelocity "电机转速";
+CM_ SG_ 647 MCU3_RL_DcOn "HV Activation Level";
+CM_ SG_ 647 MCU3_RL_QuitInverterOn "Controller Enable Acknowledgement";
+CM_ SG_ 647 MCU3_RL_Error "故障";
+CM_ SG_ 647 MCU3_RL_QuitDcOn "HV Activation Acknowledgement";
+CM_ SG_ 647 MCU3_RL_InverterOn "Controller Enable Level";
+CM_ SG_ 647 MCU3_RL_SystemReady "SBM";
+CM_ SG_ 647 MCU3_RL_Warning "报警";
+CM_ SG_ 647 MCU3_RL_Derating "降功率";
+BA_DEF_  "BusType" STRING ;
+BA_DEF_ BO_  "NmMessage" ENUM  "No","Yes";
+BA_DEF_ BO_  "DiagState" ENUM  "No","Yes";
+BA_DEF_ BO_  "DiagRequest" ENUM  "No","Yes";
+BA_DEF_ BO_  "DiagResponse" ENUM  "No","Yes";
+BA_DEF_ BO_  "GenMsgSendType" ENUM  "cycle","NoSendType","IfActive";
+BA_DEF_ BO_  "GenMsgCycleTime" INT 0 0;
+BA_DEF_ SG_  "GenSigSendType" ENUM  "cycle","OnChange","OnWrite","IfActive","OnChangeWithRepetition","OnWriteWithRepetition","IfActiveWithRepetition";
+BA_DEF_ SG_  "GenSigStartValue" INT 0 0;
+BA_DEF_ SG_  "GenSigInactiveValue" INT 0 0;
+BA_DEF_ BO_  "GenMsgCycleTimeFast" INT 0 0;
+BA_DEF_ BO_  "GenMsgNrOfRepetition" INT 0 0;
+BA_DEF_ BO_  "GenMsgDelayTime" INT 0 0;
+BA_DEF_  "DBName" STRING ;
+BA_DEF_DEF_  "BusType" "";
+BA_DEF_DEF_  "NmMessage" "No";
+BA_DEF_DEF_  "DiagState" "No";
+BA_DEF_DEF_  "DiagRequest" "No";
+BA_DEF_DEF_  "DiagResponse" "No";
+BA_DEF_DEF_  "GenMsgSendType" "cycle";
+BA_DEF_DEF_  "GenMsgCycleTime" 0;
+BA_DEF_DEF_  "GenSigSendType" "cycle";
+BA_DEF_DEF_  "GenSigStartValue" 0;
+BA_DEF_DEF_  "GenSigInactiveValue" 0;
+BA_DEF_DEF_  "GenMsgCycleTimeFast" 0;
+BA_DEF_DEF_  "GenMsgNrOfRepetition" 0;
+BA_DEF_DEF_  "GenMsgDelayTime" 0;
+BA_DEF_DEF_  "DBName" "";
+BA_ "BusType" "CAN";
+BA_ "DBName" "EVBUS";
+BA_ "GenMsgCycleTime" BO_ 649 100;
+BA_ "GenMsgCycleTime" BO_ 392 10;
+BA_ "GenMsgCycleTime" BO_ 647 100;
+BA_ "GenSigStartValue" SG_ 392 VCU3_RL_DcOn 0;
+BA_ "GenSigStartValue" SG_ 392 VCU3_RL_InverterOn 0;
+BA_ "GenSigStartValue" SG_ 647 MCU3_RL_TorqueCurrent 0;
+BA_ "GenSigStartValue" SG_ 647 MCU3_RL_QuitInverterOn 0;
+VAL_ 392 VCU3_RL_DcOn 1 "开启" 0 "关闭" ;
+VAL_ 392 VCU3_RL_ErrorReset 1 "开启" 0 "关闭" ;
+VAL_ 392 VCU3_RL_Enable 1 "开启" 0 "关闭" ;
+VAL_ 392 VCU3_RL_InverterOn 1 "开启" 0 "关闭" ;
+VAL_ 647 MCU3_RL_DcOn 1 "开启" 0 "关闭" ;
+VAL_ 647 MCU3_RL_QuitInverterOn 1 "开启" 0 "关闭" ;
+VAL_ 647 MCU3_RL_Error 1 "异常" 0 "正常" ;
+VAL_ 647 MCU3_RL_QuitDcOn 1 "开启" 0 "关闭" ;
+VAL_ 647 MCU3_RL_InverterOn 1 "正常" 0 "关闭" ;
+VAL_ 647 MCU3_RL_SystemReady 1 "开启" 0 "关闭" ;
+VAL_ 647 MCU3_RL_Warning 1 "异常" 0 "正常" ;
+VAL_ 647 MCU3_RL_Derating 1 "异常" 0 "正常" ;
+

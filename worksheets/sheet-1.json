@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "name": "真正轮边加速度",
+  "order": 75,
+  "hints": [],
+  "components": [
+    {
+      "type": "graph",
+      "x": 0.0,
+      "y": 0.0,
+      "w": 12.0,
+      "h": 16.75,
+      "config": {
+        "mode": "tiled"
+      },
+      "pick": {
+        "channels": {
+          "limit": 8
+        }
+      }
+    },
+    {
+      "type": "graph",
+      "x": 0.0,
+      "y": 16.0,
+      "w": 12.0,
+      "h": 13.75,
+      "config": {
+        "channels": [
+          "IMU_RawData_Copy_3.ACC_X",
+          "IMU_RawData_Copy_1.ACC_X",
+          "IMU_RawData_Copy_2.ACC_X"
+        ],
+        "mode": "tiled"
+      }
+    },
+    {
+      "type": "graph",
+      "x": 0.0,
+      "y": 29.75,
+      "w": 12.0,
+      "h": 11.25,
+      "config": {
+        "channels": [
+          "IMU_RawData_Copy_2.ACC_Y",
+          "IMU_RawData_Copy_1.ACC_Y",
+          "IMU_RawData_Copy_3.ACC_Y"
+        ],
+        "mode": "tiled"
+      }
+    }
+  ]
+}

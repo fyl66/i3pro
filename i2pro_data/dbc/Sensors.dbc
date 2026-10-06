@@ -1,0 +1,143 @@
+VERSION ""
+
+
+NS_ : 
+	NS_DESC_
+	CM_
+	BA_DEF_
+	BA_
+	VAL_
+	CAT_DEF_
+	CAT_
+	FILTER
+	BA_DEF_DEF_
+	EV_DATA_
+	ENVVAR_DATA_
+	SGTYPE_
+	SGTYPE_VAL_
+	BA_DEF_SGTYPE_
+	BA_SGTYPE_
+	SIG_TYPE_REF_
+	VAL_TABLE_
+	SIG_GROUP_
+	SIG_VALTYPE_
+	SIGTYPE_VALTYPE_
+	BO_TX_BU_
+	BA_DEF_REL_
+	BA_REL_
+	BA_DEF_DEF_REL_
+	BU_SG_REL_
+	BU_EV_REL_
+	BU_BO_REL_
+	SG_MUL_VAL_
+
+BS_:
+
+BU_:
+
+
+BO_ 3221225472 VECTOR__INDEPENDENT_SIG_MSG: 0 Vector__XXX
+ SG_ Right_Front_Brake_Disc_Temp : 0|16@0+ (6.25009536E-05,-2.048) [-2.048|2.047999994176] "V" Vector__XXX
+ SG_ New_Signal_52 : 0|8@1+ (1,0) [0|0] "" Vector__XXX
+ SG_ Channel_5 : 0|16@0+ (6.25009536E-05,-2.048) [-2.048|2.047999994176] "" Vector__XXX
+ SG_ Channel_2 : 0|16@0+ (6.25009536E-05,-2.048) [-2.048|2.047999994176] "" Vector__XXX
+ SG_ RR_Brake_Disc_Temperature : 0|16@0+ (0.0079346913862,-20) [-20|499.999999994617] "Cesius" Vector__XXX
+
+BO_ 1646 Front_Brake_Disc_Temperature: 4 Vector__XXX
+ SG_ FR_Brake_Disc_Temperature : 7|16@0+ (0.0079346913862,-20) [-20|499.999999994617] "Cesius" Vector__XXX
+ SG_ FL_Brake_Disc_Temperature : 23|16@0+ (0.0079346913862,-20) [-20|499.999999994617] "Cesius" Vector__XXX
+
+BO_ 1647 Rear_Brake_Disc_Temperature: 4 Vector__XXX
+ SG_ RR_Brake_Disc_Temperature : 7|16@0+ (0.0079346913862,-20) [-20|499.999999994617] "Cesius" Vector__XXX
+ SG_ RL_Brake_Disc_Temperature : 23|16@0+ (0.0079346913862,-20) [-20|499.999999994617] "Cesius" Vector__XXX
+
+BO_ 1648 Tire_Temperature_NEW: 8 Vector__XXX
+ SG_ Ta : 23|16@0- (0.01,0) [-327.68|327.67] "" Vector__XXX
+ SG_ To : 7|16@0- (0.01,0) [-327.68|327.67] "" Vector__XXX
+
+BO_ 1645 Front_Aero_Ride_Height: 4 Vector__XXX
+ SG_ FR_Aero_Ride_Height : 7|16@0+ (0.0024414435034,-80) [-80|79.999999995319] "cm" Vector__XXX
+ SG_ FL_Aero_Ride_Height : 23|16@0+ (0.0024414435034,-80) [-80|79.999999995319] "cm" Vector__XXX
+
+BO_ 1644 Rear_Aero_Ride_Height: 4 Vector__XXX
+ SG_ RL_Aero_Ride_Height : 23|16@0+ (0.0024414435034,-80) [-80|79.999999995319] "cm" Vector__XXX
+ SG_ RR_Aero_Ride_Height : 7|16@0+ (0.0024414435034,-80) [-80|79.999999995319] "cm" Vector__XXX
+
+BO_ 1643 Left_Rear_Tire_Temperatures1: 8 Vector__XXX
+ SG_ LR_Tire_Temperature7 : 55|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+ SG_ LR_Tire_Temperature6 : 39|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+ SG_ LR_Tire_Temperature5 : 23|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+ SG_ LR_Tire_Temperature4 : 7|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+
+BO_ 1641 Right_Rear_Tire_Temperatures1: 8 Vector__XXX
+ SG_ RR_Tire_Temperature7 : 55|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+ SG_ RR_Tire_Temperature6 : 39|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+ SG_ RR_Tire_Temperature5 : 23|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+ SG_ RR_Tire_Temperature4 : 7|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+
+BO_ 1639 Right_Front_Tire_Temperatures1: 8 Vector__XXX
+ SG_ RF_Tire_Temperature7 : 55|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+ SG_ RF_Tire_Temperature6 : 39|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+ SG_ RF_Tire_Temperature5 : 23|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+ SG_ RF_Tire_Temperature4 : 7|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+
+BO_ 1637 Left_Front_Tire_Temperatures1: 8 Vector__XXX
+ SG_ LF_Tire_Temperature7 : 55|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+ SG_ LF_Tire_Temperature6 : 39|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+ SG_ LF_Tire_Temperature5 : 23|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+ SG_ LF_Tire_Temperature4 : 7|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+
+BO_ 1642 Left_Rear_Tire_Temperatures0: 8 Vector__XXX
+ SG_ LR_Tire_Temperature3 : 55|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+ SG_ LR_Tire_Temperature2 : 39|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+ SG_ LR_Tire_Temperature1 : 23|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+ SG_ LR_Tire_Temperature0 : 7|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+
+BO_ 1640 Right_Rear_Tire_Temperatures0: 8 Vector__XXX
+ SG_ RR_Tire_Temperature3 : 55|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+ SG_ RR_Tire_Temperature2 : 39|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+ SG_ RR_Tire_Temperature1 : 23|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+ SG_ RR_Tire_Temperature0 : 7|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+
+BO_ 1638 Right_Front_Tire_Temperatures0: 8 Vector__XXX
+ SG_ RF_Tire_Temperature1 : 23|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+ SG_ RF_Tire_Temperature0 : 7|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+ SG_ RF_Tire_Temperature3 : 55|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+ SG_ RF_Tire_Temperature2 : 39|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+
+BO_ 1636 Left_Front_Tire_Temperatures0: 8 Vector__XXX
+ SG_ LF_Tire_Temperature3 : 55|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+ SG_ LF_Tire_Temperature2 : 39|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+ SG_ LF_Tire_Temperature1 : 23|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+ SG_ LF_Tire_Temperature0 : 7|16@0+ (0.0025177386129,-40) [-40|124.999999996401] "Cesius" Vector__XXX
+
+BO_ 1635 Front_Compartment_Sensors: 8 Vector__XXX
+ SG_ Steering_Linear : 55|16@0+ (6.25009536E-05,-2.048) [-2.048|2.047999994176] "" Vector__XXX
+ SG_ Channel_1 : 23|16@0+ (6.250095369E-05,-2.048) [-2.048|2.04800000007415] "" Vector__XXX
+ SG_ Channel_0 : 7|16@0+ (6.25009536E-05,-2.048) [-2.048|2.047999994176] "" Vector__XXX
+ SG_ Steering_Torque : 39|16@0+ (6.25009536E-05,-2.048) [-2.048|2.047999994176] "V" Vector__XXX
+
+BO_ 1634 Front_Wheel_Sensors: 8 Vector__XXX
+ SG_ Right_Front_Brake_Disc_Temp : 55|16@0+ (6.25009536E-05,-2.048) [-2.048|2.047999994176] "V" Vector__XXX
+ SG_ Left_Front_Brake_Disc_Temp : 39|16@0+ (6.25009536E-05,-2.048) [-2.048|2.047999994176] "V" Vector__XXX
+ SG_ Right_Front_Suspension_Load : 23|16@0+ (6.25009536E-05,-2.048) [-2.048|2.047999994176] "V" Vector__XXX
+ SG_ Left_Front_Suspension_Load : 7|16@0+ (6.25009536E-05,-2.048) [-2.048|2.047999994176] "V" Vector__XXX
+
+BO_ 1633 Left_Rear_Sensors: 8 Vector__XXX
+ SG_ LR_Water_Temperature : 23|16@0+ (6.25009536E-05,-2.048) [-2.048|2.047999994176] "" Vector__XXX
+ SG_ Left_Rear_Brake_Disc_Temp : 7|16@0+ (6.25009536E-05,-2.048) [-2.048|2.047999994176] "V" Vector__XXX
+ SG_ Left_Rear_Suspension_Load : 39|16@0+ (6.25009536E-05,-2.048) [-2.048|2.047999994176] "V" Vector__XXX
+
+BO_ 1632 Right_Rear_Sensors: 8 Vector__XXX
+ SG_ Channel_0 : 7|16@0+ (6.25009536E-05,-2.048) [-2.048|2.047999994176] "" Vector__XXX
+ SG_ RR_Water_Temperature : 39|16@0+ (6.25009536E-05,-2.048) [-2.048|2.047999994176] "" Vector__XXX
+ SG_ Right_Rear_Suspension_Load : 23|16@0+ (6.25009536E-05,-2.048) [-2.048|2.047999994176] "V" Vector__XXX
+
+
+
+CM_ BO_ 3221225472 "This is a message for not used signals, created by Vector CANdb++ DBC OLE DB Provider.";
+BA_DEF_  "MultiplexExtEnabled" ENUM  "No","Yes";
+BA_DEF_  "BusType" STRING ;
+BA_DEF_DEF_  "MultiplexExtEnabled" "No";
+BA_DEF_DEF_  "BusType" "CAN";
+

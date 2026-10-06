@@ -1,0 +1,224 @@
+VERSION "MTi 600-series, May 27 2025"
+
+
+NS_ : 
+	NS_DESC_
+	CM_
+	BA_DEF_
+	BA_
+	VAL_
+	CAT_DEF_
+	CAT_
+	FILTER
+	BA_DEF_DEF_
+	EV_DATA_
+	ENVVAR_DATA_
+	SGTYPE_
+	SGTYPE_VAL_
+	BA_DEF_SGTYPE_
+	BA_SGTYPE_
+	SIG_TYPE_REF_
+	VAL_TABLE_
+	SIG_GROUP_
+	SIG_VALTYPE_
+	SIGTYPE_VALTYPE_
+	BO_TX_BU_
+	BA_DEF_REL_
+	BA_REL_
+	BA_DEF_DEF_REL_
+	BU_SG_REL_
+	BU_EV_REL_
+	BU_BO_REL_
+	SG_MUL_VAL_
+
+BS_:
+
+BU_: Xsens_Sensor
+
+
+BO_ 3221225472 VECTOR__INDEPENDENT_SIG_MSG: 0 Vector__XXX
+ SG_ NewSignal_0016_MTI : 0|8@1+ (1,0) [0|0] "" Vector__XXX
+
+BO_ 1 Error: 1 Xsens_Sensor
+
+BO_ 18 Warning: 1 Xsens_Sensor
+ SG_ WarningCode_MTI : 7|8@0+ (1,0) [0|0] "" Vector__XXX
+
+BO_ 5 SampleTime: 4 Xsens_Sensor
+ SG_ Timestamp_MTI : 7|32@0+ (1,0) [0|0] "us" Vector__XXX
+
+BO_ 6 GroupCounter: 2 Xsens_Sensor
+ SG_ Counter_MTI : 7|16@0+ (1,0) [0|0] "" Vector__XXX
+
+BO_ 17 StatusWord: 4 Xsens_Sensor
+ SG_ SelfTestOk_MTI : 24|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ FilterValid_MTI : 25|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ GnssFix : 26|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ NoRotationStatus_MTI : 28|2@0+ (1,0) [0|3] "" Vector__XXX
+ SG_ RepresentativeMotion_MTI : 29|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ ExternalClockSynced_MTI : 30|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ ClipAccX_MTI : 16|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ ClipAccY_MTI : 17|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ ClipAccZ_MTI : 18|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ ClipGyrX_MTI : 19|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ ClipGyrY_MTI : 20|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ ClipGyrZ_MTI : 21|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ ClipMagX_MTI : 22|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ ClipMagY_MTI : 23|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ ClipMagZ_MTI : 8|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ ClippingDetected_MTI : 11|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ SyncIn_MTI : 13|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ SyncOut_MTI : 14|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ FilterMode_MTI : 1|3@0+ (1,0) [0|1] "" Vector__XXX
+ SG_ HaveGnssTimePulse_MTI : 2|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ RtkStatus_MTI : 4|2@0+ (1,0) [0|1] "" Vector__XXX
+
+BO_ 33 Quaternion: 8 Xsens_Sensor
+ SG_ Q0_MTI : 7|16@0- (3.0517578125E-05,0) [-1|1] "" Vector__XXX
+ SG_ Q1_MTI : 23|16@0- (3.0517578125E-05,0) [-1|1] "" Vector__XXX
+ SG_ Q2_MTI : 39|16@0- (3.0517578125E-05,0) [-1|1] "" Vector__XXX
+ SG_ Q3_MTI : 55|16@0- (3.0517578125E-05,0) [-1|1] "" Vector__XXX
+
+BO_ 49 DeltaV: 7 Xsens_Sensor
+ SG_ X_MTI : 7|16@0- (7.6293945313E-06,0) [-0.25|0.25] "m/s" Vector__XXX
+ SG_ Y_MTI : 23|16@0- (7.6293945313E-06,0) [-0.25|0.25] "m/s" Vector__XXX
+ SG_ Z_MTI : 39|16@0- (7.6293945313E-06,0) [-0.25|0.25] "m/s" Vector__XXX
+ SG_ Exponent_MTI : 55|8@0+ (1,0) [0|0] "" Vector__XXX
+
+BO_ 50 RateOfTurn: 6 Xsens_Sensor
+ SG_ gyrX_MTI : 7|16@0- (0.001953125,0) [-35|35] "rad/s" Vector__XXX
+ SG_ gyrY_MTI : 23|16@0- (0.001953125,0) [-35|35] "rad/s" Vector__XXX
+ SG_ gyrZ_MTI : 39|16@0- (0.001953125,0) [-35|35] "rad/s" Vector__XXX
+
+BO_ 51 DeltaQ: 8 Xsens_Sensor
+ SG_ DeltaQ0_MTI : 7|16@0- (3.0518509476E-05,0) [-1|1] "" Vector__XXX
+ SG_ DeltaQ1_MTI : 23|16@0- (3.0518509476E-05,0) [-1|1] "" Vector__XXX
+ SG_ DeltaQ2_MTI : 39|16@0- (3.0518509476E-05,0) [-1|1] "" Vector__XXX
+ SG_ DeltaQ3_MTI : 55|16@0- (3.0518509476E-05,0) [-1|1] "" Vector__XXX
+
+BO_ 52 Acceleration: 6 Xsens_Sensor
+ SG_ accX_MTI : 7|16@0- (0.00390625,0) [-100|100] "m/s²" Vector__XXX
+ SG_ accY_MTI : 23|16@0- (0.00390625,0) [-100|100] "m/s²" Vector__XXX
+ SG_ accZ_MTI : 39|16@0- (0.00390625,0) [-100|100] "m/s²" Vector__XXX
+
+BO_ 53 FreeAcceleration: 6 Xsens_Sensor
+ SG_ FreeAccX_MTI : 7|16@0- (0.00390625,0) [-100|100] "m/s²" Vector__XXX
+ SG_ FreeAccY_MTI : 23|16@0- (0.00390625,0) [-100|100] "m/s²" Vector__XXX
+ SG_ FreeAccZ_MTI : 39|16@0- (0.00390625,0) [-100|100] "m/s²" Vector__XXX
+
+BO_ 97 RateOfTurnHR: 6 Xsens_Sensor
+ SG_ HrGyrX_MTI : 7|16@0- (0.001953125,0) [-35|35] "rad/s" Vector__XXX
+ SG_ HrGyrY_MTI : 23|16@0- (0.001953125,0) [-35|35] "rad/s" Vector__XXX
+ SG_ HrGyrZ_MTI : 39|16@0- (0.001953125,0) [-35|35] "rad/s" Vector__XXX
+
+BO_ 98 AccelerationHR: 6 Xsens_Sensor
+ SG_ HrAccX_MTI : 7|16@0- (0.00390625,0) [-100|100] "m/s²" Vector__XXX
+ SG_ HrAccY_MTI : 23|16@0- (0.00390625,0) [-100|100] "m/s²" Vector__XXX
+ SG_ HrAccZ_MTI : 39|16@0- (0.00390625,0) [-100|100] "m/s²" Vector__XXX
+
+BO_ 65 MagneticField: 6 Xsens_Sensor
+ SG_ magX_MTI : 7|16@0- (0.0009765625,0) [-32|32] "a.u." Vector__XXX
+ SG_ magY_MTI : 23|16@0- (0.0009765625,0) [-32|32] "a.u" Vector__XXX
+ SG_ magZ_MTI : 39|16@0- (0.0009765625,0) [-32|32] "a.u" Vector__XXX
+
+BO_ 81 Temperature: 2 Xsens_Sensor
+ SG_ Temperature_MTI : 7|16@0- (0.00390625,0) [-40|85] "degC" Vector__XXX
+
+BO_ 82 BarometricPressure: 4 Xsens_Sensor
+ SG_ Pressure_MTI : 7|32@0+ (1,0) [30000|125000] "Pa" Vector__XXX
+
+BO_ 7 UTC: 8 Xsens_Sensor
+ SG_ year_MTI : 7|8@0+ (1,0) [0|0] "Y" Vector__XXX
+ SG_ month_MTI : 15|8@0+ (1,0) [1|12] "M" Vector__XXX
+ SG_ day_MTI : 23|8@0+ (1,0) [1|31] "D" Vector__XXX
+ SG_ hour_MTI : 31|8@0+ (1,0) [0|24] "h" Vector__XXX
+ SG_ minute_MTI : 39|8@0+ (1,0) [0|60] "m" Vector__XXX
+ SG_ second_MTI : 47|8@0+ (1,0) [0|60] "s" Vector__XXX
+ SG_ tenthms_MTI : 55|16@0+ (1,0) [0|0] "ms/10" Vector__XXX
+
+BO_ 34 EulerAngles: 6 Xsens_Sensor
+ SG_ roll_MTI : 7|16@0- (0.0078125,0) [-180|180] "deg" Vector__XXX
+ SG_ pitch_MTI : 23|16@0- (0.0078125,0) [-90|90] "deg" Vector__XXX
+ SG_ yaw_MTI : 39|16@0- (0.0078125,0) [-360|360] "deg" Vector__XXX
+
+BO_ 113 LatLon: 8 Xsens_Sensor
+ SG_ latitude_MTI : 7|32@0- (5.9604644775E-08,0) [-90|90] "deg" Vector__XXX
+ SG_ longitude_MTI : 39|32@0- (1.1920928955E-07,0) [-180|180] "deg" Vector__XXX
+
+BO_ 114 AltitudeEllipsoid: 4 Xsens_Sensor
+ SG_ altEllipsoid_MTI : 7|32@0- (3.0517578125E-05,0) [-1000|80000] "m" Vector__XXX
+
+BO_ 115 PositionEcef_X: 4 Xsens_Sensor
+ SG_ PositionEcef_X_MTI : 7|32@0- (0.00390625,0) [-6500000|6500000] "m" Vector__XXX
+
+BO_ 116 PositionEcef_Y: 4 Xsens_Sensor
+ SG_ PositionEcef_Y_MTI : 7|32@0- (0.00390625,0) [-6500000|6500000] "m" Vector__XXX
+
+BO_ 117 PositionEcef_Z: 4 Xsens_Sensor
+ SG_ PositionEcef_Z_MTI : 7|32@0- (0.00390625,0) [-6500000|6500000] "m" Vector__XXX
+
+BO_ 118 Velocity: 6 Xsens_Sensor
+ SG_ velX_MTI : 7|16@0- (0.015625,0) [-500|500] "m/s" Vector__XXX
+ SG_ velY_MTI : 23|16@0- (0.015625,0) [-500|500] "m/s" Vector__XXX
+ SG_ velZ_MTI : 39|16@0- (0.015625,0) [-500|500] "m/s" Vector__XXX
+
+BO_ 121 GnssReceiverStatus: 5 Xsens_Sensor
+ SG_ fixType_MTI : 7|8@0+ (1,0) [0|5] "" Vector__XXX
+ SG_ numSv_MTI : 15|8@0+ (1,0) [0|255] "" Vector__XXX
+ SG_ flags_MTI : 23|8@0+ (1,0) [0|255] "" Vector__XXX
+ SG_ valid_MTI : 31|8@0+ (1,0) [0|255] "" Vector__XXX
+ SG_ numSvs_MTI : 39|8@0+ (1,0) [0|255] "" Vector__XXX
+
+BO_ 122 GnssReceiverDop: 8 Xsens_Sensor
+ SG_ pdop_MTI : 7|16@0+ (0.01,0) [0|100] "" Vector__XXX
+ SG_ tdop_MTI : 23|16@0+ (0.01,0) [0|100] "" Vector__XXX
+ SG_ vdop_MTI : 39|16@0+ (0.01,0) [0|100] "" Vector__XXX
+ SG_ hdop_MTI : 55|16@0+ (0.01,0) [0|100] "" Vector__XXX
+
+
+
+CM_ BU_ Xsens_Sensor "Generic Xsens Motion Sensor";
+CM_ BO_ 3221225472 "This is a message for not used signals, created by Vector CANdb++ DBC OLE DB Provider.";
+CM_ SG_ 17 SelfTestOk_MTI "Set when the self test result was ok";
+CM_ SG_ 17 FilterValid_MTI "Set when the computed orientation is valid. The orientation may be invalid during startup or when the Xsens_Sensor data is clipping during violent (for the device) motion";
+CM_ SG_ 17 GnssFix "Set when the device has a GNSS receiver and the receiver says that there is a GNSS position fix.";
+CM_ SG_ 17 RepresentativeMotion_MTI "Indicates if the In-Run Compass Calibration is doing the representative motion analysis";
+CM_ SG_ 17 ExternalClockSynced_MTI "Indicates whether the internal clock is synced with an external clock (Either GNSS or custom provided clock sync)";
+CM_ SG_ 17 ClipAccX_MTI "Indicates if there was clipping on the X-axis of the accelerometer";
+CM_ SG_ 17 ClipAccY_MTI "Indicates if there was clipping on the Y-axis of the accelerometer";
+CM_ SG_ 17 ClipAccZ_MTI "Indicates if there was clipping on the Z-axis of the accelerometer";
+CM_ SG_ 17 ClipGyrX_MTI "Indicates if there was clipping on the X-axis of the gyroscope";
+CM_ SG_ 17 ClipGyrY_MTI "Indicates if there was clipping on the Y-axis of the gyroscope";
+CM_ SG_ 17 ClipGyrZ_MTI "Indicates if there was clipping on the Z-axis of the gyroscope";
+CM_ SG_ 17 ClipMagX_MTI "Indicates if there was clipping on the X-axis of the magnetometer";
+CM_ SG_ 17 ClipMagY_MTI "Indicates if there was clipping on the Y-axis of the magnetometer";
+CM_ SG_ 17 ClipMagZ_MTI "Indicates if there was clipping on the Z-axis of the magnetometer";
+CM_ SG_ 17 ClippingDetected_MTI "When set Indicates clipping has occurred";
+CM_ SG_ 17 SyncIn_MTI "When set indicates a sync-in event has been triggered";
+CM_ SG_ 17 SyncOut_MTI "When set Indicates a sync-out event has been generated";
+CM_ SG_ 17 FilterMode_MTI "Mask for the 3 bit filter mode field";
+CM_ SG_ 17 HaveGnssTimePulse_MTI "Indicates that the 1PPS GNSS time pulse is present";
+CM_ SG_ 17 RtkStatus_MTI "Mask for 2 bit RTK status field";
+CM_ BO_ 7 "UTC Time in the following format YYMMDDhhmmss plus tenth of a milli second";
+VAL_ 17 SelfTestOk_MTI 0 "false" 1 "true" ;
+VAL_ 17 FilterValid_MTI 0 "false" 1 "true" ;
+VAL_ 17 GnssFix 0 "false" 1 "true" ;
+VAL_ 17 NoRotationStatus_MTI 1 "Aborted" 2 "SamplesRejected" 3 "RunningNormally" ;
+VAL_ 17 RepresentativeMotion_MTI 0 "false" 1 "true" ;
+VAL_ 17 ExternalClockSynced_MTI 0 "false" 1 "true" ;
+VAL_ 17 ClipAccX_MTI 0 "false" 1 "true" ;
+VAL_ 17 ClipAccY_MTI 0 "false" 1 "true" ;
+VAL_ 17 ClipAccZ_MTI 0 "false" 1 "true" ;
+VAL_ 17 ClipGyrX_MTI 0 "false" 1 "true" ;
+VAL_ 17 ClipGyrY_MTI 0 "false" 1 "true" ;
+VAL_ 17 ClipGyrZ_MTI 0 "false" 1 "true" ;
+VAL_ 17 ClipMagX_MTI 0 "false" 1 "true" ;
+VAL_ 17 ClipMagY_MTI 0 "false" 1 "true" ;
+VAL_ 17 ClipMagZ_MTI 0 "false" 1 "true" ;
+VAL_ 17 ClippingDetected_MTI 0 "false" 1 "true" ;
+VAL_ 17 SyncIn_MTI 0 "false" 1 "true" ;
+VAL_ 17 SyncOut_MTI 0 "false" 1 "true" ;
+VAL_ 17 FilterMode_MTI 0 "false" 1 "true" ;
+VAL_ 17 HaveGnssTimePulse_MTI 0 "false" 1 "true" ;
+VAL_ 17 RtkStatus_MTI 0 "No RTK" 1 "RTK floating" 2 "RTK fixed" ;
+

@@ -1,0 +1,628 @@
+VERSION "100"
+
+
+NS_ : 
+	NS_DESC_
+	CM_
+	BA_DEF_
+	BA_
+	VAL_
+	CAT_DEF_
+	CAT_
+	FILTER
+	BA_DEF_DEF_
+	EV_DATA_
+	ENVVAR_DATA_
+	SGTYPE_
+	SGTYPE_VAL_
+	BA_DEF_SGTYPE_
+	BA_SGTYPE_
+	SIG_TYPE_REF_
+	VAL_TABLE_
+	SIG_GROUP_
+	SIG_VALTYPE_
+	SIGTYPE_VALTYPE_
+	BO_TX_BU_
+	BA_DEF_REL_
+	BA_REL_
+	BA_DEF_DEF_REL_
+	BU_SG_REL_
+	BU_EV_REL_
+	BU_BO_REL_
+	SG_MUL_VAL_
+
+BS_:
+
+BU_: C125
+
+
+BO_ 2636251137 Display_1: 8 C125
+ SG_ Gear : 7|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ Susp_Pos_FL_LoRes : 23|16@0- (0.0001,0) [-1000|1000] "m"  Vector__XXX
+ SG_ Susp_Pos_FR_LoRes : 39|16@0- (0.0001,0) [-1000|1000] "m"  Vector__XXX
+ SG_ Susp_Pos_RL_LoRes : 55|16@0- (0.0001,0) [-1000|1000] "m"  Vector__XXX
+
+BO_ 2636251138 Display_2: 8 C125
+ SG_ Susp_Pos_RR_LoRes : 7|16@0- (0.0001,0) [-1000|1000] "m"  Vector__XXX
+ SG_ Fuel_Remaining : 23|16@0- (0.1,0) [0|0] "l"  Vector__XXX
+ SG_ Lap_Time : 39|32@0- (0.01,0) [0|0] "s"  Vector__XXX
+
+BO_ 2636251139 Display_3: 8 C125
+ SG_ Lap_GainLoss_Running : 7|16@0- (0.01,0) [0|0] "s"  Vector__XXX
+ SG_ Lap_Number : 23|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ Fuel_Used : 39|32@0- (0.01,0) [0|0] "l"  Vector__XXX
+
+BO_ 2636251140 Display_4: 8 C125
+ SG_ Running_Lap_Time : 7|32@0- (0.01,0) [0|0] "s"  Vector__XXX
+ SG_ Fuel_Used_per_Lap : 39|16@0- (0.01,0) [0|0] "l"  Vector__XXX
+ SG_ Fuel_Laps_Rem_LastLap : 55|16@0- (0.1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251141 Display_5: 6 C125
+ SG_ Fastest_Lap_Time : 7|32@0- (0.01,0) [0|0] "s"  Vector__XXX
+ SG_ Bat_Volts_Dash : 39|16@0- (0.01,0) [0|0] "V"  Vector__XXX
+
+BO_ 2636251142 Display_6: 6 C125
+ SG_ AMKFR_DCBusVolt : 7|32@0- (1,0) [0|0] "V"  Vector__XXX
+ SG_ AMKFR_ActualTorqueValue : 39|16@0- (100,0) [0|0] "m"  Vector__XXX
+
+BO_ 2636251143 Display_7: 6 C125
+ SG_ AMKFL_DCBusVolt : 7|32@0- (1,0) [0|0] "V"  Vector__XXX
+ SG_ AMKFL_ActualTorqueValue : 39|16@0- (100,0) [0|0] "m"  Vector__XXX
+
+BO_ 2636251144 Display_8: 6 C125
+ SG_ AMKRL_DCBusVolt : 7|32@0- (1,0) [0|0] "V"  Vector__XXX
+ SG_ AMKRL_ActualTorqueValue : 39|16@0- (100,0) [0|0] "m"  Vector__XXX
+
+BO_ 2636251145 Display_9: 6 C125
+ SG_ AMKRR_DCBusVolt : 7|32@0- (1,0) [0|0] "V"  Vector__XXX
+ SG_ AMKRR_ActualTorqueValue : 39|16@0- (100,0) [0|0] "m"  Vector__XXX
+
+BO_ 2636251146 Display_10: 8 C125
+ SG_ Current : 7|32@0- (0.001,0) [0|0] "A"  Vector__XXX
+ SG_ Application_DC_Bus_Voltag_2 : 39|32@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251147 Display_11: 8 C125
+ SG_ MCU1_FR_ErrorInfo : 7|32@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ MCU1_FR_TempIGBT : 39|16@0- (0.1,0) [0|0] ""  Vector__XXX
+ SG_ MCU1_FR_TempInverter : 55|16@0- (0.1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251148 Display_12: 8 C125
+ SG_ MCU1_FR_TempMotor : 7|16@0- (0.1,0) [0|0] ""  Vector__XXX
+ SG_ MCU1_FR_DcOn : 23|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ MCU1_FR_QuitInverterOn : 39|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ MCU1_FR_Error : 55|16@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251149 Display_13: 6 C125
+ SG_ MCU1_FR_QuitDcOn : 7|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ MCU1_FR_InverterOn : 23|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ MCU1_FR_Derating : 39|16@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251150 Display_14: 8 C125
+ SG_ MCU2_FL_ErrorInfo : 7|32@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ MCU2_FL_TempIGBT : 39|32@0- (0.1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251151 Display_15: 8 C125
+ SG_ MCU2_FL_TempInverter : 7|32@0- (0.1,0) [0|0] ""  Vector__XXX
+ SG_ MCU2_FL_TempMotor : 39|32@0- (0.1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251152 Display_16: 8 C125
+ SG_ Brake_Signal : 7|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ Vx_KF : 23|16@0- (0.01,0) [0|0] "km/h"  Vector__XXX
+ SG_ RearPress_Mpa : 39|32@0- (0.1,0) [0|0] "kPa"  Vector__XXX
+
+BO_ 2636251153 Display_17: 8 C125
+ SG_ FrontPress_Mpa : 7|32@0- (0.1,0) [0|0] "kPa"  Vector__XXX
+ SG_ LV : 39|16@0- (0.01,0) [0|0] "V"  Vector__XXX
+ SG_ Battery_Power : 55|16@0- (10,0) [0|0] "W"  Vector__XXX
+
+BO_ 2636251154 Display_18: 8 C125
+ SG_ TH : 7|32@0- (0.01,0) [0|0] ""  Vector__XXX
+ SG_ force_channel_8_RR : 39|32@0- (1,0) [0|0] "G"  Vector__XXX
+
+BO_ 2636251155 Display_19: 8 C125
+ SG_ Linear_displacement_sensor : 7|32@0- (0.001,0) [0|0] "V"  Vector__XXX
+ SG_ power_real : 39|16@0- (10,0) [0|0] "W"  Vector__XXX
+ SG_ High_Temperature_2 : 55|16@0- (1,0) [0|0] "C"  Vector__XXX
+
+BO_ 2636251156 Display_20: 6 C125
+ SG_ Low_Temperature_2 : 7|16@0- (1,0) [0|0] "C"  Vector__XXX
+ SG_ High_Cell_Voltage_2 : 23|32@0- (0.0001,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251157 Display_21: 8 C125
+ SG_ Pack_kW_Power_2 : 7|32@0- (1,0) [0|0] "W"  Vector__XXX
+ SG_ THError : 39|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ SW_Angle : 55|16@0- (0.01,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251158 Display_22: 8 C125
+ SG_ Pack_Amphours_2 : 7|32@0- (0.1,0) [0|0] ""  Vector__XXX
+ SG_ MCU2_FL_DcOn : 39|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ MCU2_FL_QuitInverterOn : 55|16@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251159 Display_23: 8 C125
+ SG_ MCU2_FL_Error : 7|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ MCU2_FL_QuitDcOn : 23|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ MCU2_FL_InverterOn : 39|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ MCU2_FL_Derating : 55|16@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251160 Display_24: 8 C125
+ SG_ MCU3_RL_ErrorInfo : 7|32@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ MCU3_RL_TempIGBT : 39|32@0- (0.1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251161 Display_25: 8 C125
+ SG_ MCU3_RL_TempInverter : 7|32@0- (0.1,0) [0|0] ""  Vector__XXX
+ SG_ MCU3_RL_TempMotor : 39|32@0- (0.1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251162 Display_26: 8 C125
+ SG_ Low_Cell_Voltage_2 : 7|32@0- (0.0001,0) [0|0] ""  Vector__XXX
+ SG_ MCU3_RL_DcOn : 39|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ MCU3_RL_QuitInverterOn : 55|16@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251163 Display_27: 8 C125
+ SG_ MCU3_RL_Error : 7|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ MCU3_RL_QuitDcOn : 23|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ MCU3_RL_InverterOn : 39|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ MCU3_RL_Derating : 55|16@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251164 Display_28: 8 C125
+ SG_ MCU4_RR_ErrorInfo : 7|32@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ MCU4_RR_TempIGBT : 39|32@0- (0.1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251165 Display_29: 8 C125
+ SG_ MCU4_RR_TempInverter : 7|32@0- (0.1,0) [0|0] ""  Vector__XXX
+ SG_ MCU4_RR_TempMotor : 39|32@0- (0.1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251166 Display_30: 8 C125
+ SG_ MCU4_RR_DcOn : 7|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ MCU4_RR_QuitInverterOn : 23|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ MCU4_RR_Error : 39|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ MCU4_RR_QuitDcOn : 55|16@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251167 Display_31: 8 C125
+ SG_ MCU4_RR_InverterOn : 7|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ MCU4_RR_Derating : 23|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ force_channel_7_RL : 39|32@0- (1,0) [0|0] "G"  Vector__XXX
+
+BO_ 2636251168 Display_32: 8 C125
+ SG_ force_channel_6_FR : 7|32@0- (1,0) [0|0] "G"  Vector__XXX
+ SG_ force_channel_5_FL : 39|32@0- (1,0) [0|0] "G"  Vector__XXX
+
+BO_ 2636251169 Display_33: 8 C125
+ SG_ Brake_precent : 7|16@0- (0.001,0) [0|0] ""  Vector__XXX
+ SG_ Pack_Inst_Voltage : 23|32@0- (0.1,0) [0|0] ""  Vector__XXX
+ SG_ Pack_Current_2 : 55|16@0- (0.1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251170 Display_34: 8 C125
+ SG_ Pack_SOC : 7|16@0- (0.0001,0) [0|0] "ratio"  Vector__XXX
+ SG_ velX_MTI : 23|16@0- (0.1,0) [0|0] "km/h"  Vector__XXX
+ SG_ Failsafe_Statuses : 39|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ AccelX : 55|16@0- (0.001,0) [0|0] "G"  Vector__XXX
+
+BO_ 2636251171 Display_35: 8 C125
+ SG_ AccelY : 7|16@0- (0.001,0) [0|0] "G"  Vector__XXX
+ SG_ AccelZ : 23|16@0- (0.001,0) [0|0] "G"  Vector__XXX
+ SG_ Slip_ratio_FL : 39|16@0- (0.01,0) [0|0] ""  Vector__XXX
+ SG_ Slip_ratio_FR : 55|16@0- (0.01,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251172 Display_36: 8 C125
+ SG_ Slip_ratio_RL : 7|16@0- (0.01,0) [0|0] ""  Vector__XXX
+ SG_ Slip_ratio_RR : 23|16@0- (0.01,0) [0|0] ""  Vector__XXX
+ SG_ accX_MTI : 39|16@0- (0.01,0) [0|0] ""  Vector__XXX
+ SG_ accY_MTI : 55|16@0- (0.01,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251173 Display_37: 8 C125
+ SG_ accZ_MTI : 7|16@0- (0.01,0) [0|0] ""  Vector__XXX
+ SG_ Display_Page : 23|16@0- (1,0) [0|5] ""  Vector__XXX
+ SG_ Switch_status : 39|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ Gear8_Switch1 : 55|16@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251174 Display_38: 8 C125
+ SG_ Gear4_Switch2 : 7|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ Gear4_Switch1 : 23|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ Gear2_Switch1 : 39|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ Encoder2 : 55|16@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251175 Display_39: 8 C125
+ SG_ Encoder1 : 7|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ change : 23|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ Gear_Speed1 : 39|16@0- (1,0) [0|0] "km/h"  Vector__XXX
+ SG_ Sign_Return : 55|16@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251176 Display_40: 8 C125
+ SG_ Sign_Regen : 7|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ Gear_Regen1 : 23|16@0- (10,0) [0|0] "W"  Vector__XXX
+ SG_ Gear_Power1 : 39|16@0- (10,0) [0|0] "W"  Vector__XXX
+ SG_ Page : 55|16@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251177 Display_41: 8 C125
+ SG_ Use_Pow : 7|16@0- (0.01,0) [0|0] ""  Vector__XXX
+ SG_ Newbest_Flag : 23|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ Last_Lap : 39|32@0- (0.01,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251178 Display_42: 6 C125
+ SG_ Lap_counter : 7|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ Current_Lap : 23|32@0- (0.01,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251179 Display_43: 6 C125
+ SG_ Best_Lap : 7|32@0- (0.01,0) [0|0] ""  Vector__XXX
+ SG_ Vx_KF_Init : 39|16@0- (0.01,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251180 Display_44: 8 C125
+ SG_ gap_time : 7|32@0- (0.01,0) [0|0] ""  Vector__XXX
+ SG_ k6 : 39|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ k5 : 55|16@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251181 Display_45: 8 C125
+ SG_ show_regen : 7|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ Max_Power : 23|32@0- (0.01,0) [0|0] ""  Vector__XXX
+ SG_ TS_ERROR_VOLTAGE_MISMATCH : 55|16@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251182 Display_46: 8 C125
+ SG_ TS_ERROR_SLAVE_UNDERVOLT : 7|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ TS_ERROR_SLAVE_OVERVOLT : 23|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ TS_ERROR_SLAVE_OVERTEMP : 39|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ TS_ERROR_SHUNT_TIMEOUT : 55|16@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251183 Display_47: 8 C125
+ SG_ TS_ERROR_SHUNT_OVERTEMP : 7|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ TS_ERROR_SHUNT_OVERCUURENT : 23|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ TS_ERROR_PRECHARGE_TIMEOUT : 39|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ TS_ERROR_NONE : 55|16@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251184 Display_48: 8 C125
+ SG_ TS_ERROR_INTERNAL_COMM_ERROR : 7|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ Power_Up_State : 23|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ shunt_error : 39|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ slave_error : 55|16@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251185 Display_49: 6 C125
+ SG_ Pre_AIR_State : 7|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ Neg_AIR_State : 23|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ Pos_AIR_State : 39|16@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251186 Display_50: 8 C125
+ SG_ Bat_volt : 7|32@0- (0.001,0) [0|0] "V"  Vector__XXX
+ SG_ TS_Target_State : 39|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ SDC_closed : 55|16@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251187 Display_51: 8 C125
+ SG_ Max_voltage : 7|32@0- (1E-05,0) [0|0] "V"  Vector__XXX
+ SG_ Min_voltage : 39|32@0- (1E-05,0) [0|0] "V"  Vector__XXX
+
+BO_ 2636251188 Display_52: 8 C125
+ SG_ TS_Current_State : 7|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ video : 23|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ page1 : 39|32@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251189 Display_53: 8 C125
+ SG_ a2048_4_4 : 7|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ a2048_4_3 : 23|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ a2048_4_2 : 39|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ a2048_4_1 : 55|16@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251190 Display_54: 8 C125
+ SG_ a2048_3_4 : 7|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ a2048_3_3 : 23|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ a2048_3_2 : 39|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ a2048_3_1 : 55|16@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251191 Display_55: 8 C125
+ SG_ a2048_2_4 : 7|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ a2048_2_3 : 23|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ a2048_2_2 : 39|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ a2048_2_1 : 55|16@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251192 Display_56: 8 C125
+ SG_ a2048_1_4 : 7|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ a2048_1_3 : 23|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ a2048_1_2 : 39|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ a2048_1_1 : 55|16@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251193 Display_57: 8 C125
+ SG_ Bus_volt : 7|32@0- (0.001,0) [0|0] "V"  Vector__XXX
+ SG_ Bus_curr : 39|32@0- (0.001,0) [0|0] "A"  Vector__XXX
+
+BO_ 2636251194 Display_58: 8 C125
+ SG_ SOC : 7|32@0- (1E-06,0) [0|0] "ratio"  Vector__XXX
+ SG_ Max_temp_2 : 39|16@0- (1,0) [0|0] ""  Vector__XXX
+ SG_ CalState_SM : 55|16@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251195 Display_59: 2 C125
+ SG_ CalBusy_SM : 7|16@0- (1,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251196 Alarm_Message: 8 C125
+ SG_ Alarm_Message : 7|64@0+ (0,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251197 Alarm_Value: 8 C125
+ SG_ Alarm_Value : 7|64@0+ (0,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251198 Alarm_Status: 2 C125
+ SG_ Alarm_Active : 7|8@0+ (0,0) [0|0] ""  Vector__XXX
+ SG_ Alarm_Flash : 15|8@0+ (0,0) [0|0] ""  Vector__XXX
+
+BO_ 2636251136 CRC32: 4 C125
+ SG_ CRC32 : 7|32@0+ (1,0) [0|0] ""  Vector__XXX
+
+
+
+BA_DEF_  "MoTeC_CRC" INT 0 0;
+BA_DEF_ SG_  "MoTeC_Type" ENUM  "Number","Compound_String";
+BA_DEF_ SG_  "MoTeC_Usage" ENUM  "General","CRC32","Alarm_Message","Alarm_Value","Alarm_Active_State","Alarm_Flash_State";
+BA_DEF_ SG_  "MoTeC_Channel" STRING ;
+BA_DEF_ BO_  "GenMsgCycleTime" INT 0 0;
+BA_DEF_DEF_  "MoTeC_CRC" -1575658209;
+BA_DEF_DEF_  "MoTeC_Type" "Number";
+BA_DEF_DEF_  "MoTeC_Usage" "General";
+BA_DEF_DEF_  "MoTeC_Channel" "";
+BA_DEF_DEF_  "GenMsgCycleTime" 50;
+BA_ "GenMsgCycleTime" BO_ 2636251137 50;
+BA_ "GenMsgCycleTime" BO_ 2636251138 50;
+BA_ "GenMsgCycleTime" BO_ 2636251139 50;
+BA_ "GenMsgCycleTime" BO_ 2636251140 50;
+BA_ "GenMsgCycleTime" BO_ 2636251141 50;
+BA_ "GenMsgCycleTime" BO_ 2636251142 50;
+BA_ "GenMsgCycleTime" BO_ 2636251143 50;
+BA_ "GenMsgCycleTime" BO_ 2636251144 50;
+BA_ "GenMsgCycleTime" BO_ 2636251145 50;
+BA_ "GenMsgCycleTime" BO_ 2636251146 50;
+BA_ "GenMsgCycleTime" BO_ 2636251147 50;
+BA_ "GenMsgCycleTime" BO_ 2636251148 50;
+BA_ "GenMsgCycleTime" BO_ 2636251149 50;
+BA_ "GenMsgCycleTime" BO_ 2636251150 50;
+BA_ "GenMsgCycleTime" BO_ 2636251151 50;
+BA_ "GenMsgCycleTime" BO_ 2636251152 50;
+BA_ "GenMsgCycleTime" BO_ 2636251153 50;
+BA_ "GenMsgCycleTime" BO_ 2636251154 50;
+BA_ "GenMsgCycleTime" BO_ 2636251155 50;
+BA_ "GenMsgCycleTime" BO_ 2636251156 50;
+BA_ "GenMsgCycleTime" BO_ 2636251157 50;
+BA_ "GenMsgCycleTime" BO_ 2636251158 50;
+BA_ "GenMsgCycleTime" BO_ 2636251159 50;
+BA_ "GenMsgCycleTime" BO_ 2636251160 50;
+BA_ "GenMsgCycleTime" BO_ 2636251161 50;
+BA_ "GenMsgCycleTime" BO_ 2636251162 50;
+BA_ "GenMsgCycleTime" BO_ 2636251163 50;
+BA_ "GenMsgCycleTime" BO_ 2636251164 50;
+BA_ "GenMsgCycleTime" BO_ 2636251165 50;
+BA_ "GenMsgCycleTime" BO_ 2636251166 50;
+BA_ "GenMsgCycleTime" BO_ 2636251167 50;
+BA_ "GenMsgCycleTime" BO_ 2636251168 50;
+BA_ "GenMsgCycleTime" BO_ 2636251169 50;
+BA_ "GenMsgCycleTime" BO_ 2636251170 50;
+BA_ "GenMsgCycleTime" BO_ 2636251171 50;
+BA_ "GenMsgCycleTime" BO_ 2636251172 50;
+BA_ "GenMsgCycleTime" BO_ 2636251173 50;
+BA_ "GenMsgCycleTime" BO_ 2636251174 50;
+BA_ "GenMsgCycleTime" BO_ 2636251175 50;
+BA_ "GenMsgCycleTime" BO_ 2636251176 50;
+BA_ "GenMsgCycleTime" BO_ 2636251177 50;
+BA_ "GenMsgCycleTime" BO_ 2636251178 50;
+BA_ "GenMsgCycleTime" BO_ 2636251179 50;
+BA_ "GenMsgCycleTime" BO_ 2636251180 50;
+BA_ "GenMsgCycleTime" BO_ 2636251181 50;
+BA_ "GenMsgCycleTime" BO_ 2636251182 50;
+BA_ "GenMsgCycleTime" BO_ 2636251183 50;
+BA_ "GenMsgCycleTime" BO_ 2636251184 50;
+BA_ "GenMsgCycleTime" BO_ 2636251185 50;
+BA_ "GenMsgCycleTime" BO_ 2636251186 50;
+BA_ "GenMsgCycleTime" BO_ 2636251187 50;
+BA_ "GenMsgCycleTime" BO_ 2636251188 50;
+BA_ "GenMsgCycleTime" BO_ 2636251189 50;
+BA_ "GenMsgCycleTime" BO_ 2636251190 50;
+BA_ "GenMsgCycleTime" BO_ 2636251191 50;
+BA_ "GenMsgCycleTime" BO_ 2636251192 50;
+BA_ "GenMsgCycleTime" BO_ 2636251193 50;
+BA_ "GenMsgCycleTime" BO_ 2636251194 50;
+BA_ "GenMsgCycleTime" BO_ 2636251195 50;
+BA_ "GenMsgCycleTime" BO_ 2636251196 50;
+BA_ "GenMsgCycleTime" BO_ 2636251197 50;
+BA_ "GenMsgCycleTime" BO_ 2636251198 50;
+BA_ "GenMsgCycleTime" BO_ 2636251136 1000;
+BA_ "MoTeC_Channel" SG_ 2636251137 Gear "Gear";
+BA_ "MoTeC_Channel" SG_ 2636251137 Susp_Pos_FL_LoRes "Susp Pos FL (LoRes)";
+BA_ "MoTeC_Channel" SG_ 2636251137 Susp_Pos_FR_LoRes "Susp Pos FR (LoRes)";
+BA_ "MoTeC_Channel" SG_ 2636251137 Susp_Pos_RL_LoRes "Susp Pos RL (LoRes)";
+BA_ "MoTeC_Channel" SG_ 2636251138 Susp_Pos_RR_LoRes "Susp Pos RR (LoRes)";
+BA_ "MoTeC_Channel" SG_ 2636251138 Fuel_Remaining "Fuel Remaining";
+BA_ "MoTeC_Channel" SG_ 2636251138 Lap_Time "Lap Time";
+BA_ "MoTeC_Channel" SG_ 2636251139 Lap_GainLoss_Running "Lap Gain/Loss Running";
+BA_ "MoTeC_Channel" SG_ 2636251139 Lap_Number "Lap Number";
+BA_ "MoTeC_Channel" SG_ 2636251139 Fuel_Used "Fuel Used";
+BA_ "MoTeC_Channel" SG_ 2636251140 Running_Lap_Time "Running Lap Time";
+BA_ "MoTeC_Channel" SG_ 2636251140 Fuel_Used_per_Lap "Fuel Used per Lap";
+BA_ "MoTeC_Channel" SG_ 2636251140 Fuel_Laps_Rem_LastLap "Fuel Laps Rem (LastLap)";
+BA_ "MoTeC_Channel" SG_ 2636251141 Fastest_Lap_Time "Fastest Lap Time";
+BA_ "MoTeC_Channel" SG_ 2636251141 Bat_Volts_Dash "Bat Volts Dash";
+BA_ "MoTeC_Channel" SG_ 2636251142 AMKFR_DCBusVolt "AMKFR DCBusVolt";
+BA_ "MoTeC_Channel" SG_ 2636251142 AMKFR_ActualTorqueValue "AMKFR ActualTorqueValue";
+BA_ "MoTeC_Channel" SG_ 2636251143 AMKFL_DCBusVolt "AMKFL DCBusVolt";
+BA_ "MoTeC_Channel" SG_ 2636251143 AMKFL_ActualTorqueValue "AMKFL ActualTorqueValue";
+BA_ "MoTeC_Channel" SG_ 2636251144 AMKRL_DCBusVolt "AMKRL DCBusVolt";
+BA_ "MoTeC_Channel" SG_ 2636251144 AMKRL_ActualTorqueValue "AMKRL ActualTorqueValue";
+BA_ "MoTeC_Channel" SG_ 2636251145 AMKRR_DCBusVolt "AMKRR DCBusVolt";
+BA_ "MoTeC_Channel" SG_ 2636251145 AMKRR_ActualTorqueValue "AMKRR ActualTorqueValue";
+BA_ "MoTeC_Channel" SG_ 2636251146 Current "Current";
+BA_ "MoTeC_Channel" SG_ 2636251146 Application_DC_Bus_Voltag_2 "Application DC Bus Voltag (2)";
+BA_ "MoTeC_Channel" SG_ 2636251147 MCU1_FR_ErrorInfo "MCU1 FR ErrorInfo";
+BA_ "MoTeC_Channel" SG_ 2636251147 MCU1_FR_TempIGBT "MCU1 FR TempIGBT";
+BA_ "MoTeC_Channel" SG_ 2636251147 MCU1_FR_TempInverter "MCU1 FR TempInverter";
+BA_ "MoTeC_Channel" SG_ 2636251148 MCU1_FR_TempMotor "MCU1 FR TempMotor";
+BA_ "MoTeC_Channel" SG_ 2636251148 MCU1_FR_DcOn "MCU1 FR DcOn";
+BA_ "MoTeC_Channel" SG_ 2636251148 MCU1_FR_QuitInverterOn "MCU1 FR QuitInverterOn";
+BA_ "MoTeC_Channel" SG_ 2636251148 MCU1_FR_Error "MCU1 FR Error";
+BA_ "MoTeC_Channel" SG_ 2636251149 MCU1_FR_QuitDcOn "MCU1 FR QuitDcOn";
+BA_ "MoTeC_Channel" SG_ 2636251149 MCU1_FR_InverterOn "MCU1 FR InverterOn";
+BA_ "MoTeC_Channel" SG_ 2636251149 MCU1_FR_Derating "MCU1 FR Derating";
+BA_ "MoTeC_Channel" SG_ 2636251150 MCU2_FL_ErrorInfo "MCU2 FL ErrorInfo";
+BA_ "MoTeC_Channel" SG_ 2636251150 MCU2_FL_TempIGBT "MCU2 FL TempIGBT";
+BA_ "MoTeC_Channel" SG_ 2636251151 MCU2_FL_TempInverter "MCU2 FL TempInverter";
+BA_ "MoTeC_Channel" SG_ 2636251151 MCU2_FL_TempMotor "MCU2 FL TempMotor";
+BA_ "MoTeC_Channel" SG_ 2636251152 Brake_Signal "Brake Signal";
+BA_ "MoTeC_Channel" SG_ 2636251152 Vx_KF "Vx KF";
+BA_ "MoTeC_Channel" SG_ 2636251152 RearPress_Mpa "RearPress Mpa";
+BA_ "MoTeC_Channel" SG_ 2636251153 FrontPress_Mpa "FrontPress Mpa";
+BA_ "MoTeC_Channel" SG_ 2636251153 LV "LV";
+BA_ "MoTeC_Channel" SG_ 2636251153 Battery_Power "Battery Power";
+BA_ "MoTeC_Channel" SG_ 2636251154 TH "TH";
+BA_ "MoTeC_Channel" SG_ 2636251154 force_channel_8_RR "force channel 8 RR";
+BA_ "MoTeC_Channel" SG_ 2636251155 Linear_displacement_sensor "Linear displacement sensor";
+BA_ "MoTeC_Channel" SG_ 2636251155 power_real "power real";
+BA_ "MoTeC_Channel" SG_ 2636251155 High_Temperature_2 "High Temperature (2)";
+BA_ "MoTeC_Channel" SG_ 2636251156 Low_Temperature_2 "Low Temperature (2)";
+BA_ "MoTeC_Channel" SG_ 2636251156 High_Cell_Voltage_2 "High Cell Voltage (2)";
+BA_ "MoTeC_Channel" SG_ 2636251157 Pack_kW_Power_2 "Pack kW Power (2)";
+BA_ "MoTeC_Channel" SG_ 2636251157 THError "THError";
+BA_ "MoTeC_Channel" SG_ 2636251157 SW_Angle "SW Angle";
+BA_ "MoTeC_Channel" SG_ 2636251158 Pack_Amphours_2 "Pack Amphours (2)";
+BA_ "MoTeC_Channel" SG_ 2636251158 MCU2_FL_DcOn "MCU2 FL DcOn";
+BA_ "MoTeC_Channel" SG_ 2636251158 MCU2_FL_QuitInverterOn "MCU2 FL QuitInverterOn";
+BA_ "MoTeC_Channel" SG_ 2636251159 MCU2_FL_Error "MCU2 FL Error";
+BA_ "MoTeC_Channel" SG_ 2636251159 MCU2_FL_QuitDcOn "MCU2 FL QuitDcOn";
+BA_ "MoTeC_Channel" SG_ 2636251159 MCU2_FL_InverterOn "MCU2 FL InverterOn";
+BA_ "MoTeC_Channel" SG_ 2636251159 MCU2_FL_Derating "MCU2 FL Derating";
+BA_ "MoTeC_Channel" SG_ 2636251160 MCU3_RL_ErrorInfo "MCU3 RL ErrorInfo";
+BA_ "MoTeC_Channel" SG_ 2636251160 MCU3_RL_TempIGBT "MCU3 RL TempIGBT";
+BA_ "MoTeC_Channel" SG_ 2636251161 MCU3_RL_TempInverter "MCU3 RL TempInverter";
+BA_ "MoTeC_Channel" SG_ 2636251161 MCU3_RL_TempMotor "MCU3 RL TempMotor";
+BA_ "MoTeC_Channel" SG_ 2636251162 Low_Cell_Voltage_2 "Low Cell Voltage (2)";
+BA_ "MoTeC_Channel" SG_ 2636251162 MCU3_RL_DcOn "MCU3 RL DcOn";
+BA_ "MoTeC_Channel" SG_ 2636251162 MCU3_RL_QuitInverterOn "MCU3 RL QuitInverterOn";
+BA_ "MoTeC_Channel" SG_ 2636251163 MCU3_RL_Error "MCU3 RL Error";
+BA_ "MoTeC_Channel" SG_ 2636251163 MCU3_RL_QuitDcOn "MCU3 RL QuitDcOn";
+BA_ "MoTeC_Channel" SG_ 2636251163 MCU3_RL_InverterOn "MCU3 RL InverterOn";
+BA_ "MoTeC_Channel" SG_ 2636251163 MCU3_RL_Derating "MCU3 RL Derating";
+BA_ "MoTeC_Channel" SG_ 2636251164 MCU4_RR_ErrorInfo "MCU4 RR ErrorInfo";
+BA_ "MoTeC_Channel" SG_ 2636251164 MCU4_RR_TempIGBT "MCU4 RR TempIGBT";
+BA_ "MoTeC_Channel" SG_ 2636251165 MCU4_RR_TempInverter "MCU4 RR TempInverter";
+BA_ "MoTeC_Channel" SG_ 2636251165 MCU4_RR_TempMotor "MCU4 RR TempMotor";
+BA_ "MoTeC_Channel" SG_ 2636251166 MCU4_RR_DcOn "MCU4 RR DcOn";
+BA_ "MoTeC_Channel" SG_ 2636251166 MCU4_RR_QuitInverterOn "MCU4 RR QuitInverterOn";
+BA_ "MoTeC_Channel" SG_ 2636251166 MCU4_RR_Error "MCU4 RR Error";
+BA_ "MoTeC_Channel" SG_ 2636251166 MCU4_RR_QuitDcOn "MCU4 RR QuitDcOn";
+BA_ "MoTeC_Channel" SG_ 2636251167 MCU4_RR_InverterOn "MCU4 RR InverterOn";
+BA_ "MoTeC_Channel" SG_ 2636251167 MCU4_RR_Derating "MCU4 RR Derating";
+BA_ "MoTeC_Channel" SG_ 2636251167 force_channel_7_RL "force channel 7 RL";
+BA_ "MoTeC_Channel" SG_ 2636251168 force_channel_6_FR "force channel 6 FR";
+BA_ "MoTeC_Channel" SG_ 2636251168 force_channel_5_FL "force channel 5 FL";
+BA_ "MoTeC_Channel" SG_ 2636251169 Brake_precent "Brake precent";
+BA_ "MoTeC_Channel" SG_ 2636251169 Pack_Inst_Voltage "Pack Inst Voltage";
+BA_ "MoTeC_Channel" SG_ 2636251169 Pack_Current_2 "Pack Current (2)";
+BA_ "MoTeC_Channel" SG_ 2636251170 Pack_SOC "Pack SOC";
+BA_ "MoTeC_Channel" SG_ 2636251170 velX_MTI "velX MTI";
+BA_ "MoTeC_Channel" SG_ 2636251170 Failsafe_Statuses "Failsafe Statuses";
+BA_ "MoTeC_Channel" SG_ 2636251170 AccelX "AccelX";
+BA_ "MoTeC_Channel" SG_ 2636251171 AccelY "AccelY";
+BA_ "MoTeC_Channel" SG_ 2636251171 AccelZ "AccelZ";
+BA_ "MoTeC_Channel" SG_ 2636251171 Slip_ratio_FL "Slip ratio FL";
+BA_ "MoTeC_Channel" SG_ 2636251171 Slip_ratio_FR "Slip ratio FR";
+BA_ "MoTeC_Channel" SG_ 2636251172 Slip_ratio_RL "Slip ratio RL";
+BA_ "MoTeC_Channel" SG_ 2636251172 Slip_ratio_RR "Slip ratio RR";
+BA_ "MoTeC_Channel" SG_ 2636251172 accX_MTI "accX MTI";
+BA_ "MoTeC_Channel" SG_ 2636251172 accY_MTI "accY MTI";
+BA_ "MoTeC_Channel" SG_ 2636251173 accZ_MTI "accZ MTI";
+BA_ "MoTeC_Channel" SG_ 2636251173 Display_Page "Display Page";
+BA_ "MoTeC_Channel" SG_ 2636251173 Switch_status "Switch status";
+BA_ "MoTeC_Channel" SG_ 2636251173 Gear8_Switch1 "Gear8 Switch1";
+BA_ "MoTeC_Channel" SG_ 2636251174 Gear4_Switch2 "Gear4 Switch2";
+BA_ "MoTeC_Channel" SG_ 2636251174 Gear4_Switch1 "Gear4 Switch1";
+BA_ "MoTeC_Channel" SG_ 2636251174 Gear2_Switch1 "Gear2 Switch1";
+BA_ "MoTeC_Channel" SG_ 2636251174 Encoder2 "Encoder2";
+BA_ "MoTeC_Channel" SG_ 2636251175 Encoder1 "Encoder1";
+BA_ "MoTeC_Channel" SG_ 2636251175 change "change";
+BA_ "MoTeC_Channel" SG_ 2636251175 Gear_Speed1 "Gear Speed1";
+BA_ "MoTeC_Channel" SG_ 2636251175 Sign_Return "Sign Return";
+BA_ "MoTeC_Channel" SG_ 2636251176 Sign_Regen "Sign Regen";
+BA_ "MoTeC_Channel" SG_ 2636251176 Gear_Regen1 "Gear Regen1";
+BA_ "MoTeC_Channel" SG_ 2636251176 Gear_Power1 "Gear Power1";
+BA_ "MoTeC_Channel" SG_ 2636251176 Page "Page";
+BA_ "MoTeC_Channel" SG_ 2636251177 Use_Pow "Use Pow";
+BA_ "MoTeC_Channel" SG_ 2636251177 Newbest_Flag "Newbest Flag";
+BA_ "MoTeC_Channel" SG_ 2636251177 Last_Lap "Last Lap";
+BA_ "MoTeC_Channel" SG_ 2636251178 Lap_counter "Lap counter";
+BA_ "MoTeC_Channel" SG_ 2636251178 Current_Lap "Current Lap";
+BA_ "MoTeC_Channel" SG_ 2636251179 Best_Lap "Best Lap";
+BA_ "MoTeC_Channel" SG_ 2636251179 Vx_KF_Init "Vx KF Init";
+BA_ "MoTeC_Channel" SG_ 2636251180 gap_time "gap time";
+BA_ "MoTeC_Channel" SG_ 2636251180 k6 "k6";
+BA_ "MoTeC_Channel" SG_ 2636251180 k5 "k5";
+BA_ "MoTeC_Channel" SG_ 2636251181 show_regen "show regen";
+BA_ "MoTeC_Channel" SG_ 2636251181 Max_Power "Max Power";
+BA_ "MoTeC_Channel" SG_ 2636251181 TS_ERROR_VOLTAGE_MISMATCH "TS ERROR VOLTAGE MISMATCH";
+BA_ "MoTeC_Channel" SG_ 2636251182 TS_ERROR_SLAVE_UNDERVOLT "TS ERROR SLAVE UNDERVOLT";
+BA_ "MoTeC_Channel" SG_ 2636251182 TS_ERROR_SLAVE_OVERVOLT "TS ERROR SLAVE OVERVOLT";
+BA_ "MoTeC_Channel" SG_ 2636251182 TS_ERROR_SLAVE_OVERTEMP "TS ERROR SLAVE OVERTEMP";
+BA_ "MoTeC_Channel" SG_ 2636251182 TS_ERROR_SHUNT_TIMEOUT "TS ERROR SHUNT TIMEOUT";
+BA_ "MoTeC_Channel" SG_ 2636251183 TS_ERROR_SHUNT_OVERTEMP "TS ERROR SHUNT OVERTEMP";
+BA_ "MoTeC_Channel" SG_ 2636251183 TS_ERROR_SHUNT_OVERCUURENT "TS ERROR SHUNT OVERCUURENT";
+BA_ "MoTeC_Channel" SG_ 2636251183 TS_ERROR_PRECHARGE_TIMEOUT "TS ERROR PRECHARGE TIMEOUT";
+BA_ "MoTeC_Channel" SG_ 2636251183 TS_ERROR_NONE "TS ERROR NONE";
+BA_ "MoTeC_Channel" SG_ 2636251184 TS_ERROR_INTERNAL_COMM_ERROR "TS ERROR INTERNAL COMM ERROR";
+BA_ "MoTeC_Channel" SG_ 2636251184 Power_Up_State "Power Up State";
+BA_ "MoTeC_Channel" SG_ 2636251184 shunt_error "shunt error";
+BA_ "MoTeC_Channel" SG_ 2636251184 slave_error "slave error";
+BA_ "MoTeC_Channel" SG_ 2636251185 Pre_AIR_State "Pre AIR State";
+BA_ "MoTeC_Channel" SG_ 2636251185 Neg_AIR_State "Neg AIR State";
+BA_ "MoTeC_Channel" SG_ 2636251185 Pos_AIR_State "Pos AIR State";
+BA_ "MoTeC_Channel" SG_ 2636251186 Bat_volt "Bat volt";
+BA_ "MoTeC_Channel" SG_ 2636251186 TS_Target_State "TS Target State";
+BA_ "MoTeC_Channel" SG_ 2636251186 SDC_closed "SDC closed";
+BA_ "MoTeC_Channel" SG_ 2636251187 Max_voltage "Max voltage";
+BA_ "MoTeC_Channel" SG_ 2636251187 Min_voltage "Min voltage";
+BA_ "MoTeC_Channel" SG_ 2636251188 TS_Current_State "TS Current State";
+BA_ "MoTeC_Channel" SG_ 2636251188 video "video";
+BA_ "MoTeC_Channel" SG_ 2636251188 page1 "page1";
+BA_ "MoTeC_Channel" SG_ 2636251189 a2048_4_4 "a2048 4 4";
+BA_ "MoTeC_Channel" SG_ 2636251189 a2048_4_3 "a2048 4 3";
+BA_ "MoTeC_Channel" SG_ 2636251189 a2048_4_2 "a2048 4 2";
+BA_ "MoTeC_Channel" SG_ 2636251189 a2048_4_1 "a2048 4 1";
+BA_ "MoTeC_Channel" SG_ 2636251190 a2048_3_4 "a2048 3 4";
+BA_ "MoTeC_Channel" SG_ 2636251190 a2048_3_3 "a2048 3 3";
+BA_ "MoTeC_Channel" SG_ 2636251190 a2048_3_2 "a2048 3 2";
+BA_ "MoTeC_Channel" SG_ 2636251190 a2048_3_1 "a2048 3 1";
+BA_ "MoTeC_Channel" SG_ 2636251191 a2048_2_4 "a2048 2 4";
+BA_ "MoTeC_Channel" SG_ 2636251191 a2048_2_3 "a2048 2 3";
+BA_ "MoTeC_Channel" SG_ 2636251191 a2048_2_2 "a2048 2 2";
+BA_ "MoTeC_Channel" SG_ 2636251191 a2048_2_1 "a2048 2 1";
+BA_ "MoTeC_Channel" SG_ 2636251192 a2048_1_4 "a2048 1 4";
+BA_ "MoTeC_Channel" SG_ 2636251192 a2048_1_3 "a2048 1 3";
+BA_ "MoTeC_Channel" SG_ 2636251192 a2048_1_2 "a2048 1 2";
+BA_ "MoTeC_Channel" SG_ 2636251192 a2048_1_1 "a2048 1 1";
+BA_ "MoTeC_Channel" SG_ 2636251193 Bus_volt "Bus volt";
+BA_ "MoTeC_Channel" SG_ 2636251193 Bus_curr "Bus curr";
+BA_ "MoTeC_Channel" SG_ 2636251194 SOC "SOC";
+BA_ "MoTeC_Channel" SG_ 2636251194 Max_temp_2 "Max temp (2)";
+BA_ "MoTeC_Channel" SG_ 2636251194 CalState_SM "CalState SM";
+BA_ "MoTeC_Channel" SG_ 2636251195 CalBusy_SM "CalBusy SM";
+BA_ "MoTeC_Type" SG_ 2636251196 Alarm_Message 1;
+BA_ "MoTeC_Usage" SG_ 2636251196 Alarm_Message 2;
+BA_ "MoTeC_Type" SG_ 2636251197 Alarm_Value 1;
+BA_ "MoTeC_Usage" SG_ 2636251197 Alarm_Value 3;
+BA_ "MoTeC_Usage" SG_ 2636251198 Alarm_Active 4;
+BA_ "MoTeC_Usage" SG_ 2636251198 Alarm_Flash 5;
+BA_ "MoTeC_Usage" SG_ 2636251136 CRC32 1;
+VAL_ 2636251148 MCU1_FR_DcOn 0 "关闭" 1 "开启" ;
+VAL_ 2636251148 MCU1_FR_QuitInverterOn 0 "关闭" 1 "开启" ;
+VAL_ 2636251148 MCU1_FR_Error 0 "正常" 1 "异常" ;
+VAL_ 2636251149 MCU1_FR_QuitDcOn 0 "关闭" 1 "开启" ;
+VAL_ 2636251149 MCU1_FR_InverterOn 0 "关闭" 1 "正常" ;
+VAL_ 2636251149 MCU1_FR_Derating 0 "正常" 1 "异常" ;
+VAL_ 2636251157 THError 0 "异常" 1 "正常" ;
+VAL_ 2636251158 MCU2_FL_DcOn 0 "关闭" 1 "开启" ;
+VAL_ 2636251158 MCU2_FL_QuitInverterOn 0 "关闭" 1 "开启" ;
+VAL_ 2636251159 MCU2_FL_Error 0 "正常" 1 "异常" ;
+VAL_ 2636251159 MCU2_FL_QuitDcOn 0 "关闭" 1 "开启" ;
+VAL_ 2636251159 MCU2_FL_InverterOn 0 "关闭" 1 "正常" ;
+VAL_ 2636251159 MCU2_FL_Derating 0 "正常" 1 "异常" ;
+VAL_ 2636251162 MCU3_RL_DcOn 0 "关闭" 1 "开启" ;
+VAL_ 2636251162 MCU3_RL_QuitInverterOn 0 "关闭" 1 "开启" ;
+VAL_ 2636251163 MCU3_RL_Error 0 "正常" 1 "异常" ;
+VAL_ 2636251163 MCU3_RL_QuitDcOn 0 "关闭" 1 "开启" ;
+VAL_ 2636251163 MCU3_RL_InverterOn 0 "关闭" 1 "正常" ;
+VAL_ 2636251163 MCU3_RL_Derating 0 "正常" 1 "异常" ;
+VAL_ 2636251166 MCU4_RR_DcOn 0 "关闭" 1 "开启" ;
+VAL_ 2636251166 MCU4_RR_QuitInverterOn 0 "关闭" 1 "开启" ;
+VAL_ 2636251166 MCU4_RR_Error 0 "正常" 1 "异常" ;
+VAL_ 2636251166 MCU4_RR_QuitDcOn 0 "关闭" 1 "开启" ;
+VAL_ 2636251167 MCU4_RR_InverterOn 0 "关闭" 1 "正常" ;
+VAL_ 2636251167 MCU4_RR_Derating 0 "正常" 1 "异常" ;
+VAL_ 2636251186 TS_Target_State 0 "TS_INACTIVE" 1 "TS_ACTIVE" 2 "TS_PRECHARGE" 3 "TS_DISCHARGE" 4 "TS_ERROR" 5 "TS_PRE_HOLD" 6 "TS_CHARGE" ;
+VAL_ 2636251188 TS_Current_State 0 "TS_INACTIVE" 1 "TS_ACTIVE" 2 "TS_PRECHARGE" 3 "TS_DISCHARGE" 4 "TS_ERROR" 5 "TS_PRE_HOLD" 6 "TS_CHARGE" ;

@@ -1,0 +1,75 @@
+VERSION "HIPBYYYYYYYYYYYYYYYYYYYYYYYYYYYYNNNNNNNNNN/4/%%%/4/'%**4NNN///"
+
+NS_ : 
+NS_DESC_
+CM_
+BA_DEF_
+BA_
+VAL_
+CAT_DEF_
+CAT_
+FILTER
+BA_DEF_DEF_
+EV_DATA_
+ENVVAR_DATA_
+SGTYPE_
+SGTYPE_VAL_
+BA_DEF_SGTYPE_
+BA_SGTYPE_
+SIG_TYPE_REF_
+VAL_TABLE_
+SIG_GROUP_
+SIG_VALTYPE_
+SIGTYPE_VALTYPE_
+
+BS_:
+
+BU_: SMotion
+
+
+BO_ 2016 Vel_Angle: 8 SMotion
+ SG_ VelX : 0|16@1- (0.036,0) [-400|400] "km/h" SMotion
+ SG_ VelY : 16|16@1- (0.036,0) [-100|100] "km/h" SMotion
+ SG_ Vel : 32|16@1- (0.036,0) [-400|400] "km/h" SMotion
+ SG_ Angle : 48|16@1- (0.01,0) [-45|45] "°" SMotion
+
+BO_ 2017 Distance: 4 SMotion
+ SG_ Distance : 0|32@1- (0.001,0) [-2.14748e+06|2.14748e+06] "m" SMotion
+
+BO_ 2018 Pitch_Roll: 8 SMotion
+ SG_ Pitch : 0|16@1- (0.01,0) [-45|45] "°" SMotion
+ SG_ Roll : 16|16@1- (0.01,0) [-45|45] "°" SMotion
+ SG_ Timestamp : 32|16@1+ (1,0) [0|65535] "" SMotion
+ SG_ Radius : 48|16@1+ (0.01,0) [0|655.35] "m" SMotion
+
+BO_ 2019 AccHor_AccCBody: 8 SMotion
+ SG_ AccX_hor : 0|16@1- (0.01,0) [-180|180] "m/s²" SMotion
+ SG_ AccY_hor : 16|16@1- (0.01,0) [-180|180] "m/s²" SMotion
+ SG_ AccZ_hor : 32|16@1- (0.01,0) [-180|180] "m/s²" SMotion
+ SG_ AccC_body : 48|16@1- (0.01,0) [-180|180] "m/s²" SMotion
+
+BO_ 2020 AngVelHor: 6 SMotion
+ SG_ AngVelX_hor : 0|16@1- (0.02,0) [-300|300] "°/s" SMotion
+ SG_ AngVelY_hor : 16|16@1- (0.02,0) [-300|300] "°/s" SMotion
+ SG_ AngVelZ_hor : 32|16@1- (0.02,0) [-300|300] "°/s" SMotion
+
+BO_ 2021 Correvit: 8 SMotion
+ SG_ VelX_cor : 0|16@1- (0.036,0) [-400|400] "km/h" SMotion
+ SG_ VelY_cor : 16|16@1- (0.036,0) [-100|100] "km/h" SMotion
+ SG_ Vel_cor : 32|16@1- (0.036,0) [-400|400] "km/h" SMotion
+ SG_ Angle_cor : 48|16@1- (0.01,0) [-45|45] "°" SMotion
+
+BO_ 2022 AccBody: 6 SMotion
+ SG_ AccX_body : 0|16@1- (0.01,0) [-180|180] "m/s²" SMotion
+ SG_ AccY_body : 16|16@1- (0.01,0) [-180|180] "m/s²" SMotion
+ SG_ AccZ_body : 32|16@1- (0.01,0) [-180|180] "m/s²" SMotion
+
+BO_ 2023 AngVelBody: 6 SMotion
+ SG_ AngVelX_body : 0|16@1- (0.02,0) [-300|300] "°/s" SMotion
+ SG_ AngVelY_body : 16|16@1- (0.02,0) [-300|300] "°/s" SMotion
+ SG_ AngVelZ_body : 32|16@1- (0.02,0) [-300|300] "°/s" SMotion
+
+BO_ 2024 Coordinates: 8 SMotion
+ SG_ Latitude : 0|32@1- (1e-07,0) [-90|90] "°" SMotion
+ SG_ Longitude : 32|32@1- (1e-07,0) [-180|180] "°" SMotion
+

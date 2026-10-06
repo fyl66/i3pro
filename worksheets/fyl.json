@@ -1,0 +1,85 @@
+{
+  "schema": 1,
+  "name": "fyl",
+  "order": 72,
+  "hints": [],
+  "components": [
+    {
+      "type": "graph",
+      "x": 0.0,
+      "y": 0.0,
+      "w": 8.0,
+      "h": 18.5,
+      "config": {
+        "channels": [
+          "TH",
+          "LF_Tire_Temperature3",
+          "LF_Tire_Temperature0",
+          "速度kmh",
+          "LV",
+          "RR_Tire_Temperature3",
+          "RR_Tire_Temperature1",
+          "RF_Tire_Temperature0",
+          "RF_Tire_Temperature2"
+        ],
+        "mode": "tiled"
+      }
+    },
+    {
+      "type": "graph",
+      "x": 0.0,
+      "y": 18.5,
+      "w": 12.0,
+      "h": 8.0,
+      "config": {
+        "channels": [
+          "RL_Aero_Ride_Height",
+          "RR_Aero_Ride_Height",
+          "FR_Aero_Ride_Height",
+          "FL_Aero_Ride_Height"
+        ],
+        "mode": "tiled"
+      }
+    },
+    {
+      "type": "graph",
+      "x": 0.0,
+      "y": 26.5,
+      "w": 5.0,
+      "h": 8.0,
+      "config": {
+        "channels": [
+          "FR_Brake_Disc_Temperature",
+          "RR_Brake_Disc_Temperature"
+        ],
+        "mode": "tiled"
+      }
+    },
+    {
+      "type": "graph",
+      "x": 5.0,
+      "y": 26.5,
+      "w": 7.0,
+      "h": 8.0,
+      "config": {
+        "channels": [
+          "Right_Rear_Suspension_Load",
+          "Left_Rear_Suspension_Load",
+          "Right_Front_Suspension_Load",
+          "Left_Front_Suspension_Load"
+        ],
+        "mode": "tiled"
+      }
+    },
+    {
+      "type": "track",
+      "x": 8.0,
+      "y": 0.0,
+      "w": 4.0,
+      "h": 18.5,
+      "config": {
+        "window": "all"
+      }
+    }
+  ]
+}

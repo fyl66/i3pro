@@ -3106,9 +3106,22 @@ python -m unittest tests.test_i3pro.TestCanLog -v
 `IMU.dbc` / `IVT.dbc` 是新加的——`TestCanLog` 里"DBC 份数与报文数"不再写死，
 改成**从目录现算**（实测下限：≥124 条通道、≥82% 覆盖）。
 
-**回归四项（本机实测）**：`Ran 447 tests` + `OK`；`verify_ld_vs_csv` `PASS - 0 channel(s)
-outside tolerance`；两份金标准快照各 `PASS`（7 圈 / 471 通道行、26 圈 / 377 通道行）；
-真浏览器 **188 项检查：188 通过，0 失败**。
+**回归四项——这一轮跑不全，如实记下来**：`i2pro_data/` 里的 16 场 `.ld` 与 MoTeC
+对照 CSV 在 2026-10-06 被挪出了仓库目录，于是
+
+```text
+python -m unittest discover -s tests   → Ran 398 tests，OK (skipped=110)
+python tools\verify_ld_vs_csv.py        → no .ld/.csv pairs found in i2pro_data（退出码非 0）
+两份金标准快照 / node tools\smoke_viewer.js → 跳过（要 .ld 才能重新生成）
+python tools\verify_clicks.py           → SKIP（同样的原因）
+```
+
+能跑的那部分全过：`TestCanLog` **12 项**（含合成的双总线用例与真的 ch3/IVT 用例）、
+`TestDbc` 15 项、`TestDbcDiscovery` 4 项、`TestGpsPair` 4 项。
+**按规则 7，跳过不算通过**——等数据回到 `i2pro_data/`（或指明新位置）之后要重跑这四条。
+耐力那场在 `E:\桌面\LTS-mimo\实测数据\E02\` 是 `.ld`/`.ldx`/`.csv` 齐全的；高避那场
+本机只剩 `out\_verify_data_8741\` 里的字节副本（`.ld`+`.ldx`），它的 MoTeC 对照 CSV
+已经找不到——也就是说 `verify_ld_vs_csv` 这条裁判现在**没法执行**。
 
 ---
 

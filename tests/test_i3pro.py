@@ -1953,6 +1953,187 @@ class TestBootstrap(unittest.TestCase):
         self.assertIn("install-deps", output, output)
 
 
+class TestSplitSessionsAreWhole(unittest.TestCase):
+    """侧边栏名字里的 ``+N`` 与"点开到底读到哪几份文件"必须是一回事。
+
+    以前不是：``library`` 算 ``+N`` 时**跨所有数据根**一起分组，而 ``read_can_session``
+    只看主文件自己那个目录的邻居。一份在 ``i2pro_data/``、另一份在 ``can_data/`` 时
+    （``启动.bat`` 正好把这两个目录都当数据根），侧边栏写着 ``+1``、点开只有一份——
+    用户看到的就是"合并之后数据少了"。这条把两个方向都钉住：
+
+    * 分卷跨目录时必须**整场**读进来；
+    * 只声明一份的场次（``sources`` 给了但只有一份）**不许**再自作主张去邻居里扩。
+    """
+
+    HEADER = "序号,系统时间,时间标识,CAN通道,ID号,帧类型,帧格式,CAN类型,长度,数据"
+
+    @staticmethod
+    def _wall(seconds: float) -> str:
+        hour = int(seconds // 3600) % 24
+        minute = int((seconds % 3600) // 60)
+        rest = seconds % 60
+        return f"{hour:02d}:{minute:02d}:{int(rest):02d}.{int(round((rest - int(rest)) * 1e6)):06d}"
+
+    def _write(self, path: Path, frames, wall_base: float, seq_base: int) -> None:
+        lines = [self.HEADER]
+        for index, (moment, value) in enumerate(frames):
+            payload = "x| " + " ".join(
+                f"{byte:02X}" for byte in (value & 0xFFFFFFFF).to_bytes(4, "little")
+            ) + " 00 00 00 00"
+            lines.append(
+                f'{seq_base + index},="{self._wall(wall_base + moment)}",{moment:.6f},'
+                f"ch1,0x7E1,数据帧,标准帧,CAN,8,{payload}"
+            )
+        path.write_bytes(("\r\n".join(lines) + "\r\n").encode("gbk"))
+
+    def _pair_in_two_roots(self, work: Path, gap: float = 0.0):
+        """一次记录被切成两卷，而且两卷**放在两个不同的数据根**里。"""
+        dt, wall_base, frames = 0.01, 13 * 3600, [(i * 0.01, i) for i in range(2000)]
+        one, two = work / "root1", work / "root2"
+        one.mkdir(parents=True)
+        two.mkdir(parents=True)
+        first = one / "recA_ID0001.csv"
+        second = two / "recB_ID0001.csv"
+        self._write(first, frames[:1000], wall_base, 0)
+        self._write(second, frames[1000:], wall_base + gap, 1000)
+        return first, second
+
+    def test_a_split_session_is_loaded_whole_even_across_two_roots(self):
+        work = scratch("_split_roots")
+        shutil.rmtree(work, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        first, second = self._pair_in_two_roots(work)
+
+        library = librarymod.SessionLibrary(
+            [first.parent, second.parent], maths_root=ROOT,
+            index_cache=work / "index.json",
+        )
+        self.addCleanup(library.close)
+        self.assertEqual(library.names(), ["recA_ID0001+1"])
+        log = library.get("recA_ID0001+1")
+        self.assertEqual(sorted(log.can["sources"]),
+                         ["recA_ID0001.csv", "recB_ID0001.csv"])
+        self.assertEqual(log.can["frames"], 2000)
+        self.assertAlmostEqual(log.duration, 19.99, places=3)
+        self.assertEqual(log.can["bytes"],
+                         first.stat().st_size + second.stat().st_size)
+
+    def test_the_same_pair_in_one_roots_behaves_the_same(self):
+        """把两卷放回同一个目录，结论必须一模一样（规则只有一条）。"""
+        work = scratch("_split_one_root")
+        shutil.rmtree(work, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        first, second = self._pair_in_two_roots(work, gap=0.0002)
+        merged = work / "together"
+        merged.mkdir()
+        shutil.copy2(first, merged / first.name)
+        shutil.copy2(second, merged / second.name)
+
+        library = librarymod.SessionLibrary([merged], maths_root=ROOT,
+                                            index_cache=work / "index.json")
+        self.addCleanup(library.close)
+        log = library.get("recA_ID0001+1")
+        self.assertEqual(len(log.can["sources"]), 2)
+        self.assertEqual(log.can["frames"], 2000)
+
+    def test_a_single_member_entry_does_not_re_expand(self):
+        """``sources`` 只给一份就是一份——否则"名字说 +N"的坑会从后门回来。"""
+        work = scratch("_split_no_reexpand")
+        shutil.rmtree(work, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        first, second = self._pair_in_two_roots(work)
+        # 只声明第二份：不许因为"同目录还有邻居"就把第一份也拉进来。
+        log = canlog.read_can_session([second], discover=False, dbc_dir=[DBC_DIR],
+                                      use_sidecar=False, write_sidecar=False)
+        self.assertEqual(log.can["sources"], ["recB_ID0001.csv"])
+        self.assertEqual(log.can["frames"], 1000)
+        # 不给 sources 时，"看一眼邻居"的老行为还在（命令行单开一份时用它）。
+        self.assertFalse(log.can["merged"])
+
+    def test_a_log_that_starts_mid_recording_says_so(self):
+        """首帧的相对时钟不是 0，就要明说"前面还有卷、不在这儿"。
+
+        不写这一条，i3pro 会把起始时间重新归零，看起来像开头那几分钟被吃掉了
+        （10-07 那批实测：首帧相对时钟 585.7 s、序号 2,000,000）。
+        """
+        work = scratch("_split_headgap")
+        shutil.rmtree(work, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        work.mkdir(parents=True)
+        path = work / "mid_ID0001.csv"
+        offset = 585.700522
+        frames = [(offset + i * 0.01, i) for i in range(500)]
+        self._write(path, frames, 16 * 3600, 2_000_000)
+
+        log = canlog.read_can_session([path], discover=False, dbc_dir=[DBC_DIR],
+                                      use_sidecar=False, write_sidecar=False)
+        self.assertAlmostEqual(log.can["head_gap_s"], offset, places=3)
+        self.assertEqual(log.can["head_seq"], 2_000_000)
+        joined = " ".join(log.can["notes"])
+        self.assertIn("不是从这次记录的起点开始的", joined)
+        self.assertIn("585.7", joined)
+        self.assertIn("2,000,000", joined)
+
+    def test_a_session_that_starts_at_zero_says_nothing_extra(self):
+        work = scratch("_split_headzero")
+        shutil.rmtree(work, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        work.mkdir(parents=True)
+        path = work / "from0_ID0001.csv"
+        self._write(path, [(i * 0.01, i) for i in range(500)], 16 * 3600, 0)
+        log = canlog.read_can_session([path], discover=False, dbc_dir=[DBC_DIR],
+                                      use_sidecar=False, write_sidecar=False)
+        self.assertEqual(log.can["head_gap_s"], 0.0)
+        self.assertNotIn("不是从这次记录的起点开始的", " ".join(log.can["notes"]))
+
+    @_needs(DATA)
+    def test_the_real_sidebar_never_promises_more_files_than_it_loads(self):
+        """真数据：每个 ``+N`` 都要与读到的份数、字节数对上。
+
+        结构那一半（``+N`` ⇔ 成员表长度）对**所有**条目查，不读文件；读文件只挑
+        真正会踩坑的那些——分卷跨目录的、以及同一个文件名在两个数据根里各有一份的
+        （``read_can_session`` 的邻居扫描正是在这两种情况下会"自己扩"或"扩不到"）。
+        全量读 74 场要两分多钟，而单测的反馈时间本身是资产。
+        """
+        roots = [DATA] + ([CAN_DATA] if CAN_DATA.exists() else [])
+        library = librarymod.SessionLibrary(
+            [root for root in roots if root.exists()], maths_root=ROOT,
+            index_cache=scratch("_split_index.json"),
+        )
+        self.addCleanup(library.close)
+        names = library.names()
+        by_stem: dict[str, list[Path]] = {}
+        for root in library.roots:
+            for path in sorted(root.rglob("*.csv")):
+                if canlog.looks_like_frames(path):
+                    by_stem.setdefault(path.stem, []).append(path)
+        merged = 0
+        suspicious: list[str] = []
+        for name in names:
+            hit = re.search(r"\+(\d+)$", name)
+            want_files = 1 + int(hit.group(1)) if hit else 1
+            members = library.members_of(name) or []
+            if not members:
+                continue                       # .ld / 通道表，不是帧表场次
+            self.assertEqual(len(members), want_files, f"{name} 的成员表与名字不符")
+            self.assertEqual(len({str(item) for item in members}), len(members),
+                             f"{name} 的成员表里有重复文件")
+            merged += 1 if hit else 0
+            twin = len(by_stem.get(Path(members[0]).stem, [])) > 1
+            if len({item.parent for item in members}) > 1 or twin:
+                suspicious.append(name)
+        self.assertGreater(merged, 0, "真数据里应该有分卷并起来的场次")
+        # 真的读一遍：这几个才是"名字与内容分家"会发生的地方。
+        for name in suspicious:
+            log = library.get(name)
+            members = library.members_of(name) or []
+            self.assertEqual(len(log.can["sources"]), len(members), name)
+            self.assertEqual(log.can["bytes"],
+                             sum(item.stat().st_size for item in members), name)
+        # 车队要是把重名/跨目录那几份收拾干净了，这里就一份都不读——**不因为"数据变
+        # 整齐了"而变红**（结构那半条已经查过了）。
+
+
 class TestViewerScript(unittest.TestCase):
     """The generated workbench must execute without throwing (needs node)."""
 

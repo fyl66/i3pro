@@ -201,7 +201,7 @@ def _positions(header: list[str], roles: dict[str, str]) -> dict[str, int | None
     #: 报告要能说清每条 ID 是从哪条总线收到的——同一条 ID 出现在两条总线上时，
     #: 现在按同一个 ID 解，那件事必须吵出来（见 read_can_session 的 notes）。
     positions = {role: find(role) for role in
-                 ("time", "id", "data", "wall", "format", "length", "bus")}
+                 ("time", "id", "data", "wall", "format", "length", "bus", "index")}
     positions["width"] = max(
         index for index in (positions["time"], positions["id"], positions["data"]) if index is not None
     )
@@ -236,7 +236,9 @@ def _row(cells: list[str], roles: dict[str, str], positions: dict) -> tuple | No
 def summarise(path: str | Path, roles: dict[str, str] | None = None) -> dict:
     """一份帧表的首尾（只看第一行和最后一行，不整份扫）。
 
-    并场判断只需要这四个时间：第一次/最后一次的墙钟与相对时钟。
+    并场判断只需要那四个时间：第一次/最后一次的墙钟与相对时钟。顺带记下首末两行的
+    帧序号（``序号`` 列）——"这份日志是不是从这次记录的起点开始的"就靠它和
+    ``first_t`` 一起判断（:func:`read_can_session` 会拿它提醒缺卷）。
     """
     path = Path(path)
     header = read_header(path)
@@ -258,18 +260,31 @@ def summarise(path: str | Path, roles: dict[str, str] | None = None) -> dict:
             step *= 2
     lines = [line for line in tail.split(b"\r\n") if line.strip()]
     last = _decode_text_line(lines[-1]) if lines else ""
-    head = _row(first.rstrip("\r\n").split(","), roles, positions)
-    end = _row(last.split(","), roles, positions)
+    head_cells = first.rstrip("\r\n").split(",")
+    end_cells = last.split(",")
+    head = _row(head_cells, roles, positions)
+    end = _row(end_cells, roles, positions)
     if head is None or end is None:
         raise ValueError(
             f"{path.name}: 首行或末行不是一帧数据。"
             "确认这份文件是原始 CAN 帧表（而不是解码后的通道表），"
             "列名不一样时用侧车的 roles 指定。"
         )
+    index_at = positions.get("index")
+
+    def seq_of(cells: list[str]) -> int | None:
+        if index_at is None or len(cells) <= index_at:
+            return None
+        try:
+            return int(cells[index_at])
+        except ValueError:
+            return None
+
     return {
         "path": path,
         "first_t": head[0], "last_t": end[0],
         "first_wall": head[4], "last_wall": end[4],
+        "first_seq": seq_of(head_cells), "last_seq": seq_of(end_cells),
         "bytes": size,
     }
 
@@ -901,6 +916,7 @@ def read_can_session(
     dbc_dir: str | Path | None = None,
     rate: float | None = None,
     merge: bool = True,
+    discover: bool = True,
     roles: dict[str, str] | None = None,
     dbc_file: str | None = None,
     write_sidecar: bool = True,
@@ -910,6 +926,11 @@ def read_can_session(
 
     ``merge`` 打开时先把连续记录并成一次（ticket #39，实测 9 份 -> 7 场）；
     列角色、DBC、主时间基都从侧车读，缺省值写在 :data:`DEFAULT_ROLES` 里。
+
+    ``discover=False`` 是"调用方已经说了这场次由哪几份文件组成，别再自己找"。
+    场次库就是这么用的：它算 ``+N`` 名字时是**跨所有数据根**一起分组，而这里的
+    邻居扫描只看主文件自己那个目录——两边规则不一致时，侧边栏写着 ``+N``、点开
+    只有一半（一份在 ``i2pro_data/``、另一份在 ``can_data/`` 时必现）。
     """
     given = [Path(paths)] if isinstance(paths, (str, Path)) else [Path(p) for p in paths]
     if not given:
@@ -924,7 +945,7 @@ def read_can_session(
         except (TypeError, ValueError):
             rate = None
     master_rate = float(rate or 100.0)
-    if merge and len(given) == 1:
+    if merge and discover and len(given) == 1:
         # 单份文件也要看一眼同目录的邻居：切分后的第 1 份不是"一场"。
         siblings = sorted(p for p in first.parent.glob("*.csv") if looks_like_frames(p))
         if len(siblings) > 1 and first in siblings:
@@ -1053,6 +1074,22 @@ def read_can_session(
         bus_counts=bus_counts, bus_names=bus_names,
     )
 
+    # 这份日志是不是**从这次记录的起点**开始的？记录仪切分卷之后，后续卷的相对时钟
+    # 接着上一卷走（实测 875.783→875.783）；真正重新开录才会归零。所以首帧的相对
+    # 时钟明显不等于 0，就说明前面还有卷，而它们不在数据目录里——**不写这一条，
+    # 界面就会把起始时间重新归零，看起来像 i3pro 吃掉了开头那几分钟**（真发生过：
+    # 10-07 那批的首帧相对时钟是 585.7 s、序号 2,000,000）。
+    head_gap = float(summaries[0]["first_t"])
+    head_seq = summaries[0].get("first_seq")
+    if head_gap >= 1.0:
+        seq_text = f"，首帧的「序号」已经是 {head_seq:,}" if isinstance(head_seq, int) else ""
+        notes.append(
+            f"这份日志不是从这次记录的起点开始的：首帧的相对时钟是 {head_gap:.1f} s"
+            f"{seq_text}。也就是说前面约 {head_gap:.0f} 秒（记录仪时钟意义上的）"
+            "不在这批文件里——不是 i3pro 丢的，是数据目录里本来就少了那几卷。"
+            "下一步：把时间戳更早的那几卷也放进同一个数据目录，再刷新这一场。"
+        )
+
     can = {
         "frames": total_frames,
         "ids": len(counts),
@@ -1074,6 +1111,9 @@ def read_can_session(
         "sources": [path.name for path in given],
         "merged": bool(merge and len(given) > 1),
         "merge_evidence": recording_evidence,
+        #: 首帧的相对时钟 / 帧序号：非 0 就是"这份日志前面还有卷，但不在这儿"。
+        "head_gap_s": head_gap,
+        "head_seq": head_seq,
         "master_rate": master_rate,
         "bytes": sum(path.stat().st_size for path in given),
         "channels": channel_rows,

@@ -769,7 +769,7 @@ def session_from_frame(
     )
 
 
-def open_session(path: str | Path, **kwargs):
+def open_session(path: str | Path, *, sources=None, **kwargs):
     """按**内容**挑读取器，调用方从此不用关心格式。
 
     ``.csv`` 有两种完全不同的东西：i2 Pro / 别的工具导出的**通道表**，和 CAN 记录仪
@@ -781,6 +781,10 @@ def open_session(path: str | Path, **kwargs):
 
     ``.txt`` / ``.tsv`` 是纯分隔文本（ticket #32）：分隔符要猜、时间列可能没有，
     但装出来仍然是同一个场次形状。
+
+    ``sources`` 是"这场次由哪几份文件组成"，**由调用方给**（场次库从它算 ``+N`` 的
+    同一处分组拿）。不给时帧表读取器退回"只看同目录的邻居"——单份文件在命令行上
+    直接打开时就是这个行为。给与不给必须只影响**成员怎么找**，不影响读法。
     """
     path = Path(path)
     suffix = path.suffix.lower()
@@ -792,6 +796,13 @@ def open_session(path: str | Path, **kwargs):
         # 的那版把 `dbc_dir` 也转给了通道表读取器，于是**每个 CSV 场次的请求都 500**
         # （真发生过：ticket #38 那次回归，靠恢复金标准数据才暴露出来）。
         if canlog.looks_like_frames(path):
+            if sources:
+                # 调用方说了算：给一份就是一份，别再回邻居里扩（那正是"名字说 +N、
+                # 点开只有一半"的来源）。见 canlog.read_can_session 的 discover。
+                return canlog.read_can_session(
+                    [Path(item) for item in sources], discover=False,
+                    **_accepted_by(canlog.read_can_session, kwargs),
+                )
             return canlog.read_can_session(path, **_accepted_by(canlog.read_can_session, kwargs))
         return read_csv_session(path, **_accepted_by(read_csv_session, kwargs))
     if suffix in (".txt", ".tsv"):

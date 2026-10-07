@@ -3489,6 +3489,64 @@ outside tolerance`；两份金标准快照各 `PASS`；真浏览器 **188 项检
 
 ---
 
+## A73 · 侧边栏的 `+N` 与"点开读到哪几份"出自同一处（本次修复）
+
+用户报的现象：**两份时间相接的 CSV，单独看各自都有数据，合并成 `+1` / `+2` 之后数据就少了。**
+
+实测根因**不是合并丢数据**，而是"这场由哪几份文件组成"这件事被**两个地方各判了一遍**，
+而两边规则不一样：
+
+* 侧边栏算名字时（`library._entries()`）是**跨所有数据根**一起分组
+  （`_groups(frames)`）——而 `启动.bat` 正好把 `i2pro_data` 与 `can_data` 都当数据根；
+* 打开时（`read_can_session`）只扫**主文件自己那个目录**的邻居
+  （`first.parent.glob("*.csv")`）。
+
+于是：一份在 `i2pro_data/`、另一份在 `can_data/` 时，侧边栏写着 `recA_ID0001+1`，
+点开**只有 `recA` 一份**。最小复现（两卷各 1,000 帧、分别放在两个数据根）：
+
+| | 侧边栏 | 点开这一场 |
+| --- | --- | --- |
+| 修之前 | `['recA_ID0001+1']` | 帧 **1000** · 来源 `['recA_ID0001.csv']` · 9.990 s |
+| 修之后 | `['recA_ID0001+1']` | 帧 **2000** · 来源 `['recA_ID0001.csv','recB_ID0001.csv']` · **19.990 s** |
+
+修法：**分组只判一次，判完把成员表交下去**。
+
+* `library` 新增 `_entries()`（名字 → 主文件 + **全部成员**），`_paths()` 由它派生，
+  并新增 `members_of(name)`；
+* `SessionLibrary.get(name)` 把成员表交给 `library.open_session(..., sources=...)`
+  → `csvlog.open_session(..., sources=...)` → `canlog.read_can_session(given, discover=False)`；
+* `read_can_session` 新增 `discover`：给了成员表（哪怕只有一份）就**不许**再回邻居里扩——
+  "一份也被扩成两份"是同一个坑从后门回来（实测：`152948` / `153603` 这两个条目）。
+
+顺带把上一轮查出来的另一半补上：**日志不是从记录起点开始时要说出来**。
+
+```powershell
+# 两卷跨两个数据根：名字说 +1、内容必须也是两份
+python -m unittest tests.test_i3pro.TestSplitSessionsAreWhole -v
+
+# 真数据：侧边栏每个 +N 都要与成员表、字节数对上
+python -m unittest tests.test_i3pro.TestSplitSessionsAreWhole.test_the_real_sidebar_never_promises_more_files_than_it_loads -v
+
+# 首帧相对时钟不是 0 -> 报告里必须明说"前面还有卷，不在这儿"
+python -m unittest tests.test_i3pro.TestSplitSessionsAreWhole.test_a_log_that_starts_mid_recording_says_so -v
+```
+
+**通过判据（本机实测）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 跨数据根的分卷整场读进来 | `recA_ID0001+1`：2 份来源 / 2,000 帧 / 19.990 s，字节数 = 两份文件之和 |
+| 同一对放进同一个目录结论相同 | 2 份 / 2,000 帧（规则只有一条） |
+| 只声明一份时不再自己扩 | `discover=False` 下 `sources == ['recB_ID0001.csv']`、1,000 帧 |
+| 真数据不再有名实不符 | 侧边栏 **74 个条目 / 12 个 `+N` 分卷场 / 0 个不一致** |
+| 起点不在 0 的日志会出声 | 10-07 那场：`head_gap_s = 585.700522`、`head_seq = 2,000,000`，报告里写着「前面约 586 秒不在这批文件里——不是 i3pro 丢的」 |
+| 起点就是 0 的日志不啰嗦 | `head_gap_s == 0.0`，报告里没有那句话 |
+
+**回归四项（本机实测）**：`Ran 480 tests` + `OK`；`verify_ld_vs_csv` `PASS - 0 channel(s)
+outside tolerance`；两份金标准快照各 `PASS`；真浏览器 **188 项检查：188 通过，0 失败**。
+
+---
+
 测试覆盖：
 
 | 分组 | 内容 |
@@ -3537,6 +3595,7 @@ outside tolerance`；两份金标准快照各 `PASS`；真浏览器 **188 项检
 | `TestGpsFix` / `TestGpsFixOverHttp` | GPS 校正（#14，15 项）：`(0,0)` 只计数不进轨迹、跳点与空档各自断开、跳变两端都算坏点、**关掉校正逐点不变**、按秒与按更新周期两种偏移、分段插值绝不跨空档、路径里程跳过跳变、距离轴作用域的开关、抽稀后断点必须落在**跨着跳变的那一段**上、参数校验的中文下一步、侧车往返与坏文件、金标准（耐久 1 个 214.5 m 跳点且断的就是那 214 m 幽灵线 / 高避 0 跳点 638 个空定位）；HTTP 的 GET / PUT / 落盘 / 400 不动侧车 / `.ld` 字节不变 |
 | `TestLaunchers` | 一键启动（5 项）：快照批量导出 + 索引页、**原始 CAN 帧表也导得出快照**（A54）、**两份连续记录只出一个 `+1` 快照**、缺数据目录的报错、端口占用自动换端口 |
 | `TestBootstrap` | 新机器怎么装（6 项，A72）：`requirements.txt` 与 `pyproject.toml` 逐包相同、清单必须全是 ASCII（pip 按本机 locale 解码，一个汉字就装不上）、`src/` 里 import 的每个第三方包都声明过、`i3pro.cmd` 把"没 Python"与"缺包"分成两句并给出 pip 命令、安装脚本引用同一份清单、**三条 bat 的非正常分支真能打印**（`启动.bat` 的报错分支曾被一个没转义的 `)` 整死） |
+| `TestSplitSessionsAreWhole` | 分卷场次的"名字 = 内容"（6 项，A73）：**跨两个数据根的分卷整场读进来**（修之前侧边栏写 `+1`、点开只有一份）、同一对放进同一个目录结论一致、只声明一份时不再回邻居里扩（`discover=False`）、首帧相对时钟不是 0 时报告里明说"前面还有卷"、起点就是 0 时不啰嗦、真数据 74 个条目 / 12 个 `+N` 场零不一致 |
 | `TestTimebase` | 主时间基（#22，5 项）：那条公式在 `src` 里只剩 `timebase.py` 一处、`tests` 里 0 处、两份金标准的轴与改动前逐点相同（长度 / 首末点 / 和）、Parquet 与报表取的是同一条轴、`--rate` 换的是同一个答案 |
 | `TestSidecar` | 侧车文件（#16，7 项）：六个领域模块里不再有 `read_text`/`write_text`/`json.load`/`json.dump`、六种侧车都在一处登记（含 `.ld`/`.csv`/名字带点的场次）、缺失=空、读坏=报错且**文件原样留着**（坏 JSON 与顶层形状两种）、写=原子替换且不留临时文件、新加一种侧车只要一条登记、快照/serve/命令行三条路径读到的侧车逐字节一致 |
 | `TestDbc` | DBC 解析（#37，15 项）：`@0` 锯齿位序（`0x4A97` 而不是按位反转的 `0x52E9`）、`@1` 小端、有符号、factor/offset、`VAL_` 值表、标准帧与扩展帧分开、伪报文跳过（信号不许挂到上一条报文上）、**多路复用按选择子分路**（`m0` 也是一路；与 cantools 逐帧比数值**和**"这一帧该不该有这条信号"）、DLC 与实际载荷不一致时以载荷为准、两份真 DBC 的报文/信号数、14 条报文解出 46 条信号、与 `cantools` 对拍（真实帧 11.3 万帧 / 随机载荷 540 个值） |

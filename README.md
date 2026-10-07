@@ -128,7 +128,7 @@ MoTeC 自己导出的两个 CSV（182 MB / 425 MB）。
 | **数据导出（CSV / Excel）** | 把数据带走去 Excel / Python / MATLAB 接着算：范围可选**全部日志 / 当前视图 / 选中圈 / 光标 A–B / 指定时间段**（`12.5s`，或 `2026-09-14 12:34:56.789`，也可以只写 `12:35:10.123`）/ **指定距离段**，边界**左闭右闭**；通道可全选或按侧边栏勾选（数学通道单独开关）；采样可选 **Auto**（各通道保留原始采样点，宽表以并集为索引、缺失留空）或统一采样率（1/5/10/20/50/100/200/500 与自定义，`linear` / `hold` / `nearest` / `mean`）；主索引可选 `time_s`（相对秒）、`timestamp`（绝对时间戳＝场次起点 + 相对秒）或 `distance_m`——**范围自己决定轴**（选距离段就是米、选时间段就是秒，主索引下拉跟着锁，免得把 1200–1850 当成"秒"导出去）。CSV 是 UTF-8 **带 BOM** 的宽表或长表（可选打包 `metadata.json`），Excel 是「元数据」sheet + 「数据」sheet、超 104 万行自动分 sheet——`.xlsx` 用**标准库**写（`zipfile` + 最小 OOXML），没有为它多一个运行期依赖。面板先给预计行数与体积，进度条按 `Content-Length` 走、再点一次就是取消。实测两份金标准 `--rate 10`：高避 **4,641 行 × 442 列 / 6.7 MiB**、耐久 **19,431 行 × 347 列 / 22.6 MiB**，末行时刻 `463.99` / `1942.99`。命令行同一个出口：`i3pro export <文件> --rate 10 --out x.csv` |
 | **CAN 原始帧 → 场次** | 车队自己录的原始帧表（`can_data/*.csv`，GBK、`x\| 5A 64 …`）直接读成与 `.ld` **同形状**的场次：DBC **取并集**解码，**含子目录**（2026-10-05 实测：18 份 DBC / 137 条报文 / **124 条通道** / 覆盖 3,013,146 帧 = **81.77%**；只挑一份最多只有 46 条 / 24.6%），并写明**每条通道来自哪份 DBC**、每份的 sha256 与贡献。除了 `Vx_KF`（车速 → 距离轴，实测 0.1–5546.8 m），`dbc/261004/` 那批还带来 S-Motion 的光学地面速度、Xsens MTi 的姿态/加速度/**经纬度**与 `sw260425` 的方向盘转角；**多路复用报文**（`M` / `m<n>`，如 `IMU.dbc` 的双帧 IMU：byte0 选帧类型、后 6 字节分时是加速度或角速度）按选择子分路解成各自的通道，两路的真实更新率分开记（实测各 47.67 Hz）。解析器是标准库手写的（`cantools` 只在测试里当裁判逐信号对拍），用日志里实际的字节长度、不用 DBC 的 DLC；没有 DBC 覆盖的 ID 留在**导入报告**里（帧数 / 帧率 / 前 8 字节），连续记录自动并场（9 份 → 7 次记录） |
 | **导入别人的表（CSV / Excel / TXT）** | 队友发来的不是 `.ld` 也能用：`.csv`（i2 Pro 导出、别的队/别的设备的表）与 **`.xlsx`** 都读成与 `.ld` **同一种场次**——进侧边栏、能画图/切圈/比圈/报表/导出。列名走 **原名 → 别名 → 手工覆盖** 三级回落，单位参与判断与补齐，选择存在 `<场次>.map.json` 侧车（`.ld` 永远只读）。Excel 多张 sheet 时**默认挑第一张能当通道表读的**（自己的导出把「元数据」放第一张），`--sheet` 可以指定；日期单元格 / ISO 文本的时间列折成相对秒；**宏 / 图表 / 外部链接 / 公式没有缓存值**这四种读不了的形态会明确报错并说下一步。分隔文本（`.txt` / `.tsv` / 分隔符不是逗号的 `.csv`）在**导入前给预览**：前 20 行 + 认出来的分隔符与编码，分隔符 / 编码 / 表头行 / 单位行都能在下拉框里改，"没有时间列"默认拒绝、可以显式选**按固定采样率生成时间列**——预览与导入是**同一条代码路径**，改了下拉框立刻看得见结果。硬判据是 **round-trip**：同一次导出的 CSV / xlsx / TXT 读回来逐点相同 |
-| **工程化** | **474 项单测全绿**（真实数据回归 + HTTP 端到端 + 无头驱动前端 **577 个断言点**），另有 **真浏览器真鼠标验收 188 项全过**（`tools\verify_clicks.py`，Edge 的 DevTools 协议发真事件，跑在两份金标准上）；运行期依赖只有 numpy/pandas/pyarrow，**唯一的例外是 `openpyxl`（只用于读 Excel，见 [ADR-0003](docs/adr/0003-openpyxl-for-reading-excel.md)）**，清单钉在 `requirements.txt` 上（与 `pyproject.toml` 同一份，有单测盯着别漂移）；改这个仓库的硬性规则见 [AGENTS.md](AGENTS.md) |
+| **工程化** | **480 项单测全绿**（真实数据回归 + HTTP 端到端 + 无头驱动前端 **577 个断言点**），另有 **真浏览器真鼠标验收 188 项全过**（`tools\verify_clicks.py`，Edge 的 DevTools 协议发真事件，跑在两份金标准上）；运行期依赖只有 numpy/pandas/pyarrow，**唯一的例外是 `openpyxl`（只用于读 Excel，见 [ADR-0003](docs/adr/0003-openpyxl-for-reading-excel.md)）**，清单钉在 `requirements.txt` 上（与 `pyproject.toml` 同一份，有单测盯着别漂移）；改这个仓库的硬性规则见 [AGENTS.md](AGENTS.md) |
 
 完整验收清单与复现命令见 **[`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md)**；
 规划、里程碑与风险见 **[`docs/PLAN.md`](docs/PLAN.md)**。
@@ -196,7 +196,7 @@ i3pro.cmd           命令行入口（探测 Python + 查依赖），上面几�
 requirements.txt    运行期依赖清单（与 pyproject.toml 同一份，有单测盯着）
 docs/               PLAN.md 规划 · ACCEPTANCE.md 验收清单 · ld-format.md 格式逆向记录
 tools/              verify_ld_vs_csv.py 解析对照 · smoke_viewer.js 无头驱动前端
-tests/              474 项单测
+tests/              480 项单测
 maths/              全局数学通道定义（global.json，跨场次复用）
 out/                生成物（快照 HTML / Parquet），已在 .gitignore 里
 i2pro_data/         试车数据（.ld/.ldx/.csv/.txt/.tsv），不进仓库；只有 dbc/ 跟着仓库走
@@ -242,7 +242,7 @@ src/i3pro/
 ## 开发
 
 ```powershell
-python -m unittest discover -s tests -v      # 474 项，无数据文件时自动 skip
+python -m unittest discover -s tests -v      # 480 项，无数据文件时自动 skip
 python tools\verify_ld_vs_csv.py             # 与 i2 Pro CSV 逐通道对照
 node tools\smoke_viewer.js out\demo.html     # 无头驱动前端：缩放/光标/分组/信标编辑/数学通道/区段/报表/直方图/频谱/注释/GPS 校正/导出/工作表/CAN 报告等 577 个断言点
 python tools\verify_clicks.py                # 真 Edge 发真鼠标/键盘：188 项交互验收（需要 Edge + 金标准数据）

@@ -50,15 +50,20 @@ def dumps(value) -> str:
 _file_stamp = cache.file_stamp
 
 
-def open_session(path: str | Path, *, dbc_dirs=()):
+def open_session(path: str | Path, *, dbc_dirs=(), sources=None):
     """打开一份日志文件；CAN 帧表按给定的目录找 DBC。
 
     这是**打开**这一半，命令行与场次库共用（ticket #48）。以前命令行直接调
     `csvlog.open_session`，场次库另写一遍，于是"哪条路带上 DBC 目录约定"变成了
     两处各自记着的事。
+
+    ``sources`` 是这场次**全部**的分卷文件（CAN 记录仪在 1,000,000 帧处切开）。
+    场次库从算 ``+N`` 名字的**那一处**分组把它传下来：名字与内容必须出自同一处，
+    否则会出现"侧边栏写着 +1、点开只有一份"（一份在 ``i2pro_data/``、另一份在
+    ``can_data/`` 时就必现）。
     """
     directories = [Path(item) for item in dbc_dirs]
-    return csvlog.open_session(path, dbc_dir=directories or None)
+    return csvlog.open_session(path, dbc_dir=directories or None, sources=sources)
 
 
 def attach_maths(log, *, maths_root: str | Path | None = None, cache=None) -> list[dict]:
@@ -193,8 +198,16 @@ class SessionLibrary:
             self._group_cache = (stamp, groups)
         return groups
 
-    def _paths(self) -> dict[str, Path]:
-        found: dict[str, Path] = {}
+    def _entries(self) -> dict[str, tuple[Path, list[Path]]]:
+        """名字 -> (主文件, 这场次的**全部**成员文件)。
+
+        ``+N`` 这个名字和"这场到底由哪几份文件组成"必须出自**同一处**。分卷是
+        **跨所有数据根**一起判的，而 ``read_can_session`` 只看主文件自己那个目录的
+        邻居——两边规则不一致时，侧边栏写着 ``+1``、点开只有一份，数据就这么"少"
+        了（真发生过：一份在 ``i2pro_data/``、另一份在 ``can_data/``，而 ``启动.bat``
+        正好把这两个目录都当数据根）。所以这里把成员表一起交下去，见 :meth:`get`。
+        """
+        found: dict[str, tuple[Path, list[Path]]] = {}
         frames: list[Path] = []
         for root in self.roots:
             if not root.exists():
@@ -211,7 +224,7 @@ class SessionLibrary:
                         # Two sources, one stem: keep both, so a CSV export of a
                         # session that also has its .ld is not silently hidden.
                         name = f"{name} ({path.suffix.lstrip('.').lower()})"
-                    found.setdefault(name, path)
+                    found.setdefault(name, (path, [path]))
         # 记录器在恰好 1,000,000 帧处切文件：9 份其实是 7 次记录（实测），这里把
         # 同一次记录的后续文件并进第一份，侧边栏里就只有一场（ticket #39）。
         for group in self._groups(frames):
@@ -219,8 +232,16 @@ class SessionLibrary:
             name = items[0].stem + (f"+{len(items) - 1}" if len(items) > 1 else "")
             if name in found:                      # 同名 .ld 在场时两场都要看得见
                 name = f"{name} (can)"
-            found.setdefault(name, items[0])
+            found.setdefault(name, (items[0], items))
         return found
+
+    def _paths(self) -> dict[str, Path]:
+        return {name: first for name, (first, _members) in self._entries().items()}
+
+    def members_of(self, name: str) -> list[Path] | None:
+        """这场次由哪几份文件组成（``.ld`` 这类单文件场次就是它自己）。"""
+        entry = self._entries().get(name)
+        return None if entry is None else list(entry[1])
 
     def names(self) -> list[str]:
         return list(self._paths())
@@ -230,9 +251,10 @@ class SessionLibrary:
 
     # ------------------------------------------------------------------- load
     def get(self, name: str) -> ldmod.LogFile:
-        path = self.path_of(name)
-        if path is None:
+        entry = self._entries().get(name)
+        if entry is None:
             raise KeyError(name)
+        path, members = entry
         key = str(path)
         with self._lock:
             if key in self._cache:
@@ -240,7 +262,8 @@ class SessionLibrary:
                 return self._cache[key]
         # CAN 场次要一份 DBC 才能解码；DBC 放在各个数据根的 dbc/ 里，挨着场次的
         # 那个目录最优先（原始帧日志在 can_data/，DBC 在 i2pro_data/dbc/）。
-        log = open_session(path, dbc_dirs=self._dbc_dirs())
+        # ``members`` 必须一起交下去：名字里的 ``+N`` 就是从它算出来的。
+        log = open_session(path, dbc_dirs=self._dbc_dirs(), sources=members)
         with self._lock:
             self._cache[key] = log
             while len(self._cache) > self.cache_size:

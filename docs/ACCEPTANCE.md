@@ -3433,6 +3433,62 @@ outside tolerance`；两份金标准快照各 `PASS`（7 圈 / 471 通道行、2
 
 ---
 
+## A72 · 新机器 clone 下来能不能跑（本次新增）
+
+README 一直写着"`git clone` 下来就能跑"，但那句话只在**机器上已经有那四个包**时成立。
+拿一个什么都没装的解释器实跑一次，暴露出三件事：
+
+1. `i3pro.cmd` 用 `python -m i3pro --help` 当探针找解释器。缺 `numpy` 时它自己也失败，
+   于是**"缺包"被报成"找不到 Python 3"**——照着提示去重装 Python，装完还是跑不起来。
+2. 仓库里**没有 `requirements.txt`**，也没有一句话说该装什么。`pyproject.toml` 里有，
+   但没有任何东西保证它和实际 import 对得上。
+3. 三个 bat 的**非正常分支是坏的**：`启动.bat` 的报错分支里 `echo` 带一个没转义的
+   `)`（藏在 `.xlsx)` 里），提前关掉 `if (` 块，cmd 直接 `. was unexpected at this
+   time.` 一个字都不打印；`导入数据.bat` 的用法分支同一处毛病。而"没数据 / 缺依赖"
+   正是新机器上必走的那一支。
+
+```powershell
+# 1) 干净解释器：一个什么都没装的 venv，等价于"队友刚装完 Python 的机器"
+python -m venv $env:TEMP\i3pro-clean
+& "$env:TEMP\i3pro-clean\Scripts\python.exe" -m pip list     # 只有 pip
+
+# 2) 不装依赖直接跑：必须把该敲的命令打出来，不是"找不到 Python"
+$env:PATH = "$env:TEMP\i3pro-clean\Scripts;$env:PATH"
+.\i3pro.cmd --help
+
+# 3) 一键装依赖：双击 安装依赖.bat 的等价命令行
+cmd /c "安装依赖.bat < nul"
+
+# 4) 再跑一次：这次要出来中文帮助
+.\i3pro.cmd --help
+
+# 5) 清单不许漂移 + 三条 bat 的解析 + 第三方 import 全覆盖
+python -m unittest tests.test_i3pro.TestBootstrap -v
+```
+
+**通过判据（本机实测）**：
+
+| 步骤 | 实测 |
+| --- | --- |
+| 干净 venv | `pip list` 只有 `pip 24.2`（Python 3.13.0） |
+| 缺包时 `i3pro.cmd --help` | 打印 `[ERROR] Python python found, but the runtime packages are missing.` + `python -m pip install -r requirements.txt`，**退出码 9009**（不再说"找不到 Python"） |
+| `安装依赖.bat` | `Successfully installed … numpy-2.5.3 … pandas-3.0.6 … pyarrow-25.0.1 … openpyxl-3.1.5`，随后自己念出版本号；**退出码 0** |
+| 装完 `i3pro.cmd --help` | 中文帮助正常打印 `MoTeC i2 Pro 数据工具链 (i3pro)` + 14 个命令 |
+| `TestBootstrap` | **6 项全过**（三条 bat 的解析、ASCII 清单、清单一致性、第三方 import 全覆盖、安装脚本指向同一份清单） |
+| 全新 clone 的场次数 | `SessionLibrary(['i2pro_data']).names() == []`——**一个场次都没有是正常的**，界面写"没有找到任何日志文件" |
+
+顺带修掉一个**当场踩到**的坑：`requirements.txt` 第一版里有一句中文注释，
+`安装依赖.bat` 直接死在
+`UnicodeDecodeError: 'gbk' codec can't decode byte 0xa3 in position 124`——
+pip 在没有 BOM 时按**本机 locale**（中文 Windows 是 cp936）解码 requirements 文件，
+一个非 ASCII 字节就让整个安装停在下载之前。所以那份清单**必须全是 ASCII**，由
+`TestBootstrap.test_requirements_txt_lists_exactly_the_pyproject_dependencies` 盯着。
+
+**回归四项（本机实测）**：`Ran 474 tests` + `OK`；`verify_ld_vs_csv` `PASS - 0 channel(s)
+outside tolerance`；两份金标准快照各 `PASS`；真浏览器 **188 项检查：188 通过，0 失败**。
+
+---
+
 测试覆盖：
 
 | 分组 | 内容 |
@@ -3480,6 +3536,7 @@ outside tolerance`；两份金标准快照各 `PASS`（7 圈 / 471 通道行、2
 | `TestNotes` / `TestNotesOverHttp` | 注释（#15，15 项）：文字折行与截断、时刻校验的下一步、增删改不改原表、距离在主采样上插值、轨迹取最近抽稀点、越界不猜位置、侧车往返与坏文件、**注释不动圈速表**、HTTP 的 PUT 落盘 / 400 说明下一步 / `.ld` 字节不变 |
 | `TestGpsFix` / `TestGpsFixOverHttp` | GPS 校正（#14，15 项）：`(0,0)` 只计数不进轨迹、跳点与空档各自断开、跳变两端都算坏点、**关掉校正逐点不变**、按秒与按更新周期两种偏移、分段插值绝不跨空档、路径里程跳过跳变、距离轴作用域的开关、抽稀后断点必须落在**跨着跳变的那一段**上、参数校验的中文下一步、侧车往返与坏文件、金标准（耐久 1 个 214.5 m 跳点且断的就是那 214 m 幽灵线 / 高避 0 跳点 638 个空定位）；HTTP 的 GET / PUT / 落盘 / 400 不动侧车 / `.ld` 字节不变 |
 | `TestLaunchers` | 一键启动（5 项）：快照批量导出 + 索引页、**原始 CAN 帧表也导得出快照**（A54）、**两份连续记录只出一个 `+1` 快照**、缺数据目录的报错、端口占用自动换端口 |
+| `TestBootstrap` | 新机器怎么装（6 项，A72）：`requirements.txt` 与 `pyproject.toml` 逐包相同、清单必须全是 ASCII（pip 按本机 locale 解码，一个汉字就装不上）、`src/` 里 import 的每个第三方包都声明过、`i3pro.cmd` 把"没 Python"与"缺包"分成两句并给出 pip 命令、安装脚本引用同一份清单、**三条 bat 的非正常分支真能打印**（`启动.bat` 的报错分支曾被一个没转义的 `)` 整死） |
 | `TestTimebase` | 主时间基（#22，5 项）：那条公式在 `src` 里只剩 `timebase.py` 一处、`tests` 里 0 处、两份金标准的轴与改动前逐点相同（长度 / 首末点 / 和）、Parquet 与报表取的是同一条轴、`--rate` 换的是同一个答案 |
 | `TestSidecar` | 侧车文件（#16，7 项）：六个领域模块里不再有 `read_text`/`write_text`/`json.load`/`json.dump`、六种侧车都在一处登记（含 `.ld`/`.csv`/名字带点的场次）、缺失=空、读坏=报错且**文件原样留着**（坏 JSON 与顶层形状两种）、写=原子替换且不留临时文件、新加一种侧车只要一条登记、快照/serve/命令行三条路径读到的侧车逐字节一致 |
 | `TestDbc` | DBC 解析（#37，15 项）：`@0` 锯齿位序（`0x4A97` 而不是按位反转的 `0x52E9`）、`@1` 小端、有符号、factor/offset、`VAL_` 值表、标准帧与扩展帧分开、伪报文跳过（信号不许挂到上一条报文上）、**多路复用按选择子分路**（`m0` 也是一路；与 cantools 逐帧比数值**和**"这一帧该不该有这条信号"）、DLC 与实际载荷不一致时以载荷为准、两份真 DBC 的报文/信号数、14 条报文解出 46 条信号、与 `cantools` 对拍（真实帧 11.3 万帧 / 随机载荷 540 个值） |

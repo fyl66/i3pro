@@ -6,9 +6,12 @@
 数据源不止 `.ld`——i2 Pro 导出的 CSV、别人的 Excel、以及车队自己录的原始 CAN 帧表（按 DBC 解码）
 读进来都是**同一种场次**。
 
-不依赖任何商业软件、不需要联网、不需要 npm、不需要 Rust。
-只用 Python 标准库 + numpy/pandas/pyarrow（读 Excel 另加一个 `openpyxl`，见
-`docs/adr/0003`），`git clone` 下来就能跑。
+不依赖任何商业软件、不需要 npm、不需要 Rust、不需要构建。
+运行期只用 Python 标准库 + 三个包（numpy / pandas / pyarrow），读 Excel 另加一个
+`openpyxl`（见 `docs/adr/0003`）。
+
+`git clone` 下来**先装一次那四个包**（唯一需要联网的一步），之后全程离线。
+三步走见下面[从零开始](#从零开始换台机器--刚-clone-下来)。
 
 ```
 i2pro_data/*.ld ──► 原生解析(mmap) ──► Parquet + 元数据 ──► SQL / 单通道秒级裁剪
@@ -24,11 +27,14 @@ i2pro_data/*.ld ──► 原生解析(mmap) ──► Parquet + 元数据 ─�
 ## 一键启动
 
 **双击 `启动.bat`** 就行——它会起本地服务并自动打开浏览器。（第一次运行 Windows 防火墙可能弹窗，选“允许访问”。）
+**新机器上先双击一次 `安装依赖.bat`**，见下面三步；缺包时 `启动.bat` 也会直接告诉你该敲哪条命令。
 
 | 双击这个 | 干什么 | 什么时候用 |
 | --- | --- | --- |
+| **`安装依赖.bat`** | 装那四个运行期包，装完念一遍版本号 | **每台新机器只做一次**（唯一要联网的一步） |
 | **`启动.bat`** | 起服务 + 开浏览器，可任意缩放，控制台会打印一个局域网地址 | 日常分析、在 P 房几个人一起看 |
 | **`导出快照.bat`** | 把每个场次导出成 `out\<场次>.html`，再打开索引页 | 要把某一场发给没装 Python 的队友 |
+| **`导入数据.bat`** | 把 `.ld/.ldx/.csv/.xlsx/.txt/.tsv`（或整个文件夹）拖上去，拷进 `i2pro_data/` | 拿到新日志的时候 |
 
 命令行等价写法：
 
@@ -41,7 +47,37 @@ cd E:\桌面\i3pro
 
 `i3pro.cmd` 会自动探测可用的 Python（`python` / `py -3` / `python3`，以及
 `%LOCALAPPDATA%\Programs\Python\Python3*`），把 `src/` 加进 `PYTHONPATH` 再调
-`python -m i3pro`——**不需要 `pip install`，不需要联网**。
+`python -m i3pro`——**不需要安装这个项目本身**（不 `pip install i3pro`、不编译、
+不需要 `node`），但它会先确认那四个运行期包在不在；不在就直接把该敲的
+`pip install -r requirements.txt` 打出来，而不是含糊地说"启动失败"。
+
+### 从零开始（换台机器 / 刚 clone 下来）
+
+1. **装 Python 3.10 或更新**——[python.org](https://www.python.org/downloads/)，
+   安装时勾上 `Add python.exe to PATH`。
+2. **装四个运行期包**——双击 **`安装依赖.bat`**，或者命令行一行：
+
+   ```powershell
+   cd <clone 下来的目录>
+   python -m pip install -r requirements.txt
+   ```
+
+   装完它会自己把四个包的版本念一遍，念不出来就是没装好。
+3. **双击 `启动.bat`**。
+
+第 2 步**只在每台机器上做一次**，也是唯一需要联网的一步；之后 `启动.bat` /
+`导出快照.bat` / `导入数据.bat` 全程离线。`requirements.txt` 与 `pyproject.toml`
+是同一份清单（有单测盯着，漂移就红），所以 `pip install -e .` 是等效的另一条路——
+那条路装完连 `PYTHONPATH` 都不用设，直接 `i3pro serve --data i2pro_data`。
+
+**刚 clone 下来一个场次都没有，这是正常的。** 车队日志（`.ld` / `.csv` / `.xlsx`）
+不进仓库，跟着仓库走的只有 `i2pro_data/dbc/` 那套 DBC
+（[ADR-0005](docs/adr/0005-dbc-goes-into-the-repo.md)：换台机器没有它就解不出 CAN
+报文）。所以第一次打开侧边栏是空的，界面会写明"没有找到任何日志文件"——把你的日志
+放进 `i2pro_data/`，或者直接拖到 `导入数据.bat` 上，刷新即可。
+
+没有随仓库发布的示例数据是有意的（那是车队数据），所以**四道回归里有三道在没有
+数据时会自动跳过**——跳过不算通过，要在有数据的机器上跑，见 [AGENTS.md](AGENTS.md) 第 7 条。
 
 ### ⚠️ 不要双击 `src\i3pro\web\viewer.html`
 
@@ -92,7 +128,7 @@ MoTeC 自己导出的两个 CSV（182 MB / 425 MB）。
 | **数据导出（CSV / Excel）** | 把数据带走去 Excel / Python / MATLAB 接着算：范围可选**全部日志 / 当前视图 / 选中圈 / 光标 A–B / 指定时间段**（`12.5s`，或 `2026-09-14 12:34:56.789`，也可以只写 `12:35:10.123`）/ **指定距离段**，边界**左闭右闭**；通道可全选或按侧边栏勾选（数学通道单独开关）；采样可选 **Auto**（各通道保留原始采样点，宽表以并集为索引、缺失留空）或统一采样率（1/5/10/20/50/100/200/500 与自定义，`linear` / `hold` / `nearest` / `mean`）；主索引可选 `time_s`（相对秒）、`timestamp`（绝对时间戳＝场次起点 + 相对秒）或 `distance_m`——**范围自己决定轴**（选距离段就是米、选时间段就是秒，主索引下拉跟着锁，免得把 1200–1850 当成"秒"导出去）。CSV 是 UTF-8 **带 BOM** 的宽表或长表（可选打包 `metadata.json`），Excel 是「元数据」sheet + 「数据」sheet、超 104 万行自动分 sheet——`.xlsx` 用**标准库**写（`zipfile` + 最小 OOXML），没有为它多一个运行期依赖。面板先给预计行数与体积，进度条按 `Content-Length` 走、再点一次就是取消。实测两份金标准 `--rate 10`：高避 **4,641 行 × 442 列 / 6.7 MiB**、耐久 **19,431 行 × 347 列 / 22.6 MiB**，末行时刻 `463.99` / `1942.99`。命令行同一个出口：`i3pro export <文件> --rate 10 --out x.csv` |
 | **CAN 原始帧 → 场次** | 车队自己录的原始帧表（`can_data/*.csv`，GBK、`x\| 5A 64 …`）直接读成与 `.ld` **同形状**的场次：DBC **取并集**解码，**含子目录**（2026-10-05 实测：18 份 DBC / 137 条报文 / **124 条通道** / 覆盖 3,013,146 帧 = **81.77%**；只挑一份最多只有 46 条 / 24.6%），并写明**每条通道来自哪份 DBC**、每份的 sha256 与贡献。除了 `Vx_KF`（车速 → 距离轴，实测 0.1–5546.8 m），`dbc/261004/` 那批还带来 S-Motion 的光学地面速度、Xsens MTi 的姿态/加速度/**经纬度**与 `sw260425` 的方向盘转角；**多路复用报文**（`M` / `m<n>`，如 `IMU.dbc` 的双帧 IMU：byte0 选帧类型、后 6 字节分时是加速度或角速度）按选择子分路解成各自的通道，两路的真实更新率分开记（实测各 47.67 Hz）。解析器是标准库手写的（`cantools` 只在测试里当裁判逐信号对拍），用日志里实际的字节长度、不用 DBC 的 DLC；没有 DBC 覆盖的 ID 留在**导入报告**里（帧数 / 帧率 / 前 8 字节），连续记录自动并场（9 份 → 7 次记录） |
 | **导入别人的表（CSV / Excel / TXT）** | 队友发来的不是 `.ld` 也能用：`.csv`（i2 Pro 导出、别的队/别的设备的表）与 **`.xlsx`** 都读成与 `.ld` **同一种场次**——进侧边栏、能画图/切圈/比圈/报表/导出。列名走 **原名 → 别名 → 手工覆盖** 三级回落，单位参与判断与补齐，选择存在 `<场次>.map.json` 侧车（`.ld` 永远只读）。Excel 多张 sheet 时**默认挑第一张能当通道表读的**（自己的导出把「元数据」放第一张），`--sheet` 可以指定；日期单元格 / ISO 文本的时间列折成相对秒；**宏 / 图表 / 外部链接 / 公式没有缓存值**这四种读不了的形态会明确报错并说下一步。分隔文本（`.txt` / `.tsv` / 分隔符不是逗号的 `.csv`）在**导入前给预览**：前 20 行 + 认出来的分隔符与编码，分隔符 / 编码 / 表头行 / 单位行都能在下拉框里改，"没有时间列"默认拒绝、可以显式选**按固定采样率生成时间列**——预览与导入是**同一条代码路径**，改了下拉框立刻看得见结果。硬判据是 **round-trip**：同一次导出的 CSV / xlsx / TXT 读回来逐点相同 |
-| **工程化** | 431 项单测全绿（真实数据回归 + HTTP 端到端 + 无头驱动前端 577 个断言点），另有 **真浏览器真鼠标验收 188 项**（`tools\verify_clicks.py`，Edge 的 DevTools 协议发真事件，跑在两份金标准上）；运行期依赖只有 numpy/pandas/pyarrow，**唯一的例外是 `openpyxl`（只用于读 Excel，见 [ADR-0003](docs/adr/0003-openpyxl-for-reading-excel.md)）**；改这个仓库的硬性规则见 [AGENTS.md](AGENTS.md) |
+| **工程化** | **474 项单测全绿**（真实数据回归 + HTTP 端到端 + 无头驱动前端 **577 个断言点**），另有 **真浏览器真鼠标验收 188 项全过**（`tools\verify_clicks.py`，Edge 的 DevTools 协议发真事件，跑在两份金标准上）；运行期依赖只有 numpy/pandas/pyarrow，**唯一的例外是 `openpyxl`（只用于读 Excel，见 [ADR-0003](docs/adr/0003-openpyxl-for-reading-excel.md)）**，清单钉在 `requirements.txt` 上（与 `pyproject.toml` 同一份，有单测盯着别漂移）；改这个仓库的硬性规则见 [AGENTS.md](AGENTS.md) |
 
 完整验收清单与复现命令见 **[`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md)**；
 规划、里程碑与风险见 **[`docs/PLAN.md`](docs/PLAN.md)**。
@@ -153,14 +189,17 @@ MoTeC 自己导出的两个 CSV（182 MB / 425 MB）。
 
 ```
 启动.bat            一键起服务 + 开浏览器（给队友用这个）
+安装依赖.bat        一键装四个运行期包（新机器上先跑这个）
 导出快照.bat        一键导出所有离线 HTML 快照
-i3pro.cmd           命令行入口（自动探测 Python），两个 bat 都调它
+导入数据.bat        拖文件上去拷进 i2pro_data/（同名永不覆盖）
+i3pro.cmd           命令行入口（探测 Python + 查依赖），上面几个 bat 都调它
+requirements.txt    运行期依赖清单（与 pyproject.toml 同一份，有单测盯着）
 docs/               PLAN.md 规划 · ACCEPTANCE.md 验收清单 · ld-format.md 格式逆向记录
 tools/              verify_ld_vs_csv.py 解析对照 · smoke_viewer.js 无头驱动前端
-tests/              431 项单测
+tests/              474 项单测
 maths/              全局数学通道定义（global.json，跨场次复用）
 out/                生成物（快照 HTML / Parquet），已在 .gitignore 里
-i2pro_data/         试车数据（.ld/.ldx/.csv/.txt/.tsv），不进仓库
+i2pro_data/         试车数据（.ld/.ldx/.csv/.txt/.tsv），不进仓库；只有 dbc/ 跟着仓库走
 
 src/i3pro/
 ├─ ld.py            .ld 原生解析（mmap，不复制数据）
@@ -203,10 +242,10 @@ src/i3pro/
 ## 开发
 
 ```powershell
-python -m unittest discover -s tests -v      # 293 项，无数据文件时自动 skip
+python -m unittest discover -s tests -v      # 474 项，无数据文件时自动 skip
 python tools\verify_ld_vs_csv.py             # 与 i2 Pro CSV 逐通道对照
 node tools\smoke_viewer.js out\demo.html     # 无头驱动前端：缩放/光标/分组/信标编辑/数学通道/区段/报表/直方图/频谱/注释/GPS 校正/导出/工作表/CAN 报告等 577 个断言点
-python tools\verify_clicks.py                # 真 Edge 发真鼠标/键盘：77 项交互验收（需要 Edge + 金标准数据）
+python tools\verify_clicks.py                # 真 Edge 发真鼠标/键盘：188 项交互验收（需要 Edge + 金标准数据）
 ```
 
 算法层（`derive` / `laps` / `render`）是不依赖框架的纯函数，改动请优先补单测——
@@ -221,18 +260,30 @@ python tools\verify_clicks.py                # 真 Edge 发真鼠标/键盘：77
 装一个 Python 3.10+（[python.org](https://www.python.org/downloads/)），安装时勾上
 `Add python.exe to PATH`。注意本机如果装过 `py` 启动器但没有注册解释器，脚本会自动跳过它。
 
+**双击 `启动.bat` 提示 "the runtime packages are missing"**
+Python 有了，缺那四个包。`i3pro.cmd` 会把该敲的命令原样打出来（
+`<python> -m pip install -r requirements.txt`），照着敲或者双击 `安装依赖.bat` 都行。
+这条提示和上面"没有 Python"是**两句不同的话**：以前两种故障共用一句，缺 numpy 会被
+报成"找不到 Python"，害人去重装 Python。
+
+**`安装依赖.bat` 装到一半失败**（`UnicodeDecodeError` / 下载超时）
+中文 Windows 上 pip 用 `cp936` 解码 `requirements.txt`，所以那份清单**必须全是
+ASCII**（有单测盯着）；下载超时多半是代理，见下一条。想离线装：在能联网的机器上
+`pip download -r requirements.txt -d wheels`，把 `wheels/` 拷过去，然后
+`python -m pip install --no-index --find-links wheels -r requirements.txt`。
+
 **端口 8731 被占用**
 启动脚本会自动往后找 10 个端口，控制台会打印实际用的那个。也可以手动指定
 `--port 9000`。
 
-**`git push` 连不上 github.com（超时 / connection reset）**
+**`git push` 或 `pip install` 连不上外网（超时 / connection reset）**
 浏览器能开 GitHub、git 却不行，通常是系统走本地代理而 git 没走。查一下
 `HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings` 里的 `ProxyServer`
-（本机是 `127.0.0.1:7890`），然后让 git 也用它：
+（这台开发机是 `127.0.0.1:7897`），然后让 git 也用它：
 
 ```powershell
-git config --global http.proxy http://127.0.0.1:7890
-git config --global https.proxy http://127.0.0.1:7890
+git config --global http.proxy http://127.0.0.1:7897
+git config --global https.proxy http://127.0.0.1:7897
 ```
 
 **某个场次切不出圈**：看 `laps` 的 `complete` 列。直线/单圈测试本来就只有 1 段，

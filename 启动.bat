@@ -44,11 +44,14 @@ if not "%RC%"=="0" (
   echo    [ERROR] i3pro exited with code %RC%
   echo  --------------------------------------------------------------
   echo    Most likely causes:
-     echo      1. The data folder above has no log files (.ld / .csv / .xlsx).
-  echo         Put your logs in i2pro_data, or edit DATA_DIR in this file.
-  echo      2. Python is missing a package.  Try:
-  echo           i3pro.cmd --help
-  echo         and see the ???? section of README.md.
+  echo      1. The data folder above has no log files.  i3pro reads .ld / .csv
+  echo         / .xlsx / .txt / .tsv -- put your logs in i2pro_data, or edit
+  echo         DATA_DIR at the top of this file.
+  echo      2. A runtime package is missing.  i3pro.cmd now says so, and prints
+  echo         the exact pip command -- or just double-click the install-deps
+  echo         bat in this folder.  Chinese instructions: README.md, section
+  echo         "Getting started from a fresh clone".
+  echo      3. Anything else: run   i3pro.cmd --help   and read the last lines.
   echo.
   pause
 )

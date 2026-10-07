@@ -25,25 +25,25 @@ if "%~1"=="" (
   echo   ==============================================================
   echo     i3pro  -  import logs
   echo   ==============================================================
-  echo     Drag one or more .ld / .ldx / .csv / .xlsx / .txt / .tsv files (or a folder)
-  echo     onto this file to copy them into:
+  echo     Drag one or more .ld / .ldx / .csv / .xlsx / .txt / .tsv files,
+  echo     or a folder, onto this file to copy them into:
   echo.
   echo       %~dp0i2pro_data
   echo.
-  echo     Raw CAN frame logs (the .csv with a "CAN" column) work too --
+  echo     Raw CAN frame logs -- the .csv with a "CAN" column -- work too:
   echo     they are decoded with the DBCs in %~dp0i2pro_data\dbc
   echo.
   echo     Excel: the first sheet that looks like a channel table is used;
   echo     pick another one with --sheet "sheet name".
   echo.
-  echo     Text tables (.txt / .tsv): run  i3pro.cmd import "file" --preview
-  echo     first -- it prints how the file will be read (separator / header
-  echo     row / channels) without copying anything.
+  echo     Text tables .txt / .tsv: run  i3pro.cmd import "file" --preview
+  echo     first.  It prints how the file will be read -- separator, header
+  echo     row, channels -- without copying anything.
   echo.
   echo     Command line equivalent:
   echo       i3pro.cmd import "D:\logs\2026-09-xx.ld" --data i2pro_data
-  echo       i3pro.cmd import "D:\logs" --data i2pro_data        ^(????^)
-  echo       i3pro.cmd import "D:\logs\a.ld" --move              ^(???????^)
+  echo       i3pro.cmd import "D:\logs" --data i2pro_data        -- a whole folder
+  echo       i3pro.cmd import "D:\logs\a.ld" --move              -- move, not copy
   echo   ==============================================================
   echo.
   pause

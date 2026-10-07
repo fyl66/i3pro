@@ -32,7 +32,7 @@ set "RC=%ERRORLEVEL%"
 
 if not "%RC%"=="0" (
   echo.
-  echo   [ERROR] snapshot export exited with code %RC%  (see above)
+  echo   [ERROR] snapshot export exited with code %RC% -- see the messages above.
   echo.
   pause
 )

@@ -1807,6 +1807,152 @@ class TestLaunchers(unittest.TestCase):
             library.close()
 
 
+class TestBootstrap(unittest.TestCase):
+    """换台机器 / 刚 clone 下来：装什么、怎么装、装错了看哪里。
+
+    这组挡的是"README 说 clone 下来就能跑，可新机器上跑不起来"。每一条都对应
+    一个真踩过的坑，不是想象出来的：
+
+    * 依赖清单在 `pyproject.toml` 和 `requirements.txt` 里各写一份，会漂移；
+    * `requirements.txt` 里**一个非 ASCII 字节**就让安装死在下载之前——pip 没有
+      BOM 时按本机 locale（中文 Windows 是 cp936）解码这个文件（实测）；
+    * `src/` 里 import 了一个没人声明过的包，AI 照着清单装完照样缺；
+    * 启动脚本把"机器上没装 Python"和"Python 有了但缺包"混成一句话，让人去重装
+      Python（旧版就是这么干的）；
+    * `启动.bat` 的报错分支里 `echo` 带一个没转义的 `)`，提前关掉了 `if (` 块，
+      cmd 报 `. was unexpected at this time.` 之后什么都不打印——而"没数据 / 缺依赖"
+      正是新机器上必走的那一支（实测）。
+    """
+
+    #: 运行期只准这几个第三方包（AGENTS.md 第 4 条 + ADR-0003）。
+    RUNTIME_PACKAGES = {"numpy", "pandas", "pyarrow", "openpyxl"}
+
+    def _pyproject_dependencies(self) -> list[str]:
+        try:
+            import tomllib                     # Python 3.11+
+        except ModuleNotFoundError:            # pragma: no cover - Python 3.10
+            self.skipTest("tomllib 要 Python 3.11+")
+        with (ROOT / "pyproject.toml").open("rb") as handle:
+            return list(tomllib.load(handle)["project"]["dependencies"])
+
+    @staticmethod
+    def _package_name(requirement: str) -> str:
+        """`numpy>=1.24` / `numpy[extra]==1.2` 都取回 `numpy`。"""
+        return re.split(r"[<>=!\[; ]", requirement.strip(), maxsplit=1)[0].lower()
+
+    def _requirements_lines(self) -> list[str]:
+        raw = (ROOT / "requirements.txt").read_bytes()
+        self.assertEqual(
+            [index for index, byte in enumerate(raw) if byte > 127], [],
+            "requirements.txt 必须全是 ASCII：pip 没有 BOM 时按本机 locale 解码它，"
+            "中文 Windows 上是 cp936，一个非 ASCII 字节就整个安装失败。",
+        )
+        return raw.decode("ascii").splitlines()
+
+    def test_requirements_txt_lists_exactly_the_pyproject_dependencies(self):
+        declared = {self._package_name(one) for one in self._pyproject_dependencies()}
+        listed = {
+            self._package_name(line) for line in self._requirements_lines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        self.assertEqual(
+            listed, declared,
+            "requirements.txt 与 pyproject.toml 的依赖清单漂移了；两份都要改。",
+        )
+        self.assertEqual(declared, self.RUNTIME_PACKAGES,
+                         "运行期依赖变了？那要先改 ADR-0003 再说。")
+
+    def test_every_third_party_import_in_src_is_declared(self):
+        """源码里 import 到的每个第三方顶层模块都必须在依赖清单里。"""
+        declared = {self._package_name(one) for one in self._pyproject_dependencies()}
+        pattern = re.compile(
+            r"^\s*(?:import\s+([A-Za-z_][\w.]*)|from\s+([A-Za-z_][\w.]*)\s+import\b)"
+        )
+        found: dict[str, str] = {}
+        for path in sorted((ROOT / "src" / "i3pro").rglob("*.py")):
+            for number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                hit = pattern.match(line)
+                if hit is None:
+                    continue
+                module = (hit.group(1) or hit.group(2)).split(".")[0]
+                if module in sys.stdlib_module_names or module == "i3pro":
+                    continue
+                found.setdefault(module, f"{path.relative_to(ROOT)}:{number}")
+        self.assertTrue(found, "一个第三方 import 都没扫到——这条断言没在检查东西")
+        undeclared = {name: where for name, where in found.items()
+                      if name not in declared}
+        self.assertEqual(
+            undeclared, {},
+            "src/ 里 import 了没声明的包，照着 requirements.txt 装完照样少东西。",
+        )
+
+    def test_launcher_tells_missing_python_apart_from_missing_packages(self):
+        """两种故障两句话：没 Python 让你装 Python，缺包给你一条 pip 命令。"""
+        text = (ROOT / "i3pro.cmd").read_text(encoding="utf-8", errors="replace")
+        self.assertIn("import sys", text)                        # 探针 1：只要解释器
+        self.assertIn("import numpy, pandas, pyarrow, openpyxl", text)   # 探针 2：包
+        self.assertNotIn(
+            "%%~C -m i3pro --help", text,
+            "不能再用 i3pro 自己当探针：缺 numpy 时它也会失败，于是缺包被报成"
+            "「找不到 Python」。",
+        )
+        self.assertIn("Could not find a working Python 3", text)
+        self.assertIn("the runtime packages are missing", text)
+        self.assertIn("pip install -r requirements.txt", text)
+
+    def test_the_install_deps_launcher_pulls_the_same_list(self):
+        path = ROOT / "安装依赖.bat"
+        self.assertTrue(path.exists(), "缺一键装依赖的脚本")
+        text = path.read_text(encoding="utf-8", errors="replace")
+        self.assertIn("requirements.txt", text)
+        self.assertIn("pip install", text)
+        # 它必须能自己说"装完了"，而不是装完就静悄悄地关掉
+        self.assertIn("import numpy, pandas, pyarrow, openpyxl", text)
+
+    @unittest.skipUnless(os.name == "nt", "批处理只有 Windows 能跑")
+    def test_the_launcher_bats_parse_and_report_errors(self):
+        """三个 bat 的非正常分支要真能打印，不能死在 cmd 的解析上。
+
+        `启动.bat` 的报错分支以前有一个没转义的 `)`（藏在 `.xlsx)` 里），
+        cmd 直接 `. was unexpected at this time.`，一个字都不打印。
+        """
+        work = Path(tempfile.mkdtemp(prefix="i3pro-launcher-"))
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        for name in ("启动.bat", "导入数据.bat", "导出快照.bat"):
+            shutil.copy2(ROOT / name, work / name)
+        # i3pro.cmd 换成"永远失败"的替身：要走的正是失败那条分支。
+        (work / "i3pro.cmd").write_bytes(b"@echo off\r\nexit /b 3\r\n")
+        for name, arguments in (("启动.bat", ""), ("导入数据.bat", ""),
+                                ("导入数据.bat", ' "x.ld"'),
+                                ("导出快照.bat", "")):
+            with self.subTest(bat=name, args=arguments.strip() or "(none)"):
+                result = subprocess.run(
+                    ["cmd", "/c", name + arguments],
+                    cwd=str(work), input="", capture_output=True, timeout=120,
+                )
+                output = (result.stdout + result.stderr).decode("utf-8", "replace")
+                self.assertNotIn("unexpected at this time", output, output)
+                self.assertNotIn("was unexpected", output, output)
+                self.assertNotIn("Syntax error", output, output)
+
+    @unittest.skipUnless(os.name == "nt", "批处理只有 Windows 能跑")
+    def test_the_start_launcher_prints_the_error_branch(self):
+        work = Path(tempfile.mkdtemp(prefix="i3pro-launcher-err-"))
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        shutil.copy2(ROOT / "启动.bat", work / "启动.bat")
+        (work / "i3pro.cmd").write_bytes(b"@echo off\r\nexit /b 3\r\n")
+        result = subprocess.run(
+            ["cmd", "/c", "启动.bat"], cwd=str(work), input="",
+            capture_output=True, timeout=120,
+        )
+        output = (result.stdout + result.stderr).decode("utf-8", "replace")
+        self.assertIn("[ERROR]", output, output)
+        self.assertIn("Most likely causes", output, output)
+        self.assertIn("install-deps", output, output)
+
+
 class TestViewerScript(unittest.TestCase):
     """The generated workbench must execute without throwing (needs node)."""
 

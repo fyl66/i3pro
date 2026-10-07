@@ -1,0 +1,25 @@
+# i3pro runtime dependencies.  Install with:
+#
+#     python -m pip install -r requirements.txt
+#
+# ...or double-click the install-deps bat next to this file, which runs exactly
+# that command and then checks that the four packages import.
+#
+# Keep this file pure ASCII.  pip decodes a requirements file with the machine's
+# locale encoding when there is no BOM, and on a Chinese Windows box that is
+# cp936 -- one Chinese character in a comment kills the install with
+# UnicodeDecodeError before a single package is downloaded.  (Measured, not
+# theory: that is what the first draft of this file did.)  The Chinese version
+# of this explanation lives in README.md.
+#
+# This list is the same list as [project].dependencies in pyproject.toml.  A unit
+# test (tests/test_i3pro.py :: TestBootstrap) fails if the two drift apart,
+# because "pip install -r requirements.txt, then run i3pro" is the whole setup
+# story on a new machine.
+#
+# Runtime is deliberately this small -- see docs/adr/0003 for why openpyxl is
+# the one package that is not numpy/pandas/pyarrow, and why it is read-only.
+numpy>=1.24
+pandas>=2.0
+pyarrow>=14.0
+openpyxl>=3.1

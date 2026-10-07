@@ -248,6 +248,17 @@ node tools\smoke_viewer.js out\demo.html     # 无头驱动前端：缩放/光�
 python tools\verify_clicks.py                # 真 Edge 发真鼠标/键盘：188 项交互验收（需要 Edge + 金标准数据）
 ```
 
+这四条里有三条会在缺东西时**自动跳过，而跳过不算通过**（[AGENTS.md](AGENTS.md) 第 7 条）。
+想一次装齐：
+
+| 要什么 | 谁需要它 | 装它 |
+| --- | --- | --- |
+| Python 3.10+ 与那四个运行期包 | 全部 | 双击 `安装依赖.bat`，或 `python -m pip install -r requirements.txt` |
+| 车队日志放 `i2pro_data/`（两份金标准 `.ld` + 它们的 i2 Pro CSV） | 单测的真实数据用例、`verify_ld_vs_csv.py`、`verify_clicks.py` | 车队数据不进仓库，自己放 |
+| **Node.js** | `tools\smoke_viewer.js`（无头驱动前端） | [nodejs.org](https://nodejs.org/) |
+| **Microsoft Edge** | `tools\verify_clicks.py`（真鼠标真键盘） | Windows 自带 |
+| **`cantools`**（测试期裁判） | `TestDbc` / `TestCanLog` 跟手写的 `dbc.py` 逐信号对拍 | `python -m pip install -e ".[dev]"` |
+
 算法层（`derive` / `laps` / `render`）是不依赖框架的纯函数，改动请优先补单测——
 这支车队最现实的风险是「写代码的人毕业了」。
 

@@ -104,7 +104,7 @@ Setup Sheets（依赖 Excel）、Matlab 导出、Mixture Map、Drag 直线加速
 src/i3pro/          Python 包（ld 解析 / derive 派生量 / laps 切圈 / store 存储 / render 载荷 / server 服务 / importer 导入）
 src/i3pro/web/      前端模板（viewer.html；它是模板，数据由 render 注入）
 tools/              开发工具（解析对照 verify_ld_vs_csv.py、无头前端驱动 smoke_viewer.js、
-                    真浏览器真鼠标验收 verify_clicks.py、exe 打包）
+                    真浏览器真鼠标验收 verify_clicks.py、造分隔文本样例 make_text_demo.py）
 tests/              单测；依赖 i2pro_data/ 的用例在缺数据时自动 skip
 docs/               PLAN.md 规划 · ACCEPTANCE.md 验收清单 · ld-format.md 格式逆向记录
 maths/              全局数学通道定义（global.json，跨场次复用，可以进 git）

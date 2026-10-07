@@ -16,7 +16,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+#: 测试期的"裁判"：cantools 是**另一套独立实现**的 DBC 解码器，用来跟手写的
+#: `dbc.py` 逐信号对拍（TestDbc / TestCanLog）。没装那几条自动跳过——**跳过不算
+#: 通过**，要真跑就装上它：`pip install -e ".[dev]"`。下限钉在**本机实测跑过的**
+#: 那个大版本上（44.1.0），不想写一个没验过的数字。
+#:
+#: 这套测试跑在标准库 `unittest` 上（`python -m unittest discover -s tests`），
+#: 不需要 pytest；这里以前写着 `pytest>=8.0`，是个误会。
+dev = ["cantools>=44"]
 
 [project.scripts]
 i3pro = "i3pro.cli:main"

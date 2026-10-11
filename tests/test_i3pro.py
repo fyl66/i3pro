@@ -6353,22 +6353,54 @@ class TestWorksheets(unittest.TestCase):
             for comp in sheet["components"]:
                 self.assertTrue(comp["type"], f"{sheet['name']} 里有组件没写 type")
 
-    def test_工作表里不会写死本场次的通道名(self):
-        """挑通道要经 `pick`：写死通道名的话，换一个场次就整片空。
+    def test_挑通道的规则不许被写没(self):
+        """`pick` 是"这一套换到别的场次该挑哪几类通道"的声明，任何时候都得在。
 
-        `config` 里允许写死（那是用户存的配置，`worksheet` 文件是声明），但仓库里
-        随版本发布的那 7 套必须靠 `pick` 挑——这条挡住"顺手把解析出来的通道名存回去"。
+        A74 之后 `config` 里出现通道名是**正常**的：用户自己勾过的键要写回文件，
+        不写他勾的通道保存一次就丢。所以这里钉的不是"config 里不许有通道名"，而是
+        **选了通道就有对应那条 `pick` 兜着**——把规则写没了才是真丢东西（那份工作表
+        换到别的场次连"该挑哪几类通道"都不知道了）。
         """
         sheets, _ = worksheetsmod.load_dir()
         sheets = [sheet for sheet in sheets if sheet["id"] in SHIPPED_WORKSHEETS]
         selectors = {"channels", "channel", "colour", "x", "y", "against"}
         for sheet in sheets:
             for comp in sheet["components"]:
+                picked = set(comp.get("pick", {}))
                 for key in selectors & set(comp.get("config", {})):
-                    self.fail(
-                        f"工作表 {sheet['id']} 的 {comp['type']} 把 {key} 写死在 config 里了；"
-                        "要挑通道请用 pick（见 worksheets/README.md）"
+                    self.assertIn(
+                        key, picked,
+                        f"工作表 {sheet['id']} 的 {comp['type']} 在 config 里写了 {key}，"
+                        "却没有对应的 pick 规则兜着；见 worksheets/README.md",
                     )
+
+    def test_用户勾过的通道与_pick_可以并存(self):
+        """A74：用户动过的键写回文件时，文件里那条 `pick` 不许跟着消失。
+
+        前端按"规则在本场次还算不算得出屏幕上这个值"决定写不写 `config`
+        （`viewer.html` 的 `ruleStillFills`）；这里钉的是**格式**那一半：两种写法
+        并存时读 / 写 / 导出三条路都原样保住两份。
+        """
+        directory = self._mkdir({}) / "worksheets"
+        body = [{
+            "type": "graph", "x": 0.0, "y": 0.0, "w": 12.0, "h": 10.0,
+            "config": {"channels": ["Σ力", "ST torque"], "mode": "tiled"},
+            "pick": {"channels": {"limit": 8}},
+        }]
+        created = worksheetsmod.create(directory, {"name": "并存", "components": body})
+        stem = created["id"]
+        one = worksheetsmod.read_sheet(directory, stem)["components"][0]
+        self.assertEqual(one["config"]["channels"], ["Σ力", "ST torque"])
+        self.assertEqual(one["pick"]["channels"], {"limit": 8})
+        # 「保存」走的就是 replace：两份都还在，pick 没被抹掉
+        worksheetsmod.replace(directory, stem, body)
+        again = worksheetsmod.read_sheet(directory, stem)["components"][0]
+        self.assertEqual(again, one)
+        self.assertEqual(
+            worksheetsmod.export_payload(worksheetsmod.read_sheet(directory, stem))
+            ["components"][0],
+            one,
+        )
 
     def test_搬进文件之后和搬之前的解析结果一致(self):
         """搬前搬后逐字段相同：夹具是硬编码那版的 dump。"""

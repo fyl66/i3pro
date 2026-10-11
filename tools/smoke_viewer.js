@@ -2946,26 +2946,98 @@ if (api && exportDlg) {
 
 /* ------------------------------------ 工作表增删改与进出（ticket #33）
  * 快照模式没有服务端可写，所以这一组钉得住的是三件：
- *   ① 写回文件的形状对不对——pick 填出来的通道名**不许**写死进文件；
+ *   ① 写回文件的形状对不对——规则（`pick`）当场还算得出屏幕上那个值的键不许写死，
+ *      用户改过的键**必须**写回去（A74：缺了这半句，新建工作表勾的通道保存一次就丢）；
  *   ② 导出给队友的那份 JSON 是文件那一份（不带本地 id）；
  *   ③ 快照里点那一排按钮要说"改用 serve"，而且**一个请求都不许发**
  *      （没挂上处理器 / 发到一半失败都会被这一条抓住）。
  * "点得到、文件真的变了"归真浏览器那关（tools/verify_clicks.py）。 */
 {
   const sheet = api.worksheetCatalogue().sheets[0];
+  // sheetComponent() 要拿这一套的 hints 去问"规则还算不算数"，先把它切上。
+  api.state.preset = sheet.name;
   const comp = api.componentsOfWorksheet(sheet).filter((c) => c.type === "graph")[0];
-  check((comp.picked || []).length > 0, "pick 填了通道却没记下填了哪些键（保存会把通道名写死）");
+  const ruleChannels = (comp.config.channels || []).slice();
+  check(ruleChannels.length > 0, "pick 没给图挑到通道，这一组验不下去");
   const written = api.sheetComponent(comp);
   check(written.type === "graph" && typeof written.x === "number"
     && typeof written.h === "number",
     "写回文件的组件缺了类型 / 位置 / 尺寸：" + JSON.stringify(written));
   check(!(written.config && "channels" in written.config),
-    "pick 挑出来的通道名被写回文件了（换场次就空图）：" + JSON.stringify(written.config));
+    "用户没动过的通道名被写死进文件了（换场次就空图）：" + JSON.stringify(written.config));
   check(!!written.pick && !!written.pick.channels,
     "文件里那条 pick 没有被保留：" + JSON.stringify(written));
+
+  // ---- A74：用户动过的键必须写回文件（以前这里是个单向闩，动过也进不了文件）
+  // ① 规则挑得出 12 条，屏幕上只剩 2 条 —— "用户删掉了几条"
+  const outside = (api.data.channels || []).map((c) => c.name)
+    .filter((n) => ruleChannels.indexOf(n) < 0).slice(0, 3);
+  check(outside.length > 0, "这场数据里没有第二组通道，A74 验不下去");
+  const trimmed = api.componentsOfWorksheet(sheet).filter((c) => c.type === "graph")[0];
+  trimmed.config.channels = ruleChannels.slice(0, 2);
+  const trimmedDoc = api.sheetComponent(trimmed);
+  check(JSON.stringify((trimmedDoc.config || {}).channels)
+    === JSON.stringify(ruleChannels.slice(0, 2)),
+    "用户删到只剩两条通道，保存时没写回文件（再进来会变回规则的 12 条）："
+      + JSON.stringify(trimmedDoc.config));
+
+  // ② 整排换成规则挑不出来的通道 —— 新建工作表勾别的最常见就是这个
+  const exotic = api.componentsOfWorksheet(sheet).filter((c) => c.type === "graph")[0];
+  exotic.config.channels = outside.slice();
+  const exoticDoc = api.sheetComponent(exotic);
+  check(JSON.stringify((exoticDoc.config || {}).channels) === JSON.stringify(outside),
+    "用户勾的通道没有写回文件（保存一次就丢，A74 就是这个 bug）："
+      + JSON.stringify(exoticDoc.config));
+  check(!!(exoticDoc.pick && exoticDoc.pick.channels),
+    "写回用户通道之后，文件里那条 pick 被丢了：" + JSON.stringify(exoticDoc));
+  // 拿写回来的那份重新 materialise 一遍：屏幕上还得是用户那三条
+  const reentered = api.componentsOfWorksheet(
+    Object.assign({}, sheet, { components: [exoticDoc] }))
+    .filter((c) => c.type === "graph")[0];
+  check(JSON.stringify(reentered.config.channels) === JSON.stringify(outside),
+    "拿写回的那份重新进入工作表，通道又变了：" + JSON.stringify(reentered.config.channels));
+
+  // ③ 通道报告走同一个侧边栏入口：勾过的也要写回去
+  const savedSheets = api.data.worksheets;
+  const savedProblems = api.data.worksheet_problems;
+  api.data.worksheets = [{ id: "probe-rep", name: "报告探针", order: 1, hints: [],
+    components: [{ type: "chreport", x: 0, y: 0, w: 12, h: 12,
+                   pick: { channels: { limit: 4 } } }] }];
+  api.data.worksheet_problems = [];
+  api.resetWorksheetCache();
+  api.applyPreset("报告探针");
+  const repComp = api.state.components[0];
+  check((repComp.config.channels || []).length > 0, "通道报告的 pick 没挑到通道");
+  api.componentTypes.chreport.sidebar.set(repComp, outside.slice(0, 2));
+  check(JSON.stringify((api.sheetComponent(repComp).config || {}).channels)
+    === JSON.stringify(outside.slice(0, 2)),
+    "通道报告里勾的通道没写回文件：" + JSON.stringify(api.sheetComponent(repComp).config));
+
+  // ④ 散点的 Y 被带 index 的规则填（只挑一条）：以前一进这一套就抛
+  //    (comp.config.y || []).forEach is not a function —— 整套工作表打不开
+  api.data.worksheets = [{ id: "probe-sc", name: "散点探针", order: 2, hints: [],
+    components: [{ type: "scatter", x: 0, y: 0, w: 4, h: 13,
+                   pick: { x: { limit: 1, index: 0 }, y: { limit: 1, index: 0 } } }] }];
+  api.data.worksheet_problems = [];
+  api.resetWorksheetCache();
+  let scatterErr = "";
+  try { api.applyPreset("散点探针"); } catch (err) { scatterErr = String(err && err.message); }
+  const scComp = api.state.components[0];
+  check(!scatterErr, "pick 填的散点 Y 让整套工作表打不开：" + scatterErr);
+  check(!!scComp && Array.isArray(scComp.config.y) && scComp.config.y.length === 1,
+    "散点的 Y 没被对齐成一排：" + JSON.stringify(scComp && scComp.config));
+  check(!!scComp && typeof scComp.config.x === "string",
+    "散点的 X 被对齐成一排了（声明里它是单值槽）：" + JSON.stringify(scComp && scComp.config));
+  api.data.worksheets = savedSheets;
+  api.data.worksheet_problems = savedProblems;
+  api.resetWorksheetCache();
+  // 把屏幕还原成这一组开始时那套：后面那几条断言看的是**当前布局**（#34 往
+  // "当前那张图"上挂一条缺的通道），停在探针那一屏上会让它们扑空。
+  api.applyPreset(sheet.name);
+
   // 用户自己设的键（不是 pick 填的那个）必须原样写回去
   const probe = { type: "gauge", x: 1, y: 2, w: 3, h: 4,
-                  config: { subtype: "bar", channel: "Vx KF" }, picked: [] };
+                  config: { subtype: "bar", channel: "Vx KF" } };
   const kept = api.sheetComponent(probe);
   check(kept.config && kept.config.subtype === "bar" && kept.config.channel === "Vx KF",
     "用户自己设的配置在保存时被丢掉了：" + JSON.stringify(kept));

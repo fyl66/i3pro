@@ -1494,19 +1494,38 @@ function resolvePickValue(spec, hints) {
   return empty;
 }
 
+/** 规则挑出来的值按**组件自己声明的形状**对齐。
+ *
+ * 声明里是一排的键（图的通道、散点的 Y、仪表列表……）永远拿一排：带 ``index``
+ * 的规则只挑一条通道，直接塞进去的话 ``scatterNeeds`` 会在画图之前先抛
+ * ``(comp.config.y || []).forEach is not a function``——那一套工作表进都进不去。
+ * 声明里是单值槽（散点的 X、直方图的通道）却拿到一排时只留第一条。
+ *
+ * 形状由组件自己的 ``defaults()`` 说，所以这里一个类型名都不写死（#20）。
+ */
+function shapePickValue(value, declared) {
+  if (Array.isArray(declared)) {
+    if (value === null || value === undefined) return [];
+    return Array.isArray(value) ? value : [value];
+  }
+  if (declared !== undefined && Array.isArray(value)) return value.length ? value[0] : null;
+  return value;
+}
+
 /** 工作表只填**还没写**的配置键：文件里 config 显式写了的永远优先。 */
 function applyPicks(comp, pick, hints) {
   if (!pick) return;
+  const spec = specOf(comp);
+  // defaults(o) 收的是"新建时的覆盖值"，所以这里递一个空对象——和 `makeComponent`
+  // 调它时同一种调法（仪表那条 `defaults(o)` 少递一个参数就会读不到 o.subtype）。
+  const declared = (spec && spec.defaults && spec.defaults({})) || {};
   for (const key of Object.keys(pick)) {
     const now = comp.config[key];
     const filled = Array.isArray(now)
       ? now.length > 0
       : (now !== null && now !== undefined && now !== "");
     if (filled) continue;
-    comp.config[key] = resolvePickValue(pick[key], hints);
-    // 记下"这个键是规则填的，不是用户写的"。保存回文件时不把本场次的通道名写死
-    // ——写死了换一个场次这张图就空着，那是 i2 Pro 用别名解决的问题（#33/#36）。
-    (comp.picked || (comp.picked = [])).push(key);
+    comp.config[key] = shapePickValue(resolvePickValue(pick[key], hints), declared[key]);
   }
 }
 
@@ -7432,8 +7451,9 @@ function refreshAliasesFromCatalogue() {
  * "改用 serve 模式"（置灰的按钮什么也不说，用户只能猜）。
  *
  * 写回文件的是**这一屏的形状**：类型 / 位置 / 尺寸 / 各组件自己的配置，外加文件里
- * 那条 pick。pick 填出来的通道名（本场次才有的那些）不写回去——写死了换场次就空图，
- * 那是 #34 / #36 要正式解决的事，这一票先不制造那个坑。 */
+ * 那条 pick。规则（`pick`）当场还算得出屏幕上那个值的键不写死——写死了换场次就空图，
+ * 那是 #34 / #36 用别名解决的问题。用户改过的键照实写回去（怎么判见
+ * `ruleStillFills`）：少了这半句，新建工作表勾的通道保存一次就丢。 */
 let wsAskOnOk = null;
 let wsDeleteArmedAt = 0;
 let wsDeleteTimer = null;
@@ -7452,13 +7472,38 @@ function currentSheet() {
   return null;
 }
 
-/** 一个组件写回文件时长什么样：picked 里的键（规则填的通道名）不写。 */
+/** 这一屏在用的那份文件里的 ``hints``（规则挑通道的默认词）。
+ *
+ * 「自定义」排布（URL 带来的那一屏）没有文件，给空——那本来就没有规则可谈。 */
+function sheetHints() {
+  const sheet = currentSheet();
+  return (sheet && sheet.hints) || [];
+}
+
+/** 这条规则在本场次**现在还算不算填得出来**屏幕上这个值？
+ *
+ * 算 → 它是"规则填的"，不写死进文件（写死了换一个场次这张图就空着，那是 #34/#36
+ * 用别名解决的问题）。
+ * 不算 → 用户改过它，照实写回去。
+ *
+ * 判定放在**保存这一刻当场算**，而不是"填的时候在组件上记一笔"：那种闩是单向的
+ * ——用户改完没人松闩，这个键就再也进不了文件（新建工作表 -> 勾通道 -> 保存 ->
+ * 再进来变成默认通道，A74 修的就是这个）。现在没有"填过没填过"这种状态要维护，
+ * 只有"规则还算不算数"一句话，六种组件、所有入口一起对。
+ */
+function ruleStillFills(comp, key, hints) {
+  if (!comp.pick || !(key in comp.pick)) return false;
+  return JSON.stringify(resolvePickValue(comp.pick[key], hints))
+    === JSON.stringify(comp.config[key]);
+}
+
+/** 一个组件写回文件时长什么样：类型 / 位置 / 尺寸 / 用户真的设过的配置 + 文件里那条 pick。 */
 function sheetComponent(comp) {
-  const picked = comp.picked || [];
+  const hints = sheetHints();
   const config = {};
   for (const key of Object.keys(comp.config || {})) {
-    if (picked.indexOf(key) >= 0) continue;
     if (comp.config[key] === undefined || comp.config[key] === null) continue;
+    if (ruleStillFills(comp, key, hints)) continue;
     config[key] = comp.config[key];
   }
   // 别名驱动的通道槽（ticket #36）：用户没动过就写回**引用**（`@车速`），

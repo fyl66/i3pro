@@ -1282,7 +1282,7 @@ class Checker:
             return
         saved = read("codex-probe.json")
         graphs = [c for c in saved.get("components", []) if c.get("type") == "graph"]
-        self.check("#33 写回文件的图没有把本场次的通道名写死（pick 还在）",
+        self.check("#33 没动过的图不把本场次的通道名写死（pick 还在）",
                    bool(graphs) and all(not (c.get("config") or {}).get("channels")
                                         for c in graphs)
                    and all("pick" in c for c in graphs),
@@ -1314,6 +1314,51 @@ class Checker:
         self.check("#33 保存之后那一套还在按钮上（没有变成没名字的「自定义」）",
                    self.js("i3pro.state.preset") == "codex-probe",
                    self.js("i3pro.state.preset"))
+
+        # ------------------------------------------ A74：勾的通道保存之后不许丢
+        # 修之前这里是单向闩：规则（pick）填过的键再也不写回文件，于是新建的工作表
+        # 勾完通道保存一次就回到默认通道。判据落在**磁盘上那份文件**里有没有这条
+        # 通道名——那条通道是规则永远填不出来的东西。
+        def click_sheet(name):
+            raw = self.js(
+                "(function(){var n=%s;var bs=document.querySelectorAll('#presetRow button');"
+                "for(var i=0;i<bs.length;i++){if(bs[i].textContent===n){"
+                "return JSON.stringify(__center(bs[i]));}}return null;})()"
+                % json.dumps(name))
+            if not raw or raw == "null":
+                return False
+            box = json.loads(raw)
+            self.browser.click(box["x"], box["y"], self.session)
+            time.sleep(0.9)
+            return True
+
+        picked = json.loads(self.js(
+            "(function(){var rows=document.querySelectorAll("
+            "'#channelList label.ch:not(.missing)');"
+            "for(var i=0;i<rows.length;i++){var inp=rows[i].querySelector('input');"
+            "if(inp&&!inp.checked){var c=__center(inp);"
+            "return JSON.stringify({name:rows[i].querySelector('.nm').textContent,"
+            "x:c.x,y:c.y});}}return null;})()"))
+        self.check("#74 侧边栏里找得到一条还没勾的通道（真鼠标要点的）", bool(picked), picked)
+        if picked:
+            self.browser.click(picked["x"], picked["y"], self.session)
+            time.sleep(0.7)
+            live = json.loads(self.js("JSON.stringify(i3pro.selectedChannels())"))
+            self.check("#74 真点勾选框 -> 这一条进了图上", picked["name"] in live, live)
+            click("wsSave", "保存")
+            time.sleep(0.9)
+            landed = read("codex-probe.json")
+            hit = [c for c in landed["components"]
+                   if picked["name"] in ((c.get("config") or {}).get("channels") or [])]
+            self.check("#74 勾的通道真的落进 worksheets/codex-probe.json", bool(hit),
+                       json.dumps(landed["components"], ensure_ascii=False)[:300])
+            if click_sheet("分析") and click_sheet("codex-probe"):
+                again = json.loads(self.js(
+                    "JSON.stringify(i3pro.state.components.map(function(c){"
+                    "return (c.config&&c.config.channels)||[];}))"))
+                self.check("#74 切走再切回，勾的通道还在（没有变回默认通道）",
+                           any(picked["name"] in one for one in again),
+                           json.dumps(again, ensure_ascii=False)[:300])
 
         # ------------------------------------------- 同名另存为：加后缀不覆盖
         before_bytes = open(os.path.join(root, "codex-probe.json"), "rb").read()

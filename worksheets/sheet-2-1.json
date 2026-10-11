@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "name": "真大表哥 2",
+  "order": 80,
+  "hints": [],
+  "components": [
+    {
+      "type": "graph",
+      "x": 0.0,
+      "y": 0.0,
+      "w": 9.75,
+      "h": 38.5,
+      "config": {
+        "mode": "tiled"
+      },
+      "pick": {
+        "channels": {
+          "limit": 8
+        }
+      }
+    }
+  ]
+}

@@ -11,7 +11,15 @@
       "w": 12.0,
       "h": 16.75,
       "config": {
-        "mode": "tiled"
+        "mode": "tiled",
+        "show": {
+          "cursor": false,
+          "delta": false,
+          "min": true,
+          "max": true,
+          "avg": false,
+          "unit": false
+        }
       },
       "pick": {
         "channels": {
@@ -29,7 +37,8 @@
         "channels": [
           "IMU_RawData_Copy_3.ACC_X",
           "IMU_RawData_Copy_1.ACC_X",
-          "IMU_RawData_Copy_2.ACC_X"
+          "IMU_RawData_Copy_2.ACC_X",
+          "IMU_RawData.ACC_X"
         ],
         "mode": "tiled"
       }
@@ -44,7 +53,8 @@
         "channels": [
           "IMU_RawData_Copy_2.ACC_Y",
           "IMU_RawData_Copy_1.ACC_Y",
-          "IMU_RawData_Copy_3.ACC_Y"
+          "IMU_RawData_Copy_3.ACC_Y",
+          "IMU_RawData.ACC_Y"
         ],
         "mode": "tiled"
       }

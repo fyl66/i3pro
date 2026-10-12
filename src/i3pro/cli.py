@@ -16,6 +16,7 @@ from . import csvlog, export as exportmod, laps as lapsmod
 from . import library as librarymod
 from . import derive
 from . import ld as ldmod
+from . import pairing as pairingmod
 from . import render as rendermod
 from . import report as reportmod
 from . import store
@@ -545,6 +546,162 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def _pair_target(directory: Path, name: str) -> Path:
+    """合并场次写到哪：``<数据目录>/<.ld 名>.csv``；同名**永不覆盖**。"""
+    from . import importer
+
+    return importer.unique_target(directory, name + ".csv")
+
+
+def _load_can_for_pair(sources: list[Path], dbc_dirs: list[Path]):
+    """把一次记录的几卷读成一个 CAN 场次（调用方已经说了是哪几卷）。"""
+    from . import canlog
+
+    return canlog.read_can_session(
+        sources, dbc_dir=dbc_dirs, merge=False, discover=False, write_sidecar=False
+    )
+
+
+def _remember_pairing(candidate, pairing) -> None:
+    """把配对证据写进帧表的 ``.can.json`` 侧车——**不改原始数据一个字节**。"""
+    from . import sidecar
+
+    for path in candidate.sources:
+        stored = sidecar.read("canmap", path) or {}
+        stored.update({
+            "paired_ld": pairing.ld_path.name,
+            "pair_offset_s": round(pairing.alignment.offset_s, 4),
+            "pair_overlap_s": round(candidate.overlap_s, 1),
+            "pair_vx_r": round(pairing.alignment.r, 4),
+        })
+        sidecar.write("canmap", path, stored)
+
+
+def cmd_pair(args: argparse.Namespace) -> int:
+    """把 CAN 记录仪帧表对到 ``.ld`` 场次，可选把两边的通道合成一场。"""
+    from . import canlog
+    from . import importer
+
+    data = Path(args.data)
+    if not data.is_dir():
+        print(f"数据目录不存在：{data}。下一步：先建这个目录，或者把 --data 指对。")
+        return 1
+    dbc_dirs = [data / "dbc"]
+
+    if args.copy:
+        if not args.source:
+            print("--copy 要同时给 --source <原始数据目录>。下一步："
+                  "例如 --source \"\\\\10.122.20.253\\...\\10.5湾区\"。")
+            return 1
+        source = Path(args.source)
+        if not source.is_dir():
+            print(f"原始目录不存在：{source}。下一步：确认这台机器现在连得上那个共享。")
+            return 1
+        wanted = [
+            path for path in sorted(source.rglob("*"))
+            if path.is_file() and path.suffix.lower() in importer.ALLOWED_SUFFIXES
+        ]
+        copied = skipped = 0
+        for path in wanted:
+            if (data / path.name).exists():
+                skipped += 1
+                continue
+            row = importer.bring(path, data, move=False)
+            print(f"  + {row['file']}  ({row['bytes'] / 1e6:.1f} MB)")
+            copied += 1
+        print(f"\n从 {source} 拷进 {copied} 个文件，{skipped} 个同名已存在（不覆盖）。")
+
+    lds = [path for path in sorted(data.glob("*.ld"))]
+    if args.ld:
+        wanted = {name[:-3] if name.lower().endswith(".ld") else name for name in args.ld}
+        lds = [path for path in lds if path.stem in wanted]
+    if not lds:
+        print(f"{data} 里没有 .ld 场次。下一步：用 导入数据.bat 拖进来，"
+              f"或者先跑 i3pro pair {data} --copy --source <原始目录>。")
+        return 1
+
+    # 帧表**含子目录**：记录仪导出常常自己带一层目录（``10.5can记录仪数据/``），
+    # 而场次库的发现逻辑也是递归的——两边规则要一致。
+    frames = [
+        path for path in sorted(data.rglob("*.csv")) if canlog.looks_like_frames(path)
+    ]
+    groups = pairingmod.frame_groups(frames)
+    print(f"{len(lds)} 场 .ld，{len(frames)} 份原始帧表（{len(groups)} 次记录）")
+
+    written = 0
+    for ld_path in lds:
+        log = ldmod.LogFile.read(ld_path)
+        try:
+            start, end = pairingmod.ld_window(log)
+            found = pairingmod.candidates(
+                start, end, groups, min_overlap_s=args.min_overlap,
+            )
+            print(f"\n{ld_path.name}")
+            print(f"  窗口 {start:%H:%M:%S} -> {end:%H:%M:%S}（{log.duration:.0f} s）")
+            if not found:
+                print("  没有时间上挨得着的帧表")
+                continue
+            for candidate in found:
+                try:
+                    session = _load_can_for_pair(candidate.sources, dbc_dirs)
+                except Exception as exc:  # 一份坏帧表不能拖垮整份报告
+                    print(f"  {candidate.label}  读不出来：{type(exc).__name__}: {exc}")
+                    continue
+                expect = pairingmod.expected_offset(start, candidate)
+                result = pairingmod.align(
+                    log, session,
+                    ld_start=start, can_window=candidate.window,
+                    expect_s=expect, max_lag_s=args.max_lag,
+                )
+                pairing = pairingmod.Pairing(ld_path, candidate, result, session=session)
+                mark = "配对" if result.ok else f"不配对（{result.reason}）"
+                print(
+                    f"  {candidate.label}  重叠 {candidate.overlap_s:6.1f} s"
+                    f"  墙钟 {expect:+7.1f} s  偏移 {result.offset_s:+7.3f} s"
+                    f"  r={result.r:.4f}"
+                    f"  {mark}"
+                )
+                if not result.ok:
+                    continue
+                if not args.list:
+                    _write_pairing(data, pairing, args)
+                    written += 1
+        finally:
+            log.close()
+
+    if args.list:
+        print("\n（--list：一个字节都没写。要真合并就加 --apply）")
+    else:
+        print(f"\n写了 {written} 个合并场次到 {data.resolve()}")
+        print("下一步: 双击 启动.bat，侧边栏里 <场次>.ld 与 <场次>.csv 并排，"
+              "合并场次里两边通道都在。")
+    return 0
+
+
+def _write_pairing(data: Path, pairing, args: argparse.Namespace) -> None:
+    """算合并列 + 落盘 + 写侧车证据。"""
+    target = _pair_target(Path(args.out or data), pairing.name)
+    log = _open_ld(pairing.ld_path)
+    try:
+        axis, columns, units, skipped = pairingmod.merge_columns(
+            log, pairing.session, pairing.alignment.offset_s
+        )
+        info = pairingmod.write_merged(target, axis, columns, units=units)
+    finally:
+        log.close()
+    _remember_pairing(pairing.candidate, pairing)
+    print(
+        f"    -> {target.name}  {info['rows']} 行 x {info['columns']} 列"
+        f"  {info['bytes'] / 1e6:.1f} MB"
+        + (f"（重名的 {len(skipped)} 条 CAN 通道没写：{'、'.join(skipped[:4])}…）"
+           if skipped else "")
+    )
+
+
+def _open_ld(path: Path):
+    return ldmod.LogFile.read(path)
+
+
 def cmd_import(args: argparse.Namespace) -> int:
     """把 .ld/.ldx/.csv/.xlsx/.txt/.tsv 复制或移动进数据目录，让它们出现在侧边栏。"""
     from . import importer
@@ -963,6 +1120,35 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("track", help="圈速柱状速览")
     p.add_argument("file")
     p.set_defaults(func=cmd_track)
+
+    p = sub.add_parser(
+        "pair",
+        help="把 CAN 记录仪帧表对到 .ld 场次，可选把两边的通道合成一场",
+        description=(
+            "记录仪与 C125 记的东西不在同一份文件里（帧表有 IVT 的 I_Data，"
+            ".ld 有电机通道）。这条命令按墙钟挑候选、按相对时钟用 Vx 互相关求偏移，"
+            "然后把两边的通道并成一个场次（时间轴以 .ld 为准，CAN 通道零阶保持）。"
+            "默认只打印配对表，不写任何文件；--apply 才落盘。"
+        ),
+    )
+    p.add_argument("data", help="数据目录（放 .ld 与原始帧表；DBC 在它的 dbc/ 里）")
+    p.add_argument("--ld", action="append", default=[],
+                   help="只处理这些 .ld（写名字或带 .ld 的文件名），可重复")
+    p.add_argument("--list", action="store_true",
+                   help="只打印配对表，一个字节都不写（默认行为，写出来更明白）")
+    p.add_argument("--apply", dest="list", action="store_false",
+                   help="真的写出合并场次")
+    p.add_argument("--source", default=None,
+                   help="--copy 时从哪个原始目录拷（网络共享也行）")
+    p.add_argument("--copy", action="store_true",
+                   help="先把原始目录里缺的 .ld/.ldx/.csv 拷进数据目录（同名永不覆盖）")
+    p.add_argument("--out", default=None,
+                   help="合并场次写到哪（默认跟数据目录同一个）")
+    p.add_argument("--min-overlap", type=float, default=pairingmod.MIN_OVERLAP_S,
+                   help=f"墙钟重叠少于这个秒数就不当候选（默认 {pairingmod.MIN_OVERLAP_S:g}）")
+    p.add_argument("--max-lag", type=float, default=pairingmod.MAX_LAG_S,
+                   help=f"互相关搜索的最大偏移 [s]（默认 {pairingmod.MAX_LAG_S:g}）")
+    p.set_defaults(func=cmd_pair)
 
     p = sub.add_parser("report", help="时间报告 / 通道报告（分段计时、理论最快圈、通道统计）")
     p.add_argument("file")

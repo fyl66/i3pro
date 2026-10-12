@@ -34,6 +34,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from dataclasses import replace
+from datetime import datetime, timedelta
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -44,11 +45,13 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from i3pro import (  # noqa: E402
     cache, canlog, channelref, channels, csvlog, dbc, derive, gpsfix,
+    cli,
     laps as lapsmod, ld, library as librarymod,
     maths as mathsmod, motec_csv,
     notes as notesmod, render, report as reportmod, sections as sectionsmod,
     aliases as aliasesmod,
     palette as palettemod,
+    pairing,
     server, sidecar, store, timebase,
     txtlog,
     worksheets as worksheetsmod,
@@ -9591,6 +9594,384 @@ class TestMissingChannelsOnExport(_ExportBase):
         header = out.read_text(encoding="utf-8-sig").splitlines()[0]
         self.assertIn("Vx KF", header)
         self.assertNotIn("缺掉的通道", header)
+
+
+class _FakeChannel:
+    """配对测试用的最小通道：只带 ``pairing`` 会碰的那几个字段。"""
+
+    def __init__(self, name, unit, rate, values):
+        self.name = name
+        self.unit = unit
+        self.sample_rate = float(rate)
+        self._values = np.asarray(values, dtype=np.float64)
+
+    @property
+    def sample_count(self):
+        return int(self._values.size)
+
+    def time(self):
+        return np.arange(self._values.size, dtype=np.float64) / self.sample_rate
+
+
+class _FakeLog:
+    """合成 ``.ld``：只要 ``pairing`` 用得到的那几样。"""
+
+    def __init__(self, path, log_date, log_time, seconds, rate=100.0, channels=None):
+        self.path = Path(path)
+        self.log_date = log_date
+        self.log_time = log_time
+        self.sample_rate = float(rate)
+        self.duration = float(seconds)
+        self.channels = []
+        # 会话协议要求声明数学通道放哪（channels.py 的 `_declared`）；合成场次没有。
+        self.derived_names = set()
+        self.derived_units = {}
+        self._values: dict[str, np.ndarray] = {}
+        for name, unit, values in (channels or []):
+            values = np.asarray(values, dtype=np.float64)
+            self.channels.append(_FakeChannel(name, unit, rate, values))
+            self._values[name] = values
+
+    def channel(self, name):
+        for channel in self.channels:
+            if channel.name.lower() == str(name).lower():
+                return channel
+        raise KeyError(name)
+
+    def values(self, name):
+        return self._values[name if isinstance(name, str) else name.name]
+
+
+class _FakeCan:
+    """合成 CAN 帧表场次：``time`` + ``columns`` 那套访问器。"""
+
+    def __init__(self, time, channels, values):
+        self.time = np.asarray(time, dtype=np.float64)
+        self.channels = [
+            _FakeChannel(name, unit, 1.0 / (self.time[1] - self.time[0]), values[name])
+            for name, unit in channels
+        ]
+        self.columns = {name: np.asarray(values[name], dtype=np.float64) for name, _ in channels}
+
+    def channel(self, name):
+        return next(ch for ch in self.channels if ch.name == name)
+
+    def values(self, name):
+        return self.columns[name if isinstance(name, str) else name.name]
+
+
+class TestPairing(unittest.TestCase):
+    """CAN 帧表 -> ``.ld`` 场次的配对与合并（``i3pro pair`` 的全部判据）。"""
+
+    #: 时间轴的形状：.ld 从 16:52:29 开始记，记录仪从 16:52:20 开始（早 9 s）。
+    #: "记录仪的 0 秒"落在 ``.ld`` 的 ``t + 9`` 处——这就是墙钟估出来的偏移。
+    #: 墙钟给出的估计：``B_ld - B_can = 16:52:29 - 16:52:20``，记录仪先开机 9 s。
+    WALL_SKEW_S = 9.0
+    #: 真正的偏移（两条时间轴上的那一段驾驶差多少秒）。墙钟那个 9 s 只是估计，
+    #: 两边各有各的启动时间，实测差到 25 s——所以这个值刻意与 ``WALL_SKEW_S`` 不同，
+    #: 用例才能证明"认出来的是数据，不是墙钟"。
+    TRUE_OFFSET_S = 16.0
+    FRAME_START = datetime(2026, 10, 5, 16, 52, 20)
+    LD_START = datetime(2026, 10, 5, 16, 52, 29)
+
+    #: 两条"同一条驾驶"的连续量：一串互不成倍频的正弦，所以在 ±120 s 里只有一个峰。
+    #: （写成一个周期的正弦会让"错半个周期"也拿满分——实测过，那不是我们要的形状。）
+    def _wave(self, at: np.ndarray) -> np.ndarray:
+        return (np.sin(2 * np.pi * at / 37.0)
+                + 0.55 * np.sin(2 * np.pi * at / 6.7 + 1.1)
+                + 0.30 * np.cos(2 * np.pi * at / 2.9 + 0.4))
+
+    def _frames(self, name: str, start: datetime, seconds: float):
+        # ``first_wall`` / ``last_wall`` 是"当天零点起的秒数"——墙钟列就是这个形状。
+        midnight = datetime(start.year, start.month, start.day)
+        begin = (start - midnight).total_seconds()
+        return {
+            "path": Path(name),
+            "first_wall": begin,
+            "last_wall": begin + seconds,
+            "first_t": 0.0,
+            "last_t": seconds,
+        }
+
+    def _can(self, seconds: float = 400.0, seed: int = 1):
+        at = np.arange(seconds * 100.0) / 100.0
+        # 记录仪时间轴上的两条通道。同一个物理量在 ``.ld`` 那条轴上出现在
+        # ``t + offset`` 处（见 ``_ld`` 的说明），两边因此是对同一段驾驶的采样。
+        speed = 60.0 + 40.0 * self._wave(at)
+        accel = 4.0 * self._wave(at + 1.7)
+        return _FakeCan(
+            at,
+            [("Vx_KF", "km/h"), ("accY_MTI", "m/s/s")],
+            {"Vx_KF": speed, "accY_MTI": accel},
+        )
+
+    def _ld(self, seconds: float = 400.0, offset: float | None = None):
+        # 约定：``.ld`` 的 ``t`` 秒对应记录仪的 ``t - offset`` 秒（记录仪先开机时
+        # offset 为正；见 ``expected_offset``）。两条轴都是 100 Hz、零点在整数格上，
+        # 所以 ``.ld`` 的第 k 个样本就是同一段驾驶在记录仪轴上第 ``k - offset*100`` 个
+        # 样本——直接按这个位移取值即可。
+        offset = self.TRUE_OFFSET_S if offset is None else float(offset)
+        at = np.arange(seconds * 100.0) / 100.0
+        speed = 60.0 + 40.0 * self._wave(at + offset)
+        accel = 4.0 * self._wave(at + offset + 1.7)
+        return _FakeLog(
+            "合成.ld", "05/10/2026", "17:00:00", seconds,
+            channels=[("Vx KF", "km/h", speed), ("accY MTI", "m/s/s", accel)],
+        )
+
+    # ------------------------------------------------------------------ 时间窗
+    def test_log_time_is_the_end_of_the_recording(self):
+        """``.ld`` 头的 ``log_time`` 是**结束**时刻：实测 9 份 10.5 数据都是这样。"""
+        log = _FakeLog("x.ld", "05/10/2026", "18:13:50", 1355.0)
+        start, end = pairing.ld_window(log)
+        self.assertEqual(end, datetime(2026, 10, 5, 18, 13, 50))
+        self.assertEqual(start, datetime(2026, 10, 5, 17, 51, 15))
+
+    def test_frames_window_uses_the_date_in_the_file_name(self):
+        """帧表的墙钟列只有时刻，日期从文件名拿——两边必须拼得起来。"""
+        items = [self._frames("2026_10_05_165220_ID0001.csv", self.FRAME_START, 400.0)]
+        start, end = pairing.recording_window(items)
+        self.assertEqual(start, self.FRAME_START)
+        self.assertEqual((end - start).total_seconds(), 400.0)
+
+    def test_the_expected_offset_is_how_early_the_recorder_started(self):
+        """记录仪先开机 -> 偏移为正（``.ld`` 的 t 秒对应记录仪的 t + 偏移）。"""
+        candidate = pairing.Candidate(
+            sources=[Path("2026_10_05_165220_ID0001.csv")],
+            window=(self.FRAME_START, self.FRAME_START + timedelta(seconds=400)),
+            overlap_s=400.0,
+        )
+        self.assertEqual(pairing.expected_offset(self.LD_START, candidate), self.WALL_SKEW_S)
+
+    def test_candidates_keep_only_the_records_that_overlap_enough(self):
+        log_start = datetime(2026, 10, 5, 16, 52, 29)
+        log_end = log_start + timedelta(seconds=1276)
+        # 帧表的日期只能从**文件名**拿（墙钟列只有时刻），所以这里的名字要是真的形状。
+        groups = [
+            {"items": [self._frames("2026_10_05_165220_ID0001.csv",
+                                    datetime(2026, 10, 5, 16, 52, 20), 1276.0)]},
+            {"items": [self._frames("2026_10_05_090000_ID0001.csv",
+                                    datetime(2026, 10, 5, 9, 0, 0), 300.0)]},
+            {"items": [self._frames("2026_10_05_171200_ID0001.csv",
+                                    datetime(2026, 10, 5, 17, 12, 0), 8.0)]},
+        ]
+        found = pairing.candidates(log_start, log_end, groups, min_overlap_s=20.0)
+        self.assertEqual([c.main.name for c in found], ["2026_10_05_165220_ID0001.csv"])
+
+    # -------------------------------------------------------------------- 对齐
+    def _pair(self, can_seconds=400.0, ld_seconds=400.0):
+        log = self._ld(ld_seconds)
+        session = self._can(can_seconds)
+        # 记录仪的那条时间轴摆到 .ld 的 ``-offset`` 处：.ld 的 t 秒读记录仪的 t + 偏移。
+        items = [{
+            "path": Path("2026_10_05_165220_ID0001.csv"),
+            "first_wall": (self.FRAME_START - datetime(2026, 10, 5, 0, 0, 0)).total_seconds(),
+            "last_wall": (self.FRAME_START - datetime(2026, 10, 5, 0, 0, 0)).total_seconds()
+                         + can_seconds,
+        }]
+        candidate = pairing.candidates(
+            self.LD_START, self.LD_START + timedelta(seconds=ld_seconds),
+            [{"items": items}],
+        )[0]
+        return log, session, candidate
+
+    def test_alignment_recovers_the_true_offset_not_the_wall_clock_guess(self):
+        log, session, candidate = self._pair()
+        expect = pairing.expected_offset(self.LD_START, candidate)
+        self.assertEqual(expect, self.WALL_SKEW_S)
+        result = pairing.align(
+            log, session, ld_start=self.LD_START, can_window=candidate.window,
+            expect_s=expect, max_lag_s=pairing.MAX_LAG_S,
+        )
+        self.assertTrue(result.ok, result.reason)
+        self.assertAlmostEqual(result.offset_s, self.TRUE_OFFSET_S, places=1)
+        self.assertGreater(result.r, 0.99)
+        self.assertIsNotNone(result.accel_r)
+        self.assertGreater(result.accel_r, pairing.MIN_ACCEL_R)
+
+    def test_a_speed_match_on_a_wrong_shift_is_rejected_by_the_acceleration_check(self):
+        """速度像、加速度不像 -> 不认。实测就是靠这条挡住两个假配对。"""
+        log = self._ld()
+        session = self._can()
+        # 速度挪回"与 .ld 同相"，但加速度留着自己那条（相对速度错开了几秒）。
+        # 错偏移上速度能拿满分，加速度却对不上——实测两个假配对就是这个样子。
+        at = np.arange(400.0 * 100.0) / 100.0
+        session.columns["Vx_KF"] = 60.0 + 40.0 * self._wave(at - self.TRUE_OFFSET_S)
+        session.columns["accY_MTI"] = 4.0 * self._wave(at + 1.7)
+        items = [{
+            "path": Path("2026_10_05_165220_ID0001.csv"),
+            "first_wall": (self.FRAME_START - datetime(2026, 10, 5, 0, 0, 0)).total_seconds(),
+            "last_wall": (self.FRAME_START - datetime(2026, 10, 5, 0, 0, 0)).total_seconds() + 400,
+        }]
+        candidate = pairing.candidates(
+            self.LD_START, self.LD_START + timedelta(seconds=400), [{"items": items}],
+        )[0]
+        result = pairing.align(
+            log, session, ld_start=self.LD_START, can_window=candidate.window,
+            expect_s=pairing.expected_offset(self.LD_START, candidate),
+            max_lag_s=pairing.MAX_LAG_S,
+        )
+        self.assertFalse(result.ok)
+        self.assertIn("加速度", result.reason)
+
+    def test_two_unrelated_runs_are_not_paired(self):
+        log = self._ld()
+        session = self._can(seed=99)
+        rng = np.random.default_rng(7)
+        session.columns["Vx_KF"] = rng.normal(30.0, 8.0, session.time.size)
+        items = [{
+            "path": Path("2026_10_05_165220_ID0001.csv"),
+            "first_wall": (self.FRAME_START - datetime(2026, 10, 5, 0, 0, 0)).total_seconds(),
+            "last_wall": (self.FRAME_START - datetime(2026, 10, 5, 0, 0, 0)).total_seconds() + 400,
+        }]
+        candidate = pairing.candidates(
+            self.LD_START, self.LD_START + timedelta(seconds=400), [{"items": items}],
+        )[0]
+        result = pairing.align(
+            log, session, ld_start=self.LD_START, can_window=candidate.window,
+            expect_s=pairing.expected_offset(self.LD_START, candidate),
+            max_lag_s=pairing.MAX_LAG_S,
+        )
+        self.assertFalse(result.ok)
+
+    def test_a_too_short_overlap_is_refused_instead_of_guessed(self):
+        log = self._ld()
+        session = self._can(seconds=15.0)
+        items = [{
+            "path": Path("2026_10_05_165220_ID0001.csv"),
+            "first_wall": (self.FRAME_START - datetime(2026, 10, 5, 0, 0, 0)).total_seconds(),
+            "last_wall": (self.FRAME_START - datetime(2026, 10, 5, 0, 0, 0)).total_seconds() + 15,
+        }]
+        candidate = pairing.Candidate(
+            sources=[Path(items[0]["path"])],
+            window=(self.FRAME_START, self.FRAME_START + timedelta(seconds=15)),
+            overlap_s=15.0,
+        )
+        result = pairing.align(
+            log, session, ld_start=self.LD_START, can_window=candidate.window,
+            expect_s=self.WALL_SKEW_S, max_lag_s=pairing.MAX_LAG_S,
+        )
+        self.assertFalse(result.ok)
+        self.assertIn("太短", result.reason)
+
+    # -------------------------------------------------------------------- 合并
+    def _merge_fixture(self):
+        # 1 s / 100 Hz -> 101 个样本（与 ``timebase.length`` 一致），三条通道等长。
+        n = 101
+        log = _FakeLog(
+            "合成.ld", "05/10/2026", "17:00:00", 1.0,
+            channels=[
+                ("Vx KF", "km/h", np.linspace(0.0, 2.0, n)),
+                ("I Data", "A", np.zeros(n)),
+                ("U1 Data", "V", np.zeros(n)),
+                ("AngVelX hor", "deg/s", np.linspace(1.0, 3.0, n)),
+                ("Slot", "", np.linspace(7.0, 9.0, n)),
+            ],
+        )
+        session = _FakeCan(
+            np.arange(n) / 100.0,
+            [
+                ("Vx_KF", "km/h"),
+                ("I_Data", "A"),
+                ("U1_Data", "V"),
+                ("AngVelX_body", "deg/s"),
+                ("AngVelX_hor", "deg/s"),
+                ("Slot_CAN", ""),
+            ],
+            {
+                "Vx_KF": np.linspace(0.5, 2.5, n),
+                "I_Data": np.linspace(-10.0, -30.0, n),
+                "U1_Data": np.linspace(540.0, 542.0, n),
+                "AngVelX_body": np.linspace(4.0, 6.0, n),
+                "AngVelX_hor": np.linspace(7.0, 9.0, n),
+                "Slot_CAN": np.linspace(1.0, 3.0, n),
+            },
+        )
+        return log, session
+
+    def test_merge_same_name_is_kept_once_and_the_ld_spelling_wins(self):
+        log, session = self._merge_fixture()
+        _axis, columns, units, skipped = pairing.merge_columns(log, session, 0.0)
+        self.assertIn("Vx KF", columns)
+        self.assertNotIn("Vx_KF", columns)
+        self.assertIn("Vx_KF", skipped)
+        self.assertTrue(np.allclose(columns["Vx KF"][:3], [0.0, 0.02, 0.04]),
+                        "同名通道保留的应该是 .ld 那一份")
+
+    def test_an_empty_placeholder_column_is_replaced_by_the_real_one(self):
+        """C125 工程里挂着 IVT 模板通道（整段 0）；合并后要留下帧表里真的有数的那条。
+
+        实测的模板通道不是**精确**的 0（``传杰八字`` 的 ``I Data`` 是 ``-0.0015 … 0``，
+        记录仪自己的量化底噪），所以这里也带一条那样的进来。
+        """
+        log, session = self._merge_fixture()
+        log._values["I Data"] = np.concatenate(
+            [[-0.0015, 0.0], np.zeros(99)]
+        )
+        _axis, columns, units, _skipped = pairing.merge_columns(log, session, 0.0)
+        self.assertTrue(np.allclose(columns["I Data"][:3], [-10.0, -10.2, -10.4]))
+        self.assertTrue(np.allclose(columns["U1 Data"][:3], [540.0, 540.02, 540.04]))
+        # 单位跟着真的那条走（模板那条也是 A / V，所以这条只是防止写空）
+        self.assertEqual(units["I Data"], "A")
+
+    def test_a_column_that_really_carries_values_is_not_treated_as_empty(self):
+        """同一张表里两侧都有数时不吃掉对面（只换"空的"，不是"小的"）。"""
+        log, session = self._merge_fixture()
+        log._values["I Data"] = np.linspace(-5.0, -1.0, 101)
+        _axis, columns, _units, skipped = pairing.merge_columns(log, session, 0.0)
+        self.assertTrue(np.allclose(columns["I Data"][:3], [-5.0, -4.96, -4.92]))
+        self.assertIn("I_Data", skipped)
+
+    def test_different_channels_sharing_a_word_are_both_kept(self):
+        """``AngVelX_body`` 与 ``AngVelX hor`` 是两条通道，不能被名字归并掉一条。
+
+        （``AngVelX_hor`` 是 ``AngVelX hor`` 的另一种写法，是**同一条**，照旧只留一份。）
+        """
+        log, session = self._merge_fixture()
+        _axis, columns, _units, _skipped = pairing.merge_columns(log, session, 0.0)
+        self.assertIn("AngVelX_body", columns)
+        self.assertIn("AngVelX hor", columns)
+        self.assertNotIn("AngVelX_hor", columns)
+        self.assertTrue(np.allclose(columns["AngVelX hor"][:3], [1.0, 1.02, 1.04]))
+        self.assertTrue(np.allclose(columns["AngVelX_body"][:3], [4.0, 4.02, 4.04]))
+
+    def test_a_can_only_channel_is_added_after_the_ld_ones(self):
+        log, session = self._merge_fixture()
+        _axis, columns, _units, _skipped = pairing.merge_columns(log, session, 0.0)
+        self.assertIn("Slot_CAN", columns)
+        self.assertEqual(list(columns)[0], "Vx KF", "顺序应该是 .ld 的通道在前")
+        self.assertEqual(list(columns)[-1], "Slot_CAN", "新加的通道接在后面")
+
+    def test_merged_output_reads_back_as_one_session(self):
+        log, session = self._merge_fixture()
+        axis = np.arange(101) / 100.0
+        _a, columns, units, _s = pairing.merge_columns(log, session, 0.0)
+        out = scratch("_pair_merged.csv")
+        try:
+            info = pairing.write_merged(out, axis, columns, units=units)
+            self.assertEqual(info["rows"], 101)
+            self.assertEqual(info["columns"], len(columns))
+            self.assertFalse(canlog.looks_like_frames(out))
+            session = csvlog.open_session(out)
+            self.assertTrue(session.has("I Data"))
+            self.assertTrue(session.has("Slot_CAN"))
+        finally:
+            out.unlink(missing_ok=True)
+
+    def test_list_mode_writes_nothing(self):
+        """``--list`` 是默认动作，一个字节都不写。"""
+        data = scratch("_pair_data")
+        shutil.rmtree(data, ignore_errors=True)
+        data.mkdir(parents=True, exist_ok=True)
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = cli.main(["pair", str(data), "--list"])
+            self.assertEqual(code, 1, "空目录应该给非零退出码并说下一步")
+            self.assertIn("没有 .ld 场次", out.getvalue())
+            self.assertEqual(list(data.iterdir()), [], "--list 不该写任何文件")
+        finally:
+            shutil.rmtree(data, ignore_errors=True)
 
 
 if __name__ == "__main__":

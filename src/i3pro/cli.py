@@ -628,7 +628,9 @@ def cmd_pair(args: argparse.Namespace) -> int:
     groups = pairingmod.frame_groups(frames)
     print(f"{len(lds)} 场 .ld，{len(frames)} 份原始帧表（{len(groups)} 次记录）")
 
-    written = 0
+    # 先全部算完、把"重复动作撞出来的假配对"剔掉，再落盘：判定要靠整场 .ld 的
+    # 全部候选放在一起看（见 consistent_pairings），边算边写就只能看一眼写一眼。
+    planned: list[tuple[Path, list]] = []
     for ld_path in lds:
         log = ldmod.LogFile.read(ld_path)
         try:
@@ -657,25 +659,37 @@ def cmd_pair(args: argparse.Namespace) -> int:
                     ld_start=start, can_window=candidate.window,
                     expect_s=expect, max_lag_s=args.max_lag,
                 )
-                pairing = pairingmod.Pairing(ld_path, candidate, result, session=session)
+                pairing = pairingmod.Pairing(
+                    ld_path, candidate, result, session=session, expect_s=expect,
+                )
                 mark = "配对" if result.ok else f"不配对（{result.reason}）"
+                if result.ok and result.window == "follow_window":
+                    mark = "配对（跟随窗）"
                 print(
-                    f"  {candidate.label}  重叠 {candidate.overlap_s:6.1f} s"
+                    f"  {candidate.label}  重叠 {candidate.overlap_s:+7.1f} s"
                     f"  墙钟 {expect:+7.1f} s  偏移 {result.offset_s:+7.3f} s"
                     f"  r={result.r:.4f}"
                     f"  {mark}"
                 )
                 if result.ok:
                     matched.append(pairing)
-            if matched and not args.list:
-                _write_pairing(data, matched, args)
-                written += 1
+            if not matched:
+                continue
+            kept, dropped = pairingmod.consistent_pairings(matched)
+            for item, gap in dropped:
+                print(f"  {item.candidate.label}  推出来的钟差比最贴墙钟那次大 "
+                      f"{gap:.0f} s（重复动作撞出来的），不当配对")
+            if kept:
+                planned.append((ld_path, kept))
         finally:
             log.close()
 
     if args.list:
         print("\n（--list：一个字节都没写。要真合并就加 --apply）")
     else:
+        for _ld_path, kept in planned:
+            _write_pairing(data, kept, args)
+        written = len(planned)
         print(f"\n写了 {written} 个合并场次到 {data.resolve()}")
         print("下一步: 双击 启动.bat，侧边栏里 <场次>.ld 与 <场次>.csv 并排，"
               "合并场次里两边通道都在。")
@@ -1156,9 +1170,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", default=None,
                    help="合并场次写到哪（默认跟数据目录同一个）")
     p.add_argument("--min-overlap", type=float, default=pairingmod.MIN_OVERLAP_S,
-                   help=f"墙钟重叠少于这个秒数就不当候选（默认 {pairingmod.MIN_OVERLAP_S:g}）")
+                   help="墙钟上放宽之后还重叠不到这个秒数就不当候选"
+                        f"（默认 {pairingmod.MIN_OVERLAP_S:g}）")
     p.add_argument("--max-lag", type=float, default=pairingmod.MAX_LAG_S,
-                   help=f"互相关搜索的最大偏移 [s]（默认 {pairingmod.MAX_LAG_S:g}）")
+                   help="互相关搜索的最大偏移 [s]，也是挑候选时把 .ld 的窗口"
+                        f"放宽多少秒（.ld 头里的绝对时间不可靠；默认 "
+                        f"{pairingmod.MAX_LAG_S:g}）")
     p.set_defaults(func=cmd_pair)
 
     p = sub.add_parser("report", help="时间报告 / 通道报告（分段计时、理论最快圈、通道统计）")

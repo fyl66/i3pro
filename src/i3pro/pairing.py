@@ -42,6 +42,7 @@ __all__ = [
     "Pairing",
     "align",
     "candidates",
+    "consistent_pairings",
     "expected_offset",
     "frame_groups",
     "hold_into",
@@ -74,7 +75,19 @@ ACCEL_AXES = (
 #: 复核用的相关系数门槛。加速度两边是同一个传感器（``.ld`` 走 CAN、帧表走
 #: 原始帧），对齐之后实测真配对 >= 0.9；给 0.6 是给两边的量程/符号留余量。
 MIN_ACCEL_R = 0.6
-#: 墙钟重叠少于这个秒数的记录不参加配对。
+#: 同一场 ``.ld`` 上认下来的几次记录，隐含的 C125 钟差最多允许差这么多秒。
+#:
+#: 每次匹配都能反推出"这份 ``.ld`` 的绝对时间跟头里写的差了多少"（``expect - lag``）：
+#: ``.ld`` 头里的绝对时间不可靠，而记录仪那边是准的，所以这个差值就是这份 ``.ld``
+#: 自己的钟差。同一场里的几次记录推出来的值应当接近（实测真配对之间差 24–115 s）。
+#:
+#: 差出好几百秒的多半是**重复动作**撞出来的：``jhy耐久``（耐久，一圈一圈跑）除了
+#: 自己那一次记录，还认下了 19 分钟前的另一次——两者推出来的钟差差 308 s，而那次
+#: 记录在 ``.ld`` 真正的时间窗里**根本还没开始**。超过这个值就只留最贴墙钟的那一组，
+#: 见 :func:`consistent_pairings`。
+E_TOLERANCE_S = 150.0
+#: 墙钟上"挨得着"的定义：``.ld`` 的窗口按 :data:`MAX_LAG_S` 放宽之后，
+#: 与一次记录至少还要重叠这么多秒，才算候选。少于这个数就是明摆着两回事。
 MIN_OVERLAP_S = 20.0
 #: 允许的钟差上限：墙钟给出的偏移与互相关搜出来的偏移相差超过它就不认。
 #: 这个差值来自两处——两边的"零点"取法不同（记录仪取首帧、``.ld`` 取第一个采样
@@ -99,8 +112,26 @@ SEARCH_S = 900.0
 SEARCH_STEP_S = 0.2
 #: 偏移搜索的步长。100 Hz 的轴，0.01 s 已经比任何一次记录仪启动抖动都细。
 LAG_STEP_S = 0.01
-#: 相关系数低于这个值就不认（正确配对的实测都在 0.99 以上）。
-MIN_CORRELATION = 0.9
+#: 相关系数低于这个值就不认。**0.99**（2026-10-13 从 0.9 提上来的）。
+#:
+#: 实测：真配对速度相关都在 0.9927 以上（最松的是 ``庞仙耐久两圈``），而放宽搜索、
+#: 加跟随窗之后冒出来的假配对在 0.906–0.908（``cjh直线`` 对上 ``100816``、
+#: ``cjh100限速直线`` 对上 ``100027``，两边的墙钟窗口压根没重叠）。0.99 正好卡在中间。
+MIN_CORRELATION = 0.99
+#: 用加速度把偏移钉准的范围 [s]。
+#:
+#: 速度那条曲线太平：`r` 在半个秒里几乎不变，Vx 自己定不到 0.1 s 以内（实测
+#: ``庞仙耐久两圈`` 对 ``112831``：Vx 峰与加速度峰差 0.47 s，加速度复核因此从
+#: 0.96 掉到 0.22）。加速度是尖的，所以在 Vx 认下来的那座峰附近 ±REFINE_S 里
+#: 用它重新定一次偏移——**Vx 的判据在那条偏移上仍然要过**。
+REFINE_S = 1.0
+#: 相关差不到这个值的峰，看成"一样高"：这时候**谁的数据多谁算数**。
+#:
+#: 20 个点的窗口和 300 个点的窗口给出同一个 `r`，说明问题的只有后者。实测
+#: ``cjh直线`` 对 ``100027`` 那一次：真偏移上只能凑出 197 个点（记录仪那段只到
+#: `.ld` 的末尾），而一个错偏移能凑满 228 个点——先按 `r` 排、再按点数挑，
+#: 才挑得回真的那个。
+TIE_CORRELATION = 0.02
 #: 互相关至少要落在这么多个点上才作数（比较窗是 1 Hz，所以约等于秒数）。
 #:
 #: 10 个点太少。搜索放宽到 ±900 s 之后，墙钟窗口夹不住的那一头会剩下几个到
@@ -224,8 +255,30 @@ class Candidate:
         return name + (f" +{len(self.sources) - 1}" if len(self.sources) > 1 else "")
 
 
-def candidates(ld_start, ld_end, groups, *, min_overlap_s: float = MIN_OVERLAP_S) -> list[Candidate]:
-    """墙钟重叠 >= ``min_overlap_s`` 的帧表记录，按重叠从大到小排。"""
+def candidates(
+    ld_start,
+    ld_end,
+    groups,
+    *,
+    min_overlap_s: float = MIN_OVERLAP_S,
+    tolerance_s: float | None = None,
+) -> list[Candidate]:
+    """墙钟上挨得着的帧表记录：``.ld`` 的窗口放宽 ``tolerance_s`` 之后还重叠
+    ``min_overlap_s`` 秒的那些，按"挨得近"从前往后排。
+
+    ``tolerance_s`` 默认 :data:`MAX_LAG_S`。放宽是必须的：``.ld`` 头里的绝对时间
+    **不可靠**——实测 10.7 同一个下午差 19 s 到 505 s（还会跳），日期甚至能差一天
+    （``20261008-传杰最小半径绕圆.ld`` 头写 08/10，其实是 07/10 录的）。
+    拿它当硬筛子会漏掉真配对：``庞仙耐久两圈`` 对上 ``112831`` 那一次，两个墙钟
+    窗口之间还差 24 s 的缝，可内容 `r=1.0000`、加速度复核 0.96（见
+    `docs/ACCEPTANCE.md` A76）。
+
+    ``Candidate.overlap_s`` 记的是**真实**重叠，可能是负的（=两个墙钟窗口之间有
+    缝）；报告里照实写。一份 ``.ld`` 可能对上**不止一次**记录（记录仪分成几段、
+    中间还断过），所以这里不挑"最近的一条"，全都交给 :func:`align` 去验。
+    """
+    reach = MAX_LAG_S if tolerance_s is None else float(tolerance_s)
+    slack = timedelta(seconds=reach)
     out: list[Candidate] = []
     for group in groups:
         items = group["items"] if isinstance(group, dict) else group
@@ -233,13 +286,16 @@ def candidates(ld_start, ld_end, groups, *, min_overlap_s: float = MIN_OVERLAP_S
             continue
         start, end = recording_window(items)
         overlap = (min(ld_end, end) - max(ld_start, start)).total_seconds()
-        if overlap >= min_overlap_s:
-            ordered = sorted(items, key=lambda item: item["first_wall"])
-            out.append(Candidate(
-                sources=[Path(item["path"]) for item in ordered],
-                window=(start, end),
-                overlap_s=overlap,
-            ))
+        reachable = (min(ld_end + slack, end)
+                     - max(ld_start - slack, start)).total_seconds()
+        if reachable < min_overlap_s:
+            continue
+        ordered = sorted(items, key=lambda item: item["first_wall"])
+        out.append(Candidate(
+            sources=[Path(item["path"]) for item in ordered],
+            window=(start, end),
+            overlap_s=overlap,
+        ))
     out.sort(key=lambda item: -item.overlap_s)
     return out
 
@@ -286,6 +342,9 @@ class Alignment:
     reason: str = ""
     #: 复核用的加速度相关系数（``None`` = 有一边没有这条通道，没复核）。
     accel_r: float | None = None
+    #: 这个结论是用哪种比较窗得来的（``wall_window`` = 锚在墙钟那段重叠上，
+    #: ``follow_window`` = 跟着偏移走）。写进侧车，报告里也好看出是哪条路认的。
+    window: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -295,6 +354,7 @@ class Alignment:
             "accel_r": None if self.accel_r is None else round(self.accel_r, 4),
             "ok": self.ok,
             "reason": self.reason,
+            "window": self.window,
         }
 
 
@@ -389,20 +449,26 @@ def align(
 ) -> Alignment:
     """在相对时钟上互相关求偏移：``log.values(t)`` 对应 ``session.values(t + offset)``。
 
-    两边的钟各有各的零点，所以"偏移"是记录仪相对 ``.ld`` 的零点差。求法分两步：
+    两边各有各的零点，所以"偏移"是记录仪相对 ``.ld`` 的零点差。整件事分三步：
 
-    1. 墙钟先给一个估计 ``expect_s``——两边都记了绝对时间，差的量级就是
-       "记录仪先开机了多少秒"；
-    2. 在它附近 ``±search_s`` 里、**只比两边墙钟上真的重叠的那一段**，用相对时钟
-       上的速度互相关找精确值。
+    1. 墙钟给一个估计 ``expect_s``（调用方用 :func:`expected_offset` 算），只当搜索中心；
+    2. 在 ``±search_s`` 里用两边都有的速度通道互相关找最像的偏移
+       （怎么挑峰见 :data:`TIE_CORRELATION`）；
+    3. 同一条偏移上再拿**三条加速度轴的中位数**复核，`r < MIN_ACCEL_R` 就不认。
 
-    第 1 步只当搜索中心，不当结论：记录仪的钟实测能差到几分钟
-    （10.7 湾区 311 s，见 :data:`SEARCH_S`），所以 :data:`SEARCH_S` 给得比
-    "钟差几秒"宽得多，**认不认由第 2 步的相关系数与加速度复核决定**。
+    **比较窗试两种，先过判据的算**（2026-10-13 补）：
 
-    第 2 步的窗口必须是墙钟算出来的那段重叠：``.ld`` 的 0 秒与记录仪的第一帧
-    各有各的零点，偏移大的时候"从头开始比 300 s"会比到记录仪还没开始（或已经
-    结束）的地方去，那是在比两条不相干的曲线。
+    * **墙钟窗**：锚在"两边墙钟上真的重叠的那一段"上，与偏移无关。钟差只有几秒到
+      几十秒时它最稳——历史数据全是这么配出来的，所以**先试它**。
+    * **跟随窗**：跟着偏移走，取这个偏移下两边都真的覆盖到的那一段。``.ld`` 头里的
+      绝对时间不可靠（10.7 实测差 19–505 s、还会跳，日期也能差一天），钟差大到几百秒
+      时墙钟窗会落到数据外面去、只剩一小截可比。实测 ``cjh100限速直线`` 对上
+      ``100816``：墙钟窗只盖住 86 个点、那一段记录仪的 MTI 恰好是死的，速度
+      `r=0.9999` 却判成不配对；跟随窗盖住 283 个点，同一偏移上加速度复核 0.941，配对。
+
+    挑峰的顺序两种窗不一样，因为窗长的性质不同：墙钟窗的窗长与偏移无关（点数恒定），
+    照旧取 `r` 最高的那个；跟随窗的窗长随偏移变（短窗上平滑曲线随手就是
+    `r=1.0000`），所以"`r` 相差不到 :data:`TIE_CORRELATION` 时点数多的优先"。
     """
     try:
         ref_t, ref_v = _speed_of(log, SPEED_CANDIDATES)
@@ -410,90 +476,145 @@ def align(
     except KeyError as exc:
         return Alignment(0.0, 0.0, 0, False, f"两边都找不到速度通道（{exc}）")
 
-    # 墙钟重叠段 -> ``.ld`` 的秒数。``.ld`` 的 0 秒就是 ``ld_start``。
-    # 再夹到记录仪**真的有帧**的那一段上：有时候墙钟重叠很长，但偏移一摆，能对上的
-    # ``.ld`` 秒数只剩一小截（记录仪比 ``.ld`` 短、又被推到一头去），那一截之外
-    # 拿去比就是在比一条空曲线。
-    can_lo = float(can_t[0])
-    can_hi = float(can_t[-1])
-    if ld_start is not None and can_window is not None:
-        # 墙钟交集 -> 分别换成两边的相对秒数，再换成"记录仪在读的那一段 ``.ld``"。
-        begin = max(ld_start, can_window[0])
-        end = min(ld_start + timedelta(seconds=float(log.duration)), can_window[1])
-        ld_lo = (begin - ld_start).total_seconds()
-        ld_hi = (end - ld_start).total_seconds()
-        can_begin = (begin - can_window[0]).total_seconds()
-        can_end = (end - can_window[0]).total_seconds()
-        lo = max(ld_lo, can_begin - float(expect_s), can_lo - float(expect_s))
-        hi = min(ld_hi, can_end - float(expect_s), can_hi - float(expect_s))
-    else:
-        lo = 0.0
-        hi = float(log.duration)
-    span = min(float(window_s), hi - lo)
-    if span < 10.0:
-        return Alignment(0.0, 0.0, 0, False, "两份数据实际重叠的时间太短，做不了互相关")
-    step = 1.0 / float(rate)
-    at = lo + np.arange(0.0, span, step)
-    ref = hold_sample(ref_t, ref_v, at)
-    usable = np.isfinite(ref)
-    if int(usable.sum()) < 10:
+    ref_v = np.asarray(ref_v, dtype=np.float64)
+    if not np.isfinite(ref_v).any():
         return Alignment(0.0, 0.0, 0, False, "这一场没有可用的速度样本")
 
+    step = 1.0 / float(rate)
+    ld_lo, ld_hi = 0.0, float(log.duration)
+    can_lo, can_hi = float(can_t[0]), float(can_t[-1])
     center = float(expect_s)
     reach = float(search_s) if search_s else float(max_lag_s)
+    floor = float(MIN_COMPARE_POINTS) * step
+    cap = float(window_s)
 
-    def score(lag: float) -> tuple[float, int]:
-        other = hold_sample(can_t, can_v, at + lag)
-        mask = usable & np.isfinite(other)
-        count = int(mask.sum())
-        # 点太少就不算数：几个点上平滑曲线随手就是 r=1.000000（见 MIN_COMPARE_POINTS）。
-        if count < MIN_COMPARE_POINTS:
-            return -2.0, count
-        return _pearson(ref[mask], other[mask]), count
+    def wall_window(_lag: float):
+        """锚在"两边墙钟上真的重叠的那一段"上（与偏移无关；老办法，先试它）。
 
-    # 粗搜（覆盖墙钟估计的整个不确定范围）之后，在峰顶附近按 step_s 精修一遍。
-    #
-    # 扫描顺序是**从墙钟那个估计往两边由近及远**，不是从左往右：反复跑同一段
-    # （绕桩、八字、来回跑直线）会让整数圈之外也冒出同样高的峰，`>` 保留先到者
-    # 就等于在平手时倒向墙钟这一侧，而不是倒向"谁排在数组前面"。
-    best_lag, best_r, best_count = float(center), -2.0, 0
+        完全照搬以前的算式，包括那两处用 ``expect_s`` 的夹取——**就是为了让这一路的
+        结果与以前逐字节一致**：已经合出来的场次不该因为这次改动而变。墙钟不全
+        （没给 ``ld_start`` / ``can_window``）或那段重叠太短就没有这个窗。
+        """
+        if ld_start is None or can_window is None:
+            return None
+        begin = max(ld_start, can_window[0])
+        end = min(ld_start + timedelta(seconds=ld_hi), can_window[1])
+        ld_begin = (begin - ld_start).total_seconds()
+        ld_end = (end - ld_start).total_seconds()
+        can_begin = (begin - can_window[0]).total_seconds()
+        can_end = (end - can_window[0]).total_seconds()
+        lo = max(ld_begin, can_begin - center, can_lo - center)
+        hi = min(ld_end, can_end - center, can_hi - center)
+        span = min(cap, hi - lo)
+        if span < floor:
+            return None
+        return lo + np.arange(0.0, span, step)
 
-    def sweep(start: float, reach_s: float, step: float) -> None:
-        nonlocal best_lag, best_r, best_count
-        for distance in np.arange(0.0, reach_s + 1e-9, step):
-            lags = (start, start - distance) if distance == 0.0 else (
-                start + distance, start - distance)
-            for lag in lags:
-                value, count = score(float(lag))
-                if value > best_r:
-                    best_lag, best_r, best_count = float(lag), value, count
+    def follow_window(lag: float):
+        """跟着偏移走：这个偏移下两边都真的覆盖到的那一段。"""
+        lo = max(ld_lo, can_lo - float(lag))
+        hi = min(ld_hi, can_hi - float(lag))
+        span = min(cap, hi - lo)
+        if span < floor:
+            return None
+        return lo + np.arange(0.0, span, step)
 
-    sweep(float(center), reach, float(SEARCH_STEP_S))
-    if best_r > -2.0:
-        sweep(best_lag, float(SEARCH_STEP_S), float(step_s))
+    def attempt(window_of, *, by_count: bool, refine: bool) -> Alignment:
+        """用一种窗把整个偏移范围搜一遍，给出这一种的结论。"""
+        def score(lag: float) -> tuple[float, int]:
+            at = window_of(lag)
+            if at is None:
+                return -2.0, 0
+            ref = hold_sample(ref_t, ref_v, at)
+            other = hold_sample(can_t, can_v, at + float(lag))
+            mask = np.isfinite(ref) & np.isfinite(other)
+            count = int(mask.sum())
+            # 点太少就不算数：几个点上平滑曲线随手就是 r=1.000000。
+            if count < MIN_COMPARE_POINTS:
+                return -2.0, count
+            return _pearson(ref[mask], other[mask]), count
 
-    # 第二判据：同一条偏移上再核一遍加速度。速度在短窗口上会撞出假的高相关
-    # （实测有 r=1.0000 落在错的偏移上、只覆盖几十秒直线的例子），加速度一直有
-    # 起伏，配上它才是"两条曲线真的重合"。
-    accel_r = _accel_correlation(log, session, at, best_lag)
-    drift = abs(best_lag - center)
-    ok = bool(best_r >= MIN_CORRELATION and best_count >= MIN_COMPARE_POINTS
-              and drift <= float(max_lag_s))
-    reason = ""
-    if not ok:
-        if best_r <= -2.0:
-            reason = (f"能拿来比的时段都不到 {MIN_COMPARE_POINTS} 个点"
-                      f"（1 Hz 上就是 {MIN_COMPARE_POINTS:g} s），认不了")
-        elif best_r < MIN_CORRELATION:
-            reason = f"互相关只有 r={best_r:.3f}（要 >= {MIN_CORRELATION}）"
-        elif drift > float(max_lag_s):
-            reason = f"互相关说偏移是 {best_lag:+.2f} s，跟墙钟差的 {drift:.1f} s 对不上"
-    elif accel_r is not None and accel_r < MIN_ACCEL_R:
-        ok = False
-        reason = f"加速度复核只有 r={accel_r:.3f}（要 >= {MIN_ACCEL_R}）——速度像，别的通道不像"
-    if ok and accel_r is not None:
+        def sweep(start: float, radius: float, stride: float):
+            found: list[tuple[float, int, float]] = []
+            for distance in np.arange(0.0, radius + 1e-9, stride):
+                lags = (start, start - distance) if distance == 0.0 else (
+                    start + distance, start - distance)
+                for lag in lags:
+                    value, count = score(float(lag))
+                    if value > -2.0:
+                        found.append((value, count, float(lag)))
+            return found
+
+        coarse = sweep(center, reach, float(SEARCH_STEP_S))
+        if not coarse:
+            return Alignment(0.0, 0.0, 0, False,
+                             f"两边能对上的时段太短（不到 {MIN_COMPARE_POINTS:g} 个点），"
+                             f"做不了互相关", None, window_of.__name__)
+        if by_count:
+            # 窗长随偏移变：`r` 相差不到 TIE_CORRELATION 的看成一样高，这时点数多的
+            # 那个才说明问题（几十个点的短窗上平滑曲线随手就是 r=1.0000）。
+            top = max(row[0] for row in coarse)
+            tied = [row for row in coarse if row[0] >= top - TIE_CORRELATION]
+            tied.sort(key=lambda row: (-row[1], abs(row[2] - center)))
+            choice = tied[0]
+        else:
+            # 窗长与偏移无关：照老办法取 `r` 最高的（平手时先遇到的、也就是离墙钟近的）。
+            choice = max(coarse, key=lambda row: row[0])
+        # 精修：在粗搜那个格子附近按 step_s 找最高的 `r`（点数在 0.2 s 之内几乎不变，
+        # 这一步不能再按"点数多优先"，否则永远跳不出 0.2 s 的格子）。
+        fine = sweep(choice[2], float(SEARCH_STEP_S), float(step_s))
+        best_r, best_count, best_lag = max(
+            fine + [choice], key=lambda row: (row[0], -abs(row[2] - choice[2])))
+
+        # 第二判据：同一条偏移上再核一遍加速度。速度在短窗口上会撞出假的高相关
+        # （实测有 r=1.0000 落在错的偏移上、只覆盖几十秒直线的例子），加速度一直有
+        # 起伏，配上它才是"两条曲线真的重合"。
+        peak = best_lag
+        at = window_of(peak)
+        accel_r = None if at is None else _accel_correlation(log, session, at, peak)
+        if refine and accel_r is not None:
+            # 用加速度把偏移钉准（原因见 REFINE_S）：只在这座峰附近 ±REFINE_S 里找，
+            # 而且**Vx 的判据在那条偏移上仍要过**——两条通道都得同意才算数。
+            for offset in np.arange(-REFINE_S, REFINE_S + 1e-9, float(step_s)):
+                lag = peak + float(offset)
+                at2 = window_of(lag)
+                if at2 is None:
+                    continue
+                value = _accel_correlation(log, session, at2, lag)
+                if value is None or value <= accel_r:
+                    continue
+                check, count = score(lag)
+                if check < MIN_CORRELATION or count < MIN_COMPARE_POINTS:
+                    continue
+                accel_r = value
+                best_r, best_count, best_lag = check, count, lag
+        drift = abs(best_lag - center)
+        ok = bool(best_r >= MIN_CORRELATION and best_count >= MIN_COMPARE_POINTS
+                  and drift <= float(max_lag_s))
         reason = ""
-    return Alignment(best_lag, max(best_r, -1.0), best_count, ok, reason, accel_r)
+        if not ok:
+            if best_r < MIN_CORRELATION:
+                reason = f"互相关只有 r={best_r:.3f}（要 >= {MIN_CORRELATION}）"
+            elif drift > float(max_lag_s):
+                reason = (f"互相关说偏移是 {best_lag:+.2f} s，跟墙钟差的 "
+                          f"{drift:.1f} s 对不上")
+        elif accel_r is not None and accel_r < MIN_ACCEL_R:
+            ok = False
+            reason = (f"加速度复核只有 r={accel_r:.3f}（要 >= {MIN_ACCEL_R}）"
+                      f"——速度像，别的通道不像")
+        return Alignment(best_lag, max(best_r, -1.0), best_count, ok, reason, accel_r,
+                         window_of.__name__)
+
+    # 墙钟窗那一路一行都不动（历史数据、已经合出来的场次都靠它；改一点偏移
+    # 就会让那些文件对不上）；跟随窗是新加的，才需要用加速度把偏移钉准。
+    first = attempt(wall_window, by_count=False, refine=False)
+    if first.ok:
+        return first
+    second = attempt(follow_window, by_count=True, refine=True)
+    if second.ok:
+        return second
+    # 两种都不认：报证据多的那一个（`r` 低的那个连"像"都谈不上）。
+    return first if first.r >= second.r else second
 
 
 # ---------------------------------------------------------------------- 合并
@@ -505,6 +626,8 @@ class Pairing:
     candidate: Candidate
     alignment: Alignment
     session: object = None
+    #: 墙钟给出的偏移估计（``.ld`` 窗口起点 − 记录窗口起点）。用来算"隐含钟差"。
+    expect_s: float = 0.0
     #: 因为重名（归一化之后同键）没有写进合并场的 CAN 通道名。
     skipped: list[str] = field(default_factory=list)
 
@@ -516,6 +639,11 @@ class Pairing:
     def ok(self) -> bool:
         return self.alignment.ok
 
+    @property
+    def clock_error(self) -> float:
+        """这次配对隐含着"C125 头里的绝对时间比真的差了多少秒"。"""
+        return float(self.expect_s) - float(self.alignment.offset_s)
+
     def as_dict(self) -> dict:
         return {
             "ld": self.name,
@@ -523,6 +651,26 @@ class Pairing:
             "overlap_s": round(self.candidate.overlap_s, 1),
             **self.alignment.as_dict(),
         }
+
+
+def consistent_pairings(pairings, tolerance_s: float = E_TOLERANCE_S):
+    """同一场 ``.ld`` 上认下来的几次记录，只留"隐含钟差"挨在一起的那一组。
+
+    返回 ``(留, 丢)``；``丢`` 里每项是 ``(配对, 比最小那个大了多少秒)``。
+    剩一个的时候它就是最小那个（没有参照物，谈不上剔除）。理由见
+    :data:`E_TOLERANCE_S`。
+    """
+    if not pairings:
+        return [], []
+    errors = [abs(item.clock_error) for item in pairings]
+    floor = min(errors)
+    kept, dropped = [], []
+    for item, error in zip(pairings, errors):
+        if error - floor <= float(tolerance_s):
+            kept.append(item)
+        else:
+            dropped.append((item, error - floor))
+    return kept, dropped
 
 
 def master_axis(log) -> np.ndarray:

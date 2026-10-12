@@ -9766,6 +9766,45 @@ class TestPairing(unittest.TestCase):
         found = pairing.candidates(log_start, log_end, groups, min_overlap_s=20.0)
         self.assertEqual([c.main.name for c in found], ["2026_10_05_165220_ID0001.csv"])
 
+    def test_a_record_just_past_the_window_is_still_a_candidate(self):
+        """``.ld`` 头里的绝对时间不可靠，所以窗口按钟差上限放宽之后再挑候选。
+
+        实测 ``庞仙耐久两圈`` 对上 ``112831`` 那一次：两个墙钟窗口之间还差 24 s 的缝，
+        可内容 `r=1.0000`、加速度复核 0.96。放宽之前这一条连候选都不是。
+        """
+        # 记录仪 17:01:00 起（.ld 的窗口 16:52:29-16:59:09 之后 111 s）。
+        group = {"items": [self._frames("2026_10_05_170100_ID0001.csv",
+                                        datetime(2026, 10, 5, 17, 1, 0), 400.0)]}
+        log_end = self.LD_START + timedelta(seconds=400)
+        found = pairing.candidates(self.LD_START, log_end, [group])
+        self.assertEqual(len(found), 1)
+        self.assertLess(found[0].overlap_s, 0)         # 两个窗口之间有缝，照实记负数
+        # 再远就没必要试了：钟差上限之外的不当候选。
+        far = {"items": [self._frames("2026_10_05_183000_ID0001.csv",
+                                      datetime(2026, 10, 5, 18, 30, 0), 400.0)]}
+        self.assertEqual(pairing.candidates(self.LD_START, log_end, [far]), [])
+
+    def test_the_comparison_window_follows_the_offset_not_the_wall_clock(self):
+        """比较窗跟着偏移走，不钉在墙钟那个估计上。
+
+        这个合成例子里记录仪的窗口晚了 500 s，两边的**墙钟窗口根本没有重叠**，
+        但两条时间轴上的那段驾驶仍旧差 ``TRUE_OFFSET_S``。窗口要是还按墙钟那个
+        （错的）估计去夹，就会夹成空的、直接判"太短"——实测 ``cjh100限速直线``
+        对 ``100816`` 就是这么被误杀的。
+        """
+        log = self._ld()
+        session = self._can()
+        candidate = self._record_at(self.FRAME_START + timedelta(seconds=500))
+        expect = pairing.expected_offset(self.LD_START, candidate)
+        self.assertLess(expect, -400.0)
+        result = pairing.align(
+            log, session, ld_start=self.LD_START, can_window=candidate.window,
+            expect_s=expect,
+        )
+        self.assertTrue(result.ok, result.reason)
+        self.assertAlmostEqual(result.offset_s, self.TRUE_OFFSET_S, places=1)
+        self.assertGreater(result.r, 0.99)
+
     # -------------------------------------------------------------------- 对齐
     def _pair(self, can_seconds=400.0, ld_seconds=400.0):
         log = self._ld(ld_seconds)
@@ -9997,6 +10036,37 @@ class TestPairing(unittest.TestCase):
         _axis, columns, _units, skipped = pairing.merge_columns(log, session, 0.0)
         self.assertTrue(np.allclose(columns["I Data"][:3], [-5.0, -4.96, -4.92]))
         self.assertIn("I_Data", skipped)
+
+    def _pairing(self, label: str, expect: float, offset: float):
+        """只为 :func:`pairing.consistent_pairings` 造一条配对（只要那两个数）。"""
+        candidate = pairing.Candidate(
+            sources=[Path(label)],
+            window=(self.FRAME_START, self.FRAME_START),
+            overlap_s=0.0,
+        )
+        return pairing.Pairing(
+            Path("合成.ld"), candidate,
+            pairing.Alignment(offset, 1.0, 300, True, ""), expect_s=expect,
+        )
+
+    def test_only_the_recordings_with_the_same_clock_error_are_kept(self):
+        """同一场 .ld 上几次记录推出来的钟差应当接近；差出好几圈的当重复动作撞出来的。
+
+        实测 ``jhy耐久``（耐久，一圈一圈跑）：自己那一次记录推出钟差 27 s，
+        19 分钟前那一次推出 335 s——而那次记录在 .ld 真正的时间窗里还没开始。
+        """
+        near = self._pairing("a.csv", -459.1, -485.997)      # 隐含钟差 26.9 s
+        far = self._pairing("b.csv", 1114.9, 780.034)        # 隐含钟差 334.9 s
+        kept, dropped = pairing.consistent_pairings([near, far])
+        self.assertEqual([item.candidate.label for item in kept], ["a.csv"])
+        self.assertEqual(len(dropped), 1)
+        self.assertAlmostEqual(dropped[0][1], 308.0, places=0)
+        # 真的挨在一起的两个片段都留下：实测 ``cjh100限速直线`` 两次记录差 115 s。
+        one = self._pairing("a.csv", 176.9, -19.997)         # 隐含钟差 196.9 s
+        two = self._pairing("b.csv", -218.1, -299.996)       # 隐含钟差 81.9 s
+        kept, dropped = pairing.consistent_pairings([one, two])
+        self.assertEqual(len(kept), 2)
+        self.assertEqual(dropped, [])
 
     def test_two_recordings_of_one_session_are_merged_into_one_file(self):
         """一个 ``.ld`` 对上不止一次记录时并进**同一场**，各自只补自己的那一段。

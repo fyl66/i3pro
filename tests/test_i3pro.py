@@ -9822,6 +9822,74 @@ class TestPairing(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("加速度", result.reason)
 
+    def _record_at(self, start: datetime, seconds: float = 400.0):
+        """一次记录：墙钟窗落在 ``start`` 起、长 ``seconds`` 秒。"""
+        name = f"{start:%Y_%m_%d_%H%M%S}_ID0001.csv"
+        items = [self._frames(name, start, seconds)]
+        return pairing.candidates(
+            self.LD_START, self.LD_START + timedelta(seconds=seconds), [{"items": items}],
+        )[0]
+
+    def test_a_wall_clock_that_is_minutes_off_still_finds_the_true_offset(self):
+        """记录仪的钟可以差到几分钟：墙钟估计偏 300 s，互相关照样把它拉回来。
+
+        实测 10.7 湾区：``jhy绕桩2`` 的峰在墙钟估计外 311 s 处、``jhy高避`` 在
+        146 s 处，两场都配上了。墙钟只挑候选、给搜索一个中心，认不认由相关系数说话。
+        """
+        log = self._ld()
+        session = self._can()
+        # 记录仪的那条时间轴被推到 300 s 之后（它的钟快了 300 s）：墙钟估出来的
+        # 偏移因此偏了 300 s，可两条轴上的那段驾驶仍旧差 TRUE_OFFSET_S。
+        candidate = self._record_at(self.FRAME_START + timedelta(seconds=300))
+        expect = pairing.expected_offset(self.LD_START, candidate)
+        self.assertAlmostEqual(expect, self.WALL_SKEW_S - 300.0)
+        result = pairing.align(
+            log, session, ld_start=self.LD_START, can_window=candidate.window,
+            expect_s=expect,
+        )
+        self.assertTrue(result.ok, result.reason)
+        self.assertAlmostEqual(result.offset_s, self.TRUE_OFFSET_S, places=1)
+        self.assertGreater(result.r, 0.99)
+
+    def test_a_dead_acceleration_axis_does_not_kill_a_real_pair(self):
+        """三根轴坏一根不该判死：取中位数，另外两根照样认得出同一段驾驶。
+
+        实测 10.7 ``jhy耐久``：速度 r=1.0000、accZ 0.970、accX 0.832，
+        accY 只有 0.359（那一段记录仪的 ``accY_MTI`` 自己就是死的）。
+        """
+        offset = self.TRUE_OFFSET_S
+        at = np.arange(400.0 * 100.0) / 100.0
+        log = _FakeLog(
+            "合成.ld", "05/10/2026", "17:00:00", 400.0,
+            channels=[
+                ("Vx KF", "km/h", 60.0 + 40.0 * self._wave(at + offset)),
+                ("accX MTI", "m/s/s", self._wave(at + offset + 0.4)),
+                ("accY MTI", "m/s/s", self._wave(at + offset + 1.7)),
+                ("accZ MTI", "m/s/s", self._wave(at + offset + 2.9)),
+            ],
+        )
+        noise = np.random.default_rng(3).normal(0.0, 1.0, at.size)
+        session = _FakeCan(
+            at,
+            [("Vx_KF", "km/h"), ("accX_MTI", "m/s/s"),
+             ("accY_MTI", "m/s/s"), ("accZ_MTI", "m/s/s")],
+            {
+                "Vx_KF": 60.0 + 40.0 * self._wave(at),
+                "accX_MTI": self._wave(at + 0.4),
+                # 这一根是死的：实测那一场它只给 0.359。
+                "accY_MTI": noise,
+                "accZ_MTI": self._wave(at + 2.9),
+            },
+        )
+        candidate = self._record_at(self.FRAME_START)
+        result = pairing.align(
+            log, session, ld_start=self.LD_START, can_window=candidate.window,
+            expect_s=pairing.expected_offset(self.LD_START, candidate),
+        )
+        self.assertTrue(result.ok, result.reason)
+        self.assertAlmostEqual(result.offset_s, offset, places=1)
+        self.assertGreater(result.accel_r, pairing.MIN_ACCEL_R)
+
     def test_two_unrelated_runs_are_not_paired(self):
         log = self._ld()
         session = self._can(seed=99)

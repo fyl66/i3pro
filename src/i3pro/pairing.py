@@ -12,9 +12,11 @@
   ``.ld`` 头里的 ``log_time`` 是**记录结束时刻**（不是开始），
   ``begin = log_time - duration``。帧表那边用文件名里的日期 + 首/末墙钟。
   墙钟只做到"挑出候选"，真正的偏移交给 :func:`align`。
-* **偏移是多少**（``align``）——墙钟在两边各有各的零点（记录仪与 C125 的钟差
-  实测在几秒量级），所以偏移要在**相对时钟**上用一条两边都有的通道
-  （``Vx KF`` / ``Vx_KF``）互相关求出来，不看墙钟。
+* **偏移是多少**（``align``）——两边各有各的零点，而且**记录仪自己的钟不准**：
+  实测 ``10.7湾区`` 同一个下午，它的 ``系统时间`` 与 C125 差了 19 s 到 311 s
+  （``jhy绕桩2`` 的峰落在墙钟估计外 311 s 处）。所以偏移要在**相对时钟**上用
+  两边都有的通道（``Vx KF`` / ``Vx_KF``）互相关求出来；墙钟只用来挑候选、
+  给搜索一个中心，配不配对由速度与三条加速度轴的相关系数说话。
 
 合并的时间轴**以 ``.ld`` 为准**（用户确认）：时长、时间零点、采样率都是
 ``.ld`` 的，CAN 通道按零阶保持重采样上去，覆盖不到的地方留空。
@@ -55,10 +57,20 @@ __all__ = [
 #: 配对用的共同通道：两边都有速度（``.ld`` 叫 ``Vx KF``，帧表解码叫 ``Vx_KF``，
 #: 归一化之后是同一个键）。
 SPEED_CANDIDATES = ("Vx KF", "Vx_KF", "VxKF")
-#: 第二判据用的加速度通道。速度在急加速/急减速之外几乎是平的，短窗口上很容易
-#: 撞出假的高相关（实测：窗口里只有几段直线时，错偏移上也能给出 r=1.0000）。
-#: 加速度一直有起伏，拿它复核同一条偏移，假配对就掉下来了。
-ACCEL_CANDIDATES = ("accY MTI", "accY_MTI", "AccY_MTI", "AccY MTI")
+#: 第二判据用的三条加速度轴（``.ld`` 的写法 -> 帧表解码的写法）。
+#:
+#: 为什么是三条轴、取中位数：速度在急加速/急减速之外几乎是平的，短窗口上很容易
+#: 撞出假的高相关（实测：窗口里只有几段直线时，错偏移上也能给出 r=1.0000），
+#: 所以拿加速度复核同一条偏移。但**只看一根轴会误杀真配对**——实测 10.7 的
+#: ``jhy耐久``：速度 r=1.0000、``accZ`` 0.970、``accX`` 0.832，``accY`` 只有
+#: 0.359（那一段记录仪的 ``accY_MTI`` 自己就是死的）。三条轴的中位数取的是
+#: 0.832，一眼就是同一段驾驶。反过来，假配对的三条轴中位数仍在 0 附近
+#: （实测 ``cjh直线`` 对上 094537 那一次：-0.058 / +0.121 / +0.106，中位数 0.106）。
+ACCEL_AXES = (
+    ("accX MTI", "accX_MTI"),
+    ("accY MTI", "accY_MTI"),
+    ("accZ MTI", "accZ_MTI"),
+)
 #: 复核用的相关系数门槛。加速度两边是同一个传感器（``.ld`` 走 CAN、帧表走
 #: 原始帧），对齐之后实测真配对 >= 0.9；给 0.6 是给两边的量程/符号留余量。
 MIN_ACCEL_R = 0.6
@@ -66,27 +78,45 @@ MIN_ACCEL_R = 0.6
 MIN_OVERLAP_S = 20.0
 #: 允许的钟差上限：墙钟给出的偏移与互相关搜出来的偏移相差超过它就不认。
 #: 这个差值来自两处——两边的"零点"取法不同（记录仪取首帧、``.ld`` 取第一个采样
-#: 点），以及 ``.ld`` 头的时刻只精到秒。实测：``10.5湾区`` 最大 41 s
-#: （``102857``），``10.4湾区测试`` 最大 105 s（``133436``，那天记录稀疏、每段很短，
-#: 墙钟窗口与 ``.ld`` 的内容窗口差得多）。给到 120 s 把这批都罩住；真正的判据
-#: 始终是**两个通道的相关系数**，这个只挡"峰跳到自己搜索范围的边上"那类。
-MAX_LAG_S = 120.0
+#: 点），``.ld`` 头的时刻只精到秒，以及**记录仪自己的钟**。实测：``10.5湾区``
+#: 最大 41 s（``102857``），``10.4湾区测试`` 最大 105 s（``133436``），
+#: ``10.7湾区`` 最大 311 s（``jhy绕桩2``：墙钟说 +273.9 s，峰在 -37.0 s）。
+#: 现在跟 :data:`SEARCH_S` 一样宽——搜索范围之内都算允许，真正的判据始终是
+#: **两条通道的相关系数**；把 ``--max-lag`` 调小可以重新收紧这道门。
+MAX_LAG_S = 900.0
 #: 互相关在"墙钟估出来的偏移"附近搜多少秒。
 #:
-#: 墙钟那个估计只当搜索中心，不当结论：它的误差来自两处——``.ld`` 头里的时刻只到
-#: 秒，而两边的"零点"取法不同（记录仪取首帧、``.ld`` 取第一个采样点，两边各自
-#: 还有一段"开始记之前"的启动时间）。实测同一个共享上差到 41 s（``102857``：
-#: 墙钟说 -200.1，真正的峰在 -241.0）。120 s 把这批全罩住，同时**不足以**把
-#: 同一天相邻的另一趟记录（实测最近的两趟相隔 37 s，多数相隔几分钟）搜进来。
-#: 真正的判据始终是相关系数本身，不是这个搜索宽度。
-SEARCH_S = 120.0
-#: 大范围搜索的步长 [s]。120 s x 2 / 0.2 = 1200 次比较，每次几百个点，很便宜；
+#: 墙钟那个估计只当**搜索中心**（以及平手时往哪边靠），不当结论。它的误差来自
+#: ``.ld`` 头里的时刻只到秒、两边"零点"的取法不同，以及记录仪自己的钟不准——
+#: 最后这一条是主要的。实测 ``10.7湾区`` 同一个下午，记录仪的 ``系统时间`` 与
+#: C125 的差在 19 s 到 311 s 之间跳（``jhy绕桩2`` 的峰在墙钟估计外 311 s 处、
+#: ``jhy高避`` 在 146 s 处；两场都被数据本身认了出来，`r=1.0000`）。所以这里
+#: 不按"钟差只有几秒"来设，而是给足 900 s 的余量——代价只是多扫几千次互相关
+#: （每次几百个点，很便宜），配不配对仍然由两条通道的相关系数说话。
+SEARCH_S = 900.0
+#: 大范围搜索的步长 [s]。900 s x 2 / 0.2 = 9000 次比较，每次几百个点，很便宜；
 #: 峰顶再按 :data:`LAG_STEP_S` 精修一次。
 SEARCH_STEP_S = 0.2
 #: 偏移搜索的步长。100 Hz 的轴，0.01 s 已经比任何一次记录仪启动抖动都细。
 LAG_STEP_S = 0.01
 #: 相关系数低于这个值就不认（正确配对的实测都在 0.99 以上）。
 MIN_CORRELATION = 0.9
+#: 互相关至少要落在这么多个点上才作数（比较窗是 1 Hz，所以约等于秒数）。
+#:
+#: 10 个点太少。搜索放宽到 ±900 s 之后，墙钟窗口夹不住的那一头会剩下几个到
+#: 二十几个点，一段平滑的速度曲线在这上面随手就是 `r=1.000000`——实测这一条
+#: 抢走过 4 个真峰（`80定速滑行`/`cjh直线`/`cjh高避油门线松了`/`YJW修改过流后跑车`）：
+#:
+#: | 场次 | 假峰 | 真峰 |
+#: | --- | --- | --- |
+#: | `80定速滑行` | +131.67 s `r=1.000000` n=23 | −649.93 s `r=0.999929` n=276 |
+#: | `cjh直线` | +15.07 s `r=1.000000` n=6 | −223.93 s `r=0.999614` n=197 |
+#: | `cjh高避油门线松了` | +495.87 s `r=1.000000` n=11 | +175.07 s `r=0.999703` n=300 |
+#: | `YJW修改过流后跑车` | −605.93 s `r=1.000000` n=6 | −932.93 s `r=0.999072` n=276 |
+#:
+#: 真配对的实测最少 132 个点（`cjh高避TV1`），假峰最多 53 个（`cjh阶跃+脉冲`
+#: 对 `175226` 那一次）。60 落在两者中间。
+MIN_COMPARE_POINTS = 60
 #: 互相关的比较窗口上限：最多比这么多秒的同一条时间线。窗口越长越稳，但要把
 #: "整段反复跑同一个八字"那种周期性算进去——300 s 在实测数据上给的是同一段驾驶。
 COMPARE_WINDOW_S = 300.0
@@ -321,18 +351,27 @@ def _pearson(left: np.ndarray, right: np.ndarray) -> float:
 
 
 def _accel_correlation(log, session, at: np.ndarray, lag: float) -> float | None:
-    """同一条偏移上复核一次加速度；有一边没有这条通道就给 ``None``（没复核）。"""
-    try:
-        ref_t, ref_v = _speed_of(log, ACCEL_CANDIDATES)
-        can_t, can_v = _speed_of(session, ACCEL_CANDIDATES)
-    except KeyError:
+    """同一条偏移上复核加速度：三根轴各算一次相关，取**中位数**。
+
+    一条轴有一个测点坏了不该拖垮整场（实测 ``jhy耐久``：``accY`` 0.359、
+    ``accZ`` 0.970）；三条轴都没有（有一边缺这条通道）就给 ``None`` = 没复核。
+    """
+    found: list[float] = []
+    for names in ACCEL_AXES:
+        try:
+            ref_t, ref_v = _speed_of(log, names)
+            can_t, can_v = _speed_of(session, names)
+        except KeyError:
+            continue
+        ref = hold_sample(ref_t, ref_v, at)
+        other = hold_sample(can_t, can_v, at + float(lag))
+        mask = np.isfinite(ref) & np.isfinite(other)
+        if int(mask.sum()) < MIN_COMPARE_POINTS:
+            continue
+        found.append(_pearson(ref[mask], other[mask]))
+    if not found:
         return None
-    ref = hold_sample(ref_t, ref_v, at)
-    other = hold_sample(can_t, can_v, at + float(lag))
-    mask = np.isfinite(ref) & np.isfinite(other)
-    if int(mask.sum()) < 10:
-        return None
-    return _pearson(ref[mask], other[mask])
+    return float(np.median(found))
 
 
 def align(
@@ -356,6 +395,10 @@ def align(
        "记录仪先开机了多少秒"；
     2. 在它附近 ``±search_s`` 里、**只比两边墙钟上真的重叠的那一段**，用相对时钟
        上的速度互相关找精确值。
+
+    第 1 步只当搜索中心，不当结论：记录仪的钟实测能差到几分钟
+    （10.7 湾区 311 s，见 :data:`SEARCH_S`），所以 :data:`SEARCH_S` 给得比
+    "钟差几秒"宽得多，**认不认由第 2 步的相关系数与加速度复核决定**。
 
     第 2 步的窗口必须是墙钟算出来的那段重叠：``.ld`` 的 0 秒与记录仪的第一帧
     各有各的零点，偏移大的时候"从头开始比 300 s"会比到记录仪还没开始（或已经
@@ -403,35 +446,45 @@ def align(
         other = hold_sample(can_t, can_v, at + lag)
         mask = usable & np.isfinite(other)
         count = int(mask.sum())
-        if count < 10:
+        # 点太少就不算数：几个点上平滑曲线随手就是 r=1.000000（见 MIN_COMPARE_POINTS）。
+        if count < MIN_COMPARE_POINTS:
             return -2.0, count
         return _pearson(ref[mask], other[mask]), count
 
     # 粗搜（覆盖墙钟估计的整个不确定范围）之后，在峰顶附近按 step_s 精修一遍。
-    best_lag, best_r, best_count = 0.0, -2.0, 0
-    for lag in np.arange(center - reach, center + reach + 1e-9, float(SEARCH_STEP_S)):
-        value, count = score(float(lag))
-        if value > best_r:
-            best_lag, best_r, best_count = float(lag), value, count
+    #
+    # 扫描顺序是**从墙钟那个估计往两边由近及远**，不是从左往右：反复跑同一段
+    # （绕桩、八字、来回跑直线）会让整数圈之外也冒出同样高的峰，`>` 保留先到者
+    # 就等于在平手时倒向墙钟这一侧，而不是倒向"谁排在数组前面"。
+    best_lag, best_r, best_count = float(center), -2.0, 0
+
+    def sweep(start: float, reach_s: float, step: float) -> None:
+        nonlocal best_lag, best_r, best_count
+        for distance in np.arange(0.0, reach_s + 1e-9, step):
+            lags = (start, start - distance) if distance == 0.0 else (
+                start + distance, start - distance)
+            for lag in lags:
+                value, count = score(float(lag))
+                if value > best_r:
+                    best_lag, best_r, best_count = float(lag), value, count
+
+    sweep(float(center), reach, float(SEARCH_STEP_S))
     if best_r > -2.0:
-        fine = np.arange(
-            best_lag - float(SEARCH_STEP_S), best_lag + float(SEARCH_STEP_S) + 1e-9,
-            float(step_s),
-        )
-        for lag in fine:
-            value, count = score(float(lag))
-            if value > best_r:
-                best_lag, best_r, best_count = float(lag), value, count
+        sweep(best_lag, float(SEARCH_STEP_S), float(step_s))
 
     # 第二判据：同一条偏移上再核一遍加速度。速度在短窗口上会撞出假的高相关
     # （实测有 r=1.0000 落在错的偏移上、只覆盖几十秒直线的例子），加速度一直有
     # 起伏，配上它才是"两条曲线真的重合"。
     accel_r = _accel_correlation(log, session, at, best_lag)
     drift = abs(best_lag - center)
-    ok = bool(best_r >= MIN_CORRELATION and best_count >= 10 and drift <= float(max_lag_s))
+    ok = bool(best_r >= MIN_CORRELATION and best_count >= MIN_COMPARE_POINTS
+              and drift <= float(max_lag_s))
     reason = ""
     if not ok:
-        if best_r < MIN_CORRELATION:
+        if best_r <= -2.0:
+            reason = (f"能拿来比的时段都不到 {MIN_COMPARE_POINTS} 个点"
+                      f"（1 Hz 上就是 {MIN_COMPARE_POINTS:g} s），认不了")
+        elif best_r < MIN_CORRELATION:
             reason = f"互相关只有 r={best_r:.3f}（要 >= {MIN_CORRELATION}）"
         elif drift > float(max_lag_s):
             reason = f"互相关说偏移是 {best_lag:+.2f} s，跟墙钟差的 {drift:.1f} s 对不上"
@@ -613,6 +666,3 @@ def write_merged(
         "columns": len(names),
         "bytes": target.stat().st_size,
     }
-#: 复核用的相关系数门槛。加速度两边是同一个传感器（``.ld`` 走 CAN、帧表走
-#: 原始帧），对齐之后实测真配对 >= 0.9；给 0.6 是给两边的量程/符号留余量。
-MIN_ACCEL_R = 0.6

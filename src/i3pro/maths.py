@@ -776,6 +776,45 @@ def _biquad_highpass(ctx: Context, x: np.ndarray, cutoff: float) -> np.ndarray:
     return x - low
 
 
+def _filled_over_gaps(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """把空档填成上一个有效样本；返回（填好的列，原本是空档的下标）。
+
+    滤波是逐样本递推：一个 NaN 被当成 0 灌进状态里，后面几十个样本都在还这笔账。
+    所以先填上再滤，滤完把那几格**还原成 NaN**——图上该断的还是断的。
+    """
+    finite = np.isfinite(x)
+    holes = np.flatnonzero(~finite)
+    if holes.size == 0:
+        return x, holes
+    filled = np.empty_like(x)
+    idx = np.where(finite, np.arange(x.size), 0)
+    np.maximum.accumulate(idx, out=idx)
+    filled[:] = x[idx]
+    first = np.flatnonzero(finite)
+    if first.size:
+        filled[: first[0]] = x[first[0]]      # 前导空档：用后面第一个有效值
+    else:
+        filled[:] = 0.0                       # 整列都空：填 0，结果仍然是全 NaN
+    return filled, holes
+
+
+def _zero_phase(ctx: Context, x: np.ndarray, cutoff: float, *, high: bool) -> np.ndarray:
+    """零相位滤波：正反各跑一遍，相位延迟抵消、幅频响应被平方。
+
+    i2 Pro 用 ``filter_lp(x, f, -2)`` 表达同一件事（它的负数 order = 正反各跑一遍
+    单阶）；我们是二阶 biquad，所以等效到四阶的幅频响应。存在的理由是**相位**：
+    单程滤波的输出整体滞后，拿两条滤波后的曲线比圈速/比相位会被错开。
+    """
+    filled, holes = _filled_over_gaps(x)
+    forward = _biquad_lowpass(ctx, filled, cutoff)
+    backward = _biquad_lowpass(ctx, forward[::-1].copy(), cutoff)[::-1]
+    out = (filled - backward) if high else backward
+    if holes.size:
+        out = out.copy()
+        out[holes] = np.nan
+    return out
+
+
 @dataclass(frozen=True)
 class _Func:
     min_args: int
@@ -859,6 +898,8 @@ FUNCTIONS: dict[str, _Func] = dict(
         _f("smooth", (1, 2), lambda c, x, w=None: _moving_average(c, _as_array(c, x), _window_points(c, w, 5)), "smooth(x, 窗口)：滑动平均，整数=点数、小数=秒；省略窗口则用 5 点"),
         _f("filter_lp", 2, lambda c, x, f: _biquad_lowpass(c, _as_array(c, x), float(_as_array(c, f)[0])), "二阶巴特沃斯低通：filter_lp(x, 截止频率Hz)"),
         _f("filter_hp", 2, lambda c, x, f: _biquad_highpass(c, _as_array(c, x), float(_as_array(c, f)[0])), "二阶巴特沃斯高通：filter_hp(x, 截止频率Hz)"),
+        _f("filter_lp0", 2, lambda c, x, f: _zero_phase(c, _as_array(c, x), float(_as_array(c, f)[0]), high=False), "零相位低通（正反各跑一遍，没有相位延迟）：filter_lp0(x, 截止频率Hz)"),
+        _f("filter_hp0", 2, lambda c, x, f: _zero_phase(c, _as_array(c, x), float(_as_array(c, f)[0]), high=True), "零相位高通：filter_hp0(x, 截止频率Hz)"),
         # 微分 / 积分
         _f("derivative", (1, 2), lambda c, x, w=None: _derivative(c, _as_array(c, x), _window_points(c, w, 3)), "derivative(x, 窗口)：中心差分，整数=点数、小数=秒；省略窗口则用 3 点"),
         _f("integrate", (1, 3), lambda c, x, cond=None, reset=None: _integrate(c, _as_array(c, x), cond, reset), "integrate(x, 条件, 复位)：梯形累积积分，后两个参数可省略"),
@@ -1028,18 +1069,26 @@ MATH_SUFFIX = sidecar.kind_of("maths").suffix
 
 @dataclass
 class Definition:
-    """一条数学通道：一个名字、一条表达式、一个单位、一个作用域。"""
+    """一条数学通道：一个名字、一条表达式、一个单位、一个作用域。
+
+    ``setup``（可选）是**界面上的「通道处理」面板**填的那四栏（滤波 / 增益 / 偏置 /
+    归零）。面板生成的定义靠它原样还原成表单；用表达式编辑器手写的定义没有这个键，
+    面板看到就明说"这条是手写的"，不猜、也不默默盖掉（见 A75）。
+    """
 
     name: str
     expr: str
     unit: str = ""
     scope: str = "local"          # local | global
     note: str = ""
+    setup: dict | None = None
 
     def as_dict(self) -> dict:
         out = {"name": self.name, "expr": self.expr, "unit": self.unit}
         if self.note:
             out["note"] = self.note
+        if self.setup:
+            out["setup"] = dict(self.setup)
         return out
 
     @classmethod
@@ -1056,7 +1105,20 @@ class Definition:
             unit=str(data.get("unit", "") or "").strip(),
             scope=scope,
             note=str(data.get("note", "") or ""),
+            setup=_setup_of(data.get("setup"), name),
         )
+
+
+def _setup_of(raw, name: str) -> dict | None:
+    """``setup`` 是可选键：不写就是手写的定义，写了就得是个对象。"""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or not raw:
+        raise MathError(
+            f"数学通道 `{name}` 的 `setup` 要是一个对象（「通道处理」面板填的那几栏）；"
+            f"现在是 {raw!r}。把它删掉，或者重写成 {{\"filter\": ...}} 这样的对象。"
+        )
+    return dict(raw)
 
 
 def config_path(session_path: str | Path) -> Path:
@@ -1343,7 +1405,13 @@ def resolve_all(
             stack.extend(channel for channel in build(name).channels if channel in pending)
         return tuple(sorted(seen.items()))
 
-    def value_of(name: str, sources: tuple[str, ...]) -> np.ndarray:
+    def value_of(name: str, sources: tuple[str, ...], owner: str) -> np.ndarray:
+        # 同名覆盖（i2 Pro 的 Filter / Scale-Offset 就是这条语义）：定义
+        # `X = filter_lp('X', 20)` 里的那个 `'X'` 指的是**文件里那条原始通道**，
+        # 不是它自己——否则每条覆盖都变成"绕成一个圈"，那个功能根本写不出来。
+        # 只有"本场次真有一条同名原生通道"才算覆盖；没有同名的自引用仍然是环。
+        if name == owner and session.has(name):
+            return _session_series(session, name, time.size)
         if name in pending:
             return resolve_definition(name)
         if name in known:
@@ -1375,7 +1443,9 @@ def resolve_all(
                 return hit
         visiting.append(name)
         try:
-            computed = plan.eval(ctx, lambda channel: value_of(channel, sources))
+            computed = plan.eval(
+                ctx, lambda channel: value_of(channel, sources, definition.name)
+            )
         finally:
             visiting.pop()
         computed = np.asarray(computed, dtype=np.float64)
@@ -1478,6 +1548,11 @@ def apply_to_session(
         effective = load_effective(session.path, root)
     except MathError as exc:
         return [], [{"name": "", "expr": "", "error": str(exc)}]
+    # 求值**之前**先把上一轮挂上去的列摘掉。同名覆盖那条路要求"定义里的 `'X'`
+    # 读到文件里的原生列"，上一轮的覆盖层还留着的话，这里会把滤完的值再滤一遍——
+    # 数字看着仍然像模像样，所以是个不出声的错。`load_effective` 放在前面：配置
+    # 读不出来时先原样返回，别把还能用的那些列白摘了。
+    detach(session)
     values, errors = resolve_available(session, effective.definitions, cache, session.path)
     return attach(session, values, effective.definitions), errors
 
@@ -1538,7 +1613,9 @@ def attach(session, resolved: dict[str, np.ndarray], definitions: list[Definitio
                 divider=1,
                 decimals=3,
                 shift=0,
-                channel_id=-1,
+                # 文件里的 id 非负；这个记号用来分辨"新加的数学通道"与"同名覆盖"，
+                # 见 channels.overrides（A75 的角标与导出元数据靠它）。
+                channel_id=channelsmod.ATTACHED_CHANNEL_ID,
                 index=len(session.channels),
             )
         )

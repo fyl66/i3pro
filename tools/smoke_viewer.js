@@ -3509,6 +3509,123 @@ if (canMeta) {
   }
 }
 
+/* ------------------------------------------------ 通道处理（A75）
+ * i2 Pro 的 Filter / Scale-Offset 语义 = "生成一条**同名**通道覆盖原通道"。
+ * 这一组钉四件事（"点了真的变、真的落盘"归真浏览器那一关 verify_clicks.py）：
+ *   ① 四栏拼出来的式子对不对（顺序固定：滤波 → 增益 → 偏置 → 归零）；
+ *   ② ⚙ 与 Ctrl+Shift+F / O / Z 作用在"当前通道"上，Ctrl+F 仍是"跳最快圈"；
+ *   ③ 面板设过的能原样读回；碰上手写的同名定义，面板明说、也拦住不让盖；
+ *   ④ 处理过的通道在通道列表与图上带 ƒ 角标。
+ */
+{
+  // ① 式子
+  check(api.setupExpression("Vx KF", { filter: "none", gain: null, offset: null, zero: false })
+    === "'Vx KF'", "四栏全空时应当就是那条通道本身");
+  check(api.setupExpression("Vx KF",
+    { filter: "lp0", filterValue: 20, gain: 2, offset: null, zero: false })
+    === "(2) * (filter_lp0('Vx KF', 20))", "零相位低通 + 增益的式子不对");
+  check(api.setupExpression("Vx KF",
+    { filter: "smooth", filterValue: 5, gain: null, offset: null, zero: false })
+    === "smooth('Vx KF', 5)", "移动平均的式子不对");
+  const full = api.setupExpression("G Force Long",
+    { filter: "lp", filterValue: 20, gain: 1.2, offset: -0.05, zero: true, zeroAt: -0.0313333 });
+  // 嵌套顺序就是应用顺序：`((gain * filter(x)) + offset) - zero`
+  check(full === "(((1.2) * (filter_lp('G Force Long', 20))) + (-0.05)) - (-0.0313333)",
+    "四栏的顺序不对（要滤波 → 增益 → 偏置 → 归零）：" + full);
+  check(api.setupSummary({ filter: { kind: "lp0", value: 20 }, gain: 1.2, offset: -0.05,
+    zero_at: -0.0313333 }).indexOf("零相位") >= 0, "参数摘要没说清是零相位");
+  check(api.setupSummary(null).indexOf("手写") >= 0, "手写的定义没被认出来");
+
+  // ② 当前通道 + 三枚快捷键
+  const graphComp = api.state.components.filter((c) => c.type === "graph")[0];
+  const firstChannel = (graphComp.config.channels || [])[0];
+  api.state.channelFocus = null;
+  check(api.currentChannelName() === firstChannel,
+    "没点过通道时，当前通道应当是聚焦图的第一条：" + api.currentChannelName());
+  api.state.channelFocus = "Vx KF";
+  api.state.setupChannel = null;
+  key("F", { ctrlKey: true, shiftKey: true });
+  check(api.state.setupChannel === "Vx KF", "Ctrl+Shift+F 没打开这条通道的处理面板");
+  api.state.setupChannel = null;
+  key("O", { ctrlKey: true, shiftKey: true });
+  check(api.state.setupChannel === "Vx KF", "Ctrl+Shift+O 没作用在当前通道上");
+  api.state.setupChannel = null;
+  key("Z", { ctrlKey: true, shiftKey: true });
+  check(api.state.setupChannel === "Vx KF", "Ctrl+Shift+Z 没作用在当前通道上");
+  // Ctrl+F（不带 Shift）还是"跳到最快圈"：新快捷键不许把它吃掉
+  const beforeRef = api.state.ref;
+  const beforeView = api.state.view;
+  api.state.setupChannel = "SENTINEL";
+  key("F", { ctrlKey: true });
+  check(api.state.setupChannel === "SENTINEL", "Ctrl+F 被新快捷键抢走了");
+  const bestLap = (api.data.laps || []).filter((l) => l.complete)
+    .sort((a, b) => a.lap_time - b.lap_time)[0];
+  check(!!bestLap && api.state.ref === bestLap.lap,
+    "Ctrl+F 不再跳到最快圈了：" + api.state.ref);
+  api.state.ref = beforeRef;
+  api.state.view = beforeView;
+
+  // ③ 读回 / 手写：照 library.maths_state 的形状塞一份"服务端算好的"状态
+  const savedMaths = api.state.maths;
+  api.state.maths = {
+    definitions: [
+      { name: "Vx KF", expr: "filter_lp0('Vx KF', 20)", unit: "km/h", scope: "local",
+        setup: { filter: { kind: "lp0", value: 20 }, gain: null, offset: null, zero_at: null } },
+      { name: "手写通道", expr: "1", unit: "", scope: "local" },
+    ],
+    overrides: { "Vx KF": { expr: "filter_lp0('Vx KF', 20)", unit: "km/h",
+      setup: { filter: { kind: "lp0", value: 20 }, gain: null, offset: null, zero_at: null } } },
+    shadowed: [], errors: [], functions: [],
+  };
+  api.renderChannelList();
+  api.openChannelSetup("Vx KF");
+  check(registry.get("setupFilterKind").value === "lp0", "面板没把已设的滤波种类读回来");
+  check(String(registry.get("setupFilterValue").value) === "20", "面板没把截止频率读回来");
+  check(String(registry.get("setupNote")._html).indexOf("面板设的") >= 0,
+    "面板设过的那条没被认出来：" + registry.get("setupNote")._html);
+  api.openChannelSetup("手写通道");
+  check(String(registry.get("setupNote")._html).indexOf("手写") >= 0,
+    "碰到手写的同名定义，面板没明说：" + registry.get("setupNote")._html);
+  api.setupApply();
+  check(String(registry.get("toast").textContent).indexOf("手写") >= 0,
+    "点「应用」时没有挡住手写的那条：" + registry.get("toast").textContent);
+
+  // ④ ƒ 角标：通道列表那一行 + 图抬头
+  // 只认通道行（label.ch）；分组抬头是 div.grphead，不长 ⚙ 也不长 ƒ
+  const rows = registry.get("channelList")._children
+    .filter((r) => r._html && String(r.tagName) === "LABEL");
+  check(rows.length > 5, "通道列表是空的，角标验不下去");
+  const noCog = rows.filter((r) => String(r.className).indexOf("missing") < 0
+    && r._html.indexOf('class="cog"') < 0);
+  check(noCog.length === 0, "有通道行没长 ⚙（点不开「通道处理」）："
+    + noCog.slice(0, 2).map((r) => r.className + "|" + r._html.slice(0, 110)).join(" ;; "));
+  const flagged = rows.filter((r) => r._html.indexOf('class="proc"') >= 0);
+  check(flagged.length === 1, "ƒ 角标的条数不对（应当只有 Vx KF 一条）：" + flagged.length);
+  check(flagged[0]._html.indexOf("Vx KF") >= 0, "ƒ 角标挂错了通道：" + flagged[0]._html.slice(0, 120));
+  api.renderAll();
+  const nodes = (registry.get("worksheet")._children || []);
+  const node = nodes.filter((c) => c.dataset && String(c.dataset.id) === String(graphComp.id))[0];
+  const body = (node && node._children ? node._children : [])
+    .filter((c) => String(c.className).indexOf("compbody") >= 0)[0];
+  const head = (body && body._children ? body._children : [])
+    .filter((c) => String(c.className).indexOf("graphhead") >= 0)[0];
+  const marked = [];
+  (function walk(el) {
+    for (const child of (el && el._children) || []) {
+      if (String(child.className).indexOf("lproc") >= 0) marked.push(child);
+      walk(child);
+    }
+  })(head);
+  check(marked.length >= 1 && marked.every((m) => m.textContent === "ƒ"),
+    "图上抬头没有把处理过的通道标出来：" + marked.length);
+
+  // 收尾：把假状态与"当前通道"还原，后面的断言看的还是原来那一屏
+  api.state.maths = savedMaths;
+  api.state.channelFocus = null;
+  api.closeChannelSetup();
+  api.renderChannelList();
+}
+
 const header = registry.get("fileInfo");
 check(header && (header.innerHTML.indexOf(".ld") >= 0
   || header.innerHTML.indexOf(".csv") >= 0

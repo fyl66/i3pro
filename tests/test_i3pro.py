@@ -2991,11 +2991,159 @@ class TestMaths(unittest.TestCase):
         self.assertEqual(len(session.channels), before - 1)
         self.assertFalse(any(c["name"] == "临时通道" for c in render.channel_index(session)))
 
-    def test_a_derived_channel_cannot_be_shadowed_by_a_stale_definition(self):
-        """引用自己在定义阶段就被判成环，而不是算出一个越来越大的数列。"""
+    def test_a_definition_can_override_the_native_channel_of_the_same_name(self):
+        """同名覆盖（i2 Pro 的 Filter / Scale-Offset）：定义里的 `车速` 是**文件里那条**。
+
+        以前这里报"绕成一个圈"，因为"自己引用自己"被一律当成环。那条守卫真正要防的是
+        **递增**：上一轮挂上去的列还留着时再算一次，`车速 + 1` 会在自己身上一层层加。
+        现在改成"同名自引用读到原生列"，递增不会发生；守卫换成下面那条
+        （重新求值前先摘列 / 没有同名原生通道时仍然是环）。
+        """
+        session = self._session()
+        native = session.values("车速").copy()
+        definitions = [mathsmod.Definition("车速", "车速 * 2")]
+        values, errors = mathsmod.resolve_available(session, definitions)
+        self.assertEqual(errors, [])
+        np.testing.assert_allclose(values["车速"], native * 2)
+        self.assertFalse(np.allclose(values["车速"], native), "覆盖没生效")
+
+    def test_overriding_does_not_compound_when_a_previous_run_is_still_attached(self):
+        """算两遍必须一模一样：不许在"上一轮滤过的值"上再滤一遍。
+
+        `apply_to_session` 每次求值前先 `detach`；这条钉住那个纪律。
+        """
+        session = self._session()
+        native = session.values("车速").copy()
+        definitions = [mathsmod.Definition("车速", "filter_lp0('车速', 2)")]
+        first = None
+        for round_index in range(2):
+            mathsmod.detach(session)                     # apply_to_session 的第一步
+            values, errors = mathsmod.resolve_available(session, definitions)
+            self.assertEqual(errors, [])
+            mathsmod.attach(session, values, definitions)
+            now = session.values("车速").copy()
+            if first is None:
+                first = now
+                self.assertFalse(np.allclose(now, native), "覆盖没生效")
+            else:
+                np.testing.assert_allclose(now, first, err_msg="第二遍在覆盖值上又算了一遍")
+
+    def test_a_self_reference_without_a_native_channel_is_still_a_cycle(self):
+        """没有同名原生通道时，"引用自己"仍然报环，不是算出个越来越大的数列。"""
         session = self._session()
         with self.assertRaises(mathsmod.MathError):
-            mathsmod.resolve_all(session, [mathsmod.Definition("车速", "车速 + 1")])
+            mathsmod.resolve_all(session, [mathsmod.Definition("凭空来的", "凭空来的 + 1")])
+
+    def test_apply_to_session_never_filters_an_already_filtered_column(self):
+        """走真实入口（`apply_to_session`）连跑两次：结果逐点相同。
+
+        这一条是上一条的"端到端版"：侧车在磁盘上，第二次调用时上一轮的列还挂在场次上。
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session_path = Path(tmp) / "场次.ld"
+            mathsmod.save_local(session_path, mathsmod.MathSet(
+                definitions=[mathsmod.Definition("车速", "filter_lp0('车速', 2)")]))
+            session = _MathSession(
+                {"车速": 36.0 + 4.0 * np.sin(np.arange(51) / 10.0)}, rate=10.0,
+                path=session_path,
+            )
+            native = session.values("车速").copy()
+            mathsmod.apply_to_session(session, root=tmp)
+            first = session.values("车速").copy()
+            self.assertFalse(np.allclose(first, native), "覆盖没生效")
+            mathsmod.apply_to_session(session, root=tmp)
+            np.testing.assert_allclose(session.values("车速"), first)
+
+    def test_filter_lp0_cancels_the_phase_delay_of_filter_lp(self):
+        """零相位：对称的脉冲滤完还是对称的；单程那条峰会往后跑。"""
+        rate, count = 200.0, 201
+        spike = np.zeros(count)
+        spike[count // 2] = 1.0
+        session = _MathSession({"尖峰": spike}, rate=rate)
+        delayed = mathsmod.evaluate("filter_lp(尖峰, 5)", session)
+        zero = mathsmod.evaluate("filter_lp0(尖峰, 5)", session)
+        self.assertGreater(int(np.argmax(delayed)), count // 2,
+                           "单程低通本来就该有相位延迟，这条是下面那条的对照")
+        self.assertEqual(int(np.argmax(zero)), count // 2,
+                         "零相位滤波的峰被推离了原位")
+        self.assertAlmostEqual(float(zero[count // 2 - 1]), float(zero[count // 2 + 1]),
+                               places=9, msg="两边不对称 => 还有相位延迟")
+
+    def test_filter_lp0_keeps_gaps_as_gaps(self):
+        """空档不许被填成 0 之后画成一条假曲线：出来还是 NaN。"""
+        values = np.ones(41)
+        values[18:21] = np.nan
+        session = _MathSession({"带空档": values}, rate=100.0)
+        out = mathsmod.evaluate("filter_lp0(带空档, 5)", session)
+        self.assertTrue(np.all(np.isnan(out[18:21])))
+        self.assertTrue(np.all(np.isfinite(np.delete(out, np.s_[18:21]))))
+        plain = mathsmod.evaluate("filter_lp(带空档, 5)", session)
+        self.assertTrue(np.all(np.isfinite(plain)), "旧函数的行为不动（空档按 0 处理）")
+
+    def test_filter_hp0_is_the_zero_phase_complement_of_filter_lp0(self):
+        rate = 200.0
+        t = np.arange(401) / rate
+        session = _MathSession({"信号": np.sin(2 * np.pi * 3 * t)}, rate=rate)
+        low = mathsmod.evaluate("filter_lp0(信号, 20)", session)
+        high = mathsmod.evaluate("filter_hp0(信号, 20)", session)
+        np.testing.assert_allclose(high + low, session.values("信号"), atol=1e-9)
+
+    def test_setup_round_trips_and_old_files_still_read(self):
+        """`setup` 是可选键：面板写的能原样读回，手写的定义不会凭空多出这个键。"""
+        setup = {"filter": {"kind": "lp", "cutoff": 20.0, "zero_phase": True},
+                 "gain": 1.2, "offset": -0.05, "zero_at": 12.345}
+        one = mathsmod.Definition("G Force Long", "filter_lp0('G Force Long', 20)",
+                                  unit="g", setup=setup)
+        back = mathsmod.Definition.from_dict(one.as_dict(), scope="local")
+        self.assertEqual(back.setup, setup)
+        self.assertEqual(back.expr, one.expr)
+        plain = mathsmod.Definition("滑移率", "车轮速度 / 车速")
+        self.assertNotIn("setup", plain.as_dict(), "手写的定义不该凭空多一个键")
+        self.assertIsNone(
+            mathsmod.Definition.from_dict({"name": "滑移率", "expr": "1"}).setup)
+        with self.assertRaises(mathsmod.MathError) as caught:
+            mathsmod.Definition.from_dict({"name": "坏的", "expr": "1", "setup": "低通"})
+        self.assertIn("setup", str(caught.exception))
+
+    def test_only_a_same_name_definition_counts_as_an_override(self):
+        """`channels.overrides` 只认"同名覆盖"，**新加的**数学通道不算（A75）。
+
+        界面的 ƒ 角标、导出的"已处理的通道"、面板判断"这条已经处理过"都问它。
+        判据是那条 `Channel` 是不是 `maths.attach` 补上去的——文件里的 id 非负。
+        """
+        session = self._session()
+        definitions = [
+            mathsmod.Definition("车速", "车速 * 2"),          # 同名覆盖
+            mathsmod.Definition("两倍车速", "车速 * 2"),      # 新加的一条
+        ]
+        values, errors = mathsmod.resolve_available(session, definitions)
+        self.assertEqual(errors, [])
+        mathsmod.attach(session, values, definitions)
+        self.assertEqual(channels.overrides(session), {"车速"})
+        # 删掉定义之后不该再算"处理过"
+        mathsmod.attach(session, {}, [])
+        self.assertEqual(channels.overrides(session), set())
+
+    def test_the_panel_expression_applies_filter_then_gain_then_offset_then_zero(self):
+        """面板拼出来的那条式子（A75）算出来的意思对不对。
+
+        式子由 `viewer.html` 的 `setupExpression` 拼（无头那关钉的是**字符串**），
+        这一条钉**含义**：先滤波、再乘增益、再加偏置、最后减掉光标处那个常数。
+        """
+        rate, count = 100.0, 201
+        t = np.arange(count) / rate
+        session = _MathSession({"车速": 10.0 + 2.0 * np.sin(2 * np.pi * 2 * t)}, rate=rate)
+        expr = "(((1.2) * (filter_lp0('车速', 20))) + (-0.05)) - (-0.0313333)"
+        got = mathsmod.evaluate(expr, session)
+        filtered = mathsmod.evaluate("filter_lp0('车速', 20)", session)
+        np.testing.assert_allclose(got, 1.2 * filtered - 0.05 + 0.0313333, atol=1e-12)
+        self.assertFalse(np.allclose(got, session.values("车速")),
+                         "四栏一栏都没起作用，式子和原通道一模一样")
+        # 归零那一项就是"减掉一个常数"：它对整条曲线的形状没有影响
+        shape = mathsmod.evaluate("filter_lp0('车速', 20)", session)
+        np.testing.assert_allclose(np.diff(got / 1.2), np.diff(shape), atol=1e-9)
 
     def test_function_catalogue_covers_what_the_ticket_promised(self):
         names = {item["name"] for item in mathsmod.function_catalogue()}
@@ -3005,12 +3153,13 @@ class TestMaths(unittest.TestCase):
             "min", "max", "abs",
             "stat_min", "stat_max", "stat_mean", "stat_std_dev", "stat_start", "stat_end",
             "smooth", "filter_lp", "filter_hp",
+            "filter_lp0", "filter_hp0",
             "derivative", "integrate", "choose", "invalid", "flip_flop",
             "time_shift", "time_valid", "range_is", "range_change",
             "bit_and", "bit_or", "bit_xor", "bit_not", "edge_delay", "hypot",
         ):
             self.assertIn(expected, names, f"函数表里缺 {expected}")
-        self.assertEqual(len(names), 53)
+        self.assertEqual(len(names), 55)
 
     # -------------------------------------------- 通道名怎么打得出来（用户反馈）
     def test_a_channel_name_with_spaces_can_be_typed_without_quotes(self):
@@ -4833,6 +4982,29 @@ class TestExportFiles(_ExportBase):
         self.assertEqual(meta["file"], self.SESSION.name)
         self.assertEqual(len(meta["channels"]), 1)
         self.assertEqual(meta["range"]["bounds"], "左闭右闭")
+
+    def test_metadata_names_the_processed_channels(self):
+        """A75：被「通道处理」覆盖过的通道要写进导出元数据。
+
+        不写的话，队友拿这份 CSV 去跟 MoTeC 的原始导出逐点对，对不上第一反应是
+        "i3pro 解析错了"——而他手上这条 `Vx KF` 其实已经滤过 20 Hz。
+        """
+        definitions = [mathsmod.Definition("Vx KF", "filter_lp0('Vx KF', 20)", unit="km/h")]
+        values, errors = mathsmod.resolve_available(self.log, definitions)
+        self.assertEqual(errors, [])
+        mathsmod.attach(self.log, values, definitions)
+        try:
+            request = self.request(**{"from": "0", "to": "1"})
+            meta = exportmod.metadata(self.log, request, 101, 2)
+            self.assertEqual(meta["transformed"], ["Vx KF"])
+            rows = [row for row in exportmod._metadata_rows(meta)]
+            self.assertTrue(any("已处理的通道" in row[0] for row in rows),
+                            "Excel 的元数据 sheet 里没写哪几条被处理过")
+        finally:
+            mathsmod.detach(self.log)
+        # 没处理过的通道不许出现在这个名单里（空也要有那个键）
+        plain = exportmod.metadata(self.log, self.request(**{"from": "0", "to": "1"}), 101, 2)
+        self.assertEqual(plain["transformed"], [])
 
     def test_long_layout_only_writes_values(self):
         request = self.request(layout="long", **{"from": "0", "to": "5",
@@ -6965,7 +7137,44 @@ class TestMathsOverHttp(unittest.TestCase):
                 # 函数表
                 status, catalogue = request("/api/maths/functions")
                 self.assertEqual(status, 200)
-                self.assertEqual(len(catalogue), 53)
+                # 55 = 53 + 两个零相位滤波（filter_lp0 / filter_hp0，A75）
+                self.assertEqual(len(catalogue), 55)
+            finally:
+                http.close()
+
+    @_needs(HILL)
+    def test_a_same_name_definition_reaches_the_viewer_as_an_override(self):
+        """A75：同名覆盖要能从 ``/maths`` 的载荷里看出来（界面靠它打 ƒ 角标）。
+
+        走的是界面上那条真路：PUT 一份定义 -> 服务端重算 -> 载荷里既有
+        ``definitions`` 又有 ``overrides``。新加的（不覆盖原通道的）不算处理。
+        """
+        with http_session(HILL, buckets=100) as http:
+            quoted = http.quoted
+            try:
+                try:
+                    status, state = http.json(
+                        f"/api/session/{quoted}/maths", "PUT",
+                        {"definitions": [
+                            {"name": "G Force Long",
+                             "expr": "filter_lp0('G Force Long', 20)", "unit": "g",
+                             "setup": {"filter": {"kind": "lp0", "value": 20},
+                                       "gain": None, "offset": None, "zero_at": None}},
+                            {"name": "新通道", "expr": "1", "unit": ""},
+                        ]},
+                    )
+                    self.assertEqual(status, 200, state)
+                    self.assertEqual(list(state["overrides"]), ["G Force Long"])
+                    self.assertEqual(
+                        state["overrides"]["G Force Long"]["setup"]["filter"]["kind"], "lp0")
+                    self.assertNotIn("新通道", state["overrides"],
+                                     "新加的数学通道被当成「处理过」了")
+                finally:
+                    # 侧车写在**副本**里，但清干净更符合"用例不留痕迹"的规矩
+                    status, state = http.json(
+                        f"/api/session/{quoted}/maths", "PUT", {"definitions": []})
+                    self.assertEqual(status, 200, state)
+                    self.assertEqual(state["overrides"], {})
             finally:
                 http.close()
 

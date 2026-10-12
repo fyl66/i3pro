@@ -1624,6 +1624,163 @@ class Checker:
                 ".scrollIntoView({block:'start'});return true;})()")
         time.sleep(1.0)
 
+    def channel_processing(self, work_dir, session_name):
+        """A75：通道处理（i2 Pro 的 Filter / Scale-Offset）——真点 ⚙、真敲参数、真落盘。
+
+        为什么非要在真浏览器里跑：这一票的入口是通道列表里那个 40 px 不到的小齿轮，
+        "点击能派发到那个函数"和"手指点得到那个像素"是两件事；判据又要一路落到
+        **磁盘上的侧车**上（同名定义、四栏参数、归零那个常数），假 DOM 里既没有
+        文件系统也没有布局。
+        """
+        sidecar = os.path.join(work_dir, session_name + ".maths.json")
+        if os.path.exists(sidecar):
+            os.remove(sidecar)
+        preset_before = self.js("i3pro.state.preset")
+        name = self.js(
+            "(function(){var cs=(i3pro.state.components.filter(function(c){"
+            "return c.type==='graph';})[0]||{config:{}}).config.channels||[];"
+            "for(var i=0;i<cs.length;i++){if(i3pro.channelState(cs[i])==='present'"
+            "&&cs[i]!==(i3pro.data.meta||{}).speed_channel)return cs[i];}"
+            "return null;})()")
+        self.check("#75 找到一条能处理的通道（避开在算距离轴的那条速度）", bool(name), name)
+        if not name:
+            return
+
+        def read_sidecar():
+            if not os.path.exists(sidecar):
+                return {}
+            with open(sidecar, encoding="utf-8") as handle:
+                return json.load(handle)
+
+        def definitions():
+            return {d.get("name"): d for d in (read_sidecar().get("definitions") or [])}
+
+        def rect_of(element_id):
+            raw = self.js("(function(){var el=document.getElementById(%r);"
+                          "return el?JSON.stringify(__center(el)):null;})()" % element_id)
+            return json.loads(raw) if raw and raw != "null" else None
+
+        # ---------------------------------------------------- 真点 ⚙
+        raw = self.js(
+            "(function(){var rows=document.querySelectorAll('#channelList label.ch');"
+            "for(var i=0;i<rows.length;i++){var nm=rows[i].querySelector('.nm');"
+            "if(nm&&nm.textContent===%s){var b=rows[i].querySelector('.cog');"
+            "return b?JSON.stringify(__center(b)):null;}}return null;})()" % json.dumps(name))
+        cog = json.loads(raw) if raw and raw != "null" else None
+        self.check("#75 这一行右边的 ⚙ 在屏幕上真的点得到", bool(cog) and cog.get("w", 0) > 0, cog)
+        if not cog:
+            return
+        self.browser.click(cog["x"], cog["y"], self.session)
+        time.sleep(0.6)
+        self.check("#75 点 ⚙ 之后面板落在这一条通道上",
+                   self.js("i3pro.state.setupChannel") == name,
+                   self.js("i3pro.state.setupChannel"))
+        self.check("#75 面板真的显示出来了",
+                   self.js("!document.getElementById('setupForm').hidden"))
+
+        # -------------------------------- 选低通（零相位）+ 真键盘敲截止频率
+        self.js("(function(){var s=document.getElementById('setupFilterKind');"
+                "s.value='lp0';s.dispatchEvent(new Event('change'));return true;})()")
+        self.js("(function(){var i=document.getElementById('setupFilterValue');"
+                "i.focus();i.select();return true;})()")
+        self.browser.key("20", self.session)
+        apply_box = rect_of("setupApply")
+        self.check("#75 「应用」在屏幕上点得到", bool(apply_box) and apply_box.get("w", 0) > 0,
+                   apply_box)
+        if not apply_box:
+            return
+        self.browser.click(apply_box["x"], apply_box["y"], self.session)
+        time.sleep(2.5)                       # 服务端要把这一场重算一遍
+
+        # ------------------------------------------------- 磁盘上的证据
+        written = definitions().get(name) or {}
+        self.check("#75 处理真的落进了 <场次>.maths.json", bool(written), sorted(definitions()))
+        self.check("#75 写的是**同名**定义（i2 Pro 的覆盖语义）",
+                   str(written.get("expr", "")).startswith("filter_lp0("), written.get("expr"))
+        self.check("#75 定义里带着四栏参数，下次打开能原样读回",
+                   bool((written.get("setup") or {}).get("filter")), written.get("setup"))
+
+        # --------------------------------------------- 屏幕上的角标与数据
+        self.check("#75 界面认出来这条已经处理过", self.js("i3pro.isProcessed(%s)" % json.dumps(name)))
+        self.check("#75 通道列表那一行挂了 ƒ 角标",
+                   self.js("document.querySelectorAll('#channelList .proc').length") >= 1,
+                   self.js("document.querySelectorAll('#channelList .proc').length"))
+        self.check("#75 这条通道现在按数学通道算（主时间基）",
+                   self.js("(i3pro.channels.get(%s)||{}).derived === true" % json.dumps(name)))
+
+        # ------------------------------- 光标处归零：真键盘 Ctrl+Shift+Z
+        self.js("(function(){var l=(i3pro.data.laps||[]).filter(function(x){"
+                "return x.complete;});var t=l.length?(l[0].start_time+5):10;"
+                "i3pro.state.cursor=t;i3pro.renderAll();return true;})()")
+        time.sleep(1.2)
+        before = self.js("String(i3pro.cursorValueFor(%s))" % json.dumps(name))
+        self.browser.key_named("Z", "KeyZ", 90, self.session, modifiers=10)   # 2|8 = Ctrl+Shift
+        time.sleep(0.8)
+        self.check("#75 Ctrl+Shift+Z 打开的还是这条通道的面板",
+                   self.js("i3pro.state.setupChannel") == name,
+                   self.js("i3pro.state.setupChannel"))
+        self.js("(function(){var c=document.getElementById('setupZero');"
+                "c.checked=true;c.dispatchEvent(new Event('change'));return true;})()")
+        # 面板长高了一行（"正在处理"那行字），**按钮位置得重新量**：拿第一次坐标
+        # 去点会落到别的地方，而那样"没写进 zero_at"会被当成功能坏了。
+        apply_box = rect_of("setupApply")
+        self.check("#75 勾上归零之后，「应用」还在屏幕上点得到",
+                   bool(apply_box) and apply_box.get("w", 0) > 0, apply_box)
+        if not apply_box:
+            return
+        self.browser.click(apply_box["x"], apply_box["y"], self.session)
+        time.sleep(2.5)
+        zero = (definitions().get(name) or {}).get("setup", {}).get("zero_at")
+        self.check("#75 归零用的是光标处的值，而且把这个常数写进了定义",
+                   zero is not None and abs(float(zero) - float(before))
+                   <= abs(float(before)) * 1e-4 + 1e-6, "%s vs %s" % (before, zero))
+        after = float(self.js("String(i3pro.cursorValueFor(%s))" % json.dumps(name)))
+        self.check("#75 归零之后光标处的读数接近 0",
+                   abs(after) < max(0.02, abs(float(before)) * 0.05),
+                   "%s -> %s" % (before, after))
+
+        # ---------------------------------------- 切走再切回：从侧车读回来
+        def click_sheet(label):
+            raw_box = self.js(
+                "(function(){var n=%s;var bs=document.querySelectorAll('#presetRow button');"
+                "for(var i=0;i<bs.length;i++){if(bs[i].textContent===n)"
+                "return JSON.stringify(__center(bs[i]));}return null;})()" % json.dumps(label))
+            if not raw_box or raw_box == "null":
+                return False
+            point = json.loads(raw_box)
+            self.browser.click(point["x"], point["y"], self.session)
+            time.sleep(1.2)
+            return True
+
+        others = [label for label in ("分析", "对比", "动力")
+                  if label != preset_before and click_sheet(label)]
+        if others and click_sheet(preset_before):
+            self.check("#75 切走再切回，这条通道还是处理过的（从侧车读回来）",
+                       self.js("i3pro.isProcessed(%s)" % json.dumps(name)),
+                       self.js("i3pro.state.preset"))
+
+        # --------------------------------------------------- 删除处理
+        # 切回来之后那一行的位置变了，重新量一次，仍然用真鼠标点。
+        raw = self.js(
+            "(function(){var rows=document.querySelectorAll('#channelList label.ch');"
+            "for(var i=0;i<rows.length;i++){var nm=rows[i].querySelector('.nm');"
+            "if(nm&&nm.textContent===%s){var b=rows[i].querySelector('.cog');"
+            "return b?JSON.stringify(__center(b)):null;}}return null;})()" % json.dumps(name))
+        cog = json.loads(raw) if raw and raw != "null" else None
+        if cog and cog.get("w", 0) > 0:
+            self.browser.click(cog["x"], cog["y"], self.session)
+            time.sleep(0.6)
+        remove_box = rect_of("setupRemove")
+        self.check("#75 「删除处理」在屏幕上点得到",
+                   bool(remove_box) and remove_box.get("w", 0) > 0, remove_box)
+        if remove_box:
+            self.browser.click(remove_box["x"], remove_box["y"], self.session)
+            time.sleep(2.5)
+            self.check("#75 删掉处理之后侧车里那条定义没了",
+                       name not in definitions(), sorted(definitions()))
+            self.check("#75 删掉处理之后角标也没了",
+                       self.js("i3pro.isProcessed(%s)" % json.dumps(name)) is False)
+
     def display_settings(self, work_dir):
         """#35：真点开颜色菜单选色、真切换调色板、真开关抬头字段——而且**真的存住**。
 
@@ -2654,6 +2811,7 @@ def main(argv=None):
             checker.worksheets()
             checker.worksheet_editing(work_dir)
             checker.missing_channels(work_dir)
+            checker.channel_processing(work_dir, args.session)
             checker.display_settings(work_dir)
             checker.aliases(work_dir)
             checker.notes(work_dir, args.session)

@@ -163,10 +163,10 @@ i2 Pro 的结构是 `Project → Workbook → Worksheet → Component`。我们�
 
 ### M3 — 工程化（已完成）
 
-单测（真实数据回归 + HTTP 端到端 + 无头 JS 冒烟）从当时的 21 项起一路加上来，现在 **481 项**
+单测（真实数据回归 + HTTP 端到端 + 无头 JS 冒烟）从当时的 21 项起一路加上来，现在 **492 项**
 （`python -m unittest discover -s tests`）、零第三方运行期依赖、git 仓库。
 
-**验收从"三条"变"四条"**：无头冒烟（`tools/smoke_viewer.js`，587 个断言点）跑在
+**验收从"三条"变"四条"**：无头冒烟（`tools/smoke_viewer.js`，609 个断言点）跑在
 假 DOM 上——元素没有面积、没有遮挡，disabled 的控件照样派发 `click`。它能证明"代码
 调用了它该调用的函数"，证明不了**用户点得到**。所以补了第四条
 `tools/verify_clicks.py`：用 Edge 的 DevTools 协议发**真鼠标 / 真键盘**，跑在
@@ -345,7 +345,21 @@ i2 Pro 的结构是 `Project → Workbook → Worksheet → Component`。我们�
     实测：`{"name":"左后轮速","candidates":["SpeedRL","Gear Speed1","GPS Speed"]}`
     在高避落到 `Gear Speed1`、在耐久落到 `SpeedRL`。保存时没被用户动过的通道槽
     写回**引用**（写成真名的话换场次就又空了）。
-21. **多 Workbook 工程体系 / 双轴 / 对数轴** 等——见 `AGENTS.md` 规则 9 的
+21. **通道处理：滤波 / 增益偏置 / 光标归零**（验收 A75）——**完成**：i2 Pro 的
+    Filter 与 Scale/Offset 是"生成一条**同名**通道覆盖原通道"（它自己的帮助原文：
+    "create a new channel (of the same name) that overrides the original channel"），
+    快捷键 `Ctrl+Shift+F` / `O` / `Z`。我们照搬这三件事，落在已有的数学通道上：
+    通道列表每行一个 ⚙，四栏固定顺序（滤波 → 增益 → 偏置 → 归零）拼成一条同名定义，
+    默认存场次侧车、可勾"存成全局"；处理过的通道在列表与图上带 ƒ 角标，导出元数据
+    里记一条 `transformed`。**引擎为此开了一条路**：同名自引用（`X = filter_lp('X', f)`）
+    解析到**文件里那条原生列**，而不是自己——以前它被判成"绕成一个圈"，所以这条功能
+    根本写不出来；没有同名原生通道的自引用仍然报环。顺带加了两个零相位滤波
+    （`filter_lp0` / `filter_hp0`，正反各跑一遍；旧的 `filter_lp` / `filter_hp` 不动）
+    ——相位延迟会让"滤波后比圈速"整体错开，那不是分析该有的样子。
+    取舍写清了：覆盖语义下原值只能靠「删除处理」拿回；处理在算距离轴的那条车速会
+    连带改变里程与圈速（面板会提示）。切比雪夫滤波仍然不做（要 scipy，违反规则 4）。
+    部署到公网这件事**不在这一票**，只交了 `docs/deploy-check.md` 那份自查清单。
+22. **多 Workbook 工程体系 / 双轴 / 对数轴** 等——见 `AGENTS.md` 规则 9 的
     "明确不做"清单；要翻案先改这份 PLAN。
 
 **没开票的候选（下一批）**——想开工先 `/to-spec` 把"要什么"说清楚：它们现在各自

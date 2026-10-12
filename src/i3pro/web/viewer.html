@@ -36,6 +36,19 @@
   .ch input { accent-color:var(--accent); flex:0 0 auto; margin:0; }
   .ch .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .ch .unit { color:var(--muted); margin-left:auto; font-size:11px; flex:0 0 auto; }
+  /* 通道处理（A75）：每行一个小齿轮；处理过的通道挂一个 ƒ 角标 */
+  .ch .cog { flex:0 0 auto; background:transparent; border:1px solid transparent;
+             color:var(--muted); font-size:11px; line-height:1; padding:1px 3px;
+             border-radius:4px; cursor:pointer; font-family:inherit; }
+  .ch .cog:hover { color:var(--fg); border-color:var(--line); background:var(--panel2); }
+  .ch .proc { flex:0 0 auto; color:var(--accent); font-size:11px; font-weight:600; }
+  .lrow .lproc { color:var(--accent); font-weight:600; }
+  .srow { display:flex; align-items:center; gap:5px; font-size:11px; color:var(--muted);
+          margin-top:3px; }
+  .srow select, .srow input[type="number"], .srow input[type="text"] {
+          font-size:11px; padding:2px 4px; font-family:inherit; }
+  .srow input[type="number"] { width:7ch; }
+  .srow input[type="text"] { width:12ch; }
   /* 本场次没有的通道：灰着，而且**看得出是灰的**（ticket #34）。
      灰不写在这个色值上，写在线条与文字一起变灰这件事上——只把文字调暗的话，
      在暗色主题里和"没勾选"几乎分不出来。 */
@@ -499,6 +512,51 @@
         <div class="hint" id="mathsPreview"></div>
       </div>
       <div class="mfuncs" id="mathsFuncList" hidden></div>
+    </div>
+    <!-- 通道处理（A75）：像 i2 Pro 的 Filter / Scale-Offset——用**同名**定义覆盖原通道，
+         所以图、报表、切圈、导出看到的是处理后的值，而 .ld 一个字节都不动。 -->
+    <div class="group" id="setupGroup">
+      <h2>通道处理 <span class="count" id="setupCount"></span></h2>
+      <div class="hint">点通道列表每行右边的 <b>⚙</b> 选一条通道；
+        <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> 滤波 ·
+        <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd> 增益偏置 ·
+        <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> 用光标处归零。
+        处理过的通道在列表和图上带 <b>ƒ</b> 角标。</div>
+      <div class="hint" id="setupNote"></div>
+      <div id="setupForm" hidden>
+        <div class="srow">
+          <span>滤波</span>
+          <select id="setupFilterKind" title="先滤波，再增益、偏置，最后归零">
+            <option value="none">不滤波</option>
+            <option value="lp0">低通 · 零相位</option>
+            <option value="lp">低通 · 单程</option>
+            <option value="hp0">高通 · 零相位</option>
+            <option value="hp">高通 · 单程</option>
+            <option value="smooth">移动平均</option>
+          </select>
+          <input type="number" id="setupFilterValue" step="0.5" min="0"
+                 title="截止频率 Hz；移动平均填窗口（整数=点数、小数=秒）">
+        </div>
+        <div class="srow">
+          <span>增益</span><input type="number" id="setupGain" step="0.1" placeholder="1">
+          <span>偏置</span><input type="number" id="setupOffset" step="0.1" placeholder="0">
+        </div>
+        <div class="srow">
+          <input type="checkbox" id="setupZero">
+          <label for="setupZero">用光标处归零（减掉 <span id="setupZeroValue">—</span>）</label>
+        </div>
+        <div class="srow">
+          <span>单位</span><input type="text" id="setupUnit" placeholder="不改">
+        </div>
+        <div class="srow">
+          <input type="checkbox" id="setupGlobal">
+          <label for="setupGlobal">存成全局（这台车所有场次都生效）</label>
+        </div>
+        <div class="row">
+          <button id="setupApply">应用</button>
+          <button id="setupRemove" title="删掉这条处理，回到文件里的原始值">删除处理</button>
+        </div>
+      </div>
     </div>
   </aside>
   <section id="charts">
@@ -1708,6 +1766,10 @@ const state = {
   //: GPS 校正（#14）：配置 + "这段数据坏在哪"的计数；侧车 `<场次>.gps.json`。
   gps: (DATA && DATA.gps) || null,
   placeBeacon: false,
+  //: 「通道处理」面板正在改哪条通道（A75）；快捷键也作用在它身上。
+  setupChannel: null,
+  //: 用户最后点过的那一行通道（面板与快捷键的落点）。
+  channelFocus: null,
   pending: 0,
   windowKey: "",
   dataVersion: 0,
@@ -2958,6 +3020,8 @@ function renderGraphHead(comp, b, groups, panels, overlapped) {
   const signature = groups.map((g) => g.key + ":" + g.channels.join(",")).join(";")
     + "|" + (state.show.measure ? 1 : 0) + "|" + (state.show.legend ? 1 : 0)
     + "|" + (comp.config.mode || "tiled") + "|" + gone.join(",")
+    // 处理过的通道会多一个 ƒ 角标（A75）：这套处理的名单变了，抬头就得重画。
+    + "|" + Object.keys(processedChannels()).join(",")
     + "|" + [fields.cursor, fields.delta, fields.min, fields.max, fields.avg,
              fields.unit].join(",");
   b.head.style.display = state.show.legend ? "" : "none";
@@ -2982,6 +3046,12 @@ function renderGraphHead(comp, b, groups, panels, overlapped) {
           openColorMenu(comp, name, sw);
         });
         makeEl("span", "lname", row).textContent = name;
+        // 这条通道的值是「通道处理」算出来的（A75）：抬头也标一下，免得拿它当原始值用。
+        if (isProcessed(name)) {
+          const tag = makeEl("span", "lproc", row);
+          tag.textContent = "ƒ";
+          tag.title = processedTitle(name);
+        }
         const cur = makeEl("span", "lcur", row);
         const dl = makeEl("span", "ldelta", row);
         const mn = makeEl("span", "lmm", row);
@@ -5490,7 +5560,7 @@ function escapeText(text) {
 }
 
 function mathsState() {
-  return state.maths || { definitions: [], shadowed: [], errors: [], functions: [] };
+  return state.maths || { definitions: [], overrides: {}, shadowed: [], errors: [], functions: [] };
 }
 
 function mathsErrorFor(name) {
@@ -5759,10 +5829,14 @@ function mathsSaveList(draft) {
     // `note` 要原样带上：它是**手写在 `maths/global.json` 里的说明**，界面上暂时没有
     // 编辑入口。原先这里只发 {name, expr, unit}，于是"在面板里存一次"就会把仓库里
     // 那几条说明永久抹掉（真发生过：`global.json` 的 4 条 note 全没了，HEAD 里还在）。
-    .map((d) => ({ name: d.name, expr: d.expr, unit: d.unit || "", note: d.note || "" }))
+    // `setup` 同理（A75）：别的通道身上那套"通道处理"参数不能因为动了一条定义就没了。
+    .map((d) => Object.assign({ name: d.name, expr: d.expr, unit: d.unit || "",
+                                note: d.note || "" },
+                              d.setup ? { setup: d.setup } : {}))
     // 正在改的那一条要保留它**原来**的说明（界面上没有 note 输入框，改表达式不该顺手把它删掉）
-    .concat([{ name: draft.name, expr: draft.expr, unit: draft.unit,
-               note: (original && original.note) || draft.note || "" }]);
+    .concat([Object.assign({ name: draft.name, expr: draft.expr, unit: draft.unit,
+                             note: (original && original.note) || draft.note || "" },
+                           draft.setup ? { setup: draft.setup } : {})]);
 }
 
 /** 服务端算完一次之后，把列表、报错、函数表一起换掉。 */
@@ -5772,6 +5846,7 @@ function applyMathsResponse(data) {
   closeMathsEditor();
   renderMathsList();
   renderMathsFunctions();
+  renderSetupForm();               // 「通道处理」面板与 ƒ 角标跟着新状态走
   const errors = data.errors || [];
   if (errors.length) {
     toast("有 " + errors.length + " 条数学通道算不出来，见列表里的红字");
@@ -5869,6 +5944,259 @@ function mathsDelete(index) {
   saveMathsDefinitions(def.scope, rest).then((data) => {
     if (data) toast("已删掉 " + def.name);
   });
+}
+
+/* ---------------------------------------------------------- 通道处理（A75）
+ * i2 Pro 的 Filter / Scale-Offset 是"生成一条**同名**通道覆盖原通道"。这里照搬
+ * 那个语义：面板把四栏拼成一条式子，存成一条**名字与被处理通道相同**的数学定义
+ * （引擎里同名自引用会解析到文件里那条原生列，见 maths.resolve_all）。于是图、
+ * 散点、报表、切圈、导出看到的都是处理后的值，而 `.ld` 一个字节都不动。
+ *
+ * 一条通道只有一套处理，四栏顺序**固定**：滤波 → 增益 → 偏置 → 归零（先滤后缩再
+ * 偏、最后才减掉光标处那个常数）。要任意拼接就去上面的「数学通道」。
+ */
+
+//: 「通道处理」写出来的定义会带上这个来源标记；手写的定义没有它，
+//: 面板看到就明说"这条是手写的"，不猜参数、也不盖掉（A75）。
+const SETUP_FILTER_LABEL = {
+  lp: "低通", lp0: "低通（零相位）", hp: "高通", hp0: "高通（零相位）", smooth: "移动平均",
+};
+
+/** 名字 -> 处理信息（服务端算好的，见 library.maths_state 的 overrides）。 */
+function processedChannels() { return (mathsState() || {}).overrides || {}; }
+
+function isProcessed(name) { return !!processedChannels()[name]; }
+
+function setupNum(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return String(value);
+  return String(Number(number.toPrecision(6)));
+}
+
+/** 四栏参数 -> 一句话（角标提示、toast、面板回显都用它）。 */
+function setupSummary(setup) {
+  if (!setup) return "（这条是用表达式编辑器手写的）";
+  const parts = [];
+  const filter = setup.filter || {};
+  if (filter.kind && filter.kind !== "none") {
+    parts.push((SETUP_FILTER_LABEL[filter.kind] || filter.kind) + " " + setupNum(filter.value)
+      + (filter.kind === "smooth" ? "（窗口）" : " Hz"));
+  }
+  if (setup.gain !== null && setup.gain !== undefined && setup.gain !== 1) {
+    parts.push("增益 " + setupNum(setup.gain));
+  }
+  if (setup.offset) parts.push("偏置 " + setupNum(setup.offset));
+  if (setup.zero_at !== null && setup.zero_at !== undefined) {
+    parts.push("归零 " + setupNum(setup.zero_at));
+  }
+  return parts.length ? parts.join(" · ") : "（四栏都是空的）";
+}
+
+function processedTitle(name) {
+  const info = processedChannels()[name];
+  if (!info) return "";
+  return "已处理：" + setupSummary(info.setup) + "（表达式 " + info.expr + "）"
+    + "；原值点「删除处理」就能拿回来";
+}
+
+/** 四栏 -> 一条同名覆盖的表达式。顺序固定：滤波 → 增益 → 偏置 → 归零。 */
+function setupExpression(name, form) {
+  const quoted = "'" + name + "'";
+  let expr = quoted;
+  const value = form.filterValue;
+  if (form.filter === "lp") expr = "filter_lp(" + quoted + ", " + setupNum(value) + ")";
+  else if (form.filter === "lp0") expr = "filter_lp0(" + quoted + ", " + setupNum(value) + ")";
+  else if (form.filter === "hp") expr = "filter_hp(" + quoted + ", " + setupNum(value) + ")";
+  else if (form.filter === "hp0") expr = "filter_hp0(" + quoted + ", " + setupNum(value) + ")";
+  else if (form.filter === "smooth") expr = "smooth(" + quoted + ", " + setupNum(value) + ")";
+  if (form.gain !== null && form.gain !== undefined && form.gain !== 1) {
+    expr = "(" + setupNum(form.gain) + ") * (" + expr + ")";
+  }
+  if (form.offset) expr = "(" + expr + ") + (" + setupNum(form.offset) + ")";
+  if (form.zero) expr = "(" + expr + ") - (" + setupNum(form.zeroAt) + ")";
+  return expr;
+}
+
+/** 这个名字现在生效的定义（本地或全局；两边同名时本地赢，服务端已经算好）。 */
+function definitionFor(name) {
+  return (mathsState().definitions || []).find((d) => d.name === name) || null;
+}
+
+/** 光标处这条通道的值；拿不到给 NaN（归零要用它）。 */
+function cursorValueFor(name) {
+  if (state.cursor === null || !Number.isFinite(state.cursor)) return NaN;
+  const trace = traceOf(name);
+  if (!trace) return NaN;
+  const value = valueAt(trace, state.cursor);
+  return Number.isFinite(value) ? value : NaN;
+}
+
+/** 快捷键作用在谁身上：先看刚点过的那一行，再看当前聚焦图的通道。 */
+function currentChannelName() {
+  const focused = state.channelFocus;
+  if (focused && (CHANNELS.has(focused) || isMissingChannel(focused))) return focused;
+  const chosen = selectedChannels();
+  if (chosen && chosen.length) return chosen[0];
+  const comp = focusedComponent();
+  const list = (comp && comp.config && comp.config.channels) || [];
+  return list.length ? list[0] : null;
+}
+
+function openChannelSetup(name, focusField) {
+  if (!name) { toast("先点一条通道（左边那一列），再按这个快捷键"); return; }
+  state.setupChannel = name;
+  state.channelFocus = name;
+  renderSetupForm();
+  const group = $("setupGroup");
+  if (group && group.scrollIntoView) group.scrollIntoView({ block: "nearest" });
+  const target = focusField === "filter" ? $("setupFilterKind")
+    : focusField === "scale" ? $("setupGain")
+    : focusField === "zero" ? $("setupZero") : null;
+  if (target && target.focus) target.focus();
+}
+
+function closeChannelSetup() {
+  state.setupChannel = null;
+  renderSetupForm();
+}
+
+function setupFormValues() {
+  const text = (id) => ($(id).value || "").trim();
+  const number = (id) => (text(id) === "" ? null : Number(text(id)));
+  return {
+    filter: $("setupFilterKind").value,
+    filterValue: number("setupFilterValue"),
+    gain: number("setupGain"),
+    offset: number("setupOffset"),
+    zero: !!$("setupZero").checked,
+    zeroAt: null,
+    unit: text("setupUnit"),
+    scope: $("setupGlobal").checked ? "global" : "local",
+  };
+}
+
+/** 面板：标题、说明、四栏的当前值。改一条处理之后就调它。 */
+function renderSetupForm() {
+  const form = $("setupForm");
+  const note = $("setupNote");
+  const count = $("setupCount");
+  if (!form || !note) return;
+  const handled = Object.keys(processedChannels());
+  if (count) count.textContent = handled.length ? handled.length + " 条" : "";
+  const name = state.setupChannel;
+  if (!name) {
+    form.hidden = true;
+    note.textContent = "还没选通道：点左边通道列表里每行右边的 ⚙。";
+    return;
+  }
+  form.hidden = false;
+  const def = definitionFor(name);
+  const setup = (def && def.setup) || null;
+  const lines = [];
+  if (isMissingChannel(name)) {
+    lines.push("⚠ 本场次没有这条通道，先换回有它的场次再来处理它。");
+  }
+  if (name.indexOf("'") >= 0) {
+    lines.push("⚠ 名字里有单引号，表达式里引不出来——这条通道不能做处理。");
+  }
+  if (!isMissingChannel(name) && String(((DATA.meta || {}).speed_channel) || "") === name) {
+    lines.push("这条通道在算距离轴：处理它会连带改变里程与圈速（那是语义，不是 bug）。");
+  }
+  if (def && !setup) {
+    lines.push("这条已经有一条**手写**的数学定义（表达式编辑器里写的）："
+      + "面板不猜它的参数。去「数学通道」里改它，或者点「删除处理」把它删掉再回来设。");
+  } else if (setup) {
+    lines.push("这一套处理是面板设的：改哪一栏就改哪一栏。");
+  }
+  const at = cursorValueFor(name);
+  $("setupZeroValue").textContent = Number.isFinite(at) ? setupNum(at) : "先移到图上";
+  const filter = (setup && setup.filter) || {};
+  $("setupFilterKind").value = filter.kind || "none";
+  $("setupFilterValue").value = filter.value === undefined || filter.value === null
+    ? "" : String(filter.value);
+  $("setupGain").value = setup && setup.gain !== null && setup.gain !== undefined
+    ? String(setup.gain) : "";
+  $("setupOffset").value = setup && setup.offset ? String(setup.offset) : "";
+  $("setupZero").checked = !!(setup && setup.zero_at !== null && setup.zero_at !== undefined);
+  $("setupUnit").value = (def && def.unit) || "";
+  $("setupGlobal").checked = !!def && def.scope === "global";
+  const existing = handled.indexOf(name);
+  lines.unshift((existing >= 0 ? "正在处理：" : "选中的通道：") + name
+    + (def ? "（" + (def.scope === "global" ? "全局" : "本场次") + "）" : "（没有处理）"));
+  note.innerHTML = lines.map((line) => escapeText(line)).join("<br>");
+}
+
+async function setupApply() {
+  const name = state.setupChannel;
+  if (!name) { toast("先点一条通道（左边那一列）"); return; }
+  if (isMissingChannel(name)) {
+    toast("「" + name + "」本场次没有；换回有它的场次再来处理它");
+    return;
+  }
+  if (name.indexOf("'") >= 0) {
+    toast("名字里有单引号，表达式里引不出来：这条通道不能做处理");
+    return;
+  }
+  const def = definitionFor(name);
+  if (def && !def.setup) {
+    toast("「" + name + "」已经有一条手写的数学定义：去「数学通道」里改它，"
+      + "或先点「删除处理」再来设");
+    return;
+  }
+  const values = setupFormValues();
+  if (values.filter !== "none" && !(Number.isFinite(values.filterValue) && values.filterValue > 0)) {
+    toast("先写滤波参数：" + (values.filter === "smooth"
+      ? "窗口（整数=点数，小数=秒），例如 5" : "截止频率（Hz），例如 20"));
+    return;
+  }
+  if (values.zero) {
+    const at = cursorValueFor(name);
+    if (!Number.isFinite(at)) {
+      toast("「归零」要用光标处的值：先把鼠标移到图上（这条通道要有波形）");
+      return;
+    }
+    values.zeroAt = Number(at.toPrecision(6));
+  }
+  if (values.filter === "none" && values.gain === null && !values.offset && !values.zero) {
+    toast("四栏都是空的：填一栏再来，或者点「删除处理」回到原始值");
+    return;
+  }
+  const setup = {
+    filter: values.filter === "none" ? null
+      : { kind: values.filter, value: values.filterValue },
+    gain: values.gain,
+    offset: values.offset,
+    zero_at: values.zeroAt,
+  };
+  const draft = { name: name, expr: setupExpression(name, values), unit: values.unit,
+                  scope: values.scope, setup: setup };
+  const data = await saveMathsDefinitions(values.scope, mathsSaveList(draft));
+  if (!data) return;
+  await refreshChannels();
+  refreshWindowTraces(true).then(() => { refreshAllComponentData().then(renderAll); });
+  renderAll();
+  renderSetupForm();
+  toast("已给「" + name + "」加上处理：" + setupSummary(setup)
+    + (values.scope === "global" ? "（全局：以后每个场次都生效）" : "（本场次）"));
+}
+
+async function setupRemove() {
+  const name = state.setupChannel;
+  if (!name) { toast("先点一条通道（左边那一列）"); return; }
+  const def = definitionFor(name);
+  if (!def) { toast("「" + name + "」现在没有处理，不用删"); return; }
+  const rest = (mathsState().definitions || [])
+    .filter((d) => d.scope === def.scope && d.name !== name)
+    .map((d) => Object.assign({ name: d.name, expr: d.expr, unit: d.unit || "",
+                                note: d.note || "" },
+                              d.setup ? { setup: d.setup } : {}));
+  const data = await saveMathsDefinitions(def.scope, rest);
+  if (!data) return;
+  await refreshChannels();
+  refreshWindowTraces(true).then(() => { refreshAllComponentData().then(renderAll); });
+  renderAll();
+  renderSetupForm();
+  toast("已删掉「" + name + "」的处理，回到文件里的原始值");
 }
 
 /* -------------------------------------------------------------- 赛道区段 */
@@ -6166,11 +6494,14 @@ async function loadMaths() {
       if (!res.ok) throw new Error("HTTP " + res.status);
       state.maths = await res.json();
     } catch (err) {
-      state.maths = { definitions: [], shadowed: [], errors: [], functions: [] };
+      state.maths = { definitions: [], overrides: {}, shadowed: [], errors: [], functions: [] };
     }
   }
   renderMathsList();
   renderMathsFunctions();
+  renderSetupForm();
+  // ƒ 角标长在通道列表上：状态到了要重画一遍列表，否则要等下一次勾选才出现。
+  renderChannelList();
 }
 
 /**
@@ -6266,10 +6597,21 @@ function renderChannelList() {
       row.innerHTML = '<input type="checkbox" ' + (on ? "checked" : "") + ">"
         + '<span class="swatch" style="background:' + (on ? channelColor(name, comp) : "#3a4150") + '"></span>'
         + '<span class="nm">' + name + '</span>'
+        // 处理过的通道（A75）：一个 ƒ 角标，悬停说清是哪一套处理。
+        + (isProcessed(name)
+          ? '<span class="proc" title="' + escapeText(processedTitle(name)) + '">ƒ</span>' : "")
         + '<span class="unit' + (dead ? " dead" : "") + '">'
-        + (dead ? "全程无有效" : (ch.unit || "")) + "</span>";
+        + (dead ? "全程无有效" : (ch.unit || "")) + "</span>"
+        + '<button type="button" class="cog" title="通道处理：滤波 / 增益 / 偏置 / 用光标处归零">⚙</button>';
       row.querySelector("input").addEventListener("change", (event) => {
         toggleChannel(name, event.target.checked);
+      });
+      // 点这一行 = 把"当前通道"定在它身上（快捷键与面板的落点）
+      row.addEventListener("mousedown", () => { state.channelFocus = name; });
+      row.querySelector(".cog").addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openChannelSetup(name);
       });
       frag.appendChild(row);
       shown += 1;
@@ -6626,6 +6968,20 @@ function onKeyDown(event) {
     stop(); return;
   }
   if (event.altKey) return;
+  // 通道处理（A75）：跟 i2 Pro 的 Ctrl+Shift+F / O / Z 对齐——滤波、增益偏置、
+  // 用光标处归零。**必须排在下面那段 Ctrl 之前**：Ctrl+F 现在是"跳到最快圈"，
+  // 带 Shift 的组合以前也会被它吃掉。
+  if (event.ctrlKey && event.shiftKey) {
+    const letter = String(key || "").toLowerCase();
+    const field = letter === "f" ? "filter"
+      : letter === "o" ? "scale"
+      : letter === "z" ? "zero" : null;
+    if (field) {
+      openChannelSetup(currentChannelName(), field);
+      stop();
+      return;
+    }
+  }
   if (event.ctrlKey) {
     if (key === "f" || key === "F") {
       const laps = (DATA.laps || []).filter((l) => l.complete);
@@ -7972,6 +8328,21 @@ function init() {
   $("mathsCancel").addEventListener("click", closeMathsEditor);
   $("mathsTest").addEventListener("click", mathsTest);
   $("mathsCommit").addEventListener("click", mathsCommit);
+  // 通道处理（A75）：面板上的三个交互入口
+  $("setupApply").addEventListener("click", setupApply);
+  $("setupRemove").addEventListener("click", setupRemove);
+  $("setupZero").addEventListener("change", () => {
+    // 勾上"归零"就把光标处的值亮出来：它会被写死成常数，用户得先看清是几。
+    const name = state.setupChannel;
+    const at = name ? cursorValueFor(name) : NaN;
+    $("setupZeroValue").textContent = Number.isFinite(at) ? setupNum(at) : "先移到图上";
+  });
+  // 换滤波种类只改提示语，**不重画面板**——重画会把用户刚敲进去的参数抹掉。
+  $("setupFilterKind").addEventListener("change", () => {
+    const kind = $("setupFilterKind").value;
+    $("setupFilterValue").placeholder = kind === "smooth" ? "窗口：5 或 0.05"
+      : kind === "none" ? "" : "Hz，例如 20";
+  });
   $("mathsPickChannel").addEventListener("change", (event) => {
     insertMathsChannel(event.target.value);
   });
@@ -8185,6 +8556,14 @@ window.i3pro = {
   formatMathsTrial: formatMathsTrial,
   reindexChannels: reindexChannels, selectChannel: selectChannel,
   mathsState: mathsState, escapeText: escapeText,
+  // 通道处理（A75）：面板、角标、表达式生成、快捷键的落点
+  processedChannels: processedChannels, isProcessed: isProcessed,
+  processedTitle: processedTitle, setupSummary: setupSummary,
+  setupExpression: setupExpression, openChannelSetup: openChannelSetup,
+  closeChannelSetup: closeChannelSetup, renderSetupForm: renderSetupForm,
+  setupApply: setupApply, setupRemove: setupRemove,
+  currentChannelName: currentChannelName, definitionFor: definitionFor,
+  cursorValueFor: cursorValueFor,
   insertMathsChannel: insertMathsChannel, renderMathsChannelPicker: renderMathsChannelPicker,
   insertMathsFunction: insertMathsFunction,
   niceTicks: niceTicks, axisTickLabel: axisTickLabel,

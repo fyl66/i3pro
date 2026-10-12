@@ -754,6 +754,11 @@ def metadata(log: ldmod.LogFile, req: Request, rows: int, columns: int) -> dict:
             for name in req.channels
         ],
         "source_meta": log.metadata(),
+        # 被「通道处理」的同名定义覆盖过的通道（A75）：列名还是那个名字，值却是
+        # 滤波 / 增益之后算出来的。**必须写进元数据**：队友拿这份 CSV 去跟 MoTeC
+        # 原始导出逐点对，对不上第一反应会是"i3pro 解析错了"。空也要写——字段不在
+        # 和"这次一条都没处理"是两件事（同 excluded_missing 的道理）。
+        "transformed": sorted(channelsmod.overrides(log)),
         # 本场次没有、被跳过的通道（ticket #34）。**空也要写**：字段不在和
         # "这次一条都没缺"是两件事，队友的脚本不该靠"有没有这个键"来猜。
         "excluded_missing": list(req.excluded_missing),
@@ -794,6 +799,11 @@ def _metadata_rows(meta: dict):
         # 少了列要写在"为什么少"的旁边，不能只写"通道数 12"（ticket #34）。
         yield ["本场次没有（已跳过）",
                "、".join(meta["excluded_missing"]) + f"（共 {len(meta['excluded_missing'])} 条）"]
+    if meta.get("transformed"):
+        # 值是算出来的、列名还是原样：不写这一行，队友会拿它跟 MoTeC 原始导出对。
+        yield ["已处理的通道",
+               "、".join(meta["transformed"])
+               + f"（共 {len(meta['transformed'])} 条：值是「通道处理」算出来的，列名没变）"]
     yield ["导出时间", meta["exported_at"]]
 
 

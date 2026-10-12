@@ -19,6 +19,7 @@ import numpy as np
 
 from . import beacons as beaconsmod, cache, canlog, csvlog, maths, render, sidecar
 from . import ld as ldmod
+from . import channels as channelsmod
 
 __all__ = ["SessionLibrary", "dumps", "json_safe"]
 
@@ -292,15 +293,41 @@ class SessionLibrary:
         self._maths_attached[key] = stamp
 
     def maths_state(self, name: str) -> dict:
-        """界面要的全部数学状态：生效的定义、谁盖住了谁、哪些算不出来。"""
+        """界面要的全部数学状态：生效的定义、谁盖住了谁、哪些算不出来。
+
+        ``overrides``（A75）是"同名覆盖了原生通道"的那些定义——i2 Pro 的
+        Filter / Scale-Offset 语义，也是界面上「通道处理」面板的产物。判定只有
+        一处（``channels.overrides``），这里只把它连定义一起端出去：通道列表靠它
+        打角标、面板靠它判断"这条已经处理过、是面板做的还是手写的"。
+        """
         path = self.path_of(name)
         if path is None:
             raise KeyError(name)
         effective = maths.load_effective(path, self.maths_root)
+        definitions = [d.as_dict() | {"scope": d.scope} for d in effective.definitions]
+        errors = list(self._maths_errors.get(str(path), []))
+        overrides: dict[str, dict] = {}
+        try:
+            log = self.get(name)
+        except KeyError:
+            log = None
+        if log is not None:
+            broken = {item.get("name") for item in errors}
+            by_name = {item["name"]: item for item in definitions}
+            overrides = {
+                channel: {
+                    "expr": by_name[channel]["expr"],
+                    "unit": by_name[channel].get("unit", "") or "",
+                    "setup": by_name[channel].get("setup"),
+                }
+                for channel in sorted(channelsmod.overrides(log))
+                if channel in by_name and channel not in broken
+            }
         return {
-            "definitions": [d.as_dict() | {"scope": d.scope} for d in effective.definitions],
+            "definitions": definitions,
+            "overrides": overrides,
             "shadowed": list(effective.shadowed),
-            "errors": list(self._maths_errors.get(str(path), [])),
+            "errors": errors,
             "local_path": maths.config_path(path).name,
             "global_path": str(maths.global_path(self.maths_root)),
             "functions": maths.function_catalogue(),

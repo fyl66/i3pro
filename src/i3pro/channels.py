@@ -32,6 +32,7 @@ from __future__ import annotations
 import numpy as np
 
 __all__ = [
+    "ATTACHED_CHANNEL_ID",
     "DERIVED_TARGET",
     "EMPTY",
     "MISSING",
@@ -41,6 +42,7 @@ __all__ = [
     "hold_factor",
     "is_derived",
     "names",
+    "overrides",
     "resolve",
     "sample_rate",
     "slot",
@@ -110,6 +112,31 @@ def is_derived(session, channel) -> bool:
     """这条通道是算出来的吗？``channel`` 可以是 ``Channel``，也可以是名字。"""
     name = channel if isinstance(channel, str) else channel.name
     return name in names(session)
+
+
+#: `maths.attach` 给"文件里本来没有的名字"补的那条 `Channel` 用的 id。
+#:
+#: 文件里的通道 id 一定是非负的，所以 `-1` 就是"这条通道不在文件里"的记号。
+#: 有它才分得清两件长得很像的事：**新加的**数学通道（文件里没这条），与
+#: **同名覆盖**原通道（文件里有，值被换掉了，i2 Pro 的 Filter / Scale-Offset）。
+ATTACHED_CHANNEL_ID = -1
+
+
+def overrides(session) -> set[str]:
+    """被**同名**数学定义盖住的原生通道名（A75 的"通道处理"就是这条语义）。
+
+    只看一件事：这个名字挂着派生列，而它在通道表里的那条 `Channel` 不是
+    `maths.attach` 补上去的（补上去的 `channel_id` 是 :data:`ATTACHED_CHANNEL_ID`）。
+    换句话说"文件里本来就有这条通道，值被算出来的那份顶掉了"。
+
+    判据只有这一处：界面的角标、导出的元数据、面板判断"这条已经处理过"都问它。
+    """
+    derived = names(session)
+    out: set[str] = set()
+    for channel in getattr(session, "channels", ()) or ():
+        if channel.name in derived and getattr(channel, "channel_id", None) != ATTACHED_CHANNEL_ID:
+            out.add(channel.name)
+    return out
 
 
 def unit(session, channel) -> str:

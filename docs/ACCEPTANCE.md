@@ -3605,6 +3605,65 @@ python tools\verify_clicks.py
 
 ---
 
+## A75 · 通道处理：低通 / 增益偏置 / 光标归零（本次新增）
+
+用户问的是"能不能像 i2 Pro 那样对每个通道做 Filter 与 Scale/Offset"。i2 Pro 的帮助
+（`Maths Overview`）里那条语义是：**生成一条同名的通道覆盖原通道**——原文
+"create a new channel (of the same name) that overrides the original channel"，
+快捷键 `Ctrl+Shift+F`（滤波）/ `Ctrl+Shift+O`（增益偏置）/ `Ctrl+Shift+Z`（用光标处归零）。
+这一票照搬这三件事，实现落在已经有的数学通道上，`.ld` 仍然只读。
+
+**真正的技术点**：同名自引用在引擎里被判成"绕成一个圈"，所以那条路原来根本走不通——
+实测把 `filter_lp('G Force Long', 20)` 存成名为 `G Force Long` 的定义会报
+「数学通道绕成一个圈了：G Force Long -> G Force Long」。改法只有一句话：`resolve_all`
+里"被引用的名字 == 正在求值的定义名、且本场次真有一条同名原生通道"时解析到**原生列**；
+没有同名原生通道的照旧报环（回归里两条都在）。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 引擎 | 同名自引用回退到原生列；求值**之前**先 `detach`（上一轮的覆盖层还留着会把滤完的值再滤一遍，而且数字看着仍然像模像样） |
+| 新函数 | `filter_lp0(x, 截止Hz)` / `filter_hp0(x, 截止Hz)`：零相位（正反各跑一遍）。旧 `filter_lp` / `filter_hp` 一字不动 |
+| 定义 | 多一个可选 `setup`（四栏参数）：面板生成的定义能原样读回；手写的定义不会凭空多这个键，面板也不猜、不盖 |
+| 界面 | 通道列表每行 ⚙ + `Ctrl+Shift+F/O/Z`；四栏固定顺序 滤波 → 增益 → 偏置 → 归零；处理过的通道在列表与图上带 ƒ 角标；导出元数据多一条 `transformed` |
+| 顺带 | `docs/deploy-check.md`：把 i3pro 放到公网要查什么、要定什么、缺什么（用户问的第二个问题，只交清单不动部署） |
+
+```powershell
+# 1) 引擎与格式：同名覆盖、不递增、零相位、setup 读回、导出元数据
+python -m unittest tests.test_i3pro.TestMaths tests.test_i3pro.TestExportFiles -v
+python -m unittest tests.test_i3pro.TestMathsOverHttp -v
+
+# 2) 无头：四栏拼出来的式子、快捷键、面板读回、ƒ 角标
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
+node tools\smoke_viewer.js "out\20260524-耐久正赛.html"
+
+# 3) 真浏览器真鼠标：真点 ⚙ -> 敲 20 -> 应用 -> 磁盘上有同名定义 -> Ctrl+Shift+Z 归零 -> 删除
+python tools\verify_clicks.py
+```
+
+**通过判据（本机实测）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 同名覆盖算得出来、而且真的换了值 | 高避 `G Force Long` 前 3 点：原生 `-0.03` → 覆盖后 `-0.0062`；`is_derived` 为真 |
+| 算两遍一模一样（不递增） | 连跑两次 `apply_to_session` 逐点 `allclose`；侧车在磁盘上那一遍也过了 |
+| 没有同名原生通道仍然是环 | `凭空来的 = filter_lp('凭空来的', 20)` 报「绕成一个圈了」 |
+| 零相位 | 脉冲滤完峰在原位、左右对称；单程那条峰往后跑（对照）；`filter_lp0` + `filter_hp0` = 原信号 |
+| 空档 | `filter_lp0` 原样留 NaN；旧 `filter_lp` 仍按 0 处理（行为不动） |
+| 性能 | 46,400 样本：单程 0.068 s、零相位 0.137 s |
+| `setup` 往返 | `as_dict` → `from_dict` 逐字段相同；手写定义不带这个键 |
+| 导出元数据 | `transformed: ["Vx KF"]`；Excel 元数据 sheet 多一行「已处理的通道」 |
+| 真鼠标端到端 | 点 ⚙ → 低通（零相位）20 Hz → `worksheets/<场次>.maths.json` 里出现 `filter_lp0('Vx KF Init', 20)`；`Ctrl+Shift+Z` 把光标处的 `51.75334` 变成 `4e-05`；切走切回还在；「删除处理」之后侧车与角标一起消失 |
+
+**回归四项（本机实测）**：`Ran 492 tests` + `OK`；`verify_ld_vs_csv` `PASS - 0 channel(s)
+outside tolerance`；两份金标准快照各 `PASS`；真浏览器 **212 项检查：212 通过，0 失败**
+（比 A74 的 193 多 19 条，就是 #75 那几组）。
+
+**已知取舍**：覆盖语义下**原值只能靠「删除处理」拿回**（不做"同时看原值"的第二条通道）；
+处理在算距离轴的那条车速会连带改变里程与圈速（面板会提示，那是语义不是 bug）；
+切比雪夫滤波仍然不做（要 scipy，违反依赖规则，用 `filter_lp0` 代替）。
+
+---
+
 测试覆盖：
 
 | 分组 | 内容 |
@@ -3634,7 +3693,7 @@ python tools\verify_clicks.py
 | `TestIndependentParsers` | 第二套实现交叉验证、213 通道 CSV 全量对照 |
 | `TestBeaconUndo` | 撤销的纯函数层：什么是"同一版"、什么时候没有可撤销的一步、交回去的是上一版本身 |
 | `TestBeaconUndoOverHttp` | 撤销走真实 `PUT`：改名 / 插入 / 删除各自一步回到原样、`trusted` 迁移、落盘、一次无改动的保存不吃掉上一步、没有可撤销的一步时 400 并说明下一步、页面注入的 `laps_can_undo` 三态 |
-| `TestViewerScript` | 无头驱动前端：脚本里 **587 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
+| `TestViewerScript` | 无头驱动前端：脚本里 **609 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
 | `TestAliases` / `TestAliasesOverHttp` | 通道别名（#36，16 项）：有序候选取第一条存在的、重复候选去掉、九种坏形状各说下一步、空候选合法、不是引用就不去别名表里翻、**同一套别名在两份金标准上落到不同通道**（`Gear Speed1` / `SpeedRL`）、`annotate` 贴出落点表、别名随文件往返、**导出 → 导入逐字段相同**、保存时给不给 aliases 的两种行为、页面载荷带着落点；HTTP：保存别名与落点、坏别名 400 带下一步 |
 | `TestPalettes` | 波形配色（#35，8 项）：三套调色板齐、每套 ≥ 8 色、前八色两两 ΔE ≥ 25、相邻 ≥ 30、对底色对比度 ≥ 3.0、"缺失"灰不属于任何一套且与所有颜色 ΔE ≥ 25、色差与对比度这两把尺子本身对拍（黑/白 = 100 / 21）、页面载荷带着三套与缺失灰、不认识的调色板名退回默认 |
 | `TestWorksheets` | 工作表（#30，13 项）：仓库里那七份文件全都读得出来（名字 / 身份 / 顺序 / 组件类型）、随版本发布的那几份**挑通道的规则不许被写没**（选了通道就要有 `pick` 兜着，A74 之后 `config` 里有通道名是允许的）、用户勾过的通道与 `pick` 并存时读 / 写 / 导出三路都保住两份、坏文件不连累别人、七种坏法各自的下一步（坏 JSON / schema 不认 / 键打错 / 尺寸非法 / 空组件列 / 空规则 / 规则键打错）、重名被挡、目录不存在与目录为空、载荷在快照与本地服务两条路上都带工作表（含 `--worksheets` 换目录只影响那一个载荷）、**搬进文件之后与搬之前逐字段一致**（夹具是硬编码那版倒出来的） |

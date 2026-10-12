@@ -207,11 +207,19 @@ class _Http:
     def url(self, path: str) -> str:
         return self.base + path
 
-    def get_json(self, path: str, timeout: float = 30):
+    #: 取数的超时。第一次 ``/api/sessions`` 要把每场算一遍（快照与场次列表都靠它），
+    #: 而 A76 之后真实数据目录里多了十几份几百 MB 的宽表 CSV 场次——冷启动一次
+    #: 实测 31 s（``out/_probe_listing_slow.py`` 量过：前几名各 1.5-4.3 s，全是宽表）。
+    #: 磁盘缓存命中时是 0.1 s，但用例用的是**另一套** roots（``STAGE`` + ``DATA``），
+    #: 指纹不同、注定冷算。给 90 s 留出余量：这条测的是"HTTP 接得对不对"，
+    #: 冷启动耗时本身由 ``TestListingCache`` 与 ``#45 实测`` 那条盯着。
+    TIMEOUT_S = 90
+
+    def get_json(self, path: str, timeout: float = TIMEOUT_S):
         with urllib.request.urlopen(self.base + path, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
 
-    def get_text(self, path: str, timeout: float = 30) -> str:
+    def get_text(self, path: str, timeout: float = TIMEOUT_S) -> str:
         with urllib.request.urlopen(self.base + path, timeout=timeout) as response:
             return response.read().decode("utf-8")
 
@@ -9921,6 +9929,30 @@ class TestPairing(unittest.TestCase):
         _axis, columns, _units, skipped = pairing.merge_columns(log, session, 0.0)
         self.assertTrue(np.allclose(columns["I Data"][:3], [-5.0, -4.96, -4.92]))
         self.assertIn("I_Data", skipped)
+
+    def test_two_recordings_of_one_session_are_merged_into_one_file(self):
+        """一个 ``.ld`` 对上不止一次记录时并进**同一场**，各自只补自己的那一段。
+
+        实测 ``10.4湾区测试``：一场高避被两次记录各录到一段，分开写会得到
+        ``<名>.csv`` 与 ``<名>-1.csv`` 两份，看不出一场到底该看哪一份。
+        """
+        log = _FakeLog(
+            "合成.ld", "05/10/2026", "17:00:00", 3.0,
+            channels=[("Slot", "", np.zeros(301))],
+        )
+        axis = np.arange(301) / 100.0
+        early = _FakeCan(axis[:151], [("A_only", "")], {"A_only": np.full(151, 1.0)})
+        late = _FakeCan(axis[150:], [("B_only", "")], {"B_only": np.full(151, 2.0)})
+        _axis, columns, _units, _skipped = pairing.merge_sources(
+            log, [(early, 0.0), (late, 0.0)]
+        )
+        self.assertIn("A_only", columns)
+        self.assertIn("B_only", columns)
+        # 先来的先填，后来的只补空档：各人盖住自己那一段，接缝处不互相盖。
+        # （零阶保持的右端是**开**的——最后一个采样点不往后带，所以尾点留空。）
+        self.assertFalse(np.isnan(columns["A_only"][:150]).any())
+        self.assertFalse(np.isnan(columns["B_only"][150:300]).any())
+        self.assertTrue(np.isnan(columns["A_only"][200:]).all(), "先来的不许被后来的盖住")
 
     def test_different_channels_sharing_a_word_are_both_kept(self):
         """``AngVelX_body`` 与 ``AngVelX hor`` 是两条通道，不能被名字归并掉一条。

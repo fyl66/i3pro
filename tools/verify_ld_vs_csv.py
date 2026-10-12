@@ -12,6 +12,7 @@ Run:  python tools/verify_ld_vs_csv.py
 
 from __future__ import annotations
 
+import csv
 import sys
 import os
 from pathlib import Path
@@ -76,12 +77,27 @@ def compare(stem: str, sample_limit: int = 20000, verbose: bool = False) -> dict
 
 
 def main() -> int:
-    stems = sorted(
-        p.stem for p in DATA.glob("*.ld") if (DATA / f"{p.stem}.csv").exists()
-    )
+    # ``<场次>.csv`` 不一定是 MoTeC 导出的那种表：``i3pro pair`` 的合并产物也叫
+    # 这个名字（一个 ``.ld`` + 若干帧表并出来的宽表，表头是 ``time_s`` 而不是
+    # MoTeC 的 ``Time``）。把它当导出表读会直接报 "no channel header row found"——
+    # 那是**另一种形态**，不是"这条不过"。所以先按时间列名筛一遍（``time s`` /
+    # ``times`` 归一化之后都是 ``times``，与 ``csvlog.TIME_NAMES`` 同一套规矩），
+    # 认不出的跳过并说出来。
+    stems, skipped = [], []
+    for path in sorted(DATA.glob("*.ld")):
+        pair = DATA / f"{path.stem}.csv"
+        if not pair.exists():
+            continue
+        if _is_motec_export(pair):
+            stems.append(path.stem)
+        else:
+            skipped.append(pair.name)
     if not stems:
         print("no .ld/.csv pairs found in", DATA)
         return 1
+    if skipped:
+        print(f"跳过 {len(skipped)} 份不是 MoTeC 导出的同名 .csv：{', '.join(skipped)}")
+        print("（``i3pro pair`` 的合并场次就是这种；它验证的是合并本身，不是解析器）\n")
     failures = 0
     for stem in stems:
         result = compare(stem, verbose=True)
@@ -95,6 +111,23 @@ def main() -> int:
         failures += len(result["mismatches"])
     print(f"\n{'PASS' if failures == 0 else 'FAIL'} - {failures} channel(s) outside tolerance")
     return 0 if failures == 0 else 1
+
+
+def _is_motec_export(path: Path) -> bool:
+    """这份 CSV 是 MoTeC 自己导出的那种（表头第一格是 ``Time``）吗？
+
+    MoTeC 导出用 ``Time``；``i3pro`` 自己导出的宽表与 ``i3pro pair`` 的合并场次
+    用 ``time_s``——那是**另一种形态**，不是 MoTeC 的对照物，所以这里只认 ``Time``。
+    """
+    try:
+        with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as handle:
+            for _ in range(400):
+                head = next(csv.reader([handle.readline()]), [])
+                if head and str(head[0]).strip() == "Time":
+                    return True
+    except OSError:
+        return False
+    return False
 
 
 if __name__ == "__main__":

@@ -42,8 +42,11 @@ __all__ = [
     "candidates",
     "expected_offset",
     "frame_groups",
+    "hold_into",
+    "hold_sample",
     "ld_window",
     "merge_columns",
+    "merge_sources",
     "overlap_seconds",
     "recording_window",
     "write_merged",
@@ -62,9 +65,12 @@ MIN_ACCEL_R = 0.6
 #: 墙钟重叠少于这个秒数的记录不参加配对。
 MIN_OVERLAP_S = 20.0
 #: 允许的钟差上限：墙钟给出的偏移与互相关搜出来的偏移相差超过它就不认。
-#: 记录仪与 C125 的相对零点差在实测里是 10-45 s 量级（记录仪先开机、日志后开
-#: 是常态），所以给到 60 s；再大就说明这两份东西根本不是同一段驾驶。
-MAX_LAG_S = 60.0
+#: 这个差值来自两处——两边的"零点"取法不同（记录仪取首帧、``.ld`` 取第一个采样
+#: 点），以及 ``.ld`` 头的时刻只精到秒。实测：``10.5湾区`` 最大 41 s
+#: （``102857``），``10.4湾区测试`` 最大 105 s（``133436``，那天记录稀疏、每段很短，
+#: 墙钟窗口与 ``.ld`` 的内容窗口差得多）。给到 120 s 把这批都罩住；真正的判据
+#: 始终是**两个通道的相关系数**，这个只挡"峰跳到自己搜索范围的边上"那类。
+MAX_LAG_S = 120.0
 #: 互相关在"墙钟估出来的偏移"附近搜多少秒。
 #:
 #: 墙钟那个估计只当搜索中心，不当结论：它的误差来自两处——``.ld`` 头里的时刻只到
@@ -272,6 +278,22 @@ def hold_sample(times: np.ndarray, values: np.ndarray, at: np.ndarray) -> np.nda
     return np.where(inside, values[index], np.nan)
 
 
+def hold_into(times: np.ndarray, values: np.ndarray, at: np.ndarray, into: np.ndarray) -> None:
+    """同 :func:`hold_sample`，但写进 ``into``，而且**只填还没有值的位置**。
+
+    一个 ``.ld`` 对上不止一次记录时（实测 ``10.4湾区测试``：同一场高避的两段分别
+    被两次记录录到），两次记录各自覆盖一段时间轴。先来的先填，后来的只补空档——
+    同一时刻不互相盖，合出来的场次哪一段来自哪一次记录是可解释的。
+    """
+    at = np.asarray(at, dtype=np.float64)
+    if times.size == 0 or values.size == 0:
+        return
+    inside = (at >= times[0]) & (at < times[-1])
+    if not inside.any():
+        return
+    index = np.clip(np.searchsorted(times, at, side="right") - 1, 0, values.size - 1)
+    fill = inside & ~np.isfinite(into)
+    into[fill] = values[index[fill]]
 def _speed_of(session, names) -> tuple[np.ndarray, np.ndarray]:
     """会话里第一条存在的候选通道 ``(time, values)``；都没有就抛 ``KeyError``。"""
     known = {channel.name for channel in session.channels}
@@ -458,10 +480,25 @@ def master_axis(log) -> np.ndarray:
 def merge_columns(log, session, offset_s: float):
     """把两边的列并起来：``(time, columns, units, skipped)``。
 
-    ``time`` 是 ``.ld`` 的主时间基（相对秒）。``.ld`` 的通道原序在前，
-    帧表里**本场次没有的**通道接在后面（按名字排序，输出稳定）。
-    同一个名字的两种写法（``Vx KF`` / ``Vx_KF``）算同一条——保留 ``.ld`` 的名字，
-    CAN 那份不写第二列，名字进 ``skipped``。
+    这是"一次记录"的便捷写法（回归与探查脚本用得多）；一个 ``.ld`` 对上不止一次
+    记录时走 :func:`merge_sources`。
+    """
+    return merge_sources(log, [(session, offset_s)])
+
+
+def merge_sources(log, sources):
+    """把 ``.ld`` 与若干次记录并起来：``(time, columns, units, skipped)``。
+
+    ``sources`` 是 ``[(对应帧表的场次, 偏移秒数), ...]``。``time`` 是 ``.ld`` 的
+    主时间基（相对秒）；``.ld`` 的通道原序在前，帧表里**本场次没有的**通道接在
+    后面（按名字排序，输出稳定）。
+
+    同一个名字的两种写法（``Vx KF`` / ``Vx_KF``、``accX MTI`` / ``accX_MTI``）算
+    同一条——保留 ``.ld`` 的名字，CAN 那份不写第二列，名字进 ``skipped``。注意
+    **不能**用"只留字母数字"的归并：``AngVelX_body`` 与 ``AngVelX_hor`` 会撞成
+    一条（见 :func:`_same_name`）。
+
+    多次记录之间按传入顺序填：先来的先写，后来的只补空档（:func:`hold_into`）。
     """
     from . import channels as channelsmod
 
@@ -470,36 +507,59 @@ def merge_columns(log, session, offset_s: float):
     units: dict[str, str] = {}
     skipped: list[str] = []
 
+    # 先按 .ld 的通道把列摆好（顺序 = .ld 里的顺序）。空占位列要**在原值上**判，
+    # 不能等重采样完再判——重采样会把"整段 0"变成"全 NaN"（或在轴外留 NaN），
+    # 那时候判出来的是另一个问题。
+    lds: dict[str, np.ndarray] = {}
+    placeholder: set[str] = set()
     for channel in log.channels:
         values = np.asarray(log.values(channel), dtype=np.float64)
         channel_rate = channelsmod.sample_rate(log, channel)
         if channel_rate <= 0:
             channel_rate = float(log.sample_rate) or 1.0
         grid = np.arange(values.size, dtype=np.float64) / channel_rate
-        columns[channel.name] = hold_sample(grid, values, axis)
         units[channel.name] = str(getattr(channel, "unit", "") or "")
+        lds[channel.name] = values
+        if _empty(values):
+            placeholder.add(channel.name)
+            # 占位列整段是 0（C125 里没接上的模板通道）。它的 0 **不是数据**，
+            # 所以合并场次里这一列从"空"开始，让帧表那条真的把它填满；一条都
+            # 填不到时给的是 NaN（"没有数据"），而不是一排看起来像读数的 0。
+            columns[channel.name] = np.full(axis.size, np.nan)
+        else:
+            columns[channel.name] = hold_sample(grid, values, axis)
 
     taken = {_key(name) for name in columns}
-    can_t = np.asarray(session.time, dtype=np.float64)
-    for channel in sorted(session.channels, key=lambda item: item.name):
-        key = _key(channel.name)
-        values = np.asarray(session.columns[channel.name], dtype=np.float64)
-        column = hold_sample(can_t, values, axis + float(offset_s))
-        unit = str(getattr(channel, "unit", "") or "")
-        if key in taken:
-            # 同名：对面是空的（C125 里没接上的 IVT 模板通道，整段 0）就换成真的有数的
-            # 这一条；真的有数就不动它，把 CAN 的这条记进 skipped。
-            existing = next(name for name in columns if _same_name(name, channel.name))
-            if not _empty(columns[existing]):
-                skipped.append(channel.name)
+    # 帧表那边本场次没有的通道：按名字排序接在后面（输出稳定、可 diff）。
+    seen_can: dict[str, str] = {}
+    for session, _offset in sources:
+        for channel in session.channels:
+            if _key(channel.name) in taken or channel.name in seen_can:
                 continue
-            columns[existing] = column
-            if unit:
-                units[existing] = unit
-            continue
-        columns[channel.name] = column
-        units[channel.name] = unit
-        taken.add(key)
+            seen_can[channel.name] = str(getattr(channel, "unit", "") or "")
+    for name in sorted(seen_can):
+        columns[name] = np.full(axis.size, np.nan)
+        units[name] = seen_can[name]
+
+    for session, offset_s in sources:
+        can_t = np.asarray(session.time, dtype=np.float64)
+        for channel in session.channels:
+            values = np.asarray(session.columns[channel.name], dtype=np.float64)
+            unit = str(getattr(channel, "unit", "") or "")
+            key = _key(channel.name)
+            if key in taken:
+                # 同名：对面是空的（C125 里没接上的 IVT 模板通道，整段 0）就换成真的
+                # 有数的这一条；真的有数就不动它，把 CAN 的这条记进 skipped。
+                existing = next(name for name in lds if _same_name(name, channel.name))
+                if existing not in placeholder:
+                    if channel.name not in skipped:
+                        skipped.append(channel.name)
+                    continue
+                hold_into(can_t, values, axis + float(offset_s), columns[existing])
+                if unit:
+                    units[existing] = unit
+                continue
+            hold_into(can_t, values, axis + float(offset_s), columns[channel.name])
     return axis, columns, units, skipped
 
 

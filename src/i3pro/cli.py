@@ -641,6 +641,10 @@ def cmd_pair(args: argparse.Namespace) -> int:
             if not found:
                 print("  没有时间上挨得着的帧表")
                 continue
+            # 一个 .ld 可能对上**不止一次**记录（同一天录了好几段，各自盖住一场的
+            # 一段）。匹配上的全部并进同一个合并场次——分开写会得到 `<名>.csv` 与
+            # `<名>-1.csv` 两份，看不出一场到底该看哪一份。
+            matched: list[pairingmod.Pairing] = []
             for candidate in found:
                 try:
                     session = _load_can_for_pair(candidate.sources, dbc_dirs)
@@ -661,11 +665,11 @@ def cmd_pair(args: argparse.Namespace) -> int:
                     f"  r={result.r:.4f}"
                     f"  {mark}"
                 )
-                if not result.ok:
-                    continue
-                if not args.list:
-                    _write_pairing(data, pairing, args)
-                    written += 1
+                if result.ok:
+                    matched.append(pairing)
+            if matched and not args.list:
+                _write_pairing(data, matched, args)
+                written += 1
         finally:
             log.close()
 
@@ -678,22 +682,29 @@ def cmd_pair(args: argparse.Namespace) -> int:
     return 0
 
 
-def _write_pairing(data: Path, pairing, args: argparse.Namespace) -> None:
-    """算合并列 + 落盘 + 写侧车证据。"""
-    target = _pair_target(Path(args.out or data), pairing.name)
-    log = _open_ld(pairing.ld_path)
+def _write_pairing(data: Path, pairings, args: argparse.Namespace) -> None:
+    """算合并列 + 落盘 + 写侧车证据。
+
+    ``pairings`` 是同一场 ``.ld`` 匹配上的全部记录——它们**并进同一个**合并场次
+    （各自的覆盖时段不同，先来的先填、后来的补空档）。
+    """
+    first = pairings[0]
+    target = _pair_target(Path(args.out or data), first.name)
+    log = _open_ld(first.ld_path)
     try:
-        axis, columns, units, skipped = pairingmod.merge_columns(
-            log, pairing.session, pairing.alignment.offset_s
+        axis, columns, units, skipped = pairingmod.merge_sources(
+            log, [(item.session, item.alignment.offset_s) for item in pairings]
         )
         info = pairingmod.write_merged(target, axis, columns, units=units)
     finally:
         log.close()
-    _remember_pairing(pairing.candidate, pairing)
+    for item in pairings:
+        _remember_pairing(item.candidate, item)
     print(
         f"    -> {target.name}  {info['rows']} 行 x {info['columns']} 列"
         f"  {info['bytes'] / 1e6:.1f} MB"
-        + (f"（重名的 {len(skipped)} 条 CAN 通道没写：{'、'.join(skipped[:4])}…）"
+        f"（并入 {len(pairings)} 次记录）"
+        + (f"；重名的 {len(skipped)} 条 CAN 通道没写：{'、'.join(skipped[:4])}…"
            if skipped else "")
     )
 

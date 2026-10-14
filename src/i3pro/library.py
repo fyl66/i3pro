@@ -160,6 +160,10 @@ def open_for_analysis(
 class SessionLibrary:
     """Discover ``.ld`` files under one or more roots and cache parsed logs."""
 
+    #: 磁盘上那份列表缓存的**形状版本**：形状一改就 +1，旧文件读不出来当没有。
+    #: 2 = 每一行自带钥匙（2026-10-15，"导入一份日志不该重算 110 场"）。
+    LISTING_CACHE_SHAPE = 2
+
     def __init__(
         self,
         roots: list[str | Path],
@@ -393,54 +397,67 @@ class SessionLibrary:
 
     def listing(self) -> list[dict]:
         paths = self._paths()
-        stamp = self._index_stamp(paths)
+        stamps = self._row_stamps(paths)
+        key = (tuple((name, tuple(stamp)) for name, stamp in sorted(stamps.items())),
+               tuple(tuple(one) for one in self._dbc_stamp()))
         with self._lock:
-            if self._listing_cache is not None and self._listing_cache[0] == stamp:
+            if self._listing_cache is not None and self._listing_cache[0] == key:
                 return self._listing_cache[1]
-        # 磁盘上那份还算不算数：算数就直接用——**冷启动一次都不重算**。
-        # 实测 41 场数据下全算一遍要 36 s（27 场 .ld 的摘要各约 0.18 s：打开 +
-        # 数学通道 + 切圈；CAN 场次那部分已由 `.can.json` 里的摘要缓存兜住）。
-        cached = self._read_index_cache(stamp)
-        if cached is not None:
-            with self._lock:
-                self._listing_cache = (stamp, cached)
-            return cached
+        # 磁盘上那份**一场一场**地算数：只有自己那把钥匙变了的场次才重算。
+        # 2026-10-15 之前整份清单共用一个指纹，于是"导入一份日志"会把 110 场的
+        # 摘要全部作废——实测首屏 68 s，而其中一份 CSV 的摘要就要 3.6 s（整份解析）。
+        cached_rows = self._read_index_cache()
         out: list[dict] = []
-        for name in paths:
-            try:
-                out.append(self.summary(name))
-            except Exception as exc:  # a broken file must not kill the index
-                out.append({"name": name, "error": str(exc)})
-        self._write_index_cache(stamp, out)
+        fresh: dict[str, dict] = {}
+        for name, path in paths.items():
+            entry = cached_rows.get(name)
+            if isinstance(entry, dict) and entry.get("stamp") == stamps[name]:
+                row = entry.get("row")
+            else:
+                try:
+                    row = self.summary(name)
+                except Exception as exc:  # a broken file must not kill the index
+                    row = {"name": name, "error": str(exc)}
+            out.append(row)
+            fresh[name] = {"stamp": stamps[name], "row": row}
+        self._write_index_cache(fresh)
         with self._lock:
-            self._listing_cache = (stamp, out)
+            self._listing_cache = (key, out)
         return out
 
-    def _index_stamp(self, paths: dict[str, Path]) -> dict:
-        """列表缓存的钥匙：每一场（含圈侧车）的文件指纹 + DBC 目录的指纹。
+    def _row_stamps(self, paths: dict[str, Path]) -> dict[str, list]:
+        """每一场**自己**的钥匙：文件指纹 + 圈侧车指纹。
 
-        三样里动一样，指纹就变——改了 DBC 之后通道数会变，那条也必须重算。
         指纹怎么算在 :mod:`i3pro.cache`（ticket #49）。
         """
         return {
-            "sessions": [
-                [name, str(path), *_file_stamp(path),
-                 *_file_stamp(sidecar.path_of("laps", path))]
-                for name, path in sorted(paths.items())
-            ],
-            "dbc": [stamp
-                    for root in self.roots
-                    if (stamp := cache.tree_stamp(root / "dbc")) is not None],
+            name: [name, str(path), *_file_stamp(path),
+                   *_file_stamp(sidecar.path_of("laps", path))]
+            for name, path in paths.items()
         }
 
-    def _read_index_cache(self, stamp: dict) -> list[dict] | None:
-        """磁盘缓存读得出来、指纹也对得上才作数（缓存坏了当没有）。"""
-        rows = cache.read_json(self.index_cache, stamp)
-        return rows if isinstance(rows, list) and rows else None
+    def _dbc_stamp(self) -> list:
+        """DBC 目录树的指纹：它一变，CAN 场次的通道就变，那些行**全部**作废。"""
+        return [stamp
+                for root in self.roots
+                if (stamp := cache.tree_stamp(root / "dbc")) is not None]
 
-    def _write_index_cache(self, stamp: dict, rows: list[dict]) -> None:
+    def _read_index_cache(self) -> dict[str, dict]:
+        """磁盘上那份列表：形状版本对得上、且 DBC 树没变才算数（缓存坏了当没有）。
+
+        DBC 树与"每一场自己的钥匙"分开存：树的指纹有几十条，**每一行都抄一份**
+        会让这份 JSON 白胖一圈；它一变就是"全作废"，一条就够。
+        """
+        value = cache.read_json(self.index_cache, self.LISTING_CACHE_SHAPE)
+        if not isinstance(value, dict) or value.get("dbc") != self._dbc_stamp():
+            return {}
+        rows = value.get("sessions")
+        return rows if isinstance(rows, dict) else {}
+
+    def _write_index_cache(self, rows: dict[str, dict]) -> None:
         """写不进去也不吵：缓存只是省时间，不是数据。"""
-        cache.write_json(self.index_cache, stamp, rows)
+        cache.write_json(self.index_cache, self.LISTING_CACHE_SHAPE,
+                         {"dbc": self._dbc_stamp(), "sessions": rows})
 
     # -------------------------------------------------------------- lap edits
     def remember_laps(self, path: str | Path, config: beaconsmod.LapConfig) -> None:

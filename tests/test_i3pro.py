@@ -8708,6 +8708,45 @@ class TestListingCache(unittest.TestCase):
                     room_.close()
 
 
+    @_needs(HILL)
+    def test_只重算钥匙变了的那个场次(self):
+        """A87：列表缓存是**一场一把钥匙**——导入一份日志不该把别的场次全作废。
+
+        2026-10-15 之前整份清单共用一个指纹，于是加一份日志就要把 110 场重新摘要
+        一遍（实测首屏 68 s；其中一份合并 CSV 的摘要就要 3.6 s，那 3.6 s 全花在
+        整份解析上）。这条钉住：没变的场次直接复用磁盘上那一行，变了的那个才重算。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "listing.json"
+            root = Path(tmp) / "data"
+            root.mkdir()
+            shutil.copy2(HILL, root / HILL.name)
+            other = root / "另一场.ld"          # 第二场：同形状的副本，名字不同
+            shutil.copy2(HILL, other)
+            room = librarymod.SessionLibrary([root], cache_size=2, maths_root=ROOT,
+                                             index_cache=cache)
+            fresh = librarymod.SessionLibrary([root], cache_size=2, maths_root=ROOT,
+                                              index_cache=cache)
+            try:
+                rows = room.listing()
+                self.assertEqual(len(rows), 2)
+                os.utime(other, None)           # 只动第二份
+                with mock.patch.object(librarymod.SessionLibrary, "summary",
+                                       side_effect=RuntimeError("重算了")) as spy:
+                    again = fresh.listing()
+                self.assertEqual(spy.call_count, 1,
+                                 "动了一份文件，重算的却是 %d 份" % spy.call_count)
+                self.assertEqual(spy.call_args.args[0], "另一场")
+                before = {row["name"]: row for row in rows}
+                after = {row["name"]: row for row in again}
+                self.assertEqual(after[HILL.stem], before[HILL.stem],
+                                 "没动过的那一场没有复用磁盘上那一行")
+                self.assertIn("error", after["另一场"])
+            finally:
+                for room_ in (room, fresh):
+                    room_.close()
+
+
 class TestSpeedChannelResolution(unittest.TestCase):
     """同一个量在两条数据线上叫两个名字：``.ld`` 是 ``Vx KF``，CAN 是 ``Vx_KF``。
 
@@ -9495,7 +9534,11 @@ class TestCacheStamps(unittest.TestCase):
 
     @_needs(HILL)
     def test_改一个文件或一份_DBC_都会让列表缓存失效(self):
-        """#45 那两层缓存最怕的是**陈旧**：侧边栏数字错了没人看得出来。"""
+        """#45 那两层缓存最怕的是**陈旧**：侧边栏数字错了没人看得出来。
+
+        A87 之后钥匙是**一场一把**：场次文件动 → 那一场那把钥匙变；DBC 树动 →
+        所有行的缓存一并作废（CAN 场次的通道会跟着变）。
+        """
         tmp = self._tmp()
         root = tmp / "data"
         (root / "dbc").mkdir(parents=True)
@@ -9504,17 +9547,22 @@ class TestCacheStamps(unittest.TestCase):
         index_cache = tmp / "index.json"
         library = librarymod.SessionLibrary([root], maths_root=root,
                                             index_cache=index_cache)
-        stamp = library._index_stamp(library._paths())
+        stamps = library._row_stamps(library._paths())
+        dbc = library._dbc_stamp()
         rows = library.listing()
         self.assertTrue(index_cache.exists(), "列表算完要落盘")
-        self.assertEqual(cache.read_json(index_cache, stamp), rows)
-        # 场次文件动一下（mtime 变）→ 钥匙就变，旧缓存不作数
+        saved = cache.read_json(index_cache, library.LISTING_CACHE_SHAPE)
+        self.assertEqual(saved["dbc"], dbc)
+        entry = saved["sessions"][HILL.stem]
+        self.assertEqual(entry["row"]["name"], HILL.stem)
+        self.assertEqual(entry["row"]["laps"], rows[0]["laps"])
+        self.assertEqual(entry["stamp"], stamps[HILL.stem])
+        # 场次文件动一下（mtime 变）→ 那一场的钥匙就变，旧缓存不作数
         os.utime(root / HILL.name, (1, 1))
-        self.assertNotEqual(library._index_stamp(library._paths()), stamp)
-        # DBC 动一下（哪怕只加一份）→ 钥匙也要变（通道数会跟着变）
-        stamp = library._index_stamp(library._paths())
+        self.assertNotEqual(library._row_stamps(library._paths()), stamps)
+        # DBC 动一下（哪怕只加一份）→ DBC 指纹要变（通道数会跟着变）
         (root / "dbc" / "extra.dbc").write_text("BO_ 194 B: 8 X\n", encoding="utf-8")
-        self.assertNotEqual(library._index_stamp(library._paths()), stamp)
+        self.assertNotEqual(library._dbc_stamp(), dbc)
         # 缓存文件被写坏：照常出结果，不抛
         index_cache.write_text("{ 坏了", encoding="utf-8")
         fresh = librarymod.SessionLibrary([root], maths_root=root,

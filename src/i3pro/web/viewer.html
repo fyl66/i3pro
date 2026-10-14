@@ -2095,11 +2095,21 @@ function plotWidth() {
   return Math.max(240, (host.clientWidth || 900) - 82);
 }
 
+/**
+ * 视图窗口的键：只说"看的是哪一段"。与曲线连接方式无关的那几条取数路（/track）
+ * 用它——不然换个连接方式会白白重取一次轨迹图，而轨迹图跟它没关系。
+ */
 function windowKey() {
-  // 曲线连接方式也是"这一屏问服务端的问题"之一：换了它必须重新取数，否则界面
-  // 换了个选中状态、曲线还是上一种（这正是 A79 要防的那种"看起来点了、其实没变"）。
-  const base = !state.view ? "full" : state.view.map((v) => v.toFixed(2)).join("-");
-  return base + "|" + state.upsample;
+  return !state.view ? "full" : state.view.map((v) => v.toFixed(2)).join("-");
+}
+
+/**
+ * /trace 的键：窗口 **加上** 曲线连接方式。连接方式也是"这一屏问服务端的问题"
+ * 之一——换了它必须重新取数，否则界面换了个选中状态、曲线还是上一种（这正是
+ * A79 要防的那种"看起来点了、其实没变"）。
+ */
+function traceKey() {
+  return windowKey() + "|" + state.upsample;
 }
 
 function windowRange() {
@@ -2194,7 +2204,7 @@ function refreshAllComponentData() {
 
 async function refreshWindowTraces(force) {
   if (!DATA.api) return;                       // static snapshot: nothing to fetch
-  const key = windowKey();
+  const key = traceKey();
   if (!force && key === state.windowKey) return;
   state.windowKey = key;
   const names = neededChannels();
@@ -8353,6 +8363,10 @@ function buildJumpRail() {
       const next = jumpButtons[(here + step + jumpButtons.length) % jumpButtons.length];
       if (next && next.button && next.button.focus) next.button.focus();
       event.preventDefault();
+      // 别让它冒到 document 上那把全局快捷键：ArrowLeft / ArrowRight 在那一层
+      // 是"挪测量光标"，在这一排里是"换一栏"。冒上去的后果是真按一下方向键，
+      // 选中项换了一栏、光标也跟着挪了 0.01 s（真浏览器抓到的 A78 第三条）。
+      if (event.stopPropagation) event.stopPropagation();
     });
     row.appendChild(button);
     return { target: target, button: button, badge: badge };
@@ -8385,8 +8399,13 @@ function syncJumpActive(active) {
       const bottom = rail.getBoundingClientRect().bottom + 8;
       for (const entry of jumpButtons) {
         const group = $(entry.target.id);
-        if (group && group.getBoundingClientRect
-            && group.getBoundingClientRect().top <= bottom) id = entry.target.id;
+        if (!group || !group.getBoundingClientRect) continue;
+        const box = group.getBoundingClientRect();
+        // 收起来的模块（「光标值」默认就收着）rect 全是 0：它根本不在页面上，
+        // 不能算"已经滚过它"。算了的话高亮会一直停在它身上——按下 V 展开之前，
+        // 滚到哪儿都亮着同一栏（真浏览器量出来的 A78 第一条）。
+        if (box.height <= 0) continue;
+        if (box.top <= bottom) id = entry.target.id;
       }
     }
   }
@@ -8752,11 +8771,11 @@ window.i3pro = {
   setHeadField: setHeadField, openColorMenu: openColorMenu,
   openDisplayMenu: openDisplayMenu, closePopMenu: closePopMenu,
   setUpsample: setUpsample, upsampleModes: UPSAMPLE_MODES,
-  upsampleLabels: UPSAMPLE_LABELS,
   // 侧边栏快速跳转（A78）
-  jumpTargets: JUMP_TARGETS, jumpTo: jumpTo, buildJumpRail: buildJumpRail,
-  focusJumpRail: focusJumpRail, jumpButtons: () => jumpButtons.map((e) => e.button),
-  windowKey: windowKey,
+  jumpTargets: JUMP_TARGETS, jumpTo: jumpTo, syncJumpActive: syncJumpActive,
+  jumpButtons: () => jumpButtons.map((e) => e.button),
+  // 取数缓存键（A79）：windowKey 只说"看的是哪一段"，traceKey 另外带上曲线连接方式
+  windowKey: windowKey, traceKey: traceKey,
   jumpActive: () => {
     const on = jumpButtons.find((e) => e.button.classList.contains("on"));
     return on ? on.target.id : null;

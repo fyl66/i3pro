@@ -2233,6 +2233,38 @@ class TestViewerScript(unittest.TestCase):
         self.assertEqual(sorted(groups), sorted(listed),
                          "侧边栏有模块没进跳转清单，或者清单里有不存在的一栏")
 
+    def test_曲线连接的四档与界面上那四枚按钮出自同一张表(self):
+        """A79：界面上的四枚按钮由 JS 里那张表建出来，必须和 ``derive.UPSAMPLE_MODES`` 一样。
+
+        漂开的后果不报错、只有用户看得见：请求里带一个服务端不认的词就是 400
+        （单测以前只钉了默认值那一个词与"请求里带着它"，四档本身没人对）。
+        """
+        page = (ROOT / "src" / "i3pro" / "web" / "viewer.html").read_text(encoding="utf-8")
+        match = re.search(r"const UPSAMPLE_MODES = \[(.*?)\];", page)
+        self.assertIsNotNone(match, "界面里没有 UPSAMPLE_MODES 这张表")
+        names = re.findall(r'"([a-z]+)"', match.group(1))
+        self.assertEqual(names, list(derive.UPSAMPLE_MODES),
+                         "界面上的四档与 derive.UPSAMPLE_MODES 不是同一份")
+        labels = re.search(r"const UPSAMPLE_LABELS = \{(.*?)\};", page, re.S)
+        self.assertIsNotNone(labels, "界面里没有 UPSAMPLE_LABELS 这张表")
+        for mode in derive.UPSAMPLE_MODES:
+            self.assertIn(mode + ":", labels.group(1).replace('"', ""),
+                          f"「{mode}」在按钮上没有中文名")
+
+    def test_窗口缓存键不许跟着曲线连接方式跑(self):
+        """A79 评审：``windowKey`` 也是轨迹图（/track）的缓存键，别把 upsample 混进去。
+
+        混进去不报错、只是白干活：换个曲线连接方式会连轨迹图一起重取，而那张图跟
+        "点与点之间怎么取值"毫无关系。带着连接方式的是 ``traceKey``（/trace 用它）。
+        """
+        page = (ROOT / "src" / "i3pro" / "web" / "viewer.html").read_text(encoding="utf-8")
+        body = page[page.index("function windowKey()"):]
+        body = body[:body.index("\n}")]
+        self.assertNotIn("upsample", body, "窗口缓存键里又混进曲线连接方式了")
+        self.assertIn("function traceKey()", page, "没有 traceKey：换档就没法只重取曲线")
+        self.assertIn("const key = traceKey();", page,
+                      "/trace 那条取数路没有用 traceKey")
+
 
 class TestComponentRegistry(unittest.TestCase):
     """ticket #17 / #19 / #20：每种显示形式只在注册表里声明一次。
@@ -2740,6 +2772,42 @@ class TestUpsample(unittest.TestCase):
         self.assertIn("不认识的曲线连接方式", text)
         for mode in derive.UPSAMPLE_MODES:
             self.assertIn(mode, text)
+
+    def test_不认识取值的报错只有一处(self):
+        """这句话只准写在 ``derive`` 一处（AGENTS 规则：一条规则一个家）。
+
+        HTTP 那一层以前把同一句又抄了一遍，注释还写着"由 derive 报"——两句话一旦
+        漂开，用户看到的和测试钉住的就不是同一句了。
+        """
+        hits = []
+        for path in sorted((ROOT / "src" / "i3pro").rglob("*.py")):
+            if "不认识的曲线连接方式" in path.read_text(encoding="utf-8"):
+                hits.append(path.name)
+        self.assertEqual(hits, ["derive.py"],
+                         "这句话该只有 derive.check_upsample 一处，实际出现在 " + repr(hits))
+
+    @_needs(HILL)
+    def test_金标准上慢通道有多少条(self):
+        """A79 里那个 **437 / 147** 就是这个命令跑出来的（AGENTS 规则 2）。
+
+        判据本身也在这里：慢通道占三分之一，所以"点与点之间怎么取值"不是给几条
+        曲线锦上添花，而是高避这种文件里肉眼一眼能看出来的那一半。
+        """
+        with ld.LogFile.read(HILL) as log:
+            rates: dict[float, int] = {}
+            for channel in log.channels:
+                rates[channel.sample_rate] = rates.get(channel.sample_rate, 0) + 1
+        total = sum(rates.values())
+        slow = sum(n for rate, n in rates.items() if rate < 50.0)
+        breakdown = " / ".join(
+            f"{rate:g} Hz ×{rates[rate]}"
+            for rate in sorted(rates, key=lambda r: (-rates[r], -r))
+        )
+        print(f"\n[A79 实测] 高避金标准：{total} 条通道，其中比 50 Hz 慢的 {slow} 条（{breakdown}）")
+        self.assertEqual(total, 437, "高避金标准的通道数变了：" + breakdown)
+        self.assertEqual(slow, 147, "慢通道数变了：" + breakdown)
+        self.assertEqual(rates.get(100.0), 268)
+        self.assertEqual(rates.get(1.0), 37)
 
     def test_数学通道的列不会再被拉一遍(self):
         """同名覆盖过的慢通道：列本来就在主时间基上（ticket #18），插值不该拉伸它。"""

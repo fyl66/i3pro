@@ -294,13 +294,19 @@ class Browser:
         self.call("Input.insertText", {"text": text}, session=session)
         time.sleep(0.2)
 
-    def key_named(self, key, code, windows_code, session, modifiers=0):
+    def key_named(self, key, code, windows_code, session, modifiers=0, text=None):
+        """发一次真按键。``text`` 只有需要"按键默认动作"时才给（回车要它才会
+        真的激活聚焦的那个按钮；不带 text 时页面只收到一个 keydown，什么也不发
+        生——A78 那条"回车跳得动"就是这么空转了半个版本）。"""
         for kind in ("keyDown", "keyUp"):
-            self.call("Input.dispatchKeyEvent", {
+            event = {
                 "type": kind, "key": key, "code": code,
                 "windowsVirtualKeyCode": windows_code,
                 "nativeVirtualKeyCode": windows_code, "modifiers": modifiers,
-            }, session=session)
+            }
+            if text is not None and kind == "keyDown":
+                event["text"] = text
+            self.call("Input.dispatchKeyEvent", event, session=session)
         time.sleep(0.2)
 
     def shot(self, path, session):
@@ -2951,6 +2957,15 @@ class Checker:
         top = scroll_top()
         self.check("A78 跳到最上面那一栏时滚动条在顶（不然下面那两步量不出东西）",
                    top <= 30, top)
+        # 高亮那条 bug（2026-10-14 评审补的真浏览器版本）：滚动条在顶、而「光标值」
+        # 还是收着的时候，"滚到哪儿了"不能算到它头上。收起来的元素 rect 全是 0，
+        # 顶边永远"过了按钮排"——不跳过它，滚到哪儿都亮着它。
+        collapsed = self.js(
+            "document.getElementById('valuesGroup').getBoundingClientRect().height<=0")
+        here = self.js("i3pro.syncJumpActive(); i3pro.jumpActive()")
+        self.check("A78 收起来的模块不会把高亮拦在自己身上（滚动条在顶时）",
+                   (not collapsed) or here != "valuesGroup",
+                   "收着=%s · 高亮=%s" % (collapsed, here))
 
         # 靠前的某一栏：这一栏量得准"标题贴到按钮排下面"。**不能拿最靠下的那几栏
         # 量**：它们底下没有足够内容，滚到底就顶住了（那是正常的，不是 bug）。
@@ -3003,15 +3018,34 @@ class Checker:
         # 真按 Ctrl+K（CDP 的 modifiers：2 = Ctrl），光标该落到那一排按钮上
         self.browser.key_named("k", "KeyK", 75, self.session, modifiers=2)
         time.sleep(0.4)
+        def focused_chip():
+            return self.js(
+                "(document.activeElement&&document.activeElement.dataset||{}).jump || ''")
+
+        here = focused_chip()
         self.check("A78 真按 Ctrl+K -> 光标落到那一排按钮上",
-                   self.js("!!(document.activeElement&&document.activeElement.dataset"
-                           "&&document.activeElement.dataset.jump)"),
-                   self.js("(document.activeElement&&document.activeElement.dataset||{}).jump || ''"))
-        self.browser.key_named("Enter", "Enter", 13, self.session)
+                   bool(here), here)
+        # 这一排里的方向键换的是**选中项**；它不该冒到页面上那把全局快捷键去
+        # （那一层 ArrowLeft/Right 是"挪测量光标"）。冒上去的后果是"换一栏"顺手
+        # 把光标也挪了 0.01 s——评审时真浏览器量出来的第三条。
+        cursor_before = self.js("String(i3pro.state.cursor)")
+        self.browser.key_named("ArrowRight", "ArrowRight", 39, self.session)
+        time.sleep(0.4)
+        moved = focused_chip()
+        self.check("A78 这一排里按右方向键换的是选中项（通道 -> 别名）",
+                   moved == "aliasGroup" and moved != here, "%s -> %s" % (here, moved))
+        self.check("A78 在这一排里按方向键不会顺手把测量光标挪走",
+                   self.js("String(i3pro.state.cursor)") == cursor_before,
+                   "%s -> %s" % (cursor_before, self.js("String(i3pro.state.cursor)")))
+        # 真按回车：真的跳到**新选中**的那一栏。判据是"高亮从通道换到别名"——
+        # 原先那条是在通道上点完再在通道上按回车，前后都是通道，什么都不证明。
+        # （CDP 还得带 text，不然页面收不到按键默认动作，回车根本不会激活按钮。）
+        landed = self.js("i3pro.jumpActive()")
+        self.browser.key_named("Enter", "Enter", 13, self.session, text="\r")
         time.sleep(0.6)
-        self.check("A78 键盘回车也跳得动（跳完那一栏仍亮着）",
-                   self.js("i3pro.jumpActive()") == "channelGroup",
-                   self.js("i3pro.jumpActive()"))
+        self.check("A78 键盘回车真的跳到选中那一栏（高亮从「通道」换到「别名」）",
+                   self.js("i3pro.jumpActive()") == "aliasGroup",
+                   "回车前亮着 %s，回车后亮着 %s" % (landed, self.js("i3pro.jumpActive()")))
         # 收尾：回到最上面那一栏，后面的验收从原来那一屏继续
         click_chip("sheetGroup")
 

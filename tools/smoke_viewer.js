@@ -216,7 +216,15 @@ class Element {
   toDataURL() { return "data:image/png;base64,"; }
   click() { this.dispatch("click", { target: this }); }
   blur() {}
-  getBoundingClientRect() { return { left: 0, top: 0, width: 900, height: 150 }; }
+  getBoundingClientRect() {
+    // 真 DOM 里 `display:none` 的元素 rect 全是 0。假 DOM 以前不看样式，收起来的
+    // 模块量出来也是 150 px 高——于是"高亮停在收起来的模块上"那类 bug 在无头这
+    // 一关是隐形的（A78 补的那一处就是这么漏过去的）。这里交给样式说了算。
+    if (this.style && this.style.display === "none") {
+      return { left: 0, top: 0, width: 0, height: 0, bottom: 0, right: 0 };
+    }
+    return { left: 0, top: 0, width: 900, height: 150, bottom: 150, right: 900 };
+  }
   get clientWidth() { return 900; }
   get parentElement() { return this._parent || (this._parent = new Element("div")); }
 }
@@ -3666,6 +3674,21 @@ if (canMeta) {
     check(api.state.show.values === true, "跳到收起来的「光标值」没有把它打开");
     api.state.show.values = false;
     api.jumpTo("channelGroup");
+    // 收起来的模块不许拦着高亮（A78 第一条）：一个 rect 全是 0 的模块根本不在
+    // 页面上，不能算"已经滚过它"——算了的话滚到哪儿都亮着它。这里把最后一栏收
+    // 起来当靶子，高亮该落到它上面那一栏。
+    const hiddenGroup = registry.get("setupGroup");
+    const host = registry.get("asideScroll");
+    check(!!hiddenGroup && !!host, "量不了收起来的模块（找不到那一栏或滚动容器）");
+    if (hiddenGroup && host) {
+      hiddenGroup.style.display = "none";
+      host.dispatch("scroll", {});
+      check(api.jumpActive() === "mathsGroup",
+        "收起来的模块把高亮拦住了：期望亮着上面那一栏 mathsGroup，实际 "
+        + api.jumpActive());
+      hiddenGroup.style.display = "";
+      api.jumpTo("channelGroup");
+    }
   }
 }
 
@@ -3690,11 +3713,16 @@ if (canMeta) {
     "快照里改不了，但没说清为什么：" + (toastEl && toastEl.textContent));
   // ② serve 模式：换取值要重新取数，而且请求里带着它
   api.data.api = "/api";
-  const keyBefore = api.windowKey();
+  const keyBefore = api.traceKey();
   const before = httpCalls.length;
   api.setUpsample("previous");
   check(api.state.upsample === "previous", "换连接方式没落到状态上");
-  check(api.windowKey() !== keyBefore, "换了连接方式，取数的窗口键却没变（不会重新取）");
+  check(api.traceKey() !== keyBefore, "换了连接方式，取数的窗口键却没变（不会重新取）");
+  // 反过来的一件事：窗口键本身**不该**跟着连接方式变。它也是轨迹图（/track）的
+  // 缓存键，而那张图跟"点与点之间怎么取值"没关系——混在一起就是换个连接方式
+  // 白重取一次轨迹（A79 的评审里量出来的）。
+  check(api.windowKey() === keyBefore.split("|")[0],
+    "窗口键被曲线连接方式带跑了：轨迹图会跟着白重取一次（" + api.windowKey() + "）");
   api.refreshWindowTraces(true);                     // 强制一次，不等那 150 ms 防抖
   const asked = httpCalls.slice(before).map((c) => c.url)
     .filter((u) => u.indexOf("/trace") >= 0);

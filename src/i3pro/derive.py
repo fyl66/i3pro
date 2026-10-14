@@ -25,6 +25,7 @@ __all__ = [
     "SPEED_CANDIDATES",
     "SATS_MIN",
     "UPSAMPLE_MODES",
+    "check_upsample",
     "name_table",
     "resolve_channel",
     "speed_channel",
@@ -43,6 +44,22 @@ __all__ = [
 #: ``linear`` 线性插值 / ``previous`` 保持前值（零阶保持）/ ``closest`` 取最近点 / ``next`` 取下一个点。
 #: **画图默认 ``linear``**，分析路径仍然用 ``previous``（见 :func:`upsample_to_master`）。
 UPSAMPLE_MODES = ("linear", "previous", "closest", "next")
+
+
+def check_upsample(mode: str) -> str:
+    """只认 :data:`UPSAMPLE_MODES` 里的四个词，别的报中文错并列出可选项。
+
+    报错文案**只有这一处**：谁先校验谁就把这句直接转给用户，不许再抄一遍
+    （抄一遍的下场是两句话慢慢漂开，而用户只看到其中一句）。
+    """
+    if mode not in UPSAMPLE_MODES:
+        raise ValueError(
+            f"不认识的曲线连接方式 {mode!r}：可选的只有 "
+            + " / ".join(UPSAMPLE_MODES)
+            + "。"
+        )
+    return mode
+
 
 SPEED_CANDIDATES = (
     "Ground Speed",
@@ -192,14 +209,10 @@ def upsample_to_master(
     可插，四种取值的答案都是它自己：这时候**不该**再抽一遍，否则数学通道会被按原生
     采样率拉长（ticket #18 修过一次的错）。
 
-    ``mode`` 不认识时报中文错并列出可选项——调用方（HTTP 那一层）直接把这句转给用户。
+    ``mode`` 不认识时报中文错并列出可选项（:func:`check_upsample`）——调用方
+    （HTTP 那一层）直接把这句转给用户。
     """
-    if mode not in UPSAMPLE_MODES:
-        raise ValueError(
-            f"不认识的曲线连接方式 {mode!r}：可选的只有 "
-            + " / ".join(UPSAMPLE_MODES)
-            + "。"
-        )
+    check_upsample(mode)
     ch = log.channel(name)
     n = timebase.length(log)
     values = np.asarray(log.values(ch), dtype=np.float64)

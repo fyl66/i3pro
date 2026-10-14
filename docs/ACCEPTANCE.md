@@ -3986,8 +3986,8 @@ python tools\verify_clicks.py
 | 一份清单 | `JUMP_TARGETS`（`viewer.html`）：按钮、跳转落点、滚动时的高亮三处共用它。加一个模块只加一行；单测按源码核对"清单里的每一栏都存在、侧边栏里每一栏都进了清单" |
 | 落点 | `jumpTo(id)` 把目标那一栏的标题对齐到**按钮排的下沿**（不是固定 34 px——按钮排自己 108 px 高，按固定数会让目标藏在它下面） |
 | 收起来的模块 | 「光标值」默认收着（i2 Pro 的 Values 窗口也要按 V）：跳过去先把它打开。不打开的话隐藏元素的 rect 全是 0，跳了等于没跳 |
-| 高亮 | 滚动时按"哪一栏的顶边过了按钮排"点亮对应的按钮（`syncJumpActive`） |
-| 键盘 | `Ctrl+K` 聚焦这一排（当前那一栏优先）→ 左右方向键换 → 回车跳。它排在"光标在输入框里就不管"那条**之前**：带修饰键，不会和单字母快捷键撞，而"正落在通道搜索框里"恰恰是最想换一栏的时刻 |
+| 高亮 | 滚动时按"哪一栏的顶边过了按钮排"点亮对应的按钮（`syncJumpActive`）。**只算看得见的模块**：收起来的模块 rect 全是 0，不能算"已经滚过它"（2026-10-14 评审修掉"高亮一直停在收起来的「光标值」上"，见下） |
+| 键盘 | `Ctrl+K` 聚焦这一排（当前那一栏优先）→ 左右方向键换 → 回车跳。它排在"光标在输入框里就不管"那条**之前**：带修饰键，不会和单字母快捷键撞，而"正落在通道搜索框里"恰恰是最想换一栏的时刻。这一排里的左右键**不冒泡**（`stopPropagation`）——冒上去会被全局那把当成"挪测量光标"（2026-10-14 评审修掉，见下） |
 
 **真浏览器抓到的两个 bug**（无头那条抓不到，因为它没有 scroll 事件、也没有真实高度）：
 
@@ -3996,11 +3996,31 @@ python tools\verify_clicks.py
 2. 跳到隐藏的「光标值」是空动作（该组 `display:none`，rect 全 0）。加 `reveal` 一行，
    跳之前先 `state.show.values = true`。
 
+**2026-10-14 评审（`/code-review` 的 Spec 轴）又抓到两条**，两条都补进真浏览器验收：
+
+3. **高亮停在收起来的「光标值」上**。`syncJumpActive` 取的是"最后一个顶边过了按钮排的
+   一栏"，而 `display:none` 的 `rect.top` 恒为 0（永远"过了"）——只要它排在别的候选
+   后面就赢。实测：`scrollTop = 0` 与 `scrollTop = 300` 亮着的都是 `valuesGroup`；按
+   `V` 把它展开之后才恢复正常。修法：rect 高度 ≤ 0 的模块直接跳过（它不在页面上）。
+   假 DOM 也一并修了——它以前不看 `style.display`，"收起来的模块"量出来照样 150 px
+   高，这一整类 bug 在无头那关是隐形的；现在假 DOM 认 `display:none`，无头那关也多了
+   一条断言盯着它。
+4. **这一排里按方向键会顺手挪测量光标**。按钮上的 `keydown` 没有 `stopPropagation`，
+   事件冒到 `onKeyDown` 里的 `ArrowLeft/ArrowRight → moveCursor`。实测：焦点从
+   `channelGroup` 换到 `aliasGroup` 的同时 `state.cursor` 由 `null` 变成 `0.01`。
+   修法：这一排处理完 `preventDefault` 之后再 `stopPropagation`。
+
+连带修掉的两条**判定空转**（不是产品 bug，是"这条断言其实什么都没证明"）：
+「回车跳得动」原先先在「通道」上点一下、再在「通道」上按回车，前后都是 `channelGroup`；
+而且 `verify_clicks.key_named` 没带 `text`，回车根本到不了页面。现在改成"先右方向键换到
+「别名」、再回车、看高亮真的从 `channelGroup` 换成 `aliasGroup`"。
+
 ```powershell
 # 1) 单测：清单与页面上的栏目一一对应（漏一栏 = 点了没反应）
 python -m unittest tests.test_i3pro.TestViewerScript -v
 
-# 2) 无头：按钮接线、点一下高亮跟着走、跳到收起来的模块会打开它、Ctrl+K 落到那一排
+# 2) 无头：按钮接线、点一下高亮跟着走、跳到收起来的模块会打开它、收起来的模块不拦高亮、
+#    Ctrl+K 落到那一排
 node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
 
 # 3) 真浏览器真鼠标真键盘：滚动条真的动了、标题真的贴在按钮排下面
@@ -4014,22 +4034,34 @@ python tools\verify_clicks.py
 | 按钮排 | 10 枚按钮，与侧边栏 10 个 `.group` 一一对应（单测按源码比对，多一个少一个都红） |
 | 按钮排占的高度 | 108.3 px（会换行，所以落点必须按它的实际高度算） |
 | 点最上面那一栏 | `scrollTop = 4`（滚条在顶） |
-| 点「光标值」（默认收着） | 跳之前 `height = 0`；跳之后 `height > 0`，`scrollTop 4 → 1815`，标题落在按钮排下面 **6.1 px** |
-| 点「通道处理」（最后一栏） | 到底了滚不到顶（正常）：标题 `top = 751.1` 落进视野（视野底 906），按钮排上仍有一栏亮着 |
+| 点「光标值」（默认收着） | 跳之前 `height = 0`；跳之后 `height > 0`，`scrollTop 4 → 1424`，标题落在按钮排下面 **6.1 px**（2026-10-14 重测；滚动的绝对距离随那一栏里有多少内容变，判据是那个 6.1 px 的关系，不是 1424 这个数） |
+| 点「通道处理」（最后一栏） | 到底了滚不到顶（正常）：标题 `top = 584.5` 落进视野（视野底 906），按钮排上仍有一栏亮着（同日重测） |
 | 点「通道」 | `document.activeElement.id === "chSearch"` |
-| 真按 `Ctrl+K` | 焦点落到 `button[data-jump]` 上（实测值 `channelGroup`），回车再跳一次仍然亮着 |
+| 真按 `Ctrl+K` | 焦点落到 `button[data-jump]` 上（实测值 `channelGroup`）；右方向键换到 `aliasGroup` 且 `state.cursor` **125 → 125 没动**；回车之后高亮真的换成 `aliasGroup` |
+| 修之前（高亮那条 bug） | `scrollTop = 0` 与 `scrollTop = 300` 亮着的都是收起来的 `valuesGroup`；展开它才恢复正常 |
+| 修之前（方向键那条） | 焦点换一栏的同时 `state.cursor` 由 `null` 变成 `0.01` |
 | 修之前（滚动监听那个 bug） | 滚一下侧边栏，10 枚按钮**全部熄灭**（`jumpActive()` 返回空） |
 
 **五件套的落点**：① 实现 `viewer.html` 的 `JUMP_TARGETS` / `jumpTo` / `syncJumpActive` /
 `focusJumpRail`（都在同一处，没有第二份模块清单）；② 单测
 `TestViewerScript.test_侧边栏快速跳转的清单与那一栏一一对应`；③ 无头断言
-`smoke_viewer.js` 第 34 段；④ 本条目；⑤ 两份金标准快照照旧全绿（文件大小不变，
-这一票没动取数）。
+`smoke_viewer.js` 第 34 段（2026-10-14 起还钉"收起来的模块不拦高亮"）；④ 本条目；
+⑤ 两份金标准快照照旧全绿（这一票没动取数）。
 
 **回归四项（本机实测，与 A79 同一轮）**：`Ran 525 tests in 348.614s` + `OK`；
 `verify_ld_vs_csv` `PASS - 0 channel(s) outside tolerance`；两份金标准快照各 `PASS`
 （高避 466 通道行 / 7 圈，耐久 372 通道行 / 26 圈）；真浏览器
 **251 项检查：251 通过，0 失败**——比 A77 的 229 多 22 条，就是 A78 的 11 条 + A79 的 11 条。
+
+**2026-10-14 评审修完之后重跑的回归四项（本机实测）**：`Ran 532 tests in 353.560s` + `OK`；
+`verify_ld_vs_csv` `PASS - 0 channel(s) outside tolerance`（两条各 213/213，最差
+`AccelX` 0.00498 / `Aceinna GyroX` 0.4）；两份金标准快照各 `PASS`；真浏览器
+**254 项检查：254 通过，0 失败**（比 251 多 3 条：收起来的模块不拦高亮、方向键不挪光标、
+回车真的跳）。
+
+**同一份验收跑在"修之前"的代码上（把这两处改动临时撤掉再跑一次）**：
+`254 项检查：252 通过，2 失败`——红的正是那两条，而且红得和评审量到的一模一样：
+`收着=True · 高亮=valuesGroup`、`125 -> 125.01`。这两条断言不是跟着实现写出来的。
 
 ---
 
@@ -4049,6 +4081,15 @@ k 次拉到 100 Hz 主时间基上），于是慢通道画出来是一排平顶�
 437 条通道里 **147 条**比 50 Hz 慢（100 Hz ×268 / 10 Hz ×90 / 1 Hz ×37 / 50 Hz ×22 /
 2 Hz ×10 / 20 Hz ×7 / 5 Hz ×2 / 25 Hz ×1）。10 Hz 的 `LF Tire Temperature2` 在
 2 秒窗口里就是"每 0.1 秒一个平顶"，而线性插值下同样这 10 个点是 36.64 → 37.73 的斜线。
+
+**这两个数（437 / 147）连着那张直方图都是跑出来的，不是抄来的**——评审发现这里当初只写了
+结论、没写命令（AGENTS 规则 2）。现在有命令了，输出就是上面那一行：
+
+```powershell
+python -m unittest tests.test_i3pro.TestUpsample.test_金标准上慢通道有多少条 -v
+# [A79 实测] 高避金标准：437 条通道，其中比 50 Hz 慢的 147 条
+# （100 Hz ×268 / 10 Hz ×90 / 1 Hz ×37 / 50 Hz ×22 / 2 Hz ×10 / 20 Hz ×7 / 5 Hz ×2 / 25 Hz ×1）
+```
 
 这一票加的就是这条属性：**画图默认线性**，`显示 → 曲线连接` 里可以换回阶梯保持；
 分析路径（距离轴 / 切圈 / 报告 / 直方图 / 导出）**一个字都没改**，仍然是保持前值。
@@ -4090,16 +4131,28 @@ python tools\verify_clicks.py
 | 默认值只在一处 | `render.DEFAULT_UPSAMPLE == derive.UPSAMPLE_MODES[0] == "linear"`，前端 `state.upsample: "linear"` 由单测按源码比对 |
 | 真浏览器（`MCU1 FR TempMotor`，10 Hz，2 秒窗口） | 线性 `[57.9, 57.91, 57.92, 57.93, …]`（相邻点互不相同）→ 点「阶梯保持」后 `[57.9, 57.9, 57.9, 57.9, …]`（与服务端直接问 `upsample=previous` 的那一份**逐点相同**）→ 点回线性又变回斜线 |
 | 真浏览器：标题 | `时间/距离图 · 1 通道 · 分栏 · 曲线：阶梯保持` |
-| 快照文件大小 | 高避 `1,629,655 → 1,646,743` 字节（+1.05%）、耐久 `2,050,304 → 2,062,972`（+0.62%）——线性之下重复值变少，文本稍大一点 |
+| 快照文件大小 | 高避 `1,629,655 → 1,646,743` 字节（+1.05%）、耐久 `2,050,304 → 2,062,972`（+0.62%）——线性之下重复值变少，文本稍大一点（A79 当时的实测；2026-10-14 重测同一份快照：高避 `1,649,203`、耐久 `2,065,432` 字节） |
 
-**五件套的落点**：① 实现 `derive.upsample_to_master` + `render.trace` + `api.act_trace` +
-`viewer.html` 的「曲线连接」；② 单测 `TestUpsample` 6 条 + `TestApiLayerWithoutASocket` 1 条
-+ `TestViewerScript` 1 条；③ 无头断言 `smoke_viewer.js` 第 35 段；④ 本条目；⑤ 两份金标准
-快照照旧全绿（`verify_ld_vs_csv` 不受影响——那条路只读原始样本）。
+**2026-10-14 评审（`/code-review` 的两条轴）修了四处**——四处都不是"功能不对"，是"以后会被
+抄错、而且抄错了没人红"：
 
-**回归四项（本机实测）**：`Ran 525 tests in 348.614s` + `OK`；`verify_ld_vs_csv`
-`PASS - 0 channel(s) outside tolerance`；两份金标准快照各 `PASS`；真浏览器
-**251 项检查：251 通过，0 失败**。无头驱动里 `check(` 共 **625** 条（A77 那会儿 609）。
+| 修掉 | 原来什么样 | 现在 |
+| --- | --- | --- |
+| 四档取值抄在四处 | `derive.UPSAMPLE_MODES` / `render.DEFAULT_UPSAMPLE` / `viewer.html` 的 `UPSAMPLE_MODES` + `UPSAMPLE_LABELS` + `UPSAMPLE_HINT`，单测只钉了默认值那一个词 | 单测按源码比对**整张表**（`TestViewerScript.test_曲线连接的四档与界面上那四枚按钮出自同一张表`）。漂开的后果是请求里带一个服务端不认的词 = 400，而两边测试全绿 |
+| 同一句报错写了两遍 | `api.act_trace` 把 `derive.upsample_to_master` 的中文错又抄了一遍，注释还写着"由 derive 报" | 新增 `derive.check_upsample(mode)`，文案只有这一处，`api` 调它。单测 `TestUpsample.test_不认识取值的报错只有一处` 扫 `src/i3pro/**/*.py`，出现两处就红 |
+| 换曲线连接会连轨迹图一起重取 | `windowKey()` 里混着 `upsample`，而它同时是 `trackData.key`（`/track` 的缓存键） | 拆成 `windowKey()`（只说"看的是哪一段"）与 `traceKey()`（= windowKey + 连接方式，只有 `/trace` 用它）。无头两条断言分别盯"换了档 `traceKey` 要变"与"`windowKey` 不许跟着变"；单测另按源码钉住 `windowKey` 里不许再出现 `upsample` |
+| 三个没人调的导出 | `upsampleLabels` / `buildJumpRail` / `focusJumpRail` 挂在 `window.i3pro` 上，全仓库没有调用者 | 删掉这三个导出（函数本身还在原地）。留在导出表上的都有真实调用者 |
+
+**五件套的落点**：① 实现 `derive.upsample_to_master` + `derive.check_upsample` +
+`render.trace` + `api.act_trace` + `viewer.html` 的「曲线连接」；② 单测 `TestUpsample` 8 条
+（含"报错只有一处"与金标准慢通道那张直方图）+ `TestApiLayerWithoutASocket` 1 条 +
+`TestViewerScript` 3 条（默认值 / 四档 / 缓存键）；③ 无头断言 `smoke_viewer.js` 第 35 段
+（含"换档要重新取数"与"窗口键不许跟着变"）；④ 本条目；⑤ 两份金标准快照照旧全绿
+（`verify_ld_vs_csv` 不受影响——那条路只读原始样本）。
+
+**回归四项（本机实测，2026-10-14 评审后重跑）**：`Ran 532 tests in 353.560s` + `OK`；
+`verify_ld_vs_csv` `PASS - 0 channel(s) outside tolerance`；两份金标准快照各 `PASS`；
+真浏览器 **254 项检查：254 通过，0 失败**。无头驱动里 `check(` 共 **628** 条（A77 那会儿 609）。
 
 ---
 
@@ -4178,9 +4231,9 @@ python out\_gps_sweep.py
 服务端算轨迹的判据，没有新的界面状态，`smoke_viewer.js` 里那份 GPS 汇总载荷本来就是注入
 的静态数据（改动前后逐字相同）；④ 本条目；⑤ 两份金标准快照照旧全绿。
 
-**回归四项（本机实测）**：`Ran 528 tests in 353.624s` + `OK`；`verify_ld_vs_csv`
-`PASS - 0 channel(s) outside tolerance`；两份金标准快照各 `PASS`；真浏览器
-**251 项检查：251 通过，0 失败**。
+**回归四项（本机实测）**：`Ran 532 tests in 353.560s` + `OK`（A80 当时是 528；
+2026-10-14 评审又加了 4 条）；`verify_ld_vs_csv` `PASS - 0 channel(s) outside tolerance`；
+两份金标准快照各 `PASS`；真浏览器 **254 项检查：254 通过，0 失败**（当时是 251）。
 
 **跑测试要先看磁盘**：这套回归会把 `i2pro_data` 拷进 `%TEMP%`（`verify_clicks.py` 那条，
 以及 `TestLaunchers` / `TestBootstrap` 那几条），合并场次进来之后这一份拷贝要 ~7 GB。

@@ -61,6 +61,12 @@ TEMPLATE = Path(__file__).with_name("web") / "viewer.html"
 #: zoom in, at the cost of file size (2000 ≈ 1.2 MB for a 12 channel payload).
 DEFAULT_BUCKETS = 2000
 
+#: 画图用哪条"点与点之间"的规则（i2 Pro 的 Channel Up-sampling）。**默认线性**：
+#: 零阶保持会把慢通道画成一排平顶（高避金标准 437 条里 147 条慢于 50 Hz），
+#: 那是"文件里只有这么多样本"的事实，不是曲线该有的形状；要回到平顶就在
+#: 图的「显示 → 曲线连接」里选「阶梯保持」。分析路径不受它影响（见 derive）。
+DEFAULT_UPSAMPLE = "linear"
+
 #: Channels a driver/vehicle-dynamics engineer opens first, best first.
 DEFAULT_CHANNEL_PRIORITY = (
     "Vx KF",
@@ -573,9 +579,15 @@ def trace(
     buckets: int = DEFAULT_BUCKETS,
     start: float | None = None,
     end: float | None = None,
+    upsample: str = DEFAULT_UPSAMPLE,
 ) -> dict:
-    """One channel, held onto the master time base and min/max decimated."""
-    values = derive.hold_to_master(log, name)[: time.size]
+    """One channel on the master time base, min/max decimated.
+
+    ``upsample`` 定的是"原始采样点之间怎么取值"（i2 Pro 的 Up-sampling 属性）：
+    画图默认 ``linear``，分析路径用的是 ``previous``。两条路都只影响**取到的值**，
+    抽稀与"留下尖峰"的做法一模一样。
+    """
+    values = derive.upsample_to_master(log, name, upsample)[: time.size]
     if start is not None or end is not None:
         lo = 0 if start is None else int(np.searchsorted(time, start))
         hi = time.size if end is None else int(np.searchsorted(time, end))
@@ -593,6 +605,9 @@ def trace(
     channel = log.channel(name)
     payload["unit"] = channelsmod.unit(log, channel)
     payload["rate"] = channelsmod.sample_rate(log, channel)
+    # 取了哪条规则要跟着载荷走：界面把它写在抬头提示里，否则"同一条通道两个地方
+    # 读数不一样"没人说得清是为什么。
+    payload["upsample"] = upsample
     return payload
 
 

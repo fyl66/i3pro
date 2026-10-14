@@ -3626,6 +3626,87 @@ if (canMeta) {
   api.renderChannelList();
 }
 
+// 34. 侧边栏快速跳转（A78）：左边那一栏比屏幕长得多，"跳到哪一栏"是一排按钮。
+//     这里证明的是**接线**：清单、按钮、页面上的那一栏三者一一对应，点一下就
+//     落到那一栏并把它点亮；真正"滚过去了"由 verify_clicks 的真鼠标那条验
+//     （假 DOM 里每个元素的高都是同一个数，量不出滚动）。
+{
+  const rail = registry.get("jumpRail");
+  check(!!rail, "侧边栏顶上没有「跳到哪一栏」那一条");
+  const targets = api.jumpTargets || [];
+  const buttons = api.jumpButtons ? api.jumpButtons() : [];
+  check(targets.length >= 8 && buttons.length === targets.length,
+    "跳转清单与按钮对不上：" + targets.length + " / " + buttons.length);
+  const ids = targets.map((t) => t.id);
+  for (const want of ["channelGroup", "mathsGroup", "setupGroup", "lapGroup"]) {
+    check(ids.indexOf(want) >= 0, "跳转清单里少了常去的那一栏：" + want);
+  }
+  // 按钮指着一栏不存在的模块 = 点了没反应；反过来，页面上有模块没进清单 =
+  // 那一栏永远跳不过去。两边都要落空才算过。
+  const nowhere = ids.filter((id) => !registry.get(id));
+  check(nowhere.length === 0, "跳转按钮指着一栏不存在的模块：" + nowhere.join(","));
+  if (targets.length && buttons.length === targets.length) {
+    // 点「通道」：按钮亮起、清单焦点跟着走（这一栏还该把光标放进搜索框，
+    // 真浏览器那条验它）。
+    const channelButton = buttons[ids.indexOf("channelGroup")];
+    channelButton.dispatch("click", { target: channelButton });
+    check(api.jumpActive() === "channelGroup",
+      "点了「通道」，那一栏却没亮：" + api.jumpActive());
+    check(String(channelButton.textContent).indexOf("通道") === 0,
+      "按钮上的字不对：" + channelButton.textContent);
+    // Ctrl+K：把光标放到这一排上（当前那一栏优先）
+    key("k", { ctrlKey: true });
+    check(api.jumpActive() === "channelGroup",
+      "Ctrl+K 之后当前那一栏不再是活跃项：" + api.jumpActive());
+    api.jumpTo("sheetGroup");
+    check(api.jumpActive() === "sheetGroup", "跳到「工作表」之后高亮没跟上");
+    // 「光标值」默认收着（按 V 才出来）：跳过去要顺手打开，不然等于没跳
+    api.state.show.values = false;
+    api.jumpTo("valuesGroup");
+    check(api.state.show.values === true, "跳到收起来的「光标值」没有把它打开");
+    api.state.show.values = false;
+    api.jumpTo("channelGroup");
+  }
+}
+
+// 35. 曲线连接（A79）：i2 Pro 的 Channel Up-sampling。三件事——
+//     ① 四种取值都在，默认是服务端那一份（线性）；
+//     ② 换一个取值要重新问服务端（请求里带 upsample=）；
+//     ③ 快照里改不了，而且说清为什么（不静默失败）。
+{
+  const modes = api.upsampleModes || [];
+  check(modes.length === 4 && modes[0] === "linear"
+    && modes.indexOf("previous") > 0,
+    "曲线连接的四种取值不对：" + modes.join(","));
+  const graph = api.state.components.filter((c) => c.type === "graph")[0];
+  check(!!graph, "工作表里没有时间/距离图");
+  const offline = api.data.api;
+  // ③ 快照（这个文件没有服务端）
+  api.setUpsample("previous");
+  check(api.state.upsample === "linear",
+    "快照文件里居然改了曲线连接方式：" + api.state.upsample);
+  const toastEl = registry.get("toast");
+  check(!!toastEl && String(toastEl.textContent).indexOf("快照") >= 0,
+    "快照里改不了，但没说清为什么：" + (toastEl && toastEl.textContent));
+  // ② serve 模式：换取值要重新取数，而且请求里带着它
+  api.data.api = "/api";
+  const keyBefore = api.windowKey();
+  const before = httpCalls.length;
+  api.setUpsample("previous");
+  check(api.state.upsample === "previous", "换连接方式没落到状态上");
+  check(api.windowKey() !== keyBefore, "换了连接方式，取数的窗口键却没变（不会重新取）");
+  api.refreshWindowTraces(true);                     // 强制一次，不等那 150 ms 防抖
+  const asked = httpCalls.slice(before).map((c) => c.url)
+    .filter((u) => u.indexOf("/trace") >= 0);
+  check(asked.length >= 1 && asked[0].indexOf("upsample=previous") >= 0,
+    "取数请求里没带曲线连接方式：" + JSON.stringify(asked.slice(0, 2)));
+  // 收尾：状态与场次 API 还原，后面的断言看到的还是原来那一屏
+  api.state.upsample = "linear";
+  api.state.windowKey = "";
+  api.data.api = offline;
+  api.renderAll();
+}
+
 const header = registry.get("fileInfo");
 check(header && (header.innerHTML.indexOf(".ld") >= 0
   || header.innerHTML.indexOf(".csv") >= 0

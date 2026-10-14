@@ -2204,6 +2204,35 @@ class TestViewerScript(unittest.TestCase):
         self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
         self.assertIn("instructions", finished.stdout)
 
+    def test_画图的默认连接方式与服务端那一份是同一个词(self):
+        """A79：默认值只在 ``render.DEFAULT_UPSAMPLE`` 一处定，前端不许另写一个。
+
+        两个词漂开之后的现象是"快照里是线性的、服务里一进来是阶梯"——这种不一致
+        不报错，只有图不一样。
+        """
+        page = (ROOT / "src" / "i3pro" / "web" / "viewer.html").read_text(encoding="utf-8")
+        self.assertIn(f'upsample: "{render.DEFAULT_UPSAMPLE}"', page)
+        self.assertIn("upsample: state.upsample", page)      # 取数请求里真的带着它
+        self.assertEqual(render.DEFAULT_UPSAMPLE, derive.UPSAMPLE_MODES[0])
+
+    def test_侧边栏快速跳转的清单与那一栏一一对应(self):
+        """A78：按钮清单里的每一栏都得真的存在，侧边栏里的每一栏也得进清单。
+
+        漏一栏的现象是"点那个按钮没反应"（指着一个不存在的 id），或者"这一栏永远
+        跳不过去"。清单只有一份（JUMP_TARGETS），这条按源码对一次。
+        """
+        page = (ROOT / "src" / "i3pro" / "web" / "viewer.html").read_text(encoding="utf-8")
+        block = page[page.index("const JUMP_TARGETS"):]
+        block = block[:block.index("];")]
+        listed = re.findall(r'id: "([A-Za-z]+)"', block)
+        groups = re.findall(r'<div class="group" id="([A-Za-z]+)"', page)
+        self.assertGreaterEqual(len(groups), 8, "侧边栏的模块数不对：" + repr(groups))
+        for group_id in listed:
+            self.assertIn(f'id="{group_id}"', page,
+                          f"跳转清单里的 {group_id} 在页面上没有对应的那一栏")
+        self.assertEqual(sorted(groups), sorted(listed),
+                         "侧边栏有模块没进跳转清单，或者清单里有不存在的一栏")
+
 
 class TestComponentRegistry(unittest.TestCase):
     """ticket #17 / #19 / #20：每种显示形式只在注册表里声明一次。
@@ -2597,14 +2626,18 @@ class _MathSession:
     不去嗅探对象有哪些属性。真实的 ``LogFile`` / ``CsvSession`` 同样声明这三样。
     """
 
-    def __init__(self, columns: dict, rate: float = 10.0, path="fake.ld", rates: dict | None = None):
+    def __init__(self, columns: dict, rate: float = 10.0, path="fake.ld",
+                 rates: dict | None = None, length: int | None = None):
         self.columns = {k: np.asarray(v, dtype=np.float64) for k, v in columns.items()}
         self.sample_rate = float(rate)
         self.derived: dict[str, np.ndarray] = {}
         self.derived_names: set[str] = set()
         self.derived_units: dict[str, str] = {}
         size = max(len(v) for v in self.columns.values())
-        self.duration = (size - 1) / self.sample_rate
+        #: ``length`` 给"主时间基比这条通道长"的场合用（A79 的慢通道就是这样）：不给
+        #: 就是最长的那条列。``timebase.length`` 会把 duration 换算回长度，所以要
+        #: 反着写——(length - 1) / rate。
+        self.duration = ((length or size) - 1) / self.sample_rate
         self.path = Path(path)
         rates = rates or {}
         self.channels = [
@@ -2646,6 +2679,100 @@ class _MathSession:
 
     def close(self) -> None:
         pass
+
+
+class TestUpsample(unittest.TestCase):
+    """A79：曲线"点与点之间"怎么取值（i2 Pro 的 Channel Up-sampling）。
+
+    这条功能的全部内容是**取哪个值**：画图取相邻两点连成的直线上的值（默认），
+    分析路径取"保持前值"那个值（和改动前逐点相同）。两句话各有一条断言钉住——
+    以后谁把画图那条路接回零阶保持，这里就会红。
+    """
+
+    def _session(self):
+        #: 主时间基 10 Hz、21 个点（2 s）；慢通道只有 1 Hz 的 3 个原始采样。
+        return _MathSession({"慢": np.array([0.0, 10.0, 20.0])}, rate=10.0,
+                            rates={"慢": 1.0}, length=21)
+
+    def test_线性在两个原始采样之间连成直线(self):
+        session = self._session()
+        channel = session.channel("慢")
+        values = derive.upsample_to_master(session, "慢", "linear")
+        expected = np.interp(timebase.axis(session), channel.time(), session.values("慢"))
+        self.assertEqual(values.size, 21)
+        np.testing.assert_allclose(values, expected)
+        np.testing.assert_allclose(np.diff(values[:11]), np.ones(10))
+        self.assertAlmostEqual(float(values[10]), 10.0, places=9)
+
+    def test_保持前值就是零阶保持(self):
+        session = self._session()
+        np.testing.assert_array_equal(
+            derive.upsample_to_master(session, "慢", "previous"),
+            derive.hold_to_master(session, "慢"),
+        )
+        # 前三段平顶：10 个 0、10 个 10，最后落到 20
+        self.assertEqual(
+            derive.upsample_to_master(session, "慢", "previous").tolist(),
+            [0.0] * 10 + [10.0] * 10 + [20.0],
+        )
+
+    def test_最近点与下一个点各取哪一个(self):
+        session = self._session()
+        closest = derive.upsample_to_master(session, "慢", "closest")
+        following = derive.upsample_to_master(session, "慢", "next")
+        # t = 0.2 s：最近的那个采样是 0（离 0 近），下一个采样是 10
+        self.assertAlmostEqual(float(closest[2]), 0.0, places=9)
+        self.assertAlmostEqual(float(following[2]), 10.0, places=9)
+        # t = 0.8 s：两个规则都是 10
+        self.assertAlmostEqual(float(closest[8]), 10.0, places=9)
+        self.assertAlmostEqual(float(following[8]), 10.0, places=9)
+        # 四种取值都覆盖整条主时间基，端点是原始样本的头尾
+        for mode in derive.UPSAMPLE_MODES:
+            values = derive.upsample_to_master(session, "慢", mode)
+            self.assertEqual(values.size, 21)
+            self.assertAlmostEqual(float(values[0]), 0.0, places=9)
+            self.assertAlmostEqual(float(values[-1]), 20.0, places=9)
+
+    def test_不认识的取值报中文错并列出可选项(self):
+        with self.assertRaises(ValueError) as caught:
+            derive.upsample_to_master(self._session(), "慢", "阶梯")
+        text = str(caught.exception)
+        self.assertIn("不认识的曲线连接方式", text)
+        for mode in derive.UPSAMPLE_MODES:
+            self.assertIn(mode, text)
+
+    def test_数学通道的列不会再被拉一遍(self):
+        """同名覆盖过的慢通道：列本来就在主时间基上（ticket #18），插值不该拉伸它。"""
+        session = _MathSession({"计数器": np.zeros(6)}, rate=10.0,
+                               rates={"计数器": 1.0}, length=21)
+        ramp = np.arange(21, dtype=np.float64)
+        mathsmod.attach(session, {"计数器": ramp},
+                        [mathsmod.Definition("计数器", "0", unit="")])
+        np.testing.assert_array_equal(
+            derive.upsample_to_master(session, "计数器", "linear"), ramp
+        )
+
+    @_needs(HILL)
+    def test_金标准上线性与保持确实不是同一条线(self):
+        """实测（高避金标准）：10 Hz 的 LF Tire Temperature2，主时间基 100 Hz。
+
+        保持前值：开头 10 个点一模一样（36.64 的平顶，宽 0.1 s）。
+        线性：同样的 10 个点是 36.64 → 37.73 的等差斜线。
+        两条路的极值相同——线性只在相邻两点之间取值，不会凭空造出更大的峰。
+        """
+        with ld.LogFile.read(HILL) as log:
+            name = "LF Tire Temperature2"
+            self.assertEqual(log.channel(name).sample_rate, 10.0)
+            self.assertEqual(timebase.rate_of(log), 100.0)
+            kept = derive.hold_to_master(log, name)
+            line = derive.upsample_to_master(log, name, "linear")
+            self.assertEqual(kept.size, line.size)
+            self.assertEqual(np.unique(kept[:10]).size, 1)
+            self.assertEqual(np.unique(line[:10]).size, 10)
+            self.assertAlmostEqual(float(line[0]), 36.64, places=2)
+            self.assertAlmostEqual(float(line[10]), 37.73, places=2)
+            self.assertAlmostEqual(float(line.min()), float(kept.min()), places=6)
+            self.assertAlmostEqual(float(line.max()), float(kept.max()), places=6)
 
 
 class TestMaths(unittest.TestCase):
@@ -4672,6 +4799,46 @@ class TestApiLayerWithoutASocket(unittest.TestCase):
         self.client.handle(["sessions"], {}, "GET", Counter(64, None, b"x" * 64))
         self.assertEqual(reads, [], "列表动作把请求体读了")
 
+    @_needs(HILL)
+    def test_曲线连接方式跟着请求走(self):
+        """A79：``/trace?upsample=`` 默认线性，显式要 ``previous`` 时就是零阶保持。
+
+        这一条同时钉住 HTTP 那一层：默认值在**服务端**（不是前端猜一个），打错的
+        取值是 400 加一句能照做的中文，而不是悄悄退回默认值。
+        """
+        # 窗口取 2 s：100 Hz 的主时间基上只有 200 个采样，抽稀那一层不介入
+        # （n <= buckets * 2），所以看到的就是"点与点之间"到底取了哪个值。
+        base = {"channels": ["LF Tire Temperature2"], "buckets": ["2000"],
+                "from": ["0"], "to": ["2"]}
+
+        def trace(extra=None):
+            query = dict(base)
+            query.update(extra or {})
+            response = self.client.handle(["session", HILL.stem, "trace"], query, "GET")
+            self.assertEqual(response.status, 200, response.body.decode("utf-8"))
+            return json.loads(response.body.decode("utf-8"))["LF Tire Temperature2"]
+
+        linear = trace({"upsample": ["linear"]})
+        previous = trace({"upsample": ["previous"]})
+        default = trace()
+        self.assertEqual(linear["upsample"], "linear")
+        self.assertEqual(default["upsample"], render.DEFAULT_UPSAMPLE)
+        self.assertEqual(len(previous["value"]), 200)
+        self.assertEqual(len(linear["value"]), 200)
+        # 保持前值：10 Hz 的通道在 100 Hz 的主时间基上是 10 个一样的值；
+        # 线性：同样这 10 个点是 36.64 → 37.62 的斜线，一个都不是平的。
+        self.assertEqual(len(set(previous["value"][:10])), 1)
+        self.assertEqual(len(set(linear["value"][:10])), 10)
+        self.assertEqual(default["value"], linear["value"])
+        # 单位与采样率照旧跟着通道走（改的是取值方式，不是通道本身）
+        self.assertEqual(linear["rate"], previous["rate"])
+        self.assertEqual(linear["unit"], previous["unit"])
+
+        bad = self.client.handle(
+            ["session", HILL.stem, "trace"], dict(base, upsample=["阶梯"]), "GET"
+        )
+        self.assertEqual(bad.status, 400)
+        self.assertIn("曲线连接方式", bad.body.decode("utf-8"))
 
 class TestStructureOfTheSplit(unittest.TestCase):
     """结构性重构的守卫（ticket #23 / #24）：**概念住在哪个文件**只留一个答案。

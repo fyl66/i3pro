@@ -163,10 +163,10 @@ i2 Pro 的结构是 `Project → Workbook → Worksheet → Component`。我们�
 
 ### M3 — 工程化（已完成）
 
-单测（真实数据回归 + HTTP 端到端 + 无头 JS 冒烟）从当时的 21 项起一路加上来，现在 **492 项**
+单测（真实数据回归 + HTTP 端到端 + 无头 JS 冒烟）从当时的 21 项起一路加上来，现在 **525 项**
 （`python -m unittest discover -s tests`）、零第三方运行期依赖、git 仓库。
 
-**验收从"三条"变"四条"**：无头冒烟（`tools/smoke_viewer.js`，609 个断言点）跑在
+**验收从"三条"变"四条"**：无头冒烟（`tools/smoke_viewer.js`，625 个断言点）跑在
 假 DOM 上——元素没有面积、没有遮挡，disabled 的控件照样派发 `click`。它能证明"代码
 调用了它该调用的函数"，证明不了**用户点得到**。所以补了第四条
 `tools/verify_clicks.py`：用 Edge 的 DevTools 协议发**真鼠标 / 真键盘**，跑在
@@ -379,6 +379,17 @@ i2 Pro 的结构是 `Project → Workbook → Worksheet → Component`。我们�
     记录仪压根没录到（10/07 那天 15:22:52–15:30:32 是空的，共享上也没有 10/08 的帧表）；
     `cjh阶跃+脉冲` 的另一半 `174142`（速度 `r=0.9986`、加速度中位数 0.566）差一点没过门槛；
     共享里 10.3 及更早的目录还没跑。
+24. **侧边栏快速跳转 + 曲线连接（i2 Pro 的 Up-sampling）**（验收 A78 / A79）——**完成**：
+    左边那一栏十个模块竖着排，屏幕上一次只看得见两三块，所以顶上钉一排按钮（点一下
+    滚过去、`Ctrl+K` 落到这一排、方向键换、回车跳，`JUMP_TARGETS` 一处清单喂三处用）。
+    另一件是**用户问的那个"i2 Pro 曲线为什么更丝滑"**：答案不是采样点多少，是
+    i2 Pro 的 Channel Up-sampling 属性（"how to calculate the channel value when a
+    value is required that lies between sample points… used when displaying a graph to
+    join the dots"），Linear / Closest / Previous / Next 四选一。我们画图这条取数路
+    一直是 **Previous（保持前值）**，高避金标准 437 条通道里 **147 条**比 50 Hz 慢，
+    放大看就是平顶加竖直跳变。现在**画图默认 Linear**、`显示 → 曲线连接` 可换回阶梯，
+    而分析路径（距离轴 / 切圈 / 报告 / 直方图 / 导出）**没动**。已知边界：CSV / CAN
+    场次的列在导入时就零阶保持到主时间基了，换不回斜线（要翻案得先留住原始采样时刻）。
 
 **没开票的候选（下一批）**——想开工先 `/to-spec` 把"要什么"说清楚：它们现在各自
 只有一句话，而规则 2 不许把这种待办写成"计划"。

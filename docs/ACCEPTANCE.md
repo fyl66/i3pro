@@ -3972,3 +3972,131 @@ python tools\verify_clicks.py
 | `TestCanAgainstMoTeC` | CAN 侧的三条交叉检查（#42/#43/#44，4 项）：同一条 ID 跨两条总线要吵出来（合成帧表）、ch3 上的 IVT 真的进到场次里、`.can.json` 的摘要按指纹失效（圈侧车 / DBC 内容）、CAN 日志认得出 MTi 经纬度 |
 | `TestListingCache` | 侧边栏列表的磁盘缓存（#45，1 项）：冷启动读磁盘缓存（把 `summary()` patch 成抛异常仍给同样的行）、数据动过（mtime）就失效重算 |
 | `TestPairing` | CAN 帧表对到 `.ld` 并合并通道（A76，16 项）：`log_time` 是**结束**时刻、帧表日期从文件名拿、墙钟偏移的正负、候选按重叠筛（含"文件名不是那个形状就认不出日期"）、互相关认出的是**数据**而不是墙钟、墙钟估错的偏移照样找回来、**速度像但加速度不像要拒绝**（实测假配对的形状）、两次不相干的驾驶不配对、重叠太短说"太短"而不是猜、同名只留一份且 `.ld` 的写法赢、**整段为 0 的占位通道被真值替换**、`AngVelX_body` 与 `AngVelX_hor` 是两条都要留、新加的 CAN 通道接在 `.ld` 通道后面、写出来的宽表 `csvlog` 读得回、`--list` 一个字节都不写 |
+---
+
+## A78 · 侧边栏快速跳转到哪一栏（本次新增）
+
+左边那一栏是"工作表 / 圈速 / 区段 / 注释 / GPS / 光标值 / 通道 / 别名 / 数学通道 /
+通道处理"十块竖着排下来的，屏幕上一次只看得见两三块。找"数学通道"要滚半天，还得记住
+它在谁下面。这一票在 `aside` 顶上钉一排按钮：点一下就滚到那一栏，顺手把该聚焦的控件
+聚焦（找通道时直接落在搜索框上）；`Ctrl+K` 把光标放到这一排上，方向键换、回车跳。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 一份清单 | `JUMP_TARGETS`（`viewer.html`）：按钮、跳转落点、滚动时的高亮三处共用它。加一个模块只加一行；单测按源码核对"清单里的每一栏都存在、侧边栏里每一栏都进了清单" |
+| 落点 | `jumpTo(id)` 把目标那一栏的标题对齐到**按钮排的下沿**（不是固定 34 px——按钮排自己 108 px 高，按固定数会让目标藏在它下面） |
+| 收起来的模块 | 「光标值」默认收着（i2 Pro 的 Values 窗口也要按 V）：跳过去先把它打开。不打开的话隐藏元素的 rect 全是 0，跳了等于没跳 |
+| 高亮 | 滚动时按"哪一栏的顶边过了按钮排"点亮对应的按钮（`syncJumpActive`） |
+| 键盘 | `Ctrl+K` 聚焦这一排（当前那一栏优先）→ 左右方向键换 → 回车跳。它排在"光标在输入框里就不管"那条**之前**：带修饰键，不会和单字母快捷键撞，而"正落在通道搜索框里"恰恰是最想换一栏的时刻 |
+
+**真浏览器抓到的两个 bug**（无头那条抓不到，因为它没有 scroll 事件、也没有真实高度）：
+
+1. `addEventListener("scroll", syncJumpActive)` 会把 **Event** 当第一个参数传进去，
+   于是"要亮的那一栏"变成了那个事件对象——所有按钮全灭。改成包一层箭头函数。
+2. 跳到隐藏的「光标值」是空动作（该组 `display:none`，rect 全 0）。加 `reveal` 一行，
+   跳之前先 `state.show.values = true`。
+
+```powershell
+# 1) 单测：清单与页面上的栏目一一对应（漏一栏 = 点了没反应）
+python -m unittest tests.test_i3pro.TestViewerScript -v
+
+# 2) 无头：按钮接线、点一下高亮跟着走、跳到收起来的模块会打开它、Ctrl+K 落到那一排
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
+
+# 3) 真浏览器真鼠标真键盘：滚动条真的动了、标题真的贴在按钮排下面
+python tools\verify_clicks.py
+```
+
+**通过判据（本机实测，Edge 1600×1000）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 按钮排 | 10 枚按钮，与侧边栏 10 个 `.group` 一一对应（单测按源码比对，多一个少一个都红） |
+| 按钮排占的高度 | 108.3 px（会换行，所以落点必须按它的实际高度算） |
+| 点最上面那一栏 | `scrollTop = 4`（滚条在顶） |
+| 点「光标值」（默认收着） | 跳之前 `height = 0`；跳之后 `height > 0`，`scrollTop 4 → 1815`，标题落在按钮排下面 **6.1 px** |
+| 点「通道处理」（最后一栏） | 到底了滚不到顶（正常）：标题 `top = 751.1` 落进视野（视野底 906），按钮排上仍有一栏亮着 |
+| 点「通道」 | `document.activeElement.id === "chSearch"` |
+| 真按 `Ctrl+K` | 焦点落到 `button[data-jump]` 上（实测值 `channelGroup`），回车再跳一次仍然亮着 |
+| 修之前（滚动监听那个 bug） | 滚一下侧边栏，10 枚按钮**全部熄灭**（`jumpActive()` 返回空） |
+
+**五件套的落点**：① 实现 `viewer.html` 的 `JUMP_TARGETS` / `jumpTo` / `syncJumpActive` /
+`focusJumpRail`（都在同一处，没有第二份模块清单）；② 单测
+`TestViewerScript.test_侧边栏快速跳转的清单与那一栏一一对应`；③ 无头断言
+`smoke_viewer.js` 第 34 段；④ 本条目；⑤ 两份金标准快照照旧全绿（文件大小不变，
+这一票没动取数）。
+
+**回归四项（本机实测，与 A79 同一轮）**：`Ran 525 tests in 348.614s` + `OK`；
+`verify_ld_vs_csv` `PASS - 0 channel(s) outside tolerance`；两份金标准快照各 `PASS`
+（高避 466 通道行 / 7 圈，耐久 372 通道行 / 26 圈）；真浏览器
+**251 项检查：251 通过，0 失败**——比 A77 的 229 多 22 条，就是 A78 的 11 条 + A79 的 11 条。
+
+---
+
+## A79 · 曲线连接：i2 Pro 的 Channel Up-sampling（本次新增）
+
+用户的原话：**"我觉得 i2 Pro 里的曲线会更丝滑，是因为采样点的问题吗，还是 i2 Pro 有插值？"**
+
+**调研结论：是"点与点之间怎么取值"的问题，不是采样点数量的问题。** i2 Pro 帮助文件
+《Log Files → Channel Properties》里有一条 **Up-sampling** 属性，原文：
+
+> "The up-sampling property specifies how to calculate the channel value when a value is
+> required that lies between sample points. **This is used when displaying a graph to 'join
+> the dots'.**"  —— 取值：Linear（线性插值）/ Closest（最近点）/ Previous（保持前值）/ Next（下一个点）
+
+我们这边**画图的取数路一直是"保持前值"**（`derive.hold_to_master` 把每个原始采样重复
+k 次拉到 100 Hz 主时间基上），于是慢通道画出来是一排平顶加竖直跳变。实测高避金标准：
+437 条通道里 **147 条**比 50 Hz 慢（100 Hz ×268 / 10 Hz ×90 / 1 Hz ×37 / 50 Hz ×22 /
+2 Hz ×10 / 20 Hz ×7 / 5 Hz ×2 / 25 Hz ×1）。10 Hz 的 `LF Tire Temperature2` 在
+2 秒窗口里就是"每 0.1 秒一个平顶"，而线性插值下同样这 10 个点是 36.64 → 37.73 的斜线。
+
+这一票加的就是这条属性：**画图默认线性**，`显示 → 曲线连接` 里可以换回阶梯保持；
+分析路径（距离轴 / 切圈 / 报告 / 直方图 / 导出）**一个字都没改**，仍然是保持前值。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 引擎 | `derive.upsample_to_master(log, name, mode)`：四种取值与 i2 Pro 一一对应；`previous` 就是原来的 `hold_to_master`（分析路径照旧调它）；不认识的取值报中文错并列出可选项 |
+| 画图 | `render.trace(..., upsample=)`，默认 `render.DEFAULT_UPSAMPLE = "linear"`；载荷里带回 `upsample` 字段（界面据此说清"这一屏取的是哪一份"）。抽稀（Min/Max 留尖峰）与两条路共用，**没有改** |
+| HTTP | `/trace?upsample=linear\|previous\|closest\|next`：默认线性；打错的取值 400 + 一句能照做的中文（**在取数之前**就校验，空通道列表也不会让它蒙混过去） |
+| 界面 | 组件标题栏的「显示」菜单里多一排「曲线连接」四枚按钮；换了它窗口缓存作废并重新取数；组件标题写明「曲线：阶梯保持」；跟布局一起记住（localStorage）。快照文件（没有服务端）里按钮**灰掉**并说明"导出时烘进去的，改不了" |
+| 顺带 | 折线改用圆角连接（`lineJoin/lineCap = round`）：同样是那些点，尖角少一截 |
+
+**已知边界（写清楚，不含糊）**：CSV / CAN 场次的列在**导入时**就已经零阶保持到主时间基了
+（`update_rate` 只是记着"报文多久发一次"），原始采样时刻没留下来，所以那些场次的曲线
+换不回斜线——这一票只对 `.ld` 的原生慢通道有效。
+
+```powershell
+# 1) 单测：四种取值 / 中文报错 / 数学通道不被再拉一遍 / 金标准上两条线确实不同
+python -m unittest tests.test_i3pro.TestUpsample -v
+
+# 2) HTTP：默认线性、显式 previous 是平顶、打错的取值 400
+python -m unittest tests.test_i3pro.TestApiLayerWithoutASocket -v
+
+# 3) 无头：四种取值都在、换了会重新取数（请求里带 upsample=）、快照里改不了但说清为什么
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
+
+# 4) 真浏览器真鼠标：点「显示 → 阶梯保持」之后**取回来的值真的变了**，点回线性又变回去
+python tools\verify_clicks.py
+```
+
+**通过判据（本机实测）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 四种取值 | `linear / previous / closest / next`；`previous` 与 `hold_to_master` **逐点相同**（`array_equal`） |
+| 线性就是线性 | 10 Hz 通道在 100 Hz 主时间基上：连续 10 个点等差（0 → 10 每步 +1.0，误差 < 1e-9） |
+| 极值不虚增 | 线性只在相邻两点之间取值：`line.min() == hold.min()`、`line.max() == hold.max()`（逐点比较通过） |
+| 数学通道 | 同名覆盖出来的列本来就在主时间基上：四种取值都**不做二次拉伸**（逐点相同，ticket #18 那条规则没被绕过） |
+| 默认值只在一处 | `render.DEFAULT_UPSAMPLE == derive.UPSAMPLE_MODES[0] == "linear"`，前端 `state.upsample: "linear"` 由单测按源码比对 |
+| 真浏览器（`MCU1 FR TempMotor`，10 Hz，2 秒窗口） | 线性 `[57.9, 57.91, 57.92, 57.93, …]`（相邻点互不相同）→ 点「阶梯保持」后 `[57.9, 57.9, 57.9, 57.9, …]`（与服务端直接问 `upsample=previous` 的那一份**逐点相同**）→ 点回线性又变回斜线 |
+| 真浏览器：标题 | `时间/距离图 · 1 通道 · 分栏 · 曲线：阶梯保持` |
+| 快照文件大小 | 高避 `1,629,655 → 1,646,743` 字节（+1.05%）、耐久 `2,050,304 → 2,062,972`（+0.62%）——线性之下重复值变少，文本稍大一点 |
+
+**五件套的落点**：① 实现 `derive.upsample_to_master` + `render.trace` + `api.act_trace` +
+`viewer.html` 的「曲线连接」；② 单测 `TestUpsample` 6 条 + `TestApiLayerWithoutASocket` 1 条
++ `TestViewerScript` 1 条；③ 无头断言 `smoke_viewer.js` 第 35 段；④ 本条目；⑤ 两份金标准
+快照照旧全绿（`verify_ld_vs_csv` 不受影响——那条路只读原始样本）。
+
+**回归四项（本机实测）**：`Ran 525 tests in 348.614s` + `OK`；`verify_ld_vs_csv`
+`PASS - 0 channel(s) outside tolerance`；两份金标准快照各 `PASS`；真浏览器
+**251 项检查：251 通过，0 失败**。无头驱动里 `check(` 共 **625** 条（A77 那会儿 609）。

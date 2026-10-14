@@ -26,6 +26,19 @@
               color:var(--muted); margin:0 0 6px; font-weight:600;
               display:flex; align-items:center; gap:6px; }
   .group h2 .count { color:var(--muted); font-weight:400; letter-spacing:0; text-transform:none; }
+  /* 侧边栏快速跳转（A78）：这一栏比屏幕长得多，"往下滚着找模块"是每天都要付的成本。
+     一排按钮钉在顶上，点一下就滚过去；Ctrl+K 把光标放到这一排上，方向键换、回车跳。 */
+  .jump { position:sticky; top:-9px; z-index:6; margin:-9px -11px 10px;
+          padding:8px 11px 7px; background:var(--panel);
+          border-bottom:1px solid var(--line); }
+  .jump .jrow { display:flex; flex-wrap:wrap; gap:4px; }
+  .jump button { padding:1px 8px; font-size:11px; line-height:1.6; border-radius:999px; }
+  .jump button.on { border-color:var(--accent); color:var(--accent); }
+  .jump button .jn { color:var(--muted); margin-left:4px; font-size:10px; }
+  .jump button.on .jn { color:inherit; }
+  .jump .jhint { color:var(--muted); font-size:10px; margin-top:5px; }
+  /* 跳过去的那一栏闪一下标题：滚过去了但不知道落在哪，等于没跳 */
+  .group.flash > h2 { color:var(--accent); }
   input[type=search], input[type=text], select {
     background:var(--panel2); color:var(--fg); border:1px solid var(--line);
     border-radius:5px; padding:4px 7px; font-size:12px; }
@@ -349,7 +362,13 @@
   <button id="dataBtn" title="把这一段、这几条通道按原始或统一采样率导出成 CSV / Excel">导出数据</button>
 </header>
 <main>
-  <aside>
+  <aside id="asideScroll">
+    <!-- 侧边栏快速跳转（A78）：按钮由 JUMP_TARGETS 一处生成，不在这里手写第二份清单。 -->
+    <div class="jump" id="jumpRail"
+         title="点一下跳到那一栏；Ctrl+K 把光标放到这里，方向键换一个，回车跳过去">
+      <div class="jrow" id="jumpRow"></div>
+      <div class="jhint" id="jumpHint">Ctrl+K 快速跳转 · 左右方向键换一栏</div>
+    </div>
     <div class="group" id="sheetGroup">
       <h2>工作表 <span class="count" id="sheetName"></span></h2>
       <div class="row" id="presetRow"></div>
@@ -844,6 +863,18 @@ function typeTitle(comp, rest) {
 }
 
 function graphDefaults() { return { channels: [], mode: "tiled" }; }
+/**
+ * 曲线"点与点之间"怎么取值（i2 Pro 的 Channel Up-sampling，见 docs/ACCEPTANCE.md A79）。
+ * 服务端只认这四个词，前端不做第二套判断——显示菜单里点哪个，请求里就是哪个。
+ */
+const UPSAMPLE_MODES = ["linear", "previous", "closest", "next"];
+const UPSAMPLE_LABELS = { linear: "线性", previous: "阶梯保持", closest: "最近点", next: "下一个点" };
+const UPSAMPLE_HINT = {
+  linear: "相邻两个原始采样之间连一条直线（i2 Pro 画图默认的观感）",
+  previous: "保持前值：平顶加竖直跳变，原始采样点长什么样就什么样",
+  closest: "取最近的那个采样点",
+  next: "取下一个采样点",
+};
 function graphTitle(comp) {
   const names = comp.config.channels || [];
   const n = names.length;
@@ -851,8 +882,11 @@ function graphTitle(comp) {
   const mode = comp.config.mode === "overlapped" ? "重叠" : "分栏";
   // "缺 N 条"写在标题上（ticket #34）：图少画了一条线时，抬头就是唯一说得清
   // "为什么少"的地方——不说的话用户只能怀疑是自己选错了。
+  // 换了非默认的连接方式时标题里留一句：否则"这条曲线为什么是平顶"没人说得清。
+  const upsample = state.upsample && state.upsample !== "linear"
+    ? " · 曲线：" + (UPSAMPLE_LABELS[state.upsample] || state.upsample) : "";
   return typeTitle(comp, (n ? n + " 通道 · " : "")
-    + (gone ? "缺 " + gone + " 条 · " : "") + mode);
+    + (gone ? "缺 " + gone + " 条 · " : "") + mode) + upsample;
 }
 function graphNeeds(comp, add) { (comp.config.channels || []).forEach(add); }
 /** 刚加进来的图先看侧边栏勾着的那些通道，别给一张空图。 */
@@ -1707,7 +1741,10 @@ function layoutKey() {
 function saveLayout() {
   try {
     localStorage.setItem(
-      layoutKey(), JSON.stringify({ preset: state.preset, components: state.components }));
+      layoutKey(),
+      JSON.stringify({
+        preset: state.preset, components: state.components, upsample: state.upsample,
+      }));
   } catch (err) { /* private mode: the worksheet simply will not persist */ }
 }
 
@@ -1744,6 +1781,10 @@ const state = {
   datumOn: false,
   panelZoom: {},
   style: "line",
+  //: 曲线"点与点之间"怎么取值（i2 Pro 的 Channel Up-sampling，A79）。默认线性——
+  //: 零阶保持会把 10 Hz 的通道放大成 65 px 宽的平顶；分析路径（距离轴 / 切圈 /
+  //: 报表 / 导出）永远用保持，改的只有画图取到的值。
+  upsample: "linear",
   groupMode: "tiled",
   show: { measure: true, legend: true, values: false },
   ref: (DATA && DATA.ref) || null,
@@ -2055,8 +2096,10 @@ function plotWidth() {
 }
 
 function windowKey() {
-  if (!state.view) return "full";
-  return state.view.map((v) => v.toFixed(2)).join("-");
+  // 曲线连接方式也是"这一屏问服务端的问题"之一：换了它必须重新取数，否则界面
+  // 换了个选中状态、曲线还是上一种（这正是 A79 要防的那种"看起来点了、其实没变"）。
+  const base = !state.view ? "full" : state.view.map((v) => v.toFixed(2)).join("-");
+  return base + "|" + state.upsample;
 }
 
 function windowRange() {
@@ -2163,6 +2206,7 @@ async function refreshWindowTraces(force) {
     const body = await apiGet(apiUrl("/trace", {
       channels: names.join(","), from: w.from, to: w.to,
       buckets: Math.round(plotWidth()),
+      upsample: state.upsample,
     }));
     Object.assign(state.traces, body);
     state.dataVersion += 1;
@@ -2507,6 +2551,9 @@ function drawTraces(ctx, pad, plotW, plotH, x0, x1, y0, y1, specs) {
     ctx.strokeStyle = spec.color;
     ctx.fillStyle = spec.color;
     ctx.lineWidth = spec.width || 1.3;
+    // 尖角相接的折线（噪声大的通道最明显）用圆角连接：同样这些点，观感顺一截。
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
     if (state.style === "points" && !spec.forceLine) {
       for (let i = 0; i < xs.length; i++) {
         const xv = xs[i];
@@ -3207,6 +3254,25 @@ function setHeadField(comp, key, on) {
   renderAll();
 }
 
+/**
+ * 曲线"点与点之间"怎么取值（A79）。它**不是**每件组件自己的设置：取数只有一条路、
+ * 一个 `state.traces` 存一份（ticket #21），两件图要两种连接方式就得多取一遍数、
+ * 还会互相顶掉。i2 Pro 把它放在 Channel Editor 里，我们放在「显示」菜单里，语义
+ * 是"这一屏怎么看"——和 S 键的 Trace Style 同一档，所以也跟布局一起记住。
+ */
+function setUpsample(mode) {
+  if (UPSAMPLE_MODES.indexOf(mode) < 0) return;
+  if (!DATA.api) {
+    toast("快照文件里的曲线是导出时烘进去的，改不了；要切换就在服务里打开");
+    return;
+  }
+  state.upsample = mode;
+  state.windowKey = "";                 // 换了取数的问题，让窗口那次缓存作废
+  saveLayout();
+  scheduleRefresh();
+  renderAll();
+}
+
 function openColorMenu(comp, name, anchor) {
   openPopMenu(anchor, "「" + name + "」的颜色", (menu) => {
     const shelf = makeEl("div", "popshelf", menu);
@@ -3257,6 +3323,25 @@ function openDisplayMenu(comp, anchor) {
     for (const color of paletteColors(comp)) {
       const spot = makeEl("i", "popdot", shelf);
       spot.style.background = color;
+    }
+    // 曲线连接（A79）：i2 Pro 的 Channel Up-sampling 四个取值，取数请求里就带它。
+    const ups = makeEl("div", "poprow", menu);
+    makeEl("span", "poplabel", ups).textContent = "曲线连接";
+    for (const mode of UPSAMPLE_MODES) {
+      const chip = makeEl("button", "popchip", ups);
+      chip.textContent = UPSAMPLE_LABELS[mode];
+      chip.title = UPSAMPLE_HINT[mode];
+      chip.dataset.upsample = mode;
+      if (mode === state.upsample) chip.classList.add("on");
+      if (!DATA.api) {
+        // 快照（无服务端）里曲线是导出时算好的，切了也不会变——灰掉并说清为什么。
+        chip.disabled = true;
+        chip.title = "快照文件里的曲线是导出时烘进去的，改不了；要切换就在服务里打开";
+      }
+      chip.addEventListener("click", () => {
+        setUpsample(mode);
+        openDisplayMenu(comp, anchor);   // 重开一次，让选中状态跟着走
+      });
     }
     const fields = headFields(comp);
     popCheck(menu, "光标值", fields.cursor, (on) => setHeadField(comp, "cursor", on));
@@ -6949,8 +7034,15 @@ function stepLap(direction) {
 
 function onKeyDown(event) {
   const tag = event.target && event.target.tagName ? event.target.tagName.toLowerCase() : "";
-  if (tag === "input" || tag === "select" || tag === "textarea") return;
   const key = event.key;
+  // Ctrl+K（A78）排在"正在输入框里打字就不管"这条之前：它带修饰键，不会和
+  // 单字母快捷键撞车，而"光标正落在通道搜索框里"恰恰是最想换一栏的时刻。
+  if (event.ctrlKey && (key === "k" || key === "K")) {
+    focusJumpRail();
+    event.preventDefault();
+    return;
+  }
+  if (tag === "input" || tag === "select" || tag === "textarea") return;
   const stop = () => event.preventDefault();
   if (key === "Escape") { band = null; bandOverlay().style.display = "none"; stop(); return; }
   if (key === "F2" && event.altKey) { state.panelZoom = {}; renderAll(); stop(); return; }
@@ -7711,6 +7803,8 @@ function restoreWorksheet() {
   if (saved) {
     state.components = saved.components;
     state.preset = saved.preset || defaultWorksheetName();
+    // 曲线连接方式跟着这一套场景走（A79）：换过它的下次进来还是那个样子。
+    if (UPSAMPLE_MODES.indexOf(saved.upsample) >= 0) state.upsample = saved.upsample;
     adoptComponentIds(state.components);
     return;
   }
@@ -8208,6 +8302,147 @@ function setStatus() {
   $("statusLine").innerHTML = bits.join(" · ");
 }
 
+/* --------------------------------------------------- 侧边栏快速跳转（A78）
+ * 左边这一栏从"工作表"到"通道处理"有十来个模块，屏幕上一次只看得见两三块；
+ * 想找"数学通道"得滚半天，还得记住它在谁下面。这里钉一排按钮：点一下就滚过去，
+ * 顺手把该聚焦的控件聚焦（找通道时直接落在搜索框上）。
+ *
+ * 一份清单（JUMP_TARGETS）同时喂三个地方：按钮、跳转落点、滚动时的高亮。
+ * 加一个模块只加一行——不在这里另抄一份模块顺序。
+ */
+const JUMP_TARGETS = [
+  { id: "sheetGroup", label: "工作表", count: "sheetName" },
+  { id: "lapGroup", label: "圈速", count: "lapCount" },
+  { id: "sectionsGroup", label: "区段", count: "sectionsCount" },
+  { id: "notesGroup", label: "注释", count: "notesCount" },
+  { id: "gpsGroup", label: "GPS", count: "gpsCount" },
+  // 「光标值」默认是收起来的（i2 Pro 的 Values 窗口也要按 V）——跳过去要顺手把它打开，
+  // 否则点一下什么也没发生（隐藏元素的 rect 全是 0，真浏览器里就是这么量出来的）。
+  { id: "valuesGroup", label: "光标值", count: "cursorInfo", reveal: "values" },
+  { id: "channelGroup", label: "通道", count: "chCount", focus: "chSearch" },
+  { id: "aliasGroup", label: "别名", count: "aliasCount" },
+  { id: "mathsGroup", label: "数学通道", count: "mathsCount", focus: "mathsNew" },
+  { id: "setupGroup", label: "通道处理", count: "setupCount", focus: "setupApply" },
+];
+
+//: 跳过去之后标题闪多久（毫秒）。太短会像没反应，太长会一直抢注意力。
+const JUMP_FLASH_MS = 900;
+
+//: 这一排的按钮（{ target, button, badge }）。假 DOM 里没有 children / querySelector，
+//: 所以这一份清单自己拿住，不靠 DOM 反查。
+let jumpButtons = [];
+
+function buildJumpRail() {
+  const row = $("jumpRow");
+  if (!row) return;
+  row.innerHTML = "";
+  jumpButtons = JUMP_TARGETS.map((target) => {
+    const button = document.createElement("button");
+    button.dataset.jump = target.id;
+    button.title = "跳到「" + target.label + "」";
+    button.textContent = target.label;
+    const badge = document.createElement("span");
+    badge.className = "jn";
+    button.appendChild(badge);
+    button.addEventListener("click", () => jumpTo(target.id));
+    // 方向键在这一排里走（Ctrl+K 把光标放进来之后不用再摸鼠标）。
+    button.addEventListener("keydown", (event) => {
+      const step = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+      if (!step) return;
+      const here = jumpButtons.findIndex((entry) => entry.button === button);
+      const next = jumpButtons[(here + step + jumpButtons.length) % jumpButtons.length];
+      if (next && next.button && next.button.focus) next.button.focus();
+      event.preventDefault();
+    });
+    row.appendChild(button);
+    return { target: target, button: button, badge: badge };
+  });
+  const host = $("asideScroll");
+  // 注意别把 syncJumpActive 直接挂上去：scroll 事件会把 Event 当第一个参数传进来，
+  // 而 syncJumpActive(active) 一旦收到 Event 就当成"要亮的那一栏"，于是所有按钮
+  // 全灭——真浏览器里滚一下侧边栏就复现（无头那边没有 scroll 事件，抓不到）。
+  if (host && host.addEventListener) host.addEventListener("scroll", () => syncJumpActive());
+  renderJumpCounts();
+  syncJumpActive();
+}
+
+/** 每个按钮上的小数字来自**那一栏自己的计数**，不另算一遍（否则两处会对不上）。 */
+function renderJumpCounts() {
+  for (const entry of jumpButtons) {
+    const source = $(entry.target.count);
+    const text = source ? String(source.textContent || "").trim() : "";
+    if (entry.badge.textContent !== text) entry.badge.textContent = text;
+  }
+}
+
+/** 滚到哪一栏，哪一栏的按钮就亮着——"我在哪"是这一排按钮的第二个用处。 */
+function syncJumpActive(active) {
+  let id = active;
+  if (!id) {
+    const rail = $("jumpRail");
+    id = jumpButtons.length ? jumpButtons[0].target.id : null;
+    if (rail && rail.getBoundingClientRect) {
+      const bottom = rail.getBoundingClientRect().bottom + 8;
+      for (const entry of jumpButtons) {
+        const group = $(entry.target.id);
+        if (group && group.getBoundingClientRect
+            && group.getBoundingClientRect().top <= bottom) id = entry.target.id;
+      }
+    }
+  }
+  for (const entry of jumpButtons) {
+    entry.button.classList.toggle("on", entry.target.id === id);
+  }
+}
+
+/**
+ * 跳到某一栏。落点算的是"这一栏的顶边对到滚动容器的顶边"，不用 scrollIntoView：
+ * 那个还会连带滚整个页面，而且被钉住的这一排会把标题盖住。
+ */
+function jumpTo(id) {
+  const group = $(id);
+  const entry = jumpButtons.find((item) => item.target.id === id);
+  if (!group) return;
+  // 收起来的模块先打开：跳过去的前提是它在那儿（见 JUMP_TARGETS 里 reveal 那一行）。
+  if (entry && entry.target.reveal === "values" && !state.show.values) {
+    state.show.values = true;
+    renderAll();
+  }
+  const host = $("asideScroll");
+  if (host && group.getBoundingClientRect && host.getBoundingClientRect) {
+    // 让开的距离是**这一排本身的高度**：它钉在顶上、还是实心的，按固定数字让
+    // 就会把目标那一栏的标题压在下面（真浏览器里量出来的）。
+    const hostBox = host.getBoundingClientRect();
+    const rail = $("jumpRail");
+    const railBottom = rail && rail.getBoundingClientRect
+      ? rail.getBoundingClientRect().bottom : hostBox.top;
+    const delta = group.getBoundingClientRect().top - hostBox.top;
+    const offset = railBottom - hostBox.top + 6;
+    host.scrollTop = Math.max(0, (host.scrollTop || 0) + delta - offset);
+  } else if (group.scrollIntoView) {
+    group.scrollIntoView();
+  }
+  if (group.classList && group.classList.add) {
+    group.classList.add("flash");
+    setTimeout(() => group.classList.remove("flash"), JUMP_FLASH_MS);
+  }
+  // 有"该落在哪个控件上"的模块（通道 → 搜索框、数学通道 → 新建）就直接把光标放过去；
+  // 其余留在按钮上，方便接着用方向键换一栏。
+  const field = entry && entry.target.focus ? $(entry.target.focus) : null;
+  if (field && field.focus) field.focus();
+  else if (entry && entry.button.focus) entry.button.focus();
+  syncJumpActive(id);
+}
+
+/** Ctrl+K：把光标放到这一排上（当前那一栏优先），之后方向键 + 回车就够了。 */
+function focusJumpRail() {
+  const entry = jumpButtons.find((item) => item.button.classList.contains("on"))
+    || jumpButtons[0];
+  if (!entry) return;
+  if (entry.button.focus) entry.button.focus();
+  entry.button.classList.add("on");
+}
+
 function renderAll() {
   $("modeTime").classList.toggle("on", state.mode === "time");
   $("modeDistance").classList.toggle("on", state.mode === "distance");
@@ -8221,6 +8456,7 @@ function renderAll() {
   markLapRows();
   setStatus();
   renderMissingNotice();
+  renderJumpCounts();
 }
 
 /* ------------------------------------------------------------------- init */
@@ -8286,6 +8522,7 @@ function init() {
     return;
   }
   initHeader();
+  buildJumpRail();
   restoreWorksheet();
   // 恢复出来的那一屏可能来自 URL / 布局记忆（不是某一份工作表文件），但**当前
   // 用哪一套**是知道的：别名表与落点按它读一次，左边那一栏才不会空着（#36）。
@@ -8514,6 +8751,16 @@ window.i3pro = {
   setChannelColor: setChannelColor, setComponentPalette: setComponentPalette,
   setHeadField: setHeadField, openColorMenu: openColorMenu,
   openDisplayMenu: openDisplayMenu, closePopMenu: closePopMenu,
+  setUpsample: setUpsample, upsampleModes: UPSAMPLE_MODES,
+  upsampleLabels: UPSAMPLE_LABELS,
+  // 侧边栏快速跳转（A78）
+  jumpTargets: JUMP_TARGETS, jumpTo: jumpTo, buildJumpRail: buildJumpRail,
+  focusJumpRail: focusJumpRail, jumpButtons: () => jumpButtons.map((e) => e.button),
+  windowKey: windowKey,
+  jumpActive: () => {
+    const on = jumpButtons.find((e) => e.button.classList.contains("on"));
+    return on ? on.target.id : null;
+  },
   isAliasReference: isAliasReference, aliasName: aliasName,
   aliasLanding: aliasLanding, applyAliases: applyAliases,
   aliasAddAlias: aliasAddAlias, aliasAddCandidate: aliasAddCandidate,

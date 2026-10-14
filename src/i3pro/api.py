@@ -488,6 +488,16 @@ class _Call:
 
     def act_trace(self, log, name: str, query: dict, method: str) -> Response:
         names = csv_arg(query, "channels") or render.pick_channels(log)
+        # 曲线连接方式（i2 Pro 的 Channel Up-sampling）。不认识的取值由 derive 报
+        # 中文错、Api.handle 转成 400——**在取数之前**就问一次，否则空通道列表会
+        # 让一个打错的参数悄悄通过。
+        upsample = (query.get("upsample") or [render.DEFAULT_UPSAMPLE])[0]
+        if upsample not in derive.UPSAMPLE_MODES:
+            raise ValueError(
+                f"不认识的曲线连接方式 {upsample!r}：可选的只有 "
+                + " / ".join(derive.UPSAMPLE_MODES)
+                + "。"
+            )
         time = timebase.axis(log)
         try:
             distance = derive.distance_series(log)[: time.size]
@@ -505,6 +515,7 @@ class _Call:
                 int_arg(query, "buckets", self.buckets),
                 start=float_arg(query, "from"),
                 end=float_arg(query, "to"),
+                upsample=upsample,
             )
         return self._json(out)
 

@@ -23,16 +23,25 @@ from . import timebase
 
 __all__ = [
     "SPEED_CANDIDATES",
+    "UPSAMPLE_MODES",
     "name_table",
     "resolve_channel",
     "speed_channel",
     "speed_series",
+    "upsample_to_master",
     "distance_series",
     "gps_pair",
     "gps_distance",
     "gps_track",
     "to_meters",
 ]
+
+#: i2 Pro 的 Channel Up-sampling 属性（帮助文件 《Log Files → Channel Properties》原文：
+#: "how to calculate the channel value when a value is required that lies between sample
+#: points. This is used when displaying a graph to 'join the dots'."）。四种取值与它一一对应：
+#: ``linear`` 线性插值 / ``previous`` 保持前值（零阶保持）/ ``closest`` 取最近点 / ``next`` 取下一个点。
+#: **画图默认 ``linear``**，分析路径仍然用 ``previous``（见 :func:`upsample_to_master`）。
+UPSAMPLE_MODES = ("linear", "previous", "closest", "next")
 
 SPEED_CANDIDATES = (
     "Ground Speed",
@@ -154,6 +163,63 @@ def hold_to_master(log: ldmod.LogFile, name: str) -> np.ndarray:
         pad = values[-1] if values.size else 0.0
         values = np.concatenate([values, np.full(n - values.size, pad)])
     return values[:n]
+
+
+def upsample_to_master(
+    log: ldmod.LogFile, name: str, mode: str = "linear"
+) -> np.ndarray:
+    """把一条通道搬到主时间基上，**点与点之间怎么取值**由 ``mode`` 说了算。
+
+    这是 i2 Pro 的 Channel Up-sampling 属性：
+
+    * ``"previous"``：保持前值，就是 :func:`hold_to_master`——**分析路径一直用它**，
+      距离轴、切圈、报表、导出、直方图一个都没改；
+    * ``"linear"``：相邻两个原始采样之间连一条直线，i2 Pro 画图 "join the dots" 的默认观感；
+    * ``"closest"``：取最近的那个采样点；
+    * ``"next"``：取下一个采样点。
+
+    为什么画图要单开这一条路：`.ld` 里慢通道不少（高避金标准实测 437 条里 147 条低于
+    50 Hz，`Gear` / 5V 供电只有 1 Hz）。零阶保持会把 1 Hz 的通道画成"每 1 秒一个平顶、
+    中间一道竖直跳变"，而 i2 Pro 默认把这些点连成斜线——同一个文件，观感差别就在这。
+
+    已经在主时间基上的列（数学通道、CAN 用例导入时已经零阶保持的列）没有"点与点之间"
+    可插，四种取值的答案都是它自己：这时候**不该**再抽一遍，否则数学通道会被按原生
+    采样率拉长（ticket #18 修过一次的错）。
+
+    ``mode`` 不认识时报中文错并列出可选项——调用方（HTTP 那一层）直接把这句转给用户。
+    """
+    if mode not in UPSAMPLE_MODES:
+        raise ValueError(
+            f"不认识的曲线连接方式 {mode!r}：可选的只有 "
+            + " / ".join(UPSAMPLE_MODES)
+            + "。"
+        )
+    ch = log.channel(name)
+    n = timebase.length(log)
+    values = np.asarray(log.values(ch), dtype=np.float64)
+    if mode == "previous" or channelsmod.is_derived(log, ch) or values.size == n:
+        return hold_to_master(log, name)
+    if values.size == 0:
+        return np.zeros(n, dtype=np.float64)
+    times = ch.time()
+    master = timebase.axis(log)
+    if mode == "linear":
+        out = np.interp(master, times, values)
+    else:
+        index = np.searchsorted(times, master)
+        if mode == "next":
+            out = values[np.minimum(index, values.size - 1)]
+        else:                                   # closest：左右两点比一下谁近
+            right = np.minimum(index, values.size - 1)
+            left = np.maximum(right - 1, 0)
+            nearer = np.where(
+                np.abs(times[right] - master) <= np.abs(master - times[left]), right, left
+            )
+            out = values[nearer]
+    if out.size < n:
+        pad = out[-1] if out.size else 0.0
+        out = np.concatenate([out, np.full(n - out.size, pad)])
+    return out[:n]
 
 
 def distance_series(

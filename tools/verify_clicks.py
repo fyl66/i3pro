@@ -2912,6 +2912,246 @@ class Checker:
                    "%s（原始列还在 = 覆盖没把文件里那列吃掉）" % back)
         self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-csv-override.png"), page)
 
+    # ------------------------------------------------ A78 侧边栏快速跳转
+    def sidebar_jump(self):
+        """A78：左边那一栏比屏幕长得多，"跳到哪一栏"要**真的滚过去**、光标放对地方。
+
+        无头那一条（smoke_viewer）只能证明接线对得上：假 DOM 里每个元素的高都是
+        同一个数，滚动量不出来。这条用真鼠标真键盘量三件事：
+
+        ① 点了最靠下的那一栏，滚动容器（aside）的 ``scrollTop`` 真的变了；
+        ② 那一栏的标题**正好贴在按钮排的下面**（既不是没滚到、也不是滚过头）；
+        ③ 点「通道」光标落在搜索框里，真按 Ctrl+K 光标落到那一排按钮上。
+        """
+        def rect_of(selector):
+            raw = self.js(
+                "(function(){var el=document.querySelector(%r);if(!el)return 'null';"
+                "var r=el.getBoundingClientRect();return JSON.stringify({x:r.left+r.width/2,"
+                "y:r.top+r.height/2,w:r.width,h:r.height,top:r.top,bottom:r.bottom});})()"
+                % selector)
+            return json.loads(raw) if raw and raw != "null" else None
+
+        def scroll_top():
+            return float(self.js("document.getElementById('asideScroll').scrollTop") or 0)
+
+        def click_chip(target):
+            box = rect_of("#jumpRow button[data-jump='%s']" % target)
+            if not box or box.get("w", 0) <= 0:
+                return None
+            self.browser.click(box["x"], box["y"], self.session)
+            time.sleep(0.6)
+            return box
+
+        first = click_chip("sheetGroup")
+        self.check("A78 侧边栏顶上有一排「跳到哪一栏」的按钮", bool(first), first)
+        if not first:
+            return
+        self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-jump-rail.png"),
+                          self.session)
+        top = scroll_top()
+        self.check("A78 跳到最上面那一栏时滚动条在顶（不然下面那两步量不出东西）",
+                   top <= 30, top)
+
+        # 靠前的某一栏：这一栏量得准"标题贴到按钮排下面"。**不能拿最靠下的那几栏
+        # 量**：它们底下没有足够内容，滚到底就顶住了（那是正常的，不是 bug）。
+        # 「光标值」还多一层：它默认是收起来的（按 V 才出来），跳过去要顺手打开它——
+        # 隐藏元素的 rect 全是 0，跳了等于没跳（这一条就是真浏览器里量出来的）。
+        hidden_before = self.js(
+            "document.getElementById('valuesGroup').getBoundingClientRect().height<=0")
+        click_chip("valuesGroup")
+        moved = scroll_top()
+        self.check("A78 真点中间那一栏「光标值」-> 侧边栏真的滚下去了",
+                   moved > top + 40, "%s -> %s" % (top, moved))
+        self.check("A78 跳到一个收起来的模块会顺手打开它（光标值默认收着）",
+                   (not hidden_before) or self.js(
+                       "document.getElementById('valuesGroup').getBoundingClientRect().height>0"),
+                   "跳之前收着=%s" % hidden_before)
+        group = rect_of("#valuesGroup > h2")
+        rail = rect_of("#jumpRail")
+        if group and rail:
+            gap = group["top"] - rail["bottom"]
+            self.check("A78 滚过去之后那一栏的标题就在按钮排下面（没被盖住、也没滚过头）",
+                       -2 <= gap <= 60, "%.1f px" % gap)
+        else:
+            self.check("A78 能读到目标那一栏的位置", False, "读不到 rect")
+        self.check("A78 滚过去的那一栏在按钮上也亮着",
+                   self.js("i3pro.jumpActive()") == "valuesGroup",
+                   self.js("i3pro.jumpActive()"))
+
+        # 最靠下的那一栏：到底之后滚不到顶（正常的），但它必须进视野，
+        # 而且按钮排上必须**有一栏亮着**（"我在哪"这件事不许因为滚动而全部灭掉）。
+        click_chip("setupGroup")
+        host = rect_of("#asideScroll")
+        head = rect_of("#setupGroup > h2")
+        if host and head and rail:
+            inside = (head["top"] >= rail["bottom"] - 2) and (head["top"] < host["bottom"] - 20)
+            self.check("A78 最下面那一栏（到底了、滚不到顶）也被带进了视野",
+                       inside, "标题 top=%.1f · 按钮排 bottom=%.1f · 视野底=%.1f"
+                       % (head["top"], rail["bottom"], host["bottom"]))
+        else:
+            self.check("A78 能读到最下面那一栏的位置", False, "读不到 rect")
+        self.check("A78 滚到底之后按钮排上仍然亮着一栏（滚一下不会把高亮全抹掉）",
+                   bool(self.js("i3pro.jumpActive()")), self.js("i3pro.jumpActive()"))
+        self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-jump-bottom.png"),
+                          self.session)
+
+        click_chip("channelGroup")
+        self.check("A78 点「通道」之后光标落在搜索框里（下一步就是打字找通道）",
+                   self.js("(document.activeElement||{}).id") == "chSearch",
+                   self.js("(document.activeElement||{}).id"))
+
+        # 真按 Ctrl+K（CDP 的 modifiers：2 = Ctrl），光标该落到那一排按钮上
+        self.browser.key_named("k", "KeyK", 75, self.session, modifiers=2)
+        time.sleep(0.4)
+        self.check("A78 真按 Ctrl+K -> 光标落到那一排按钮上",
+                   self.js("!!(document.activeElement&&document.activeElement.dataset"
+                           "&&document.activeElement.dataset.jump)"),
+                   self.js("(document.activeElement&&document.activeElement.dataset||{}).jump || ''"))
+        self.browser.key_named("Enter", "Enter", 13, self.session)
+        time.sleep(0.6)
+        self.check("A78 键盘回车也跳得动（跳完那一栏仍亮着）",
+                   self.js("i3pro.jumpActive()") == "channelGroup",
+                   self.js("i3pro.jumpActive()"))
+        # 收尾：回到最上面那一栏，后面的验收从原来那一屏继续
+        click_chip("sheetGroup")
+
+    # ------------------------------------------------ A79 曲线连接（Up-sampling）
+    def curve_join(self, base_url):
+        """A79：i2 Pro 的 Channel Up-sampling——真点「显示 → 曲线连接」，曲线**真的变了**。
+
+        判据不是"选中状态变了"，而是**取回来的值变了**：同一条 10 Hz 的通道、同一个
+        2 秒窗口，线性时相邻点互不相同（斜线），阶梯保持时是 10 个一样的值（平顶）。
+        最后再点回线性，值要变回去——一次单向的闩不算过。
+        """
+        # 挑一条"线性与保持真的不一样"的慢通道：把**所有**比主采样率慢的通道一次性
+        # 各取一份 2 秒窗口（两个请求），在 Python 这边比。**不能随便挑一条**——
+        # 1 Hz 的开关量（Gear）本身就是平的，两种取值同一个答案，量不出差别
+        # （第一次跑就挑中了它）；而只扫前 8 条会先撞上一堆全空的通道。
+        candidates = json.loads(self.js(
+            "(function(){var s=(i3pro.data.channels||[]).filter(function(c){"
+            "return c.rate>=2&&c.rate<50&&!c.derived&&c.has_data;});"
+            "return JSON.stringify(s.map(function(c){return c.name;}));})()") or "[]")
+        self.check("A79 这一场有比主采样率慢的通道（不然看不到平顶）",
+                   bool(candidates), len(candidates))
+        if not candidates:
+            return
+
+        def trace_window(channels, mode):
+            url = (base_url + "api/session/" + urllib.parse.quote(str(sess_name))
+                   + "/trace?channels=" + urllib.parse.quote(",".join(channels))
+                   + "&from=0&to=2&buckets=2000&upsample=" + mode)
+            with urllib.request.urlopen(url, timeout=60) as handle:
+                return json.loads(handle.read().decode("utf-8"))
+
+        sess_name = self.js("i3pro.data.session")
+        linear_all = trace_window(candidates, "linear")
+        previous_all = trace_window(candidates, "previous")
+        name = ""
+        for candidate in candidates:
+            lin = (linear_all.get(candidate) or {}).get("value") or []
+            prev = (previous_all.get(candidate) or {}).get("value") or []
+            if len(lin) >= 10 and len(prev) >= 10 and lin[:10] != prev[:10]:
+                name = candidate
+                probe = {"name": candidate, "linear": lin[:10], "previous": prev[:10]}
+                break
+        self.check("A79 找到一条「线性与保持真的不一样」的慢通道（不然这一票没得验）",
+                   bool(name), name or "204 条候选里一条都没有")
+        if not name:
+            return
+        rate = (linear_all[name].get("rate"))
+
+        def values(n):
+            raw = self.js(
+                "(function(){var t=i3pro.state.traces[%s]||{};"
+                "return JSON.stringify((t.value||[]).slice(0,%d));})()"
+                % (json.dumps(name), n))
+            return json.loads(raw) if raw else []
+
+        def load(name):
+            """把这条通道放进第一张图、窗口缩到 2 秒，并**立刻**取一次数。
+
+            直接改 `state.view` 不会触发取数（那条防抖只在缩放/平移那条路上），
+            所以这里显式强制一次——不强制的话读到的永远是上一次那几条通道。
+            """
+            self.js(
+                "(function(){var g=i3pro.state.components.filter(function(c){"
+                "return c.type==='graph';})[0];g.config.channels=[%s];"
+                "i3pro.state.view=[0,2];i3pro.state.windowKey='';"
+                "i3pro.refreshWindowTraces(true);i3pro.renderAll();return true;})()"
+                % json.dumps(name))
+            self.browser.wait_for(
+                "((i3pro.state.traces[%s]||{}).value||[]).length>0" % json.dumps(name),
+                self.session, timeout=15)
+
+        load(name)
+        linear = values(10)
+        self.check("A79 界面默认取的也是线性那一份（前后端默认是同一个词）",
+                   linear == probe["linear"],
+                   "界面 %s · 直接问接口 %s" % (linear[:4], probe["linear"][:4]))
+
+        self.browser.wait_for(
+            "((i3pro.state.traces[%s]||{}).value||[]).length>0" % json.dumps(name),
+            self.session, timeout=25)
+        linear = values(10)
+        self.check("A79 默认是线性：同一个 10 Hz 通道的相邻点互不相同",
+                   len(linear) >= 10 and len(set(linear[:10])) == 10,
+                   "%s Hz · %s" % (rate, linear[:6]))
+
+        def rect_of_local(selector):
+            raw = self.js(
+                "(function(){var el=document.querySelector(%r);if(!el)return 'null';"
+                "var r=el.getBoundingClientRect();return JSON.stringify({x:r.left+r.width/2,"
+                "y:r.top+r.height/2,w:r.width,h:r.height});})()" % selector)
+            return json.loads(raw) if raw and raw != "null" else None
+
+        def open_display_menu():
+            box = rect_of_local("#worksheet .comp .compbar button[title*='配色与抬头']")
+            if not box:
+                return False
+            self.browser.click(box["x"], box["y"], self.session)
+            time.sleep(0.5)
+            return bool(self.js("!!document.querySelector('.popmenu')"))
+
+        def click_mode(mode):
+            box = rect_of_local(".popmenu .popchip[data-upsample='%s']" % mode)
+            if not box:
+                return False
+            self.browser.click(box["x"], box["y"], self.session)
+            time.sleep(1.4)
+            return True
+
+        self.check("A79 「显示」菜单真的弹得出来", open_display_menu())
+        self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-curve-join-menu.png"),
+                          self.session)
+        self.check("A79 菜单里有「曲线连接」这一排，而且点得到「阶梯保持」",
+                   open_display_menu() and click_mode("previous"))
+        self.browser.wait_for(
+            "(i3pro.state.traces[%s]||{}).upsample==='previous'" % json.dumps(name),
+            self.session, timeout=20)
+        kept = values(10)
+        self.check("A79 选「阶梯保持」之后取回来的值真的换了（就是保持前值那一份）",
+                   kept == probe["previous"] and kept != probe["linear"],
+                   "阶梯 %s · 线性 %s" % (kept[:4], probe["linear"][:4]))
+        self.check("A79 服务端回的那一份也说是阶梯保持",
+                   self.js("(i3pro.state.traces[%s]||{}).upsample||''" % json.dumps(name))
+                   == "previous",
+                   self.js("(i3pro.state.traces[%s]||{}).upsample||''" % json.dumps(name)))
+        title = self.js(
+            "(document.querySelector('#worksheet .comp .ctitle')||{}).textContent || ''")
+        self.check("A79 组件标题里写明了现在这一屏是阶梯保持", "阶梯保持" in (title or ""), title)
+        self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-curve-join-step.png"),
+                          self.session)
+        self.check("A79 再点回「线性」，值也变回去（不是一次性的闩）",
+                   open_display_menu() and click_mode("linear"))
+        self.browser.wait_for(
+            "(i3pro.state.traces[%s]||{}).upsample==='linear'" % json.dumps(name),
+            self.session, timeout=20)
+        back = values(10)
+        self.check("A79 点回线性之后取回来的又是线性那一份（不是一次性的闩）",
+                   back == probe["linear"], back[:6])
+        # 收尾：把窗口放开，后面的验收从整场那一屏继续
+        self.js("(function(){i3pro.state.view=null;i3pro.renderAll();return true;})()")
+
 
 def _blob(path):
     with open(path, "rb") as handle:
@@ -2988,6 +3228,9 @@ def main(argv=None):
             checker.missing_channels(work_dir)
             checker.channel_processing(work_dir, args.session)
             checker.display_settings(work_dir)
+            # A78 / A79：侧边栏那一排跳转按钮，以及「曲线连接」换了之后值真的跟着换。
+            checker.sidebar_jump()
+            checker.curve_join("http://127.0.0.1:%d/" % args.port)
             checker.aliases(work_dir)
             checker.notes(work_dir, args.session)
             checker.gps(work_dir, args.session)

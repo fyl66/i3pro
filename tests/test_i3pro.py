@@ -44,7 +44,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from i3pro import (  # noqa: E402
-    cache, canlog, channelref, channels, csvlog, dbc, derive, gpsfix,
+    axes as axesmod,
+    cache, canlog, channelpick, channelref, channels, csvlog, dbc, derive, gpsfix,
     cli,
     laps as lapsmod, ld, library as librarymod,
     maths as mathsmod, motec_csv,
@@ -477,6 +478,49 @@ class TestGpsPair(unittest.TestCase):
             self.assertEqual(derive.gps_pair(log), ("GPS Latitude", "GPS Longitude"))
 
 class TestLaps(unittest.TestCase):
+    def test_这一场的圈只有一个入口(self):
+        """A81：``detect_laps`` 是**算法**入口，``detect_from_config`` 才是"这一场有哪些圈"。
+
+        2026-10-14 之前有四条命令行（track / delta / render 摘要 / 快照索引）直接问
+        算法，于是同一个 `.ld` 在侧边栏写着 20 圈、`i3pro track` 打印 16 行且整列都
+        标着"(进出场/泊车/异常段)"（实测 `20260912-TV0`，侧车 `mode=figure8`）。
+        这条按源码守：`src/i3pro` 里除了 `laps.py` 自己，不许再出现 `detect_laps(`。
+        """
+        offenders = []
+        for path in sorted((ROOT / "src" / "i3pro").rglob("*.py")):
+            if path.name == "laps.py":
+                continue
+            for number, line in enumerate(path.read_text(encoding="utf-8").split("\n"), 1):
+                if "detect_laps(" in line:
+                    offenders.append(f"{path.name}:{number}")
+        self.assertEqual(
+            offenders, [],
+            "这些地方又自己去问算法了：该问「这一场有哪些圈」（detect_from_config）——"
+            + ", ".join(offenders),
+        )
+
+    @_needs(HILL)
+    def test_侧车说了算(self):
+        """A81：用户在侧车里选了什么，**每一条**取圈的路都得照着来。
+
+        `lap_table(log)` 不给 laps 时以前默认走"不看侧车"的自动路——那是个静默的
+        第二个答案。现在它等于 `detect_from_config`，而后者与自动路在这个夹具上
+        本来就是两个不同结果（run 模式给出的是整段行驶，不是圈）。
+        """
+        sidecar, kept = _borrow_sidecar(HILL)
+        try:
+            sidecar.write_text(
+                json.dumps({"mode": "run", "beacons": [], "trusted": {}}), encoding="utf-8"
+            )
+            with ld.LogFile.read(HILL) as log:
+                auto = lapsmod.lap_table(log, lapsmod.detect_laps(log))
+                default = lapsmod.lap_table(log)                    # 不给 laps：这一场的答案
+                explicit = lapsmod.lap_table(log, lapsmod.detect_from_config(log))
+            self.assertEqual(default, explicit, "默认那条路与「看侧车」那条路不是同一个答案")
+            self.assertNotEqual(default, auto, "侧车写了 run，默认那条路还是按 auto 切")
+        finally:
+            _return_sidecar(sidecar, kept)
+
     @_needs(HILL)
     def test_gps_laps_hill_climb(self):
         with ld.LogFile.read(HILL) as log:
@@ -524,6 +568,78 @@ class TestLaps(unittest.TestCase):
                 ),
                 0.6,
             )
+
+
+class TestDefaultPair(unittest.TestCase):
+    """A82：默认比哪两条圈，只有一处规则；命令行与载荷用的是同一个。"""
+
+    @staticmethod
+    def _lap(index: int, label: str, seconds: float, complete: bool = True):
+        return lapsmod.Lap(
+            index=index, label=label, start_time=index * 100.0,
+            end_time=index * 100.0 + seconds, start_distance=0.0,
+            end_distance=seconds * 20.0, complete=complete,
+        )
+
+    def test_没说就取最快的两条(self):
+        laps = [self._lap(0, "1", 52.0), self._lap(1, "2", 40.0), self._lap(2, "3", 44.0)]
+        ref, cmp = axesmod.default_pair(laps)
+        self.assertIs(ref, laps[1])            # 40.0 最快
+        self.assertIs(cmp, laps[2])            # 第二快是 44.0，不是 52.0
+
+    def test_点名了就用点名的那条(self):
+        laps = [self._lap(0, "1", 52.0), self._lap(1, "2", 40.0), self._lap(2, "3", 44.0)]
+        ref, cmp = axesmod.default_pair(laps, ref="1")
+        self.assertIs(ref, laps[0])
+        self.assertIs(cmp, laps[1])            # 对比圈仍然是剩下里最快的
+        ref, cmp = axesmod.default_pair(laps, ref="1", cmp="3")
+        self.assertIs(ref, laps[0])
+        self.assertIs(cmp, laps[2])
+        # 点名的那条与最快的撞上时不许把同一圈当成两条（差值恒为 0 的图会骗人）
+        ref, cmp = axesmod.default_pair(laps, ref="3", cmp="3")
+        self.assertIsNot(ref, cmp)
+
+    def test_只有一条圈时明说没有可比的那一条(self):
+        one = [self._lap(0, "1", 52.0)]
+        ref, cmp = axesmod.default_pair(one)
+        self.assertIs(ref, one[0])
+        self.assertIsNone(cmp)
+        self.assertEqual(axesmod.default_pair([]), (None, None))
+
+    def test_载荷那条路用的是同一处规则(self):
+        """render.default_lap_pair 只是形状适配器——两处再各挑一次就是 A82 要修的事。"""
+        laps = [self._lap(0, "1", 52.0), self._lap(1, "2", 40.0), self._lap(2, "3", 44.0)]
+        for kwargs in ({}, {"ref": "1"}, {"ref": "3", "cmp": "2"}):
+            with self.subTest(kwargs=kwargs):
+                self.assertEqual(
+                    render.default_lap_pair(None, laps, **kwargs),
+                    axesmod.default_pair(laps, **kwargs),
+                )
+
+    @_needs(HILL)
+    def test_命令行不再自己挑一遍(self):
+        """`i3pro delta` 曾经自己挑 ref/cmp，而且默认参数下 `args.ref_index()` 直接抛错
+        （解析器里它是 int）。这条钉住两件事：命令真的跑完、写出的那两条就是
+        `axes.default_pair` 挑的那两条。"""
+        with ld.LogFile.read(HILL) as log:
+            laps = lapsmod.detect_from_config(log)
+            ref, cmp = axesmod.default_pair(laps)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "delta.json"
+            code = cli.main(["delta", str(HILL), "--out", str(out)])
+            self.assertEqual(code, 0)
+            payload = json.loads(out.read_text(encoding="utf-8"))
+        self.assertEqual(payload["reference"], ref.label)
+        self.assertEqual(payload["compare"], cmp.label)
+        self.assertEqual(len(payload["delta"]), len(payload["distance"]))
+
+    @_needs(HILL)
+    def test_命令行的标签打错时不静默换成最快的(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "delta.json"
+            code = cli.main(["delta", str(HILL), "--ref", "不存在的圈", "--out", str(out)])
+        self.assertEqual(code, 1)
+        self.assertFalse(out.exists(), "打错的标签不该还落一个文件出来")
 
 
 class TestStore(unittest.TestCase):
@@ -2250,6 +2366,63 @@ class TestViewerScript(unittest.TestCase):
         for mode in derive.UPSAMPLE_MODES:
             self.assertIn(mode + ":", labels.group(1).replace('"', ""),
                           f"「{mode}」在按钮上没有中文名")
+
+    def test_导出表里每个名字都有人过(self):
+        """A85：`window.i3pro` 是前端唯一的测试缝，缝上每个名字都得有消费者。
+
+        实测（2026-10-14）：导出 207 个名字，其中 **68 个**在 `tools/` 与 `tests/`
+        里一次都没出现——上一轮评审删掉的 3 个死导出只是这个类的零头。缝宽了，
+        "哪条边才是可测的"就被淹掉，而每加一个功能都会顺手再挂一个没人用的句柄。
+
+        这条是粗判（名字恰好出现在别处的文字里也会算过），挡的是**整批**死导出
+        悄悄长回来。
+        """
+        page = (ROOT / "src" / "i3pro" / "web" / "viewer.html").read_text(encoding="utf-8")
+        start = page.index("window.i3pro = {")
+        block = page[start:page.index("\n};", start)]
+        names = sorted({m for m in re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\s*:", block)})
+        self.assertGreater(len(names), 100, "导出表读不出来，这条守卫会永远绿：" + str(len(names)))
+        words = set()
+        paths = (list((ROOT / "tools").glob("*.js")) + list((ROOT / "tools").glob("*.py"))
+                 + list((ROOT / "tests").glob("*.py")))
+        for path in paths:
+            words |= set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*",
+                                    path.read_text(encoding="utf-8")))
+        missing = sorted(n for n in names if n not in words and n != "jumpActive")
+        self.assertEqual(missing, [],
+                         "导出表里这些名字没有任何消费者（要么给它一个消费者，要么别导出）："
+                         + ", ".join(missing))
+
+    def test_转义只有一个实现(self):
+        """A84：`esc` 是唯一的转义器，`escapeText` 那份逐字节相同的副本已经删掉。
+
+        两个转义器隔了 3800 行各活一份时，"转不转义"就成了每个调用点的自觉——实测
+        已经漏了一处（通道列表里的通道名原样写进 innerHTML）。这条按源码钉死一处。
+        """
+        page = (ROOT / "src" / "i3pro" / "web" / "viewer.html").read_text(encoding="utf-8")
+        self.assertEqual(page.count("function esc("), 1, "转义函数不止一处了")
+        self.assertNotIn("escapeText", page, "第二个转义器又回来了")
+        # 通道名那一行真的转义了（它来自 .ld / CSV 表头）
+        self.assertIn("""'<span class="nm">' + esc(name) + '</span>'""", page)
+
+    def test_写路径只有一个出口(self):
+        """A83：`/session/<场次>` 的 URL 只准在 `apiUrl` 里拼一次，写路径全走 `sessionRequest`。
+
+        以前十处写路径各自 `fetch(DATA.api + "/session/" + …)`，失败也各解一遍——同一件
+        事五种写法，服务端写好的中文原因在其中一种里被换成了 `HTTP 400`（规则 6 要的是
+        "说下一步做什么"）。这条按源码钉住那两件事。
+        """
+        page = (ROOT / "src" / "i3pro" / "web" / "viewer.html").read_text(encoding="utf-8")
+        self.assertEqual(
+            page.count('DATA.api + "/session/"'), 1,
+            "又有地方在 apiUrl 之外自己拼场次路由了（写路径该走 sessionRequest）",
+        )
+        self.assertGreaterEqual(
+            page.count("sessionRequest("), 10,
+            "写路径没有都走 sessionRequest：" + str(page.count("sessionRequest(")),
+        )
+        self.assertIn("sessionRequest: sessionRequest,", page,
+                      "sessionRequest 没导出：真浏览器那关（A83）驱动不了它")
 
     def test_窗口缓存键不许跟着曲线连接方式跑(self):
         """A79 评审：``windowKey`` 也是轨迹图（/track）的缓存键，别把 upsample 混进去。
@@ -4932,6 +5105,29 @@ class TestStructureOfTheSplit(unittest.TestCase):
         return "\n".join(
             line for line in text.splitlines() if not line.lstrip().startswith("#")
         )
+
+    def test_读取层不再反向依赖载荷层(self):
+        """A86：六种输入格式的读取器（L1）不许 import 载荷层（L3）。
+
+        `csvlog` 当年只是为了三张"哪几类通道名"的表 import 了整个 `render`——
+        全包唯一一处 L1 → L3 的反向依赖（2026-10-15 架构评审量出来的）。表搬进
+        `channelpick` 之后两边都只 import 它。
+        """
+        payload = ("render", "indexpage", "worksheets", "export", "api", "server",
+                   "library")
+        readers = ("ld", "motec_csv", "csvlog", "txtlog", "xlslog", "canlog", "dbc")
+        offenders = []
+        for reader in readers:
+            code = self._code(f"{reader}.py")
+            for module in payload:
+                if f"import {module}\n" in code or f"import {module} as" in code \
+                        or f"import {module}," in code or f", {module}\n" in code:
+                    offenders.append(f"{reader}.py -> {module}.py")
+        self.assertEqual(offenders, [],
+                         "读取层反向依赖载荷层了（表该住在 channelpick 这类地方）："
+                         + ", ".join(offenders))
+        self.assertIn("import channelpick", self._code("csvlog.py"),
+                      "csvlog 认列名要用的那三张表该来自 channelpick")
 
     # ---------------------------------------------------------- #23 服务端
     def test_server_只剩_HTTP_管道(self):
@@ -8568,14 +8764,15 @@ class TestSpeedChannelResolution(unittest.TestCase):
         session = self._can()
         self.assertEqual(render.overview_channel(session, ["Steering_Linear"]), "Vx_KF")
         # 把速度候选都拿掉（空表）时，才轮到第一条被选中的通道
-        saved = render.SPEED_FOR_COLORING
-        render.SPEED_FOR_COLORING = ()
+        # （这张表现在住 channelpick，A86：读取层认列名也要用它，别放回载荷层）
+        saved = channelpick.SPEED_FOR_COLORING
+        channelpick.SPEED_FOR_COLORING = ()
         try:
             self.assertEqual(render.overview_channel(session, ["Steering_Linear"]),
                              "Steering_Linear")
             self.assertIsNone(render.overview_channel(session, []))
         finally:
-            render.SPEED_FOR_COLORING = saved
+            channelpick.SPEED_FOR_COLORING = saved
 
     def test_the_golden_sessions_keep_the_channel_they_always_showed(self):
         """冻结：改这条解析不许动 ``.ld`` 场次的概览条（23 个场次逐个比对过）。"""

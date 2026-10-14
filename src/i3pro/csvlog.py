@@ -30,7 +30,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import channelref, derive, ld as ldmod, render, sidecar
+from . import channelpick, channelref, derive, ld as ldmod, sidecar
 
 __all__ = ["CsvSession", "read_csv_session", "canonical_names", "ALIASES", "scan_rows",
            "load_map", "save_map", "load_sheet", "load_options", "save_options",
@@ -167,9 +167,9 @@ def save_options(path: str | Path, **options) -> Path:
 #: look channels up, so this list cannot drift from them.
 def canonical_names() -> list[str]:
     names = set(derive.SPEED_CANDIDATES)
-    names |= set(render.DEFAULT_CHANNEL_PRIORITY)
-    names |= set(render.OVERLAY_PRIORITY)
-    names |= set(render.SPEED_FOR_COLORING)
+    names |= set(channelpick.DEFAULT_CHANNEL_PRIORITY)
+    names |= set(channelpick.OVERLAY_PRIORITY)
+    names |= set(channelpick.SPEED_FOR_COLORING)
     return sorted(names)
 
 

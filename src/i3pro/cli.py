@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from . import axes as axesmod
 from . import csvlog, export as exportmod, laps as lapsmod
 from . import library as librarymod
 from . import derive
@@ -267,7 +268,9 @@ def cmd_delta(args: argparse.Namespace) -> int:
     )
     with _session(args, args.file) as log:
         try:
-            laps = lapsmod.detect_laps(log)
+            # 「这一场有哪些圈」只有一个入口（A81）：命令行也得看侧车，
+            # 否则同一个场次在侧边栏与这里给出两个圈数。
+            laps = lapsmod.detect_from_config(log)
         except ValueError as exc:
             print(f"# {exc}")
             return 1
@@ -275,15 +278,18 @@ def cmd_delta(args: argparse.Namespace) -> int:
             print("no laps found")
             return 1
         by_label = {l.label: l for l in laps}
-        ranked = sorted((l for l in laps if l.complete), key=lambda l: l.lap_time) or laps
-        ref = by_label.get(args.ref) or (
-            laps[args.ref_index()] if args.ref_index() != 0 else ranked[0]
-        )
-        cmp = by_label.get(args.cmp) or (
-            laps[args.cmp_index()] if args.cmp_index() != -1 else (ranked[1] if len(ranked) > 1 else laps[-1])
-        )
-        if cmp is ref:
-            cmp = next((l for l in ranked if l is not ref), ref)
+        # 点名的标签得真的存在：`--ref 左环-3` 打错一个字符就静默换成"最快那条"，
+        # 用户会拿着别人的圈比自己以为的那条（而且不报错）。
+        for given, flag in ((args.ref, "--ref"), (args.cmp, "--cmp")):
+            if given and given not in by_label:
+                print(f"# {flag} {given!r} 不是这一场的圈标签（可选: "
+                      + ", ".join(by_label) + "）")
+                return 1
+        # 「默认比哪两条」只有一处规则（axes.default_pair，A82）——载荷那条路用的是同一个。
+        ref, cmp = axesmod.default_pair(laps, ref=args.ref, cmp=args.cmp)
+        if cmp is None:
+            print("# 这一场只有一条圈，没有可比的那一条")
+            return 1
         available = [c for c in channels if log.has(c)]
         missing = [c for c in channels if not log.has(c)]
         if missing:
@@ -433,7 +439,7 @@ def cmd_render(args: argparse.Namespace) -> int:
             worksheets_dir=args.worksheets,
         )
         try:
-            laps = lapsmod.detect_laps(log)
+            laps = lapsmod.detect_from_config(log)     # 这一场的答案（看侧车，A81）
             complete = [l for l in laps if l.complete]
             best = min((l.lap_time for l in complete), default=None)
             best_txt = "-" if best is None else f"{best:.3f}s"
@@ -499,7 +505,8 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
                 log = library.get(name)          # 数学通道 / CAN 的 DBC 都在这里挂上
                 laps: list = []
                 try:
-                    laps = lapsmod.detect_laps(log)
+                    # 索引里的圈数要与它自己写出来的那个页面一致（A81）
+                    laps = lapsmod.detect_from_config(log)
                 except ValueError:
                     pass
                 rendermod.render_html(
@@ -891,7 +898,7 @@ def cmd_track(args: argparse.Namespace) -> int:
     """Print a coarse ASCII trace of the detected lap times (quick sanity check)."""
     with _session(args, args.file) as log:
         try:
-            laps = lapsmod.detect_laps(log)
+            laps = lapsmod.detect_from_config(log)     # 这一场的答案（看侧车，A81）
         except ValueError as exc:
             print(f"# {exc}")
             return 1
@@ -999,8 +1006,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("file")
     p.add_argument("--ref", help="基准圈标签 (如 2)")
     p.add_argument("--cmp", help="对比圈标签 (如 3)")
-    p.add_argument("--ref-index", type=int, default=0)
-    p.add_argument("--cmp-index", type=int, default=-1)
     p.add_argument("--channels", help="叠加的通道, 逗号分隔")
     p.add_argument("--step", type=float, default=1.0, help="距离插值步长 [m]")
     p.add_argument("--out", help="输出 JSON 路径")

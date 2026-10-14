@@ -21,6 +21,8 @@ from pathlib import Path
 import numpy as np
 
 from . import aliases as aliasesmod
+from . import channelpick as channelpickmod
+from . import axes as axesmod
 from . import channelref
 from . import channels as channelsmod
 from . import derive, gpsfix, histogram as histogrammod, laps as lapsmod
@@ -67,44 +69,8 @@ DEFAULT_BUCKETS = 2000
 #: 图的「显示 → 曲线连接」里选「阶梯保持」。分析路径不受它影响（见 derive）。
 DEFAULT_UPSAMPLE = "linear"
 
-#: Channels a driver/vehicle-dynamics engineer opens first, best first.
-DEFAULT_CHANNEL_PRIORITY = (
-    "Vx KF",
-    "Ground Speed",
-    "GPS Speed",
-    "SpeedFL",
-    "SpeedFR",
-    "SpeedRL",
-    "SpeedRR",
-    "Brake Signal",
-    "TH",
-    "Throttle",
-    "Brake Pressure",
-    "G Force Lat",
-    "G Force Long",
-    "G Force Vert",
-    "Steering Angle",
-    "SW Angle",
-    "SteerAngle",
-    "AMKFR ActualTorqueValue",
-    "Battery Power",
-    "MCU1 FR TempMotor",
-    "GPS Heading",
-    "AngleSlip",
-)
-
-#: Channels the distance-axis overlay compares by default.
-OVERLAY_PRIORITY = (
-    "Vx KF",
-    "Ground Speed",
-    "SpeedFR",
-    "Brake Signal",
-    "TH",
-    "G Force Long",
-    "AMKFR ActualTorqueValue",
-)
-
-SPEED_FOR_COLORING = ("Vx KF", "Ground Speed", "GPS Speed", "SpeedFR", "SpeedFL")
+#: 三张"哪几类通道名"的表住在 :mod:`i3pro.channelpick`（A86）：读取层
+#: (``csvlog``) 认列名也要用它们，表留在这里就是 L1 反向 import L3。
 
 
 def display_speed_channel(log: ldmod.LogFile) -> str | None:
@@ -123,7 +89,7 @@ def display_speed_channel(log: ldmod.LogFile) -> str | None:
     （通道在、值不动），两种情况都比原来"整条横条消失"更接近事实。
     """
     table = derive.name_table(log)
-    for candidate in SPEED_FOR_COLORING:
+    for candidate in channelpickmod.SPEED_FOR_COLORING:
         actual = derive.resolve_channel(log, candidate, table)
         if actual is not None:
             return actual
@@ -613,7 +579,7 @@ def trace(
 
 def pick_channels(log: ldmod.LogFile, limit: int = 12) -> list[str]:
     """Prefer the engineer's usual channels, then pad with anything live."""
-    picked = [name for name in DEFAULT_CHANNEL_PRIORITY if log.has(name)]
+    picked = [name for name in channelpickmod.DEFAULT_CHANNEL_PRIORITY if log.has(name)]
     if len(picked) < limit:
         for ch in log.channels:
             if ch.name in picked or not ch.unit:
@@ -627,7 +593,7 @@ def pick_channels(log: ldmod.LogFile, limit: int = 12) -> list[str]:
 
 
 def overlay_channels(log: ldmod.LogFile) -> list[str]:
-    picked = [name for name in OVERLAY_PRIORITY if log.has(name)]
+    picked = [name for name in channelpickmod.OVERLAY_PRIORITY if log.has(name)]
     return picked or pick_channels(log, 3)
 
 
@@ -674,22 +640,12 @@ def detect(log: ldmod.LogFile):
 
 
 def default_lap_pair(log: ldmod.LogFile, laps, ref: str | None = None, cmp: str | None = None):
-    """The two laps a race engineer wants by default: the quickest ones."""
-    if len(laps) < 2:
-        return None, None
-    by_label = {l.label: l for l in laps}
-    if ref and ref in by_label:
-        chosen_ref = by_label[ref]
-    else:
-        ranked = sorted((l for l in laps if l.complete), key=lambda l: l.lap_time) or laps
-        chosen_ref = ranked[0]
-    if cmp and cmp in by_label and by_label[cmp] is not chosen_ref:
-        return chosen_ref, by_label[cmp]
-    ranked = sorted(
-        (l for l in laps if l.complete and l is not chosen_ref), key=lambda l: l.lap_time
-    )
-    chosen_cmp = ranked[0] if ranked else next((l for l in laps if l is not chosen_ref), None)
-    return chosen_ref, chosen_cmp
+    """The two laps a race engineer wants by default: the quickest ones.
+
+    规则在 :func:`i3pro.axes.default_pair`（命令行 ``i3pro delta`` 用的是同一个）——
+    载荷这边只剩"要什么形状"。以前两处各挑一次，兜底还不一样（A82）。
+    """
+    return axesmod.default_pair(laps, ref=ref, cmp=cmp)
 
 
 def track_payload(

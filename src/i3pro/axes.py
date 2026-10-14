@@ -7,6 +7,10 @@
 * ``overlay`` / ``time_delta``：i2 Pro 的看家功能——两圈放到同一条距离轴上比，
   再算累计时间差。
 
+* ``default_pair``：**默认要比哪两条圈**——``ref`` / ``cmp`` 说了算，没说就取最快的
+  两条。这个问题以前写了两遍（载荷一处、``i3pro delta`` 一处），兜底规则还不一样，
+  其中一遍在默认参数下根本跑不到底（见 A82）。
+
 切圈在 :mod:`i3pro.laps`，信标与配置在 :mod:`i3pro.beacons`。
 """
 
@@ -24,11 +28,39 @@ if TYPE_CHECKING:  # 只是标注：真 import 会绕回 laps -> axes 的环
     from .laps import Lap
 
 __all__ = [
+    "default_pair",
     "distance_on_master",
     "overlay",
     "time_at_distance",
     "time_delta",
 ]
+
+
+def default_pair(
+    laps: list[Lap], ref: str | None = None, cmp: str | None = None
+) -> tuple[Lap | None, Lap | None]:
+    """要对比的那两条圈：``ref`` / ``cmp`` 是**圈的标签**（``"2"`` / ``"左环-3"``）
+    时就照它，没说就取**最快的那两条**。
+
+    只要一条圈、或者一条完整圈都没有时按原样尽力而为：参照圈取不完整里最快的那条，
+    对比圈取剩下最像样的一条；真的只有一条圈就返回 ``(它, None)``——调用方拿到
+    ``None`` 就该说"没有可比的那一条"，不许拿它自己去比自己（差值恒为 0 的图看着
+    像"两圈一样快"）。
+    """
+    if len(laps) < 2:
+        return (laps[0] if laps else None), None
+    by_label = {lap.label: lap for lap in laps}
+    chosen_ref = by_label.get(ref) if ref else None
+    if chosen_ref is None:
+        ranked = sorted((l for l in laps if l.complete), key=lambda l: l.lap_time) or list(laps)
+        chosen_ref = ranked[0]
+    if cmp and cmp in by_label and by_label[cmp] is not chosen_ref:
+        return chosen_ref, by_label[cmp]
+    ranked = sorted(
+        (l for l in laps if l.complete and l is not chosen_ref), key=lambda l: l.lap_time
+    )
+    chosen_cmp = ranked[0] if ranked else next((l for l in laps if l is not chosen_ref), None)
+    return chosen_ref, chosen_cmp
 
 
 def overlay(

@@ -4240,3 +4240,224 @@ python out\_gps_sweep.py
 本机 `C:` 只剩 0 GB 时这四条会以 `OSError: [Errno 28] No space left on device` 成片报错
 ——那是磁盘不是代码。把 `%TEMP%` 指到有空间的分区再跑即可（本次实测：
 `$env:TEMP="E:\桌面\i3pro\out\_temp"; $env:TMP=$env:TEMP`）。
+
+---
+
+## A81 · 「这一场有哪些圈」只有一个入口（本次修复）
+
+2026-10-15 的架构评审量出来的：**同一个 `.ld` 会给出两个圈速答案**。
+`laps.detect_laps` 是**算法**入口（只看算法，不看侧车），`laps.detect_from_config` 才是
+"这一场有哪些圈"（读用户选的信标 / 模式 / 可信圈）。界面与侧边栏走的是后者，
+而 track / delta / render 摘要 / 快照索引四条命令行走了前者。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 单源 | `laps.lap_table(log)` 不给 laps 时问的就是 `detect_from_config`（以前默认走自动路） |
+| 四处调用点 | `cli.py` 的 `cmd_track` / `cmd_delta` / `cmd_render` 摘要 / `cmd_snapshot` 索引改走 `detect_from_config` |
+| 说清楚 | `laps.py` 的模块文档把两个入口的差别写死：一个是算法，一个是这一场的答案 |
+| 守卫 | `TestLaps.test_这一场的圈只有一个入口`：按源码钉住 `src/i3pro` 里除 `laps.py` 不许再出现 `detect_laps(` |
+
+```powershell
+python -m unittest tests.test_i3pro.TestLaps tests.test_i3pro.TestLapModes -v
+python -m i3pro track "i2pro_data\20260912-TV0.ld"        # 侧车写着 mode=figure8
+```
+
+**通过判据（本机实测，2026-10-15）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| `20260912-TV0` 的圈数 | 修之前 **16 圈 / 0 完整 / 最快 无**（16 行全挂 `(进出场/泊车/异常段)`）；修之后 **20 圈 / 16 完整 / 最快 10.980 s**，与侧边栏同一个数 |
+| `20260908-jhy高避2圈`（侧车 `mode=run`） | 1 圈 / 0 完整 → **5 圈 / 2 完整（最快 35.120 s）** |
+| 侧车说了算 | 往金标准副本写 `{"mode":"run"}` 之后 `lap_table(log)` 与 `detect_from_config` **逐行相同**，且与不看侧车的自动路**不同** |
+| 源码守卫 | `src/i3pro` 里 `detect_laps(` 只出现在 `laps.py`（那 4 处调用点清零） |
+
+**五件套的落点**：① `laps.lap_table` 的默认 + `cli.py` 四处 + `laps.py` 的文档；
+② 单测 `TestLaps` 新增 2 条；③ 无头断言不加——这条改的是"取哪一份圈"，页面载荷的形状
+一个字没动（`render.detect` 本来就是对的）；④ 本条目；⑤ 两份金标准快照照旧全绿。
+
+---
+
+## A82 · 默认比哪两条圈只有一处规则（本次修复）
+
+同一轮评审量出来的：**`i3pro delta` 从来没跑到底过**。默认参数下
+`cli.py` 里的 `args.ref_index()` 直接抛 `TypeError: 'int' object is not callable`
+（解析器把 `--ref-index` 定义成 `type=int`），而"默认看哪两条圈"这件事还写了两遍
+（`render.default_lap_pair` 与 `cmd_delta` 各挑一次，兜底规则不一样）。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 单源 | 规则搬进 `axes.default_pair(laps, ref, cmp)`（"距离轴与圈差"那一层）；`render.default_lap_pair` 只剩形状适配，`cmd_delta` 调同一个 |
+| 命令能跑 | 删掉从来没工作过的 `--ref-index` / `--cmp-index`；`--ref` / `--cmp` 按**标签**点名 |
+| 不静默 | 点名的标签不在这一场里时报错并列出可选标签（以前会静默换成"最快那条"） |
+| 边界 | 只有一条圈时明说"没有可比的那一条"，不拿它自己比自己（差值恒为 0 的图会骗人） |
+
+```powershell
+python -m unittest tests.test_i3pro.TestDefaultPair -v
+python -m i3pro delta "i2pro_data\20260908-cjh 高避5圈.ld"          # 不给任何参数
+python -m i3pro delta "i2pro_data\20260908-cjh 高避5圈.ld" --ref 99  # 打错的标签
+```
+
+**通过判据（本机实测，2026-10-15）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 默认参数 | `lap 左环 5 (40.440s) vs lap 左环 2 (40.560s), lap-time difference +0.120s`，并写出 `.delta.json` |
+| 打错的标签 | `# --ref '99' 不是这一场的圈标签（可选: 左环 1, …, 左环 7）`，退出码 1，**不落文件** |
+| 与载荷同源 | `render.default_lap_pair` 与 `axes.default_pair` 三种入参（默认 / 只给 ref / 同时给）逐个相等 |
+| 命令真的跑完 | `cli.main(["delta", HILL, "--out", …])` 返回 0，写出的 `reference`/`compare` 就是 `axes.default_pair` 挑的那两条 |
+
+**五件套的落点**：① `axes.default_pair` + `render.default_lap_pair` 转调 + `cli.cmd_delta`；
+② 单测 `TestDefaultPair` 6 条（含两条端到端）；③ 无头断言不加——命令行不在页面上，
+这条的判据就是命令本身；④ 本条目；⑤ 两份金标准照旧全绿（`delta` 在金标准上跑出上面那行）。
+
+---
+
+## A83 · 写路径只有一条缝（本次修复）
+
+`viewer.html` 的注释里写着 `apiUrl` 是"请求地址的唯一出处"、`apiGet` 是"唯一的请求出口"，
+但**只有读路径走它们**：十处写路径各自 `fetch(DATA.api + "/session/" + …)`，失败也各解一遍
+（五种写法），服务端写好的中文原因在其中一种里被换成 `HTTP 400`——AGENTS 规则 6 要的是
+"报错说下一步做什么"。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 出口 | 新增 `sessionRequest(route, {method, params, body})`：URL 走 `apiUrl`，失败解出服务端那句中文并挂在 Error 上（`body` / `status` 一起带上） |
+| 十处调用点 | 信标 / 注释 / GPS（读写）/ 数学通道（读、保存、试算）/ 区段（读、保存）/ 通道索引 |
+| 不留第二只手 | 单测按源码钉住 `DATA.api + "/session/"` 在 `viewer.html` 里只出现一次（就是 `apiUrl` 自己那行） |
+| 只在场的 | 工作表那条路由不在 `/session/<场次>` 前缀下，仍走自己的 `fetch`（`apiUrl` 只认场次路由） |
+
+```powershell
+python -m unittest tests.test_i3pro.TestViewerScript -v
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
+python tools\verify_clicks.py
+```
+
+**通过判据（本机实测，2026-10-15）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 手拼 URL | `viewer.html` 里 `fetch(` 共 5 行（`apiGet`、`sessionRequest`、导出下载 2 处、工作表路由 1 处）；`DATA.api + "/session/"` **只剩 1 处**（`apiUrl` 里面那行） |
+| 服务端原因没被吞 | 真浏览器：让服务端拒一条注释（时刻落在这一场外），toast 是服务端那句中文、**不含 `HTTP 400`**，页面走的是 `sessionRequest` |
+| 写路径仍然能写 | `verify_clicks.py` 里信标改名 / 插穿越 / 删信标 / 注释 / GPS / 区段 / 通道处理 / 工作表那几段全过（写路径一条没坏） |
+| 快照模式 | 各写入方原有的"快照模式不能改…"提示一字未动（那些判断留在了各自的领域里） |
+
+**五件套的落点**：① `readJson` / `failureOf` / `sessionRequest` + 十处调用点；
+② 单测 `TestViewerScript.test_写路径只有一个出口`；③ 无头断言：假 DOM 里 fetch 永远 reject，
+这一条归真浏览器（`verify_clicks.py` 的 `write_seam`，2 条）；④ 本条目；
+⑤ 两份金标准快照照旧 PASS。
+
+---
+
+## A84 · 转义只有一处（本次修复）
+
+`esc`（72 处调用）与 `escapeText`（8 处调用）**行为逐字节相同**、隔着 3800 行各活一份，
+于是"转不转义"成了每个调用点的自觉——实测已经漏了一处：通道列表把通道名原样写进
+`innerHTML`（`<span class="nm">` + name），而三行之隔的 `processedTitle` 却转义了。
+通道名来自用户文件（`.ld` / CSV 表头），这是现成的注入点。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 一个转义器 | 删掉 `escapeText`，8 处调用改 `esc` |
+| 补上漏的那处 | 通道列表两处行模板（在册通道 / 本场次没有）都改成 `esc(name)` |
+| 守卫 | `TestViewerScript.test_转义只有一个实现`：按源码钉住 `function esc(` 只有一处、`escapeText` 不再出现 |
+| 无头断言 | smoke 里往通道表里塞一条名字带尖括号的通道，断言它画出来是 `&lt;img src=x&gt;` 而不是标记 |
+
+```powershell
+python -m unittest tests.test_i3pro.TestViewerScript -v
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
+```
+
+**通过判据（本机实测，2026-10-15）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 转义器数量 | `function esc(` = 1，`escapeText` 出现 0 次 |
+| 注入点 | 名字 `<img src=x>` 的通道在通道列表里渲染成 `&lt;img src=x&gt;`（无头断言；同一份断言在改之前是红的） |
+| 其它转义点没坏 | 数学通道名 / 表达式 / 报错 / 函数说明 / 注释文字 / 通道处理角标全部仍走同一个 `esc` |
+| 金标准快照 | 高避 466 通道行 / 7 圈，耐久 372 通道行 / 26 圈（与改动前逐行相同） |
+
+**五件套的落点**：① `viewer.html`（删 `escapeText`、8 处改 `esc`、补通道名那两处转义）；
+② 单测 `TestViewerScript.test_转义只有一个实现`；③ 无头断言：`smoke_viewer.js` 里那条
+"通道名里的尖括号要说清是文本"；④ 本条目；⑤ 两份金标准快照照旧 PASS。
+
+---
+
+## A85 · 前端导出表按消费者收窄（本次修复）
+
+`window.i3pro` 是前端唯一的测试缝（两个驱动 `smoke_viewer.js` / `verify_clicks.py` 都从它进来），
+但它只增不减：实测导出 **207 个名字，其中 68 个在 `tools/` 与 `tests/` 里一次都没出现**
+（2026-10-14 评审删掉的 3 个死导出只是这个类的零头）。缝宽了，"哪条边才是可测的"就淹掉了。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 收窄 | 删掉 68 个没有消费者的导出（函数本身都还在原地，只是不再挂到 `window.i3pro` 上） |
+| 留痕 | 导出表顶上写明"只导出两个驱动真的用得到的名字" |
+| 守卫 | `TestViewerScript.test_导出表里每个名字都有人过`：导出表里每个名字都必须在 `tools/` 或 `tests/` 里出现过（粗判，挡的是整批死导出长回来） |
+
+```powershell
+python -m unittest tests.test_i3pro.TestViewerScript -v
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
+python tools\verify_clicks.py
+```
+
+**通过判据（本机实测，2026-10-15）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 导出名字数 | 207 → **139**（68 个删除） |
+| 没人用的名字 | **0**（同一份扫描：`rg -w <名字>` 在 `tools/ tests/ src/`（除 viewer.html）里都能找到消费者） |
+| 两个驱动没坏 | smoke 全绿（466 通道行 / 7 圈）；真浏览器全绿（写路径、信标、别名、工作表、导出那几段全过） |
+
+**五件套的落点**：① `viewer.html` 的导出表；② 单测 `TestViewerScript.test_导出表里每个名字都有人过`；
+③ 无头断言不加——这 68 个名字本来就没有无头消费者（加不了），这一条本身就是"按消费者收窄"；
+④ 本条目；⑤ 两份金标准快照照旧 PASS。
+
+---
+
+## A86 · 通道名表搬出载荷层（本次修复）
+
+`csvlog.canonical_names()`（**读取层 L1**）要拿三张"哪几类通道名"的表去认列名，而这三张表
+住在 `render.py`（**载荷层 L3**）——于是全包唯一一处 L1 → L3 的反向依赖。表本身与
+"怎么搭页面"无关，跟着载荷走是历史原因。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 搬家 | `DEFAULT_CHANNEL_PRIORITY` / `OVERLAY_PRIORITY` / `SPEED_FOR_COLORING` 搬进 `channelpick.py`；`render` 与 `csvlog` 都只 import 它 |
+| 说清楚 | `channelpick.py` 的模块文档写明"这里只放名字表"：通道引用（写法差异）在 `channelref`，"能不能积分出距离轴"在 `derive.SPEED_CANDIDATES`（**顺序有用，别合并**） |
+| 守卫 | `TestStructureOfTheSplit.test_读取层不再反向依赖载荷层`：六个读取器都不许 import 载荷层（`render` / `api` / `server` / `library` …） |
+
+```powershell
+python -m unittest tests.test_i3pro.TestStructureOfTheSplit -v
+python -m unittest tests.test_i3pro.TestCanSessionSurface tests.test_i3pro.TestCsvReader -v
+```
+
+**通过判据（本机实测，2026-10-15）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 反向依赖 | `csvlog.py` 里 `import render` **0 处**（改之前是第 33 行），`import channelpick` 1 处 |
+| 六个读取器 | `ld` / `motec_csv` / `csvlog` / `txtlog` / `xlslog` / `canlog` / `dbc` 一个都不 import 载荷层 |
+| 行为没变 | 概览条那一套用例（`TestSpeedChannelResolution`）全过：`Vx_KF` 的识别、空候选表的回落、金标准上仍是 `Vx KF` |
+
+**五件套的落点**：① `channelpick.py`（新）+ `render.py` / `csvlog.py` 的引用；
+② 单测 `TestStructureOfTheSplit.test_读取层不再反向依赖载荷层`（另：概览条那条用例改成
+monkeypatch `channelpick`，因为它要模拟"速度候选表空了"）；③ 无头断言不加——这是 import 方向，
+页面看不到；④ 本条目；⑤ 两份金标准快照照旧 PASS。
+
+---
+
+**A81–A86 的回归四项（本机实测，2026-10-15）**：`Ran 544 tests in 365.358s` + `OK`
+（A80 时是 532，这六条加了 12 条单测）；`verify_ld_vs_csv` `PASS - 0 channel(s) outside
+tolerance`（两条各 213/213）；两份金标准快照各 `PASS`（高避 466 通道行 / 7 圈，耐久
+372 通道行 / 26 圈）；真浏览器 **256 项检查：256 通过，0 失败**（A83 那两条是新加的）。
+
+**六条改动的实测锚点**（每一条都能在下面各自的段落里找到命令）：
+
+| 条目 | 一句话 | 实测 |
+| --- | --- | --- |
+| A81 | 圈数只有一个入口 | TV0：16 圈/0 完整 → **20 圈/16 完整/10.980 s** |
+| A82 | 默认双圈只有一处规则 | `i3pro delta <文件>` 从 `TypeError` → **跑完并写出 JSON** |
+| A83 | 写路径只有一条缝 | 手拼 URL 11 处 → **1 处**（`apiUrl` 自己）；服务端原因原样到 toast |
+| A84 | 转义只有一处 | `escapeText` 从 8 处调用 → **删除**；通道名里的尖括号渲染成文本 |
+| A85 | 导出表按消费者收窄 | 207 → **139 个名字**，没人用的 **0** |
+| A86 | 通道名表搬出载荷层 | `csvlog → render` 反向依赖 **0 处** |

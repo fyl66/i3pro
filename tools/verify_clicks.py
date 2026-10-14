@@ -3049,6 +3049,28 @@ class Checker:
         # 收尾：回到最上面那一栏，后面的验收从原来那一屏继续
         click_chip("sheetGroup")
 
+    # ------------------------------------------- A83 写路径的唯一出口
+    def write_seam(self):
+        """A83：写路径只有 ``sessionRequest`` 一个出口，服务端那句中文原因要活着到用户眼前。
+
+        这一条只有真浏览器验得了：失败那句 toast 是页面在 fetch 之后拼的，而假 DOM 里
+        fetch 永远 reject（``smoke_viewer.js`` 自己写着），所以"HTTP 400 会不会盖掉
+        服务端的原因"在无头那关根本看不见——A83 修的就是这一处。
+        """
+        self.check("A83 页面上有写路径的唯一出口 sessionRequest",
+                   self.js("typeof i3pro.sessionRequest") == "function",
+                   self.js("typeof i3pro.sessionRequest"))
+        # 一条落不到这一场里的注释：服务端 400 并给出中文原因（`notes.normalize`）
+        raw = self.js(
+            "(async function(){var ok=await i3pro.saveNotes([{time:1e9,text:'越界'}]);"
+            "var el=document.getElementById('toast');"
+            "return JSON.stringify({ok:ok,toast:(el&&el.textContent)||''});})()")
+        got = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        text = got.get("toast") or ""
+        self.check("A83 服务端拒绝时，前端说的是它那句中文原因（不是 HTTP 400）",
+                   got.get("ok") is False and "HTTP 400" not in text and len(text) > 10,
+                   text)
+
     # ------------------------------------------------ A79 曲线连接（Up-sampling）
     def curve_join(self, base_url):
         """A79：i2 Pro 的 Channel Up-sampling——真点「显示 → 曲线连接」，曲线**真的变了**。
@@ -3268,6 +3290,7 @@ def main(argv=None):
             checker.aliases(work_dir)
             checker.notes(work_dir, args.session)
             checker.gps(work_dir, args.session)
+            checker.write_seam()
             checker.imports("http://127.0.0.1:%d/" % args.port, work_dir)
             checker.text_import("http://127.0.0.1:%d/" % args.port, work_dir)
             # 接着用刚导入的那一场（CSV 场次）验 A77：末尾那句"再应用一次"就是

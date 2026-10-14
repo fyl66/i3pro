@@ -15,9 +15,16 @@ trajectory:
 
 | 概念 | 住在哪 |
 | --- | --- |
-| 切圈算法（本模块） | ``detect_laps`` / ``gps_laps`` / ``winding_laps`` / ``figure8_laps`` / ``run_laps`` / ``lap_table`` |
+| 切圈算法（本模块） | ``gps_laps`` / ``winding_laps`` / ``figure8_laps`` / ``run_laps``（``detect_laps`` 是它们的**算法**入口） |
+| "这一场有哪些圈"（本模块） | ``detect_from_config``——**看侧车**（用户选的信标 / 模式 / 可信圈）；``lap_table`` 不给 laps 时问的就是它 |
 | 信标与配置、编辑规则、侧车 | :mod:`i3pro.beacons` |
 | 距离轴换算、两圈叠加与圈差 | :mod:`i3pro.axes` |
+
+**两个入口别搞混（A81）**：``detect_laps`` 只回答"按这个算法切出来是什么"，
+``detect_from_config`` 回答"这一场有哪些圈"。界面、命令行、报表、导出要的都是后者；
+2026-10-14 之前有四条命令行走的是前者，于是同一个 `.ld` 在侧边栏写着 20 圈、
+``i3pro track`` 打印 16 行且整列都标着"(进出场/泊车/异常段)"。源码里有一条守卫
+钉住"``src/i3pro`` 除了本模块不许再出现 ``detect_laps(``"。
 
 下面仍把 ``Beacon`` / ``LapConfig`` / ``overlay`` 这些名字**转出来**（``__all__`` 里
 分了两段），因为界面、命令行、报表早就按 ``laps.X`` 在用了；转出来的就是那两个模块
@@ -621,7 +628,11 @@ def _flag_implausible(laps: list[Lap]) -> list[Lap]:
 
 
 def lap_table(log: ldmod.LogFile, laps: list[Lap] | None = None) -> list[dict]:
-    laps = laps if laps is not None else detect_laps(log)
+    """圈表。不给 ``laps`` 时问的就是"这一场有哪些圈"——**不看侧车的那条路不算答案**
+    （2026-10-14 之前它默认走 `detect_laps`，于是同一个 `.ld` 在侧边栏与命令行给出
+    两个圈数，见 A81）。
+    """
+    laps = laps if laps is not None else detect_from_config(log)
     complete = [l.lap_time for l in laps if l.complete] or [l.lap_time for l in laps]
     best = min(complete, default=0.0)
     rows = []

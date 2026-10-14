@@ -3756,6 +3756,23 @@ if (expectsLaps) {
 }
 const channelList = registry.get("channelList");
 check(channelList && channelList._children.length > 5, "channel list is empty");
+// A84：通道名是用户文件里的文本（.ld / CSV 表头），画进列表要说清它是文本而不是标记。
+// 转义只有 `esc` 一处（这条同时钉住"别再加第二个转义器"这件事）。
+{
+  const savedChannels = api.data.channels;
+  const savedGroups = api.data.groups;
+  const savedStatus = api.data.status;
+  const evil = { name: "<img src=x>", unit: "V", rate: 1.0, samples: 2, derived: false };
+  api.reindexChannels({
+    channels: savedChannels.concat([evil]),
+    groups: [{ key: "g", label: "测试组", unit: "V", channels: ["<img src=x>"] }],
+  });
+  const markup = channelList._children.map((row) => row._html || "").join("");
+  check(markup.indexOf("&lt;img src=x&gt;") >= 0 && markup.indexOf("<img src=x>") < 0,
+    "通道名里的尖括号被当成标记画出去了：" + markup.slice(0, 160));
+  // status 也要一起还回去：reindexChannels 只在给了 status 时才把"状态与故障"那一组加回来
+  api.reindexChannels({ channels: savedChannels, groups: savedGroups, status: savedStatus });
+}
 const count = registry.get("chCount");
 check(count && String(count.textContent).indexOf("/") >= 0, "channel count missing");
 const status = registry.get("statusLine");

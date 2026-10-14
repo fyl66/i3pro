@@ -2130,17 +2130,52 @@ function apiUrl(route, params) {
   return pairs.length ? url + "?" + pairs.join("&") : url;
 }
 
-/** 唯一的请求出口：非 2xx 或正文里带 error 都算失败，原因跟着异常一起抛。 */
+/**
+ * 读一个响应的正文。服务端两种正文都可能回来（正常是 JSON，兜底那段 500 是
+ * HTML），裸 `res.json()` 会让调用方炸在解析上、而不是报出真正的原因。
+ */
+async function readJson(res) {
+  try { return await res.json(); } catch (err) { return null; }
+}
+
+/** 非 2xx 或正文里带 error 都算失败，原因（服务端那句中文）跟着异常一起抛。 */
+function failureOf(res, body) {
+  const failure = new Error((body && body.error) || ("HTTP " + res.status));
+  failure.body = body;
+  failure.status = res.status;
+  return failure;
+}
+
+/** 读路径的唯一出口：URL 由调用方用 apiUrl 拼（它要带查询参数）。 */
 async function apiGet(url) {
   const res = await fetch(url);
-  let body = null;
-  try { body = await res.json(); } catch (err) { body = null; }
-  if (!res.ok || (body && body.error)) {
-    const failure = new Error((body && body.error) || ("HTTP " + res.status));
-    failure.body = body;
-    throw failure;
-  }
+  const body = await readJson(res);
+  if (!res.ok || (body && body.error)) throw failureOf(res, body);
   return body;
+}
+
+/**
+ * **写路径的唯一出口**（A83）。读路径一直只有 `apiGet` 一个出口，写路径以前是
+ * 十处各自拼 URL、各自解失败——同一件事有五种写法，服务端写好的"下一步做什么"
+ * （规则 6）在其中一种里被换成了 `HTTP 400`，另外几种干脆不读正文。
+ *
+ * `route` 是 `/session/<场次>` 下面那一段（`/laps`、`/maths`…）；工作表那条路由
+ * 不在这个前缀下，仍走它自己的 `fetch`（`apiUrl` 只认场次路由）。
+ *
+ * 失败抛的 Error 上带着 `body` 与 `status`：`/sections` 的 `needs_force` 这类标记
+ * 就挂在 body 里，调用方要读它才能决定"再按一次"。
+ */
+async function sessionRequest(route, options) {
+  const opts = options || {};
+  const payload = opts.body;
+  const res = await fetch(apiUrl(route, opts.params), {
+    method: opts.method || "GET",
+    headers: payload === undefined ? undefined : { "Content-Type": "application/json" },
+    body: payload === undefined ? undefined : JSON.stringify(payload),
+  });
+  const data = await readJson(res);
+  if (!res.ok || (data && data.error)) throw failureOf(res, data);
+  return data;
 }
 
 /**
@@ -5228,14 +5263,9 @@ function applyLapsResponse(data) {
  */
 async function putLaps(payload) {
   try {
-    const res = await fetch(DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/laps", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    applyLapsResponse(await res.json());
+    applyLapsResponse(await sessionRequest("/laps", { method: "PUT", body: payload }));
   } catch (err) {
+    // 服务端那句中文原因要原样落到 toast 上（规则 6）：以前这里把它换成了 HTTP 400
     toast("信标保存失败: " + err.message);
   }
 }
@@ -5441,22 +5471,14 @@ function renderNotes() {
 async function saveNotes(next) {
   if (!DATA.api) { toast("快照模式不能改注释，用 serve 模式打开"); return false; }
   try {
-    const res = await fetch(DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/notes", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ notes: next }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      toast(data.error || ("保存注释失败：HTTP " + res.status));
-      return false;
-    }
+    const data = await sessionRequest("/notes", { method: "PUT", body: { notes: next } });
     state.notes = data.notes || [];
     renderNotes();
     renderAll();
     return true;
   } catch (err) {
-    toast("保存注释失败：" + err.message + "（本地服务还在吗？）");
+    // 服务端有回话（4xx/5xx）时说它那句；连回话都没有才问"服务还在吗"
+    toast("保存注释失败：" + err.message + (err.status ? "" : "（本地服务还在吗？）"));
     return false;
   }
 }
@@ -5583,22 +5605,13 @@ function renderGps() {
 async function saveGps(config, okMessage) {
   if (!DATA.api) { toast("快照模式不能改 GPS 校正，用 serve 模式"); return null; }
   try {
-    const res = await fetch(DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/gps", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ config: config }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      toast("GPS 校正没保存：" + (data.error || ("HTTP " + res.status)));
-      return null;
-    }
+    const data = await sessionRequest("/gps", { method: "PUT", body: { config: config } });
     state.gps = data;
     renderGps();
     if (okMessage) toast(okMessage);
     return data;
   } catch (err) {
-    toast("GPS 校正没保存：" + err.message + "（本地服务还在吗？）");
+    toast("GPS 校正没保存：" + err.message + (err.status ? "" : "（本地服务还在吗？）"));
     return null;
   }
 }
@@ -5632,9 +5645,7 @@ async function applyGps() {
 async function loadGps() {
   if (!DATA || !DATA.api) { renderGps(); return null; }
   try {
-    const res = await fetch(DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/gps");
-    if (!res.ok) return null;
-    state.gps = await res.json();
+    state.gps = await sessionRequest("/gps");
     renderGps();
     return state.gps;
   } catch (err) {
@@ -5647,12 +5658,6 @@ async function loadGps() {
 // 实现），前端只做三件事：收集输入、把请求发出去、把服务端返回的定义与报错画
 // 回来。同一条规则不在两边各写一遍，也就不会慢慢长歪。
 const MATHS_SCOPE_LABEL = { local: "本地", global: "全局" };
-
-function escapeText(text) {
-  return String(text === null || text === undefined ? "" : text)
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
 
 function mathsState() {
   return state.maths || { definitions: [], overrides: {}, shadowed: [], errors: [], functions: [] };
@@ -5680,12 +5685,12 @@ function renderMathsList() {
     box.innerHTML = defs.map((d, i) => {
       const bad = mathsErrorFor(d.name);
       return '<div class="mdef' + (bad ? " bad" : "") + '" data-maths-row="' + i + '">'
-        + '<span class="mname">' + escapeText(d.name) + "</span>"
+        + '<span class="mname">' + esc(d.name) + "</span>"
         + '<span class="msc ' + (d.scope === "global" ? "global" : "local") + '">'
         + (MATHS_SCOPE_LABEL[d.scope] || "本地") + "</span>"
-        + '<span class="mex">' + escapeText(d.expr) + "</span>"
+        + '<span class="mex">' + esc(d.expr) + "</span>"
         + '<a class="mdel" data-maths-del="' + i + '" title="删掉这条定义">✕</a>'
-        + (bad ? '<div class="merr">' + escapeText(bad) + "</div>" : "")
+        + (bad ? '<div class="merr">' + esc(bad) + "</div>" : "")
         + "</div>";
     }).join("");
   }
@@ -5867,8 +5872,8 @@ function renderMathsFunctions() {
   box.innerHTML = (mathsState().functions || []).map((f) => {
     const arity = f.max_args < 0 ? (f.min_args + "+")
       : (f.min_args === f.max_args ? String(f.min_args) : f.min_args + "~" + f.max_args);
-    return '<div class="mfunc"><b>' + escapeText(f.name) + "</b>(" + arity + ") "
-      + escapeText(f.doc) + "</div>";
+    return '<div class="mfunc"><b>' + esc(f.name) + "</b>(" + arity + ") "
+      + esc(f.doc) + "</div>";
   }).join("");
 }
 
@@ -5951,14 +5956,9 @@ function applyMathsResponse(data) {
 async function saveMathsDefinitions(scope, definitions) {
   if (!DATA.api) { toast("快照模式不能改数学通道，用 serve 模式"); return null; }
   try {
-    const res = await fetch(DATA.api + "/session/" + encodeURIComponent(DATA.session)
-      + "/maths?scope=" + encodeURIComponent(scope), {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ definitions: definitions }),
+    const data = await sessionRequest("/maths", {
+      method: "PUT", params: { scope: scope }, body: { definitions: definitions },
     });
-    const data = await res.json();
-    if (!res.ok) { toast("数学通道保存失败：" + (data.error || ("HTTP " + res.status))); return null; }
     applyMathsResponse(data);
     return data;
   } catch (err) {
@@ -5975,15 +5975,13 @@ async function mathsTest() {
   if (!DATA.api) { out.textContent = "快照模式不能试算，用 serve 模式。"; return; }
   out.textContent = "正在算…";
   try {
-    const res = await fetch(DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/maths", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ expr: draft.expr }),
-    });
-    const data = await res.json();
-    out.textContent = formatMathsTrial(data, res.ok ? "" : ("HTTP " + res.status));
+    const data = await sessionRequest("/maths", { method: "POST", body: { expr: draft.expr } });
+    out.textContent = formatMathsTrial(data, "");
   } catch (err) {
-    out.textContent = "试算失败：" + err.message;
+    // 服务端回话了（4xx 带一句原因）就照它说；连回话都没有才是"试算失败"
+    out.textContent = err.status
+      ? formatMathsTrial(err.body, "HTTP " + err.status)
+      : "试算失败：" + err.message;
   }
 }
 
@@ -6218,7 +6216,7 @@ function renderSetupForm() {
   const existing = handled.indexOf(name);
   lines.unshift((existing >= 0 ? "正在处理：" : "选中的通道：") + name
     + (def ? "（" + (def.scope === "global" ? "全局" : "本场次") + "）" : "（没有处理）"));
-  note.innerHTML = lines.map((line) => escapeText(line)).join("<br>");
+  note.innerHTML = lines.map((line) => esc(line)).join("<br>");
 }
 
 async function setupApply() {
@@ -6509,26 +6507,17 @@ function sectionsManualPayload(changes) {
 async function saveSections(payload, okMessage) {
   if (!DATA || !DATA.api) { toast("快照模式不能改区段，用 serve 模式"); return null; }
   try {
-    const res = await fetch(DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/sections", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      if (data && data.needs_force) {
-        // 手工改过再重切要按两次：第一次拦住并说清后果，第二次才真的覆盖
-        state.sectionsForce = true;
-        toast(data.error);
-      } else {
-        toast("区段没保存：" + ((data && data.error) || ("HTTP " + res.status)));
-      }
-      return null;
-    }
+    const data = await sessionRequest("/sections", { method: "PUT", body: payload });
     applySectionsResponse(data);
     if (okMessage) toast(okMessage);
     return data;
   } catch (err) {
+    if (err.body && err.body.needs_force) {
+      // 手工改过再重切要按两次：第一次拦住并说清后果，第二次才真的覆盖
+      state.sectionsForce = true;
+      toast(err.body.error);
+      return null;
+    }
     toast("区段没保存：" + err.message);
     return null;
   }
@@ -6545,9 +6534,7 @@ function applySectionsResponse(data) {
 async function loadSections() {
   if (!DATA || !DATA.api) { renderSections(); return null; }
   try {
-    const res = await fetch(DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/sections");
-    if (!res.ok) return null;
-    state.sections = await res.json();
+    state.sections = await sessionRequest("/sections");
     renderSections();
     return state.sections;
   } catch (err) {
@@ -6585,9 +6572,7 @@ function toggleSectionKind(index) {
 async function loadMaths() {
   if (DATA && DATA.api) {
     try {
-      const res = await fetch(DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/maths");
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      state.maths = await res.json();
+      state.maths = await sessionRequest("/maths");
     } catch (err) {
       state.maths = { definitions: [], overrides: {}, shadowed: [], errors: [], functions: [] };
     }
@@ -6630,9 +6615,7 @@ function reindexChannels(payload) {
 async function refreshChannels() {
   if (!DATA.api) return null;
   try {
-    const res = await fetch(DATA.api + "/session/" + encodeURIComponent(DATA.session) + "/info");
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const payload = await res.json();
+    const payload = await sessionRequest("/info");
     reindexChannels(payload);
     return payload;
   } catch (err) {
@@ -6691,10 +6674,11 @@ function renderChannelList() {
       if (dead) row.title = name + " · 整段没有有效样本（列是全空的）";
       row.innerHTML = '<input type="checkbox" ' + (on ? "checked" : "") + ">"
         + '<span class="swatch" style="background:' + (on ? channelColor(name, comp) : "#3a4150") + '"></span>'
-        + '<span class="nm">' + name + '</span>'
+        // 通道名来自用户文件（.ld / CSV 表头）：它是文本，不是标记
+        + '<span class="nm">' + esc(name) + '</span>'
         // 处理过的通道（A75）：一个 ƒ 角标，悬停说清是哪一套处理。
         + (isProcessed(name)
-          ? '<span class="proc" title="' + escapeText(processedTitle(name)) + '">ƒ</span>' : "")
+          ? '<span class="proc" title="' + esc(processedTitle(name)) + '">ƒ</span>' : "")
         + '<span class="unit' + (dead ? " dead" : "") + '">'
         + (dead ? "全程无有效" : (ch.unit || "")) + "</span>"
         + '<button type="button" class="cog" title="通道处理：滤波 / 增益 / 偏置 / 用光标处归零">⚙</button>';
@@ -6734,7 +6718,7 @@ function renderChannelList() {
         + "（工作表里还留着，换回原来的场次就还在）";
       row.innerHTML = '<input type="checkbox" ' + (on ? "checked" : "") + ">"
         + '<span class="swatch" style="background:' + MISSING_COLOR + '"></span>'
-        + '<span class="nm">' + name + "</span>"
+        + '<span class="nm">' + esc(name) + "</span>"
         + '<span class="unit">本场次没有</span>';
       row.querySelector("input").addEventListener("change", (event) => {
         toggleChannel(name, event.target.checked);
@@ -8736,10 +8720,12 @@ init();
 //   i3pro.state.view = [600, 620]; i3pro.renderAll();
 //   i3pro.addComponentOfType("graph");
 window.i3pro = {
+  // 只导出**两个驱动真的用得到**的名字（A85）：上一轮评审删掉 3 个死导出，实际有
+  // 68 个（导出 207 个、tools/ 与 tests/ 里一半没人过）——缝宽了，"哪条边才是可测的"
+  // 就淹掉了。新增一个名字前先看它有没有消费者（单测按源码守这一条）。
   state: state, data: DATA, renderAll: renderAll, lane: lane,
-  channels: CHANNELS, statusChannels: STATUS, channelGroups: GROUPS,
-  payloadMissing: PAYLOAD_MISSING, renderChannelList: renderChannelList,
-  fullRange: fullRange, zoomTo: zoomTo, zoomFactor: zoomFactor,
+  channels: CHANNELS, renderChannelList: renderChannelList,
+  fullRange: fullRange, zoomTo: zoomTo,
   groupsFor: groupsFor, selectedChannels: selectedChannels,
   addComponentOfType: addComponentOfType, applyPreset: applyPreset,
   componentAction: componentAction, refreshWindowTraces: refreshWindowTraces,
@@ -8751,25 +8737,19 @@ window.i3pro = {
   resetWorksheetCache: resetWorksheetCache,
   componentsOfWorksheet: componentsOfWorksheet,
   currentSheet: currentSheet, sheetComponent: sheetComponent,
-  applySheetState: applySheetState, sheetWritable: sheetWritable,
   sheetExportPayload: sheetExportPayload,
-  saveCurrentSheet: saveCurrentSheet, saveSheetAs: saveSheetAs, newSheet: newSheet,
-  renameCurrentSheet: renameCurrentSheet, deleteCurrentSheet: deleteCurrentSheet,
-  exportCurrentSheet: exportCurrentSheet, importSheetFile: importSheetFile,
-  askSheetName: askSheetName, submitSheetAsk: submitSheetAsk, hideSheetAsk: hideSheetAsk,
   resolvePickValue: resolvePickValue,
   renderWorksheetNote: renderWorksheetNote,
-  channelState: channelState, isMissingChannel: isMissingChannel,
-  isEmptyChannel: isEmptyChannel, componentChannels: componentChannels,
-  worksheetChannels: worksheetChannels, workbenchMissing: workbenchMissing,
-  missingText: missingText, renderMissingNotice: renderMissingNotice,
-  exportMissingChannels: exportMissingChannels, syncExportFields: syncExportFields,
+  channelState: channelState,
+  workbenchMissing: workbenchMissing,
+  renderMissingNotice: renderMissingNotice,
+  exportMissingChannels: exportMissingChannels,
   palettes: PALETTE_SET, missingColor: MISSING_COLOR,
-  paletteColors: paletteColors, headFields: headFields,
+  headFields: headFields,
   channelColor: channelColor, channelColorIsManual: channelColorIsManual,
   setChannelColor: setChannelColor, setComponentPalette: setComponentPalette,
   setHeadField: setHeadField, openColorMenu: openColorMenu,
-  openDisplayMenu: openDisplayMenu, closePopMenu: closePopMenu,
+  closePopMenu: closePopMenu,
   setUpsample: setUpsample, upsampleModes: UPSAMPLE_MODES,
   // 侧边栏快速跳转（A78）
   jumpTargets: JUMP_TARGETS, jumpTo: jumpTo, syncJumpActive: syncJumpActive,
@@ -8780,18 +8760,15 @@ window.i3pro = {
     const on = jumpButtons.find((e) => e.button.classList.contains("on"));
     return on ? on.target.id : null;
   },
-  isAliasReference: isAliasReference, aliasName: aliasName,
+  isAliasReference: isAliasReference,
   aliasLanding: aliasLanding, applyAliases: applyAliases,
   aliasAddAlias: aliasAddAlias, aliasAddCandidate: aliasAddCandidate,
   aliasRemoveAlias: aliasRemoveAlias, aliasRemoveCandidate: aliasRemoveCandidate,
   aliasMoveCandidate: aliasMoveCandidate, renderAliasList: renderAliasList,
-  loadSheetAliases: loadSheetAliases, currentSheetAliases: currentSheetAliases,
-  refreshAliasesFromCatalogue: refreshAliasesFromCatalogue,
-  encodeComponentConfig: encodeComponentConfig,
+  currentSheetAliases: currentSheetAliases,
   buildWorksheet: buildWorksheet, syncScatterSelectors: syncScatterSelectors,
-  apiUrl: apiUrl, apiGet: apiGet,
+  apiUrl: apiUrl, apiGet: apiGet, sessionRequest: sessionRequest,
   refreshComponentData: refreshComponentData,
-  refreshAllComponentData: refreshAllComponentData,
   histogramKey: histogramKey,
   mergeCounts: mergeCounts, snapshotHistogramFor: snapshotHistogramFor,
   syncHistogramSelectors: syncHistogramSelectors, componentTitle: componentTitle,
@@ -8799,57 +8776,48 @@ window.i3pro = {
   snapshotSpectrumFor: snapshotSpectrumFor, spectrumY: spectrumY,
   syncSpectrumSelectors: syncSpectrumSelectors,
   adoptComponentIds: adoptComponentIds, sheetSize: () => SHEET.size,
-  selectLap: selectLap, zoomToLap: zoomToLap,
+  selectLap: selectLap,
   renderLapControls: renderLapControls, renameBeacon: renameBeacon,
   insertCrossing: insertCrossing, cursorTime: cursorTime,
   exactCursorTime: exactCursorTime, applyLapsResponse: applyLapsResponse,
-  renderNotes: renderNotes, addNoteAtCursor: addNoteAtCursor,
-  updateNoteText: updateNoteText, removeNoteAt: removeNoteAt, saveNotes: saveNotes,
-  drawNotes: drawNotes, noteAt: noteAt,
-  gpsState: gpsState, gpsNoteText: gpsNoteText, renderGps: renderGps, saveGps: saveGps,
-  applyGps: applyGps, loadGps: loadGps, renderTrackComponent: renderTrackComponent,
+  renderNotes: renderNotes,
+  saveNotes: saveNotes,
+  drawNotes: drawNotes,
+  renderGps: renderGps,
+  renderTrackComponent: renderTrackComponent,
   exportConfig: exportConfig, exportURL: exportURL, exportPreset: exportPreset,
   applyExportPlan: applyExportPlan, applyExportConfig: applyExportConfig,
   openExportDialog: openExportDialog, closeExportDialog: closeExportDialog,
   refreshExportPlan: refreshExportPlan, runExport: runExport,
   exportFilename: exportFilename, exportMoment: exportMoment,
-  exportDefaults: exportDefaults, exportSaved: exportSaved,
-  renderMathsList: renderMathsList, openMathsEditor: openMathsEditor,
+  exportSaved: exportSaved,
+  openMathsEditor: openMathsEditor,
   closeMathsEditor: closeMathsEditor, mathsDraft: mathsDraft,
   mathsSaveList: mathsSaveList, applyMathsResponse: applyMathsResponse,
-  saveMathsDefinitions: saveMathsDefinitions, mathsDelete: mathsDelete,
-  mathsCommit: mathsCommit, mathsTest: mathsTest, loadMaths: loadMaths,
+  mathsCommit: mathsCommit,
   formatMathsTrial: formatMathsTrial,
-  reindexChannels: reindexChannels, selectChannel: selectChannel,
-  mathsState: mathsState, escapeText: escapeText,
+  reindexChannels: reindexChannels,
   // 通道处理（A75）：面板、角标、表达式生成、快捷键的落点
-  processedChannels: processedChannels, isProcessed: isProcessed,
-  processedTitle: processedTitle, setupSummary: setupSummary,
+  isProcessed: isProcessed,
+  setupSummary: setupSummary,
   setupExpression: setupExpression, openChannelSetup: openChannelSetup,
-  closeChannelSetup: closeChannelSetup, renderSetupForm: renderSetupForm,
+  closeChannelSetup: closeChannelSetup,
   setupApply: setupApply, setupRemove: setupRemove,
-  currentChannelName: currentChannelName, definitionFor: definitionFor,
+  currentChannelName: currentChannelName,
   cursorValueFor: cursorValueFor,
-  insertMathsChannel: insertMathsChannel, renderMathsChannelPicker: renderMathsChannelPicker,
-  insertMathsFunction: insertMathsFunction,
   niceTicks: niceTicks, axisTickLabel: axisTickLabel,
-  insertMathsOperator: insertMathsOperator, mathsBackspace: mathsBackspace,
-  mathsClearExpr: mathsClearExpr,
-  sectionsState: sectionsState, renderSections: renderSections,
-  sectionsManualPayload: sectionsManualPayload, saveSections: saveSections,
-  applySectionsResponse: applySectionsResponse, loadSections: loadSections,
+  sectionsState: sectionsState,
+  applySectionsResponse: applySectionsResponse,
   sectionsAuto: sectionsAuto, setSectionName: setSectionName,
   setSectionEdge: setSectionEdge, toggleSectionKind: toggleSectionKind,
   drawSectionBands: drawSectionBands,
   sectionAtTime: sectionAtTime, sectionWindow: sectionWindow,
-  zoomToSection: zoomToSection, onSectionRowDoubleClick: onSectionRowDoubleClick,
+  zoomToSection: zoomToSection,
   sectionRowIndexOf: sectionRowIndexOf,
   sectionStripAt: sectionStripAt, SECTION_STRIP_PX: SECTION_STRIP_PX,
   reportFetchKey: reportFetchKey,
-  reportRowsOf: reportRowsOf, reportCSVText: reportCSVText,
-  exportReportCSV: exportReportCSV, syncReportSelectors: syncReportSelectors,
-  snapshotReportTable: snapshotReportTable, bandForRatio: bandForRatio,
-  MAX_REPORT_CHANNELS: MAX_REPORT_CHANNELS, SECTION_FILTERS: SECTION_FILTERS,
+  reportCSVText: reportCSVText,
+  exportReportCSV: exportReportCSV,
   bundleOf: (comp) => SHEET.get(comp.id),
 };
 </script>

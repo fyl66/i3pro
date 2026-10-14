@@ -328,8 +328,16 @@ class CsvSession:
     log_time: str
     event_name: str
     report: list[dict]
-    #: 数学通道的列放进 ``columns``（CSV 没有原生/派生的存储之分），名字与单位
+    #: 数学通道的列放**自己的**字典里（与 ``ld.LogFile.derived`` 一样），名字与单位
     #: 和 ``.ld`` 会话一样在这里**声明**，下游走同一条缝（见 channels.py，ticket #18）。
+    #:
+    #: 以前 ``derived_target`` 指的就是 ``columns``（原生列那本字典），理由是"CSV 的
+    #: 列本来就没有原生/派生之分"。那个理由在**同名覆盖**这条语义下是错的：覆盖会把
+    #: 原生列原地顶掉，``channels.clear()``（``maths.detach`` 的第一步）再一 pop，
+    #: 原生列就**整条没了**——下一轮求值读到 ``raw()`` 直接 ``KeyError``，界面上显示成
+    #: "未知场次: <通道名>"（A77）。分家之后"覆盖"只是取值时优先看派生那一份，
+    #: 原生列始终留在 ``columns`` 里。
+    derived: dict[str, np.ndarray] = field(default_factory=dict, repr=False, compare=False)
     derived_names: set[str] = field(default_factory=set)
     derived_units: dict[str, str] = field(default_factory=dict)
     #: 这份表是从什么文件读来的（``csv`` / ``xlsx``）以及读的哪张 sheet。
@@ -339,8 +347,8 @@ class CsvSession:
 
     @property
     def derived_target(self) -> dict[str, np.ndarray]:
-        """数学通道的列放哪（CSV 会话与原生列同住 ``columns``）。"""
-        return self.columns
+        """数学通道的列放哪（``.ld`` 会话放 ``derived``，CSV 会话同样放 ``derived``）。"""
+        return self.derived
 
     def channel(self, name: str) -> ldmod.Channel:
         for ch in self.channels:
@@ -361,11 +369,20 @@ class CsvSession:
 
     def raw(self, name: str | ldmod.Channel) -> np.ndarray:
         ch = self.channel(name) if isinstance(name, str) else name
+        if ch.name in self.derived:
+            raise ValueError(
+                f"{ch.name} 是数学通道算出来的，没有文件里的原生列。"
+                f"要它的数值请用 values()。"
+            )
         return self.columns[ch.name]
 
     def values(self, name: str | ldmod.Channel) -> np.ndarray:
         """Already in engineering units - a CSV has no raw/scaled split."""
-        return np.asarray(self.raw(name), dtype=np.float64)
+        ch = self.channel(name) if isinstance(name, str) else name
+        cached = self.derived.get(ch.name)
+        if cached is not None:
+            return cached
+        return np.asarray(self.raw(ch), dtype=np.float64)
 
     def time_base(self) -> np.ndarray:
         return self.time

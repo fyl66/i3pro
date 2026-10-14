@@ -26,9 +26,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+from . import library as librarymod
 from . import render
 from .api import Api, Body, ClientGone, Response, csv_arg, float_arg, int_arg
-from .indexpage import index_page
+from .indexpage import index_page, unknown_session_page
 from .library import SessionLibrary, dumps, json_safe
 
 __all__ = [
@@ -103,6 +104,17 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                 response = self.route(parts, query, method)
             except ClientGone:
                 return  # 客户端走了：不算错误，也不用回东西
+            # 注意用**模块**（``librarymod``）：``make_handler`` 的形参 ``library``
+            # 是那个场次库实例，`library.UnknownSession` 会 AttributeError。
+            except librarymod.UnknownSession as exc:
+                # 页面地址里的场次名对不上（多半是收藏了旧链接，或者那份日志已经
+                # 挪走/改名了）。以前这一支落到下面的兜底，回一个 500 加一句
+                # ``KeyError: '名字'``——用户的下一步是"回去点一次列表"，不是看栈。
+                response = Response(
+                    404,
+                    unknown_session_page(str(exc.args[0]), library.names()).encode("utf-8"),
+                    "text/html; charset=utf-8",
+                )
             except Exception as exc:  # 页面那两条路也可能炸；兜住，别把连接晾着
                 response = Response(
                     500,

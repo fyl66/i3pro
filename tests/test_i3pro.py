@@ -727,6 +727,22 @@ class TestServer(unittest.TestCase):
                 urllib.request.urlopen(base + "/api/session/nope/trace", timeout=15)
             self.assertEqual(caught.exception.code, 404)
 
+    @_needs(HILL)
+    def test_打开一个没有的场次时给的是404页面(self):
+        """A77 顺带修的：页面地址里的场次名对不上，以前是 500 ``KeyError``。
+
+        （顺手钉住 ``server.py`` 里那个 ``library`` 名字的坑：``make_handler`` 的
+        形参就叫 ``library``，写 ``library.UnknownSession`` 会 AttributeError——
+        这个 500 只会在真的点一个坏链接时出现，静态检查看不见。）
+        """
+        with http_session(HILL, roots=LIBRARY_ROOTS) as http:
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                http.get_text("/session/" + urllib.parse.quote("没有这个场次"))
+            self.assertEqual(caught.exception.code, 404)
+            page = caught.exception.read().decode("utf-8")
+            self.assertIn("没有这个场次", page)
+            self.assertIn("回到场次列表", page)
+
 
 class TestLapModes(unittest.TestCase):
     """Lap segmentation modes: auto, run, per-beacon, and the sidecar config."""
@@ -3510,13 +3526,19 @@ class TestChannelSeam(unittest.TestCase):
 
     @_needs(DATA / "20260522-yjw第二次直线3.72.csv")
     def test_a_csv_session_uses_the_same_seam(self):
-        """CSV 会话的列和原生列同住 ``columns``：挂上、取元数据、撤下都要走同一条缝。"""
+        """CSV 会话的列放进 ``derived``（和 ``.ld`` 一样）：挂上、取元数据、撤下一条缝。
+
+        2026-10-14（A77）改的：以前派生列与原生列同住 ``columns``，同名覆盖会把原生
+        列顶掉、``detach`` 再把它删掉。分家之后本用例断言的位置跟着搬家。
+        """
         with csvlog.read_csv_session(DATA / "20260522-yjw第二次直线3.72.csv") as session:
             definitions = [mathsmod.Definition("车速两倍", "'GPS Speed' * 2", unit="km/h")]
             values, errors = mathsmod.resolve_available(session, definitions)
             self.assertEqual(errors, [])
             self.assertEqual(mathsmod.attach(session, values, definitions), ["车速两倍"])
-            self.assertIn("车速两倍", session.columns)
+            self.assertIn("车速两倍", session.derived)
+            self.assertNotIn("车速两倍", session.columns,
+                             "数学通道不该混进文件里那本原生列的字典")
             self.assertEqual(channels.names(session), {"车速两倍"})
             self.assertEqual(channels.units(session), {"车速两倍": "km/h"})
             channel = session.channel("车速两倍")
@@ -3524,8 +3546,40 @@ class TestChannelSeam(unittest.TestCase):
             self.assertEqual(channels.sample_rate(session, channel), session.sample_rate)
             self.assertEqual(channels.hold_factor(session, channel, session.sample_rate), 1)
             mathsmod.detach(session)
-            self.assertNotIn("车速两倍", session.columns)
+            self.assertNotIn("车速两倍", session.derived)
             self.assertEqual(channels.names(session), set())
+
+    @_needs(DATA / "20260522-yjw第二次直线3.72.csv")
+    def test_a_same_name_override_keeps_the_native_column_of_a_csv_session(self):
+        """A77：CSV 场次上的同名覆盖不准把**原生列**删掉。
+
+        真事（CAN 帧表 `cjh阶跃+脉冲`，通道 `IMU_RawData_Copy_1.ACC_Y`）：CSV 会话的
+        派生列与原生列原来同住 `columns`，于是第一轮 `attach` 把原生列**顶掉**，
+        第二轮开头的 `detach`（``apply_to_session`` 的第一步）再把它 pop 掉——
+        求值走到 ``CsvSession.raw()`` 直接 ``KeyError``，界面上显示成
+        "数学通道保存失败：未知场次: <通道名>"。所以这里必须走两轮：
+        这是"上一轮的覆盖层还挂着"才能踩到的毛病。
+        """
+        name = "GPS Speed"
+        with csvlog.read_csv_session(DATA / "20260522-yjw第二次直线3.72.csv") as session:
+            native = session.values(name).copy()
+            definitions = [mathsmod.Definition(name, "smooth('%s', 3)" % name)]
+            first = None
+            for round_index in (1, 2, 3):
+                mathsmod.detach(session)               # apply_to_session 的第一步
+                values, errors = mathsmod.resolve_available(session, definitions)
+                self.assertEqual(errors, [], f"第 {round_index} 轮算不出来")
+                mathsmod.attach(session, values, definitions)
+                now = session.values(name).copy()
+                self.assertFalse(np.allclose(now, native), "覆盖没生效")
+                if first is None:
+                    first = now
+                else:
+                    np.testing.assert_allclose(
+                        now, first, err_msg=f"第 {round_index} 轮在覆盖值上又算了一遍")
+            # 摘掉覆盖层：文件里那条原生列必须原样还在
+            mathsmod.detach(session)
+            np.testing.assert_array_equal(session.values(name), native)
 
 
 class TestSections(unittest.TestCase):
@@ -7152,6 +7206,44 @@ class TestMathsOverHttp(unittest.TestCase):
                 self.assertEqual(len(catalogue), 55)
             finally:
                 http.close()
+
+    @_needs(DATA / "20260522-yjw第二次直线3.72.csv")
+    def test_a_same_name_override_can_be_applied_twice_on_a_csv_session(self):
+        """A77：CSV 场次上连按两次「应用」必须都是 200。
+
+        这是用户报的那一步（"设置完滤波参数以后提示数学通道未找到 / 未知场次"）：
+        第一次应用成功落盘，第二次就 404 ``未知场次: IMU_RawData_Copy_1.ACC_Y``——
+        真正的报错来自 ``CsvSession.raw()`` 的 KeyError，被 ``Api.handle`` 的
+        兜底当成"场次没找到"报了。CSV 场次（含 CAN 帧表）才踩得到，金标准那两份
+        ``.ld`` 踩不到，所以真浏览器那条回归也漏了。
+        """
+        source = DATA / "20260522-yjw第二次直线3.72.csv"
+        payload = {"definitions": [{
+            "name": "GPS Speed",
+            "expr": "smooth('GPS Speed', 3)",
+            "unit": "",
+            "setup": {"filter": {"kind": "smooth", "value": 3},
+                      "gain": None, "offset": None, "zero_at": None},
+        }]}
+        with http_session(source) as http:
+            quoted, request = http.quoted, http.json
+            try:
+                for round_index in (1, 2, 3):
+                    status, state = request(
+                        f"/api/session/{quoted}/maths", "PUT", payload)
+                    self.assertEqual(status, 200, f"第 {round_index} 次应用：{state}")
+                    self.assertEqual(state["errors"], [], f"第 {round_index} 次应用")
+                # 处理后仍然是"这条通道已经被同名覆盖"，而且画得出来
+                self.assertEqual(list(state["overrides"]), ["GPS Speed"])
+                status, trace = request(
+                    f"/api/session/{quoted}/trace?channels="
+                    + urllib.parse.quote("GPS Speed") + "&buckets=20")
+                self.assertEqual(status, 200, trace)
+                self.assertTrue(trace["GPS Speed"]["value"], "覆盖之后取不到值了")
+            finally:
+                status, state = request(
+                    f"/api/session/{quoted}/maths", "PUT", {"definitions": []})
+                self.assertEqual(status, 200, state)
 
     @_needs(HILL)
     def test_a_same_name_definition_reaches_the_viewer_as_an_override(self):

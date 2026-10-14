@@ -3840,6 +3840,78 @@ outside tolerance`；两份金标准快照各 `PASS`；真浏览器 **212 项检
 
 ---
 
+## A77 · CSV 场次上的同名覆盖把原生列删了（"未知场次: <通道名>"，本次修复）
+
+用户报障原文：**"设置完滤波参数以后，会提示数学通道未找到，未知场次"**。
+
+现场是 CAN 帧表那类场次（`cjh阶跃+脉冲`，通道 `IMU_RawData_Copy_1.ACC_Y`，侧车在
+2026-10-14 09:06 已经写好了，说明**第一次应用是成功的**）。真 Edge 里复现出来的
+那一步是**第二次**应用：
+
+```
+PUT /api/session/cjh阶跃+脉冲/maths?scope=local  ->  404  {"error": "未知场次: IMU_RawData_Copy_1.ACC_Y"}
+界面 toast：数学通道保存失败：未知场次: IMU_RawData_Copy_1.ACC_Y
+```
+
+**一个 bug，两条错**：
+
+1. **CSV 场次的派生列和原生列同住一本字典**（`CsvSession.derived_target` 返回 `self.columns`）。
+   同名覆盖是"把算出来的那列盖在原通道上"，于是 `attach` 把 `columns['IMU_RawData_Copy_1.ACC_Y']`
+   原地**顶掉**；下一轮 `apply_to_session` 开头的 `detach` → `channels.clear()` 再把它
+   **pop 掉**。原生列从此整条没了，求值走 `_session_series` → `CsvSession.raw()` 直接
+   `KeyError`。`.ld` 踩不到：`LogFile` 的派生列一直住在**另一个**字典 `derived` 里。
+2. `Api.handle` 那条 `except KeyError` 把**任何** KeyError 都说成"未知场次"，
+   于是"字典里少了一个键"在界面上变成"这个场次不存在"，连报错指向的层都是错的。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 存储 | `CsvSession` 多一本 `derived` 字典（与 `LogFile.derived` 对称）：`derived_target` 指它，`values()` 优先读它，`raw()` 明确拒绝（"是数学通道算出来的"）。**原生列不再被顶掉、也不再被 pop** |
+| 合并 | `pairing.merge_columns` 改走 `session.values()`：列分两本之后按名字查 `columns` 会漏掉本场次算出来的数学通道 |
+| 报错分层 | `library.UnknownSession`（`KeyError` 的子类）：`library.get` / `maths_state` 抛它，API 层**只**把它翻成 404「未知场次」；其余 KeyError 落到 500 并写清"这是 i3pro 的 bug，不是你的数据/名字" |
+| 顺带 | 页面地址里的场次名对不上时给 **404 页面**（以前是 500 `KeyError: '名字'`），并列出名字相近的场次 + 回列表的链接（`indexpage.unknown_session_page`） |
+
+**为什么四道回归原来没拦住**：金标准两份都是 `.ld`（`LogFile.derived`），而 CSV 场次
+这条路当时只有"挂一次"的用例（`test_a_csv_session_uses_the_same_seam`），
+**第二次**应用这个触发条件谁都没走过。
+
+```powershell
+# 1) 单测：CSV 场次的同名覆盖（接缝 + 用户那两步）
+python -m unittest tests.test_i3pro.TestChannelSeam -v
+python -m unittest tests.test_i3pro.TestMathsOverHttp -v
+python -m unittest tests.test_i3pro.TestServer -v
+
+# 2) 真浏览器真鼠标：#77 在**导入进来的 CSV/文本场次**上真点两次「应用」
+python tools\verify_clicks.py
+```
+
+**通过判据（本机实测）**：
+
+| 断言 | 修之前 | 修之后 |
+| --- | --- | --- |
+| 用户那一步：第二次「应用」 | `404 unknown_session`，toast 是「数学通道保存失败：未知场次: IMU_RawData_Copy_1.ACC_Y」 | `200`，toast 是「已给「IMU_RawData_Copy_1.ACC_Y」加上处理：低通 20 Hz（本场次）」；随后 `/info` 与 `/trace` 都是 200 |
+| 接缝：连跑 3 轮 `detach -> resolve -> attach` | 第 2 轮 `KeyError: 'GPS Speed'` | 3 轮逐点 `allclose`；摘掉覆盖层之后原生列与文件里的原值**逐点相同** |
+| 真鼠标 #77（真点 ⚙ → 低通 20 Hz → 应用 → 再应用 → 删除处理） | — | 侧车 `filter_lp('TH', 20)` 一条；两次应用都 200；第二次之后光标处 `394.0535` 读得出来；**删除处理**之后回到文件里的 `396`（原生列还在，而且两数不同 = 覆盖真的生效过） |
+| 未知场次的两条路 | `/api/session/nope/trace` 404（本来就是对的）；`/session/没有这个场次` **500** `KeyError` | 前者仍 404「未知场次」；后者 **404 页面**「没有这个场次 … 最接近的几条 … ← 回到场次列表重新点一个」 |
+
+**回归四项（本机实测）**：`Ran 516 tests` + `OK`；`verify_ld_vs_csv`
+`PASS - 0 channel(s) outside tolerance`；两份金标准快照各 `PASS`；真浏览器
+**229 项检查：229 通过，0 失败**（比 A76 的 212 多 17 条，就是 #77 那一组）。
+
+**五件套的落点**：① 实现 `csvlog` / `pairing` / `library` / `api` / `server` / `indexpage`；
+② 单测 3 条（`TestChannelSeam` 接缝 3 轮、`TestMathsOverHttp` 两次应用、
+`TestServer` 未知场次页面 404）；③ 无头交互断言 = `verify_clicks.py` 的 #77（**真鼠标**；
+`tools/smoke_viewer.js` 不加——这一票没动 `viewer.html` 的界面）；④ 本条目；
+⑤ 金标准两份照旧全绿，另外 CSV 那条由 `20260522-yjw第二次直线3.72.csv` 与
+`verify_clicks` 导入的文本场次实跑。
+
+**已知取舍**：CSV 场次的"原生列"与"派生列"现在真的分两本字典，所以
+`session.columns` **只装文件里的列**（外部代码要按名字取一条通道时一律走
+`session.values(name)`；`tests` 里两条断言跟着搬到了 `session.derived`）。
+"应用一次之后左边栏变长、面板按钮会被挤出视口"是布局的现成行为（侧栏可滚动，
+`verify_clicks` 里显式滚一次再点）——这一票不改布局。
+
+---
+
 测试覆盖：
 
 | 分组 | 内容 |
@@ -3863,9 +3935,9 @@ outside tolerance`；两份金标准快照各 `PASS`；真浏览器 **212 项检
 | `TestSpectrum` | 频谱（12 项）：正弦落格、Parseval 与方差对上、hann/blackman 压泄漏、点数吸附到 2 的幂并说明、短数据补零并说明、50 % 重叠段数 10 → 19、`amplitude` 就是有效值、平滑压低峰但功率守恒、NaN 补齐并报数、坏输入的下一步、金标准按**通道自己的采样率**、快照只内嵌勾选的那些 |
 | `TestSpectrumOverHttp` | `/spectrum` 端点（1 项）：参数一个不少、单位与采样率、400 带下一步 |
 | `TestSectionsOverHttp` | 赛道区段走到 HTTP：GET 不落盘、重切落盘、手工改名字与边界、`edited` 立起来、被挡住的重切 400 + `needs_force` 且侧车不动、带 `force` 才覆盖、坏请求的下一步、`.ld` 字节不变 |
-| `TestMathsOverHttp` | 数学通道走到 HTTP：存本地 / 全局、侧车落盘、坏表达式 400 且不动已存侧车、同名拦截、`shadowed`、试算接口、函数表 |
+| `TestMathsOverHttp` | 数学通道走到 HTTP：存本地 / 全局、侧车落盘、坏表达式 400 且不动已存侧车、同名拦截、`shadowed`、试算接口、函数表、**同名覆盖在 CSV 场次上连按两次「应用」都是 200**（A77） |
 | `TestRender` | 静态/服务两种 payload、自包含性 |
-| `TestServer` | HTTP 端到端：场次列表、工作台页、通道、时间窗、散点、概览、对比圈、赛道、404 |
+| `TestServer` | HTTP 端到端：场次列表、工作台页、通道、时间窗、散点、概览、对比圈、赛道、404；**未知场次的页面给 404 页面并说下一步**（A77；以前是 500 `KeyError`） |
 | `TestIndependentParsers` | 第二套实现交叉验证、213 通道 CSV 全量对照 |
 | `TestBeaconUndo` | 撤销的纯函数层：什么是"同一版"、什么时候没有可撤销的一步、交回去的是上一版本身 |
 | `TestBeaconUndoOverHttp` | 撤销走真实 `PUT`：改名 / 插入 / 删除各自一步回到原样、`trusted` 迁移、落盘、一次无改动的保存不吃掉上一步、没有可撤销的一步时 400 并说明下一步、页面注入的 `laps_can_undo` 三态 |
@@ -3883,7 +3955,7 @@ outside tolerance`；两份金标准快照各 `PASS`；真浏览器 **212 项检
 | `TestXlsxImport` | 读 Excel（#31，13 项）：普通工作簿读成场次、**同一次导出的 CSV 与 xlsx 读回来逐点相同**、两份金标准各实跑一次（1001 行 × 2 通道）、列名里的 `[单位]` 拆成名字 + 单位、默认挑第一张能当表读的 sheet 且记得住选择、日期时间列折成相对秒并带出场次日期、没有时间列 / 宏 / 图表 / 外链 / 公式无缓存 / 不是 zip 各自报错并给下一步、同名导入不覆盖、中间的空列与文字列不错位 |
 | `TestStructureOfTheSplit` | 结构性重构的守卫（#23 / #24 / #25 / #26，11 项）：`server.py` 只剩 HTTP 管道、动作分派只有一张表、库不反向依赖服务、老名字仍可用、信标住 `beacons.py`、距离轴住 `axes.py`、`laps.py` 只剩切圈、三模块共用同一份对象、**HTTP 用例共用一个夹具**（全场只有一处起服务） |
 | `TestComponentRegistry` | 组件类型注册表（#17 / #19 / #20 / #21，6 项）：每种显示形式都在表里、分派只剩"哪个是图"与"哪一列是文字列"（实测 10 处）、每种形式都声明了怎么画与怎么取数、取数只有一条路（六个端点不许自己 fetch）、自检形式只挂在无头驱动的标记上 |
-| `TestChannelSeam` | 通道接缝（#18，10 项）：那条规则只准写在一个模块里（扫源码）、会话必须显式声明三样、原生通道保留自己的采样率与单位、同名覆盖时保持因子/采样率/单位、Parquet 写出的是派生列本身、挂载与卸载走声明、金标准 437 条通道逐条与旧公式一致（无数学通道时逐点不变） |
+| `TestChannelSeam` | 通道接缝（#18，11 项）：那条规则只准写在一个模块里（扫源码）、会话必须显式声明三样、原生通道保留自己的采样率与单位、同名覆盖时保持因子/采样率/单位、Parquet 写出的是派生列本身、挂载与卸载走声明、**CSV 场次的派生列住 `derived`、同名覆盖连跑三轮都不许把原生列弄丢**（A77）、金标准 437 条通道逐条与旧公式一致（无数学通道时逐点不变） |
 | `TestNotes` / `TestNotesOverHttp` | 注释（#15，15 项）：文字折行与截断、时刻校验的下一步、增删改不改原表、距离在主采样上插值、轨迹取最近抽稀点、越界不猜位置、侧车往返与坏文件、**注释不动圈速表**、HTTP 的 PUT 落盘 / 400 说明下一步 / `.ld` 字节不变 |
 | `TestGpsFix` / `TestGpsFixOverHttp` | GPS 校正（#14，15 项）：`(0,0)` 只计数不进轨迹、跳点与空档各自断开、跳变两端都算坏点、**关掉校正逐点不变**、按秒与按更新周期两种偏移、分段插值绝不跨空档、路径里程跳过跳变、距离轴作用域的开关、抽稀后断点必须落在**跨着跳变的那一段**上、参数校验的中文下一步、侧车往返与坏文件、金标准（耐久 1 个 214.5 m 跳点且断的就是那 214 m 幽灵线 / 高避 0 跳点 638 个空定位）；HTTP 的 GET / PUT / 落盘 / 400 不动侧车 / `.ld` 字节不变 |
 | `TestLaunchers` | 一键启动（5 项）：快照批量导出 + 索引页、**原始 CAN 帧表也导得出快照**（A54）、**两份连续记录只出一个 `+1` 快照**、缺数据目录的报错、端口占用自动换端口 |

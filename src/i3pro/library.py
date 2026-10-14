@@ -21,7 +21,19 @@ from . import beacons as beaconsmod, cache, canlog, csvlog, maths, render, sidec
 from . import ld as ldmod
 from . import channels as channelsmod
 
-__all__ = ["SessionLibrary", "dumps", "json_safe"]
+__all__ = ["SessionLibrary", "UnknownSession", "dumps", "json_safe"]
+
+
+class UnknownSession(KeyError):
+    """这个名字的场次不在库里——**只有这一件事**该报 404「未知场次」。
+
+    ``Api.handle`` 以前把**任何** KeyError 都说成"未知场次"（``except KeyError`` 兜住
+    整条请求）。于是 CSV 场次上的同名覆盖把原生列 pop 掉之后，``CsvSession.raw()``
+    抛的 ``KeyError('IMU_RawData_Copy_1.ACC_Y')`` 在界面上显示成
+    "数学通道保存失败：未知场次: IMU_RawData_Copy_1.ACC_Y"——一句话里每一层都是错的，
+    用户只能拿着它猜（A77）。所以"查场次失败"要有自己的类型：``KeyError`` 的子类，
+    老的 ``except KeyError`` 照样收得住，但 API 层能把它和"字典里没这个键"分开。
+    """
 
 
 def json_safe(value):
@@ -254,7 +266,7 @@ class SessionLibrary:
     def get(self, name: str) -> ldmod.LogFile:
         entry = self._entries().get(name)
         if entry is None:
-            raise KeyError(name)
+            raise UnknownSession(name)
         path, members = entry
         key = str(path)
         with self._lock:
@@ -302,7 +314,7 @@ class SessionLibrary:
         """
         path = self.path_of(name)
         if path is None:
-            raise KeyError(name)
+            raise UnknownSession(name)
         effective = maths.load_effective(path, self.maths_root)
         definitions = [d.as_dict() | {"scope": d.scope} for d in effective.definitions]
         errors = list(self._maths_errors.get(str(path), []))

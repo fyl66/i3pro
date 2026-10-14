@@ -1580,9 +1580,13 @@ def evaluate(
 def attach(session, resolved: dict[str, np.ndarray], definitions: list[Definition]) -> list[str]:
     """把算出来的列挂到场次上，让下游（图表、切圈、报表）当原生通道用。
 
-    ``.ld`` 会话把列放进 ``LogFile.derived``，CSV 会话放进 ``CsvSession.columns``
+    ``.ld`` 会话把列放进 ``LogFile.derived``，CSV 会话放进 ``CsvSession.derived``
     ——两条来源共用同一套下游代码，不需要各自加分支。**放哪儿由 ``channels.py``
     问会话自己**（``derived_target``），这里不再用 ``hasattr`` 嗅探会话类型。
+
+    **派生列绝不与原生列同住一本字典**（A77）：同名覆盖要求"定义里的 `'X'` 读到
+    文件里那条原生列"，两边同住一本字典时，`attach` 会顶掉原生列、`detach` 又把
+    它 pop 掉，第二轮就再也读不回来了。
     """
     from . import channels as channelsmod
     from . import ld as ldmod

@@ -359,6 +359,12 @@ i2 Pro 的结构是 `Project → Workbook → Worksheet → Component`。我们�
     取舍写清了：覆盖语义下原值只能靠「删除处理」拿回；处理在算距离轴的那条车速会
     连带改变里程与圈速（面板会提示）。切比雪夫滤波仍然不做（要 scipy，违反规则 4）。
     部署到公网这件事**不在这一票**，只交了 `docs/deploy-check.md` 那份自查清单。
+    **A77 补齐了一条真错**：这套语义在 `.ld` 上没问题，在 CSV 场次（含 CAN 帧表）上
+    第二轮「应用」就崩——CSV 的派生列当时与原生列**同住** `columns`，覆盖把原生列顶掉、
+    下一轮 `detach` 再把它 pop 掉，报出来的却是"未知场次: <通道名>"（`Api.handle` 那条
+    `except KeyError` 把任何 KeyError 都说成场次不存在）。现在 CSV 场次的派生列也住
+    自己的 `derived`（与 `LogFile.derived` 对称），只有真正的 `library.UnknownSession`
+    才是 404「未知场次」。
 22. **多 Workbook 工程体系 / 双轴 / 对数轴** 等——见 `AGENTS.md` 规则 9 的
     "明确不做"清单；要翻案先改这份 PLAN。
 23. **CAN 记录仪 ↔ `.ld` 场次对齐与合并**（验收 A76）——**已交付，按场次继续用**：

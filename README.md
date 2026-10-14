@@ -130,7 +130,7 @@ MoTeC 自己导出的两个 CSV（182 MB / 425 MB）。
 | **CAN 原始帧 → 场次** | 车队自己录的原始帧表（`can_data/*.csv`，GBK、`x\| 5A 64 …`）直接读成与 `.ld` **同形状**的场次：DBC **取并集**解码，**含子目录**（2026-10-05 实测：18 份 DBC / 137 条报文 / **124 条通道** / 覆盖 3,013,146 帧 = **81.77%**；只挑一份最多只有 46 条 / 24.6%），并写明**每条通道来自哪份 DBC**、每份的 sha256 与贡献。除了 `Vx_KF`（车速 → 距离轴，实测 0.1–5546.8 m），`dbc/261004/` 那批还带来 S-Motion 的光学地面速度、Xsens MTi 的姿态/加速度/**经纬度**与 `sw260425` 的方向盘转角；**多路复用报文**（`M` / `m<n>`，如 `IMU.dbc` 的双帧 IMU：byte0 选帧类型、后 6 字节分时是加速度或角速度）按选择子分路解成各自的通道，两路的真实更新率分开记（实测各 47.67 Hz）。解析器是标准库手写的（`cantools` 只在测试里当裁判逐信号对拍），用日志里实际的字节长度、不用 DBC 的 DLC；没有 DBC 覆盖的 ID 留在**导入报告**里（帧数 / 帧率 / 前 8 字节），连续记录自动并场（9 份 → 7 次记录） |
 | **导入别人的表（CSV / Excel / TXT）** | 队友发来的不是 `.ld` 也能用：`.csv`（i2 Pro 导出、别的队/别的设备的表）与 **`.xlsx`** 都读成与 `.ld` **同一种场次**——进侧边栏、能画图/切圈/比圈/报表/导出。列名走 **原名 → 别名 → 手工覆盖** 三级回落，单位参与判断与补齐，选择存在 `<场次>.map.json` 侧车（`.ld` 永远只读）。Excel 多张 sheet 时**默认挑第一张能当通道表读的**（自己的导出把「元数据」放第一张），`--sheet` 可以指定；日期单元格 / ISO 文本的时间列折成相对秒；**宏 / 图表 / 外部链接 / 公式没有缓存值**这四种读不了的形态会明确报错并说下一步。分隔文本（`.txt` / `.tsv` / 分隔符不是逗号的 `.csv`）在**导入前给预览**：前 20 行 + 认出来的分隔符与编码，分隔符 / 编码 / 表头行 / 单位行都能在下拉框里改，"没有时间列"默认拒绝、可以显式选**按固定采样率生成时间列**——预览与导入是**同一条代码路径**，改了下拉框立刻看得见结果。硬判据是 **round-trip**：同一次导出的 CSV / xlsx / TXT 读回来逐点相同 |
 | **CAN 记录仪 ↔ `.ld` 对齐与合并** | C125 与记录仪记的东西**不在同一份文件里**：`.ld` 有电机 / AMK / MTI / GPS 共 459–474 条通道但没有 IVT，帧表有 `I_Data` / `U1_Data` 但没有电机通道，所以母线电流与电机电流从来不同框。`i3pro pair` 按墙钟挑候选（`.ld` 头的 `log_time` 是**结束**时刻；而头里的绝对时间**不可靠**，实测一天里差 19–505 s 还会跳，所以候选按钟差上限放宽）、用两边都有的速度互相关求偏移、**再用加速度把偏移钉准并复核**（三条轴取中位数；速度太平，短窗口上会在错偏移上给出 `r=1.0000`，实测多例），然后把两边的通道合到一个场次：时间轴以 `.ld` 为准、CAN 通道零阶保持、同名只留一份、**C125 里那些整段为 0 的 IVT 模板通道会被真值替换**；**一个 `.ld` 对上不止一次记录时全部并进同一场**（各自只补自己的那一段），而同一场里几次记录推出的钟差差出好几圈的当重复动作撞出来的剔掉。实测 `10.5湾区` 配出 9 对、`10.4湾区测试` 3 对（其中一场并进两次记录）、`10.7湾区` 15 对（另有两场各并进两次记录）、`10.6中庭` 2 对，合并后的 `底马八字` 是 **127,600 行 × 555 列**（其中 287 条真的有数，其余是 `.ld` 里整段为 0 的空模板），`I Data`（−84.1 A）与 `MCU1 FR TorqueCurrent` 同框（见 [A76](docs/ACCEPTANCE.md)） |
-| **工程化** | **508 项单测全绿**（真实数据回归 + HTTP 端到端 + 无头驱动前端 **609 个断言点**），另有 **真浏览器真鼠标验收 212 项全过**（`tools\verify_clicks.py`，Edge 的 DevTools 协议发真事件，跑在两份金标准上）；运行期依赖只有 numpy/pandas/pyarrow，**唯一的例外是 `openpyxl`（只用于读 Excel，见 [ADR-0003](docs/adr/0003-openpyxl-for-reading-excel.md)）**，清单钉在 `requirements.txt` 上（与 `pyproject.toml` 同一份，有单测盯着别漂移）；改这个仓库的硬性规则见 [AGENTS.md](AGENTS.md) |
+| **工程化** | **516 项单测全绿**（真实数据回归 + HTTP 端到端 + 无头驱动前端 **609 个断言点**），另有 **真浏览器真鼠标验收 229 项全过**（`tools\verify_clicks.py`，Edge 的 DevTools 协议发真事件，跑在两份金标准上）；运行期依赖只有 numpy/pandas/pyarrow，**唯一的例外是 `openpyxl`（只用于读 Excel，见 [ADR-0003](docs/adr/0003-openpyxl-for-reading-excel.md)）**，清单钉在 `requirements.txt` 上（与 `pyproject.toml` 同一份，有单测盯着别漂移）；改这个仓库的硬性规则见 [AGENTS.md](AGENTS.md) |
 
 完整验收清单与复现命令见 **[`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md)**；
 规划、里程碑与风险见 **[`docs/PLAN.md`](docs/PLAN.md)**。
@@ -199,7 +199,7 @@ i3pro.cmd           命令行入口（探测 Python + 查依赖），上面几�
 requirements.txt    运行期依赖清单（与 pyproject.toml 同一份，有单测盯着）
 docs/               PLAN.md 规划 · ACCEPTANCE.md 验收清单 · ld-format.md 格式逆向记录
 tools/              verify_ld_vs_csv.py 解析对照 · smoke_viewer.js 无头驱动前端
-tests/              508 项单测
+tests/              516 项单测
 maths/              全局数学通道定义（global.json，跨场次复用）
 out/                生成物（快照 HTML / Parquet），已在 .gitignore 里
 i2pro_data/         试车数据（.ld/.ldx/.csv/.txt/.tsv），不进仓库；只有 dbc/ 跟着仓库走
@@ -246,10 +246,10 @@ src/i3pro/
 ## 开发
 
 ```powershell
-python -m unittest discover -s tests -v      # 508 项，无数据文件时自动 skip
+python -m unittest discover -s tests -v      # 516 项，无数据文件时自动 skip
 python tools\verify_ld_vs_csv.py             # 与 i2 Pro CSV 逐通道对照
 node tools\smoke_viewer.js out\demo.html     # 无头驱动前端：缩放/光标/分组/信标编辑/数学通道/区段/报表/直方图/频谱/注释/GPS 校正/导出/工作表/CAN 报告等 609 个断言点
-python tools\verify_clicks.py                # 真 Edge 发真鼠标/键盘：212 项交互验收（需要 Edge + 金标准数据）
+python tools\verify_clicks.py                # 真 Edge 发真鼠标/键盘：229 项交互验收（需要 Edge + 金标准数据）
 ```
 
 这四条里有三条会在缺东西时**自动跳过，而跳过不算通过**（[AGENTS.md](AGENTS.md) 第 7 条）。

@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import html as htmlmod
 from typing import TYPE_CHECKING
+from urllib.parse import quote
 
 if TYPE_CHECKING:                       # 只为类型标注，运行时不 import（避免绕圈）
     from .library import SessionLibrary
@@ -309,3 +311,30 @@ def index_page(library: SessionLibrary, error: str | None = None) -> str:
 </table>
 </main>
 """
+
+
+def unknown_session_page(name: str, known=()) -> str:
+    """场次名对不上时那一页（404）：说清下一步，并把像的名字端出来。
+
+    以前这条落到 ``server.dispatch`` 的兜底分支：用户看到 ``500 KeyError: '名字'``。
+    页面的下一步永远是"回列表再点一次"，所以这里给出回去的链接；顺手把"名字里有
+    你打的那几个字"的场次列出来——多半是把 ``-1`` / ``+1`` 后缀或者空格记错了。
+    """
+    wanted = str(name).strip().lower()
+    close = [item for item in known
+             if wanted and (wanted in str(item).lower() or str(item).lower() in wanted)][:5]
+    hint = (
+        "最接近的几条：" + "、".join(f"<a href='/session/{quote(str(item))}'>{htmlmod.escape(str(item))}</a>"
+                                     for item in close) + "。"
+        if close else "列表里没有名字相近的场次——它可能被挪走、改名，或者还没导入。"
+    )
+    return (
+        "<!doctype html><meta charset='utf-8'><title>i3pro - 没有这个场次</title>"
+        "<body style='font:14px/1.6 system-ui,\"Microsoft YaHei\";padding:32px;"
+        "background:#0f1115;color:#e6e9ef;max-width:720px'>"
+        "<h1 style='font-size:18px'>没有这个场次</h1>"
+        f"<p>地址里的名字是 <code>{htmlmod.escape(str(name))}</code>，这场次现在不在库里。</p>"
+        f"<p style='color:#8b94a7'>{hint}</p>"
+        "<p><a style='color:#4cc2ff' href='/'>← 回到场次列表重新点一个</a></p>"
+        "</body>"
+    )

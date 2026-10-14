@@ -745,7 +745,10 @@ def merge_sources(log, sources):
     for session, offset_s in sources:
         can_t = np.asarray(session.time, dtype=np.float64)
         for channel in session.channels:
-            values = np.asarray(session.columns[channel.name], dtype=np.float64)
+            # 走 ``values()`` 而不是 ``session.columns[...]``：CSV 场次的列分两本
+            # （原生在 ``columns``、数学通道在 ``derived``，见 A77），直接按名字查
+            # 字典会让"这一场算出来的数学通道"在合并时 KeyError。
+            values = np.asarray(session.values(channel.name), dtype=np.float64)
             unit = str(getattr(channel, "unit", "") or "")
             key = _key(channel.name)
             if key in taken:

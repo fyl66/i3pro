@@ -48,6 +48,7 @@ from . import (
     txtlog,
     worksheets as worksheetsmod,
 )
+from . import library as librarymod
 from .library import dumps
 
 __all__ = ["Api", "Body", "Response", "csv_arg", "float_arg", "int_arg", "filter_arg"]
@@ -175,8 +176,20 @@ class Api:
         except ClientGone:
             # 客户端已经走了（导出中途取消）：没人收这份数据，安静收场。
             return Response(status=499, body=b"", close=True)
-        except KeyError as exc:
+        except librarymod.UnknownSession as exc:
             return call._error(404, f"未知场次: {exc.args[0]}")
+        except KeyError as exc:
+            # **不是**"未知场次"：字典里没这个键是服务端的 bug，不是用户打错了名字。
+            # 这一支以前把两者混成一句话，于是 A77 那个"CSV 场次的同名覆盖把原生列
+            # pop 掉"在界面上显示成"数学通道保存失败：未知场次: <通道名>"——
+            # 用户拿着这句话查了很久，因为连"哪一层坏了"都是错的。现在老实说是
+            # 我们的 bug，并且把请求路径与键名一起带上，方便对号。
+            return call._error(
+                500,
+                f"服务端内部错误：处理 /{'/'.join(parts)} 时找不到键 {exc.args[0]!r}。"
+                f"这是 i3pro 的 bug（不是你的数据或名字的问题），"
+                f"请把这句话连同刚才的操作报给维护者；想接着看数据就先用别的通道。",
+            )
         except FileNotFoundError as exc:
             return call._error(404, str(exc))
         except ValueError as exc:

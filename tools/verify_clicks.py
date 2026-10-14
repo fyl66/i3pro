@@ -2737,6 +2737,181 @@ class Checker:
         else:
             self.check("#32 取消那条路能走到（第二份文件也弹了卡片）", False)
 
+    # ------------------------------------------------ #77 CSV 场次上的通道处理
+    def channel_processing_on_an_imported_session(self, base_url, work_dir):
+        """A77：**导入进来的** CSV / 文本场次上，真点两次「应用」都不准报错。
+
+        用户报障的原话是"设置完滤波参数以后，提示数学通道未找到 / 未知场次"。
+        金标准那两份是 ``.ld``（派生列住在 ``LogFile.derived``），踩不到；CSV 场次
+        的派生列以前和原生列同住一本字典：第一轮的覆盖把原生列顶掉，第二轮开头的
+        ``detach`` 再把它 pop 掉，求值于是 ``KeyError``，被 API 层报成
+        "未知场次: <通道名>"。所以这一条必须在 **CSV 场次**上、而且必须**点两次**。
+
+        用的就是 ``text_import`` 刚导入的那一场（它就是一个 CSV 场次），走完全程：
+        应用 -> 再应用 -> 删除处理，最后一步是"原生列还在不在"的判据。
+        """
+        session_name = "验证用文本"
+        sidecar = os.path.join(work_dir, session_name + ".maths.json")
+        if os.path.exists(sidecar):
+            os.remove(sidecar)
+
+        def read_sidecar():
+            if not os.path.exists(sidecar):
+                return {}
+            with open(sidecar, encoding="utf-8") as handle:
+                return json.load(handle)
+
+        def definitions():
+            return {d.get("name"): d for d in (read_sidecar().get("definitions") or [])}
+
+        page = self.browser.open(
+            base_url + "session/" + urllib.parse.quote(session_name), wait=1.0
+        )
+        if not self.browser.wait_for("!!(window.i3pro && i3pro.data && i3pro.data.channels)",
+                                     page, timeout=60):
+            self.check("#77 导入的场次能当工作台打开", False)
+            return
+        time.sleep(1.0)
+        self.check("#77 导入的场次能当工作台打开", True)
+
+        def js(expression):
+            return self.browser.js(expression, page)
+
+        # 这个标签页是**新开的**，主页面那份 HELPERS 不在里面：`__center` 得重新注入，
+        # 否则量元素坐标那一步会在页面里抛 Uncaught（A33 那条注释里同样的坑）。
+        js(HELPERS)
+
+        def toast():
+            return js("(document.getElementById('toast')||{}).textContent||''")
+
+        def rect_of(selector):
+            raw = js("(function(){var el=document.querySelector(%r);if(!el)return 'null';"
+                     "var r=el.getBoundingClientRect();return JSON.stringify({x:r.left+r.width/2,"
+                     "y:r.top+r.height/2,w:r.width,h:r.height,disabled:!!el.disabled});})()"
+                     % selector)
+            return json.loads(raw) if raw and raw != "null" else None
+
+        def item_rect(expression, label):
+            raw = js(expression)
+            box = json.loads(raw) if raw and raw != "null" else None
+            height = float(js("window.innerHeight"))
+            self.check("#77 %s 在屏幕上真的点得到" % label,
+                       bool(box) and box.get("w", 0) > 0
+                       and 0 < box["y"] < height - 2,
+                       "box=%s innerHeight=%s" % (box, height))
+            return box
+
+        def clickable(selector, label):
+            """把元素滚进视野再量。**必须先滚**：应用一次之后左边栏会长出东西
+            （数学通道列表多一条），「通道处理」那两枚按钮跟着往下走——实测在
+            1000 px 高的窗口里它们会掉到 907 px 的视口外面，CDP 的鼠标事件落在
+            视口外是**静默无效**的（不报错、什么也不发生）。所以这里量完还要断言
+            "真的在窗口里"，否则点到空气上会被当成功能坏了。
+            """
+            js("(function(){var el=document.querySelector(%r);"
+               "el.scrollIntoView({block:'end'});return true;})()" % selector)
+            time.sleep(0.3)
+            box = rect_of(selector)
+            height = js("window.innerHeight")
+            inside = bool(box) and box.get("w", 0) > 0 and box["y"] > 0 \
+                and box["y"] < float(height) - 2
+            self.check("#77 %s 滚进视野之后真的点得到" % label, inside,
+                       "box=%s innerHeight=%s" % (box, height))
+            return box if inside else None
+
+        def apply_once():
+            box = clickable("#setupApply", "「应用」")
+            if not box:
+                return False
+            self.browser.click(box["x"], box["y"], page)
+            time.sleep(2.0)
+            return True
+
+        # 挑一条本场次真有数据的通道（优先不是"在算距离轴"的那条速度）
+        name = js(
+            "(function(){var cs=(i3pro.state.components.filter(function(c){"
+            "return c.type==='graph';})[0]||{config:{}}).config.channels||[];"
+            "var spd=(i3pro.data.meta||{}).speed_channel;var first=null;"
+            "for(var i=0;i<cs.length;i++){if(i3pro.channelState(cs[i])==='present'){"
+            "if(cs[i]!==spd)return cs[i];if(first===null)first=cs[i];}}"
+            "return first;})()")
+        self.check("#77 导入的场次里有能处理的通道（避开在算距离轴的那条速度）",
+                   bool(name), name)
+        if not name:
+            return
+
+        # ---------------------------------------------------------- 真点 ⚙
+        cog = item_rect(
+            "(function(){var rows=document.querySelectorAll('#channelList label.ch');"
+            "for(var i=0;i<rows.length;i++){var nm=rows[i].querySelector('.nm');"
+            "if(nm&&nm.textContent===%s){var b=rows[i].querySelector('.cog');"
+            "return b?JSON.stringify(__center(b)):null;}}return null;})()"
+            % json.dumps(name), "这条通道的 ⚙")
+        if not cog:
+            return
+        self.browser.click(cog["x"], cog["y"], page)
+        time.sleep(0.6)
+        self.check("#77 点 ⚙ 之后面板落在这一条通道上", js("i3pro.state.setupChannel") == name,
+                   js("i3pro.state.setupChannel"))
+
+        # 低通 20 Hz（用户说的"设置完滤波参数"），真键盘敲进去
+        js("(function(){var s=document.getElementById('setupFilterKind');"
+           "s.value='lp';s.dispatchEvent(new Event('change'));return true;})()")
+        js("(function(){var i=document.getElementById('setupFilterValue');"
+           "i.focus();i.select();return true;})()")
+        self.browser.key("20", page)
+        js("(function(){var l=(i3pro.data.laps||[]).filter(function(x){return x.complete;});"
+           "var t=l.length?(l[0].start_time+5):10;i3pro.state.cursor=t;i3pro.renderAll();"
+           "return true;})()")
+        time.sleep(0.6)
+        if not apply_once():
+            return
+
+        written = definitions().get(name) or {}
+        self.check("#77 第一次「应用」落进了 <场次>.maths.json",
+                   bool(written), sorted(definitions()))
+        self.check("#77 写的是**同名**定义、而且是那条低通",
+                   str(written.get("expr", "")).startswith("filter_lp(")
+                   and written.get("name") == name, written.get("expr"))
+        self.check("#77 第一次应用之后界面认出来这条被处理过",
+                   js("i3pro.isProcessed(%s)" % json.dumps(name))
+                   and js("(i3pro.channels.get(%s)||{}).derived===true" % json.dumps(name)))
+        before = float(js("String(i3pro.cursorValueFor(%s))" % json.dumps(name)))
+        self.check("#77 处理之后光标处的读数读得出来", math.isfinite(before), before)
+
+        # -------------------------------------- 第二次「应用」：用户报的就是这一步
+        if not apply_once():
+            return
+        said = toast()
+        self.check("#77 第二次「应用」没有报错（原话是「数学通道保存失败：未知场次: …」）",
+                   "保存失败" not in said and "未知场次" not in said
+                   and "加上处理" in said, said)
+        self.check("#77 第二次应用之后侧车里仍然只有一条定义",
+                   sorted(definitions()) == [name], sorted(definitions()))
+        after = js("String(i3pro.cursorValueFor(%s))" % json.dumps(name))
+        self.check("#77 第二次应用之后这条通道还取得到值（原生列没被删掉）",
+                   after not in ("NaN", "null", "undefined") and math.isfinite(float(after)),
+                   after)
+        self.check("#77 第二次应用之后这一列还是「算出来的」那一档",
+                   js("(i3pro.channels.get(%s)||{}).derived===true" % json.dumps(name)))
+
+        # ------------------------------------------------ 删除处理：回到原值
+        remove = clickable("#setupRemove", "「删除处理」")
+        if not remove:
+            return
+        self.browser.click(remove["x"], remove["y"], page)
+        time.sleep(2.0)
+        self.check("#77 「删除处理」之后侧车里没有它了", name not in definitions(),
+                   "侧车=%s · toast=%r · 还标着处理过=%s"
+                   % (sorted(definitions()), toast(),
+                      js("i3pro.isProcessed(%s)" % json.dumps(name))))
+        back = js("String(i3pro.cursorValueFor(%s))" % json.dumps(name))
+        self.check("#77 删除之后这条通道回到文件里的原值、而且还在",
+                   back not in ("NaN", "null", "undefined")
+                   and js("i3pro.channelState(%s)==='present'" % json.dumps(name)),
+                   "%s（原始列还在 = 覆盖没把文件里那列吃掉）" % back)
+        self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-csv-override.png"), page)
+
 
 def _blob(path):
     with open(path, "rb") as handle:
@@ -2818,6 +2993,10 @@ def main(argv=None):
             checker.gps(work_dir, args.session)
             checker.imports("http://127.0.0.1:%d/" % args.port, work_dir)
             checker.text_import("http://127.0.0.1:%d/" % args.port, work_dir)
+            # 接着用刚导入的那一场（CSV 场次）验 A77：末尾那句"再应用一次"就是
+            # 用户踩到的那一步；这一条必须在 text_import **之后**。
+            checker.channel_processing_on_an_imported_session(
+                "http://127.0.0.1:%d/" % args.port, work_dir)
             errors = browser.page_errors()
             checker.check("整场没有页面级报错", not errors, errors[:3])
         bad = [name for name, ok in checker.results if not ok]

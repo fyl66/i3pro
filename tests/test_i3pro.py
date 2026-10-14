@@ -6172,6 +6172,62 @@ class TestGpsFix(unittest.TestCase):
         self.assertGreater(info["worst_jump_m"], 1000.0)
         self.assertAlmostEqual(info["longest_hole_s"], 2.1, places=6)
 
+    def test_a_dead_satellite_channel_does_not_veto_the_fix(self):
+        """卫星数通道整份只有 0 与 -1（本车实测就是这样）时，它不该否掉定位。
+
+        合并场次撞的就是这条：``.ld`` 里经纬度 50 Hz、卫星数 20 Hz，长度不同，所以
+        ``gps_track`` 那条"长度相等才看卫星数"的判据从来没生效；合并把每条通道都搬到
+        同一条主轴之后它突然生效，于是合并出来的 csv 全都报
+        "GPS never got a usable fix"（2026-10-14 实测）。
+        """
+        base = _gps_session()
+        n = base.columns["GPS Latitude"].size
+        dead = np.zeros(n, dtype=np.float64)
+        dead[7] = -1.0        # 本车那份的"死"是 0 与 -1 混着来，不是严格全 0
+        dead[33] = -1.0
+        session = _MathSession(
+            {**base.columns, "GPS Sats Used": dead}, rate=10.0, length=n,
+        )
+        track = derive.gps_track(session)
+        self.assertEqual(track["dropped"]["low_sats"], 0)
+        self.assertGreater(np.asarray(track["x"]).size, 100)
+
+    def test_a_live_satellite_channel_still_vetoes(self):
+        """真的在报数的卫星数通道照旧算数：报 3 颗以下的那些点要丢掉、要计数。"""
+        base = _gps_session()
+        n = base.columns["GPS Latitude"].size
+        sats = np.full(n, 9.0)
+        sats[40:60] = 2.0          # 这 2 秒只有 2 颗星
+        session = _MathSession({**base.columns, "GPS Sats Used": sats}, rate=10.0,
+                               length=n)
+        track = derive.gps_track(session)
+        self.assertEqual(track["dropped"]["low_sats"], 20)
+
+    def test_a_slower_satellite_channel_is_resampled_not_ignored(self):
+        """卫星数比经纬度慢（真数据就是 20 Hz vs 50 Hz）时，按零阶保持搬到同一条轴上比。"""
+        n = 200
+        lat = np.full(n, 22.6, dtype=np.float64)
+        lon = np.full(n, 114.0, dtype=np.float64)
+        for i in range(n):
+            lat[i] = 22.6 + i * 1e-6
+            lon[i] = 114.0 + i * 1e-6
+        session = _MathSession(
+            {
+                "GPS Latitude": lat,
+                "GPS Longitude": lon,
+                # 10 Hz 的经纬度、2 Hz 的卫星数：1/5 长度
+                "GPS Sats Used": np.concatenate([np.full(8, 9.0), np.full(32, 1.0)]),
+            },
+            rate=10.0,
+            length=n,
+            rates={"GPS Sats Used": 2.0},
+        )
+        track = derive.gps_track(session)
+        # 前 8 个卫星数采样（t = 0..3.5 s）>= 4，后 32 个（t >= 4 s）< 4；
+        # 经纬度最后 5 个采样（t = 19.5..19.9 s）落在卫星数样本之外，没有读数，
+        # 不算"卫星数不足"，所以是 155 而不是 160。
+        self.assertEqual(track["dropped"]["low_sats"], 155)
+
     @_needs(ENDURANCE)
     def test_golden_endurance_spike_is_flagged(self):
         """真数据：耐久正赛结尾有一次 214 m 的错位定位。"""

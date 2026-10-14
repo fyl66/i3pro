@@ -23,6 +23,7 @@ from . import timebase
 
 __all__ = [
     "SPEED_CANDIDATES",
+    "SATS_MIN",
     "UPSAMPLE_MODES",
     "name_table",
     "resolve_channel",
@@ -94,6 +95,11 @@ GPS_PAIRS = (
 #: "同一后缀"而不是只认写死的那几个全名。
 _LAT_HEADS = ("latitude", "poslat", "lat")
 _LON_HEADS = ("longitude", "poslon", "lon")
+
+#: 卫星数低于这个值算"没有定位"。判据只在卫星数通道**真的报过数**时才成立：
+#: 本车日志里 ``GPS Sats Used`` 整份只有 0 与 -1（死通道），拿它去否定位会把
+#: GPS 全部否掉——合并场次撞的就是这个（见 :func:`gps_track`）。
+SATS_MIN = 4
 
 
 def gps_pair(log: ldmod.LogFile) -> tuple[str, str] | None:
@@ -322,9 +328,18 @@ def gps_track(
     no_fix |= ~np.isfinite(lat) | ~np.isfinite(lon)
     low_sats = np.zeros(lat.size, dtype=bool)
     if log.has(sats_channel):
-        sats = log.values(sats_channel)
-        if sats.size == lat.size:
-            low_sats = sats < 4
+        sats = np.asarray(log.values(sats_channel), dtype=float)
+        if np.isfinite(sats).any() and np.nanmax(sats) >= SATS_MIN:
+            # 卫星数这条通道通常比经纬度慢（.ld 里经纬度 50 Hz、卫星数 20 Hz），
+            # 按零阶保持搬到经纬度那条轴上再逐点比。
+            sats_rate = log.channel(sats_channel).sample_rate
+            sats_time = np.arange(sats.size, dtype=np.float64) / sats_rate
+            low_sats = timebase.hold_sample(sats_time, sats, time) < SATS_MIN
+        # 一次都没报过 >= SATS_MIN 的卫星数通道是**死的**（本车实测就是：整份日志里
+        # 只有 0 与 -1），它没有任何信息，不能拿它去否掉定位。以前那条判据写成
+        # "卫星数通道与经纬度等长才用"——在 .ld 上因为两者采样率不同从来没生效，
+        # 而合并场次把每条通道都搬到同一条主轴上之后它突然生效，于是合并出来的
+        # csv 全都变成"GPS never got a usable fix"（2026-10-14 实测）。
     valid = ~(no_fix | low_sats)
     if valid.sum() < 10:
         raise ValueError(f"{log.path.name}: GPS never got a usable fix")

@@ -359,13 +359,12 @@ class Alignment:
 
 
 def hold_sample(times: np.ndarray, values: np.ndarray, at: np.ndarray) -> np.ndarray:
-    """零阶保持重采样：``at`` 落在两个采样点之间时取前一个（与 canlog 一致）。"""
-    at = np.asarray(at, dtype=np.float64)
-    if times.size == 0 or values.size == 0:
-        return np.full(at.size, np.nan)
-    inside = (at >= times[0]) & (at < times[-1])
-    index = np.clip(np.searchsorted(times, at, side="right") - 1, 0, values.size - 1)
-    return np.where(inside, values[index], np.nan)
+    """零阶保持重采样：``at`` 落在两个采样点之间时取前一个（与 canlog 一致）。
+
+    实现在 :func:`i3pro.timebase.hold_sample`（``derive`` 把卫星数搬到经纬度那条
+    轴上时用的是同一个函数）。这里是留个本地名字，调用方不必改。
+    """
+    return timebase.hold_sample(times, values, at)
 
 
 def hold_into(times: np.ndarray, values: np.ndarray, at: np.ndarray, into: np.ndarray) -> None:

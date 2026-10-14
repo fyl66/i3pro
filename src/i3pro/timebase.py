@@ -41,3 +41,24 @@ def axis(source, rate: float | None = None) -> np.ndarray:
     """主时间基本身（秒）：`0, 1/rate, …, duration`。"""
     sample_rate = rate_of(source, rate)
     return np.arange(length(source, rate), dtype=np.float64) / sample_rate
+
+
+def hold_sample(times, values, at) -> np.ndarray:
+    """把 ``(times, values)`` 按零阶保持重采样到 ``at`` 这些时刻。
+
+    ``at`` 落在两个采样点之间时取**前一个**（与 ``canlog`` 对 CAN 帧的处理一致）；
+    ``at`` 落在 ``[times[0], times[-1])`` 之外给 ``NaN``——那一段确实没有读数，
+    不编造也不外推。
+
+    这是"两条不同采样率的通道搬到同一条轴上"的唯一实现：``pairing`` 用它把 CAN
+    通道并到 ``.ld`` 的时间轴上，``derive`` 用它把卫星数搬到经纬度那条轴上
+    （``.ld`` 里经纬度 50 Hz、卫星数 20 Hz）。
+    """
+    times = np.asarray(times, dtype=np.float64)
+    values = np.asarray(values)
+    at = np.asarray(at, dtype=np.float64)
+    if times.size == 0 or values.size == 0:
+        return np.full(at.size, np.nan)
+    inside = (at >= times[0]) & (at < times[-1])
+    index = np.clip(np.searchsorted(times, at, side="right") - 1, 0, values.size - 1)
+    return np.where(inside, values[index], np.nan)

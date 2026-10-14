@@ -4100,3 +4100,90 @@ python tools\verify_clicks.py
 **回归四项（本机实测）**：`Ran 525 tests in 348.614s` + `OK`；`verify_ld_vs_csv`
 `PASS - 0 channel(s) outside tolerance`；两份金标准快照各 `PASS`；真浏览器
 **251 项检查：251 通过，0 失败**。无头驱动里 `check(` 共 **625** 条（A77 那会儿 609）。
+
+---
+
+## A80 · 合并出来的 csv 里没有 GPS（"GPS never got a usable fix"，本次修复）
+
+用户报的现象：`i3pro pair` 合出来的 csv 导进 i3pro 之后**没有 GPS 轨迹**（原始 `.ld`
+是有的）。查下来不是数据丢了——`GPS Latitude` / `GPS Longitude` 都好好地写在合并文件里，
+`derive.gps_pair` 也认得出这一对；是 **`derive.gps_track` 把它们整条否掉了**。
+
+**根因：一条本来就写错的判据，被"合并成一条时间轴"这件事踩响了。**
+
+`gps_track` 拿卫星数通道判"没定位"：
+
+```python
+low_sats = np.zeros(lat.size, dtype=bool)
+if log.has(sats_channel):                      # sats_channel = "GPS Sats Used"
+    sats = log.values(sats_channel)
+    if sats.size == lat.size:                  # <- 这一条
+        low_sats = sats < 4
+```
+
+`sats.size == lat.size` 是在拿**长度**当"这条通道靠不靠得住"的替身。实测两份数据的形状：
+
+| | 经纬度 | `GPS Sats Used` | 那条判据 |
+| --- | --- | --- | --- |
+| 原始 `.ld` | 50 Hz（63,800 点） | 20 Hz（25,520 点） | 长度不等 → **从来没生效** |
+| 合并后的 csv | 100 Hz（127,600 点） | 100 Hz（127,600 点） | 长度相等 → 生效 |
+
+而本车那个卫星数通道是**死的**——`20261005-底马八字.ld` 里 25,520 个样本全是 `0`；
+`20261007-jhy绕桩.ld` / `cjh100限速直线.ld` / `20261007-庞仙耐久两圈.ld` 里全是 `0` 与
+`-1`（非零的只有 13 / 27 / 30 个）。于是 `sats < 4` 把所有点都判成"没有定位"，
+`valid.sum() < 10` 成立，轨迹直接抛 `GPS never got a usable fix`。
+
+**改法**（`derive.gps_track`）：不再看长度，而是
+
+1. 把卫星数按**零阶保持**搬到经纬度那条时间轴上再逐点比（`.ld` 里两者采样率不同，
+   这一步本来就得做）；
+2. **只在它真的报过数时**才拿它当判据——`np.nanmax(sats) >= derive.SATS_MIN`（4）。
+   一次都没报过 ≥ 4 的卫星数通道没有任何信息，不能拿它去否掉定位。
+   判据没生效时 `dropped["low_sats"]` 记 0，界面上那句"卫星数不足 N 点"自然也不出现
+   （以前那条判据在 `.ld` 上就是靠"长度不等"偶然躲过去的，现在是明写的规则）。
+
+零阶保持这一份实现搬到了 `timebase.hold_sample`（`pairing` 原来那个 `hold_sample`
+改成调它），两处不再各写一遍。
+
+**判据有没有真的变**（同一份合成数据，老判据照抄出来并排算）：
+
+| 情形 | 老判据 | 新判据 |
+| --- | --- | --- |
+| 死通道（整份只有 0 与 −1） | 能用的点 **0** 个 → 抛 `never got a usable fix` | 能用的点 **170** 个，`low_sats = 0` → 画得出 |
+| 活的卫星数通道（0~3 颗那 20 个采样） | 能用 150 个，`low_sats = 20` | 能用 **150** 个，`low_sats = 20`（**没被改松**） |
+| 卫星数比经纬度慢（40 个采样 vs 200 个） | 长度不等 → 判据不生效，`low_sats = 0` | 搬上同一条轴，`low_sats = 135` |
+
+**真数据实跑**：把 `i2pro_data` 里**全部 26 份合并场次**过一遍（`out\_gps_prefix_count.py`
+数改动前会被这条判据打掉的有多少、`out\_gps_sweep.py` 数改动后画得出来多少）：
+
+| 26 份合并场次 | 份数 | 说明 |
+| --- | --- | --- |
+| 改动前会被否掉 | **22** | `GPS Sats Used` 被读成数值列，且 99.98% 的样本 < 4（如 `jhy高避` 77,500 个样本里 77,495 个） |
+| 改动前侥幸躲过 | 2 | `20261005-底马八字` / `cjh高避油门线松了`——那两场的占位列在合并时恰好被写成空列、读的时候整列丢掉，老判据就没得踩 |
+
+改动后 **26 份全部画得出轨迹、0 出错**。例：`20261005-底马八字.csv` 127,600 行 →
+124,406 个定位点（x −50.3…0.1 m、y −31.0…9.5 m），`cjh阶跃+脉冲.csv` → 128,276 个定位点，
+`jhy高避.csv` → 65,846 个。**不需要重新合并**：毛病在读的一侧，已经合出来的 csv 现在就能看。
+
+```powershell
+# 1) 纯函数层：死通道不否定位 / 活通道照旧否 / 慢通道照样搬
+python -m unittest tests.test_i3pro.TestGpsFix -v
+
+# 2) 真数据：每一份合并场次都要画得出轨迹（26 份、0 出错）
+python out\_gps_sweep.py
+```
+
+**五件套的落点**：① 实现 `derive.gps_track` + `timebase.hold_sample`；② 单测
+`TestGpsFix` 新增 3 条（死通道 / 活通道 / 慢通道）；③ 无头断言**不加**——这条改的是
+服务端算轨迹的判据，没有新的界面状态，`smoke_viewer.js` 里那份 GPS 汇总载荷本来就是注入
+的静态数据（改动前后逐字相同）；④ 本条目；⑤ 两份金标准快照照旧全绿。
+
+**回归四项（本机实测）**：`Ran 528 tests in 353.624s` + `OK`；`verify_ld_vs_csv`
+`PASS - 0 channel(s) outside tolerance`；两份金标准快照各 `PASS`；真浏览器
+**251 项检查：251 通过，0 失败**。
+
+**跑测试要先看磁盘**：这套回归会把 `i2pro_data` 拷进 `%TEMP%`（`verify_clicks.py` 那条，
+以及 `TestLaunchers` / `TestBootstrap` 那几条），合并场次进来之后这一份拷贝要 ~7 GB。
+本机 `C:` 只剩 0 GB 时这四条会以 `OSError: [Errno 28] No space left on device` 成片报错
+——那是磁盘不是代码。把 `%TEMP%` 指到有空间的分区再跑即可（本次实测：
+`$env:TEMP="E:\桌面\i3pro\out\_temp"; $env:TMP=$env:TEMP`）。

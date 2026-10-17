@@ -517,6 +517,16 @@ Drag（直线加速）项目模式、多 Workbook 工程体系。
 
 ---
 
+### M11 — 逆向对齐（Marple Insight，2026-10-17 起）
+
+用 REA 对 Marple Insight 的交付包做静态分析（不执行其代码、不调用其后端），得到 20 条能力
+对照与 P1–P4 候选：**姿态图 + PFD**、**光标 A–B 区间统计**、**热力图**、**绘图分辨率旋钮**。
+证据、现状与"做/押后/不做"的结论在 [`docs/marple-parity.md`](marple-parity.md)；
+运行时证据的采集规程在 [`docs/marple-runtime-capture.md`](marple-runtime-capture.md)；
+本轮规则放宽（单文件 / 依赖白名单 / 五件套分级）的边界见
+[ADR-0006](adr/0006-marple-parity-and-rule-relaxation.md)。对照表里标"做"的每一条，
+落地时仍要带可跑的验收命令，`tools/verify_ld_vs_csv.py` 照旧不可谈判。
+
 ## 8. 待确认事项
 
 1. **仓库托管**：代码已推到 **https://github.com/fyl66/i3pro**（**public**，2026-09-13 确认；车队数据与 MoTeC

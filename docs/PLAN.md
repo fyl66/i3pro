@@ -522,6 +522,8 @@ Drag（直线加速）项目模式、多 Workbook 工程体系。
 用 REA 对 Marple Insight 的交付包做静态分析（不执行其代码、不调用其后端），得到 20 条能力
 对照与 P1–P4 候选：**姿态图 + PFD**、**光标 A–B 区间统计**、**热力图**、**绘图分辨率旋钮**。
 证据、现状与"做/押后/不做"的结论在 [`docs/marple-parity.md`](marple-parity.md)；
+四条能力已收敛成可切票的规格：[`docs/spec-marple-parity.md`](spec-marple-parity.md)（含
+UI 与组件逻辑的"取/去"清单）。
 运行时证据的采集规程在 [`docs/marple-runtime-capture.md`](marple-runtime-capture.md)；
 本轮规则放宽（单文件 / 依赖白名单 / 五件套分级）的边界见
 [ADR-0006](adr/0006-marple-parity-and-rule-relaxation.md)。对照表里标"做"的每一条，

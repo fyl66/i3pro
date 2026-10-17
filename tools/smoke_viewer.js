@@ -4156,6 +4156,74 @@ if (canMeta) {
   api.renderAll();
 }
 
+// 36. 组件栏的小改（A92）：添加入口分组、不可用原因、空状态、换成与复制。
+{
+  const addSel = registry.get("addType");
+  const addNote = registry.get("addTypeNote");
+  check(!!addSel && !!addNote, "添加组件那一栏没有下拉或原因行");
+  for (const label of ["曲线", "聚合", "姿态", "状态与报告"]) {
+    check(String(addSel && addSel._html).indexOf('<optgroup label="' + label + '">') >= 0,
+      "添加组件下拉少了分组：" + label);
+  }
+
+  const savedChannels = api.data.channels;
+  const savedStatus = api.data.status;
+  api.data.channels = [];
+  api.data.status = [];
+  if (addSel) addSel.value = "graph";
+  api.renderAddTypeNote();
+  check(String(addNote && addNote.textContent).indexOf("这一场没有任何通道") >= 0
+    && String(addNote && addNote.textContent).indexOf("先导入数据") >= 0,
+    "本场次没有通道时没给出原因和下一步：" + (addNote && addNote.textContent));
+  check(api.addTypeReason("status").indexOf("状态通道") >= 0
+    && api.addTypeReason("status").indexOf("先导入数据") >= 0,
+    "状态组件没有状态通道时没给出原因和下一步：" + api.addTypeReason("status"));
+  api.data.channels = savedChannels;
+  api.data.status = savedStatus;
+  api.renderAddTypeNote();
+  check(api.emptyComponentHint() === "把左边的通道拖进来",
+    "空组件状态文案不对：" + api.emptyComponentHint());
+
+  const graph = api.state.components.filter((c) => c.type === "graph")[0];
+  check(!!graph, "工作表里没有可换成 / 复制的图组件");
+  if (graph) {
+    const saved = JSON.parse(JSON.stringify(graph));
+    graph.x = 0;
+    graph.y = 0;
+    graph.w = 12;
+    graph.h = 8;
+    graph.config.channels = ["Vx KF", "GPS Speed"];
+    const replaced = api.replaceComponentType(graph, "histogram");
+    check(!!replaced && replaced.type === "histogram"
+      && replaced.id === saved.id && replaced.config.channel === "Vx KF"
+      && replaced.x === 0 && replaced.y === 0,
+      "「换成…」没有保留通道与位置：" + JSON.stringify(replaced));
+    const back = replaced && api.replaceComponentType(replaced, "graph");
+    if (back) {
+      Object.assign(back.config, saved.config);
+      back.x = saved.x; back.y = saved.y; back.w = saved.w; back.h = saved.h;
+      api.buildWorksheet();
+      api.renderAll();
+    }
+  }
+
+  const copyFrom = api.state.components.filter((c) => c.type === "graph")[0];
+  const beforeCopy = api.state.components.length;
+  const copied = api.copyComponent(copyFrom);
+  check(!!copied && api.state.components.length === beforeCopy + 1
+    && copied.id !== copyFrom.id && copied.config !== copyFrom.config,
+    "「复制」没有生成一块独立组件：" + JSON.stringify(copied));
+  if (copied) {
+    copied.config.channels = (copied.config.channels || []).concat(["__copy__"]);
+    check((copyFrom.config.channels || []).indexOf("__copy__") < 0,
+      "复制出来的组件和原件共用 config（改一块会改另一块）");
+    api.state.components.splice(api.state.components.indexOf(copied), 1);
+    api.state.focusId = copyFrom.id;
+    api.buildWorksheet();
+    api.renderAll();
+  }
+}
+
 const header = registry.get("fileInfo");
 check(header && (header.innerHTML.indexOf(".ld") >= 0
   || header.innerHTML.indexOf(".csv") >= 0

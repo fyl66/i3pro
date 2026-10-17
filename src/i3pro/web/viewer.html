@@ -398,6 +398,7 @@
         <select id="addType" title="选择要添加的组件"></select>
         <button id="addBtn">＋ 添加组件</button>
       </div>
+      <div class="hint" id="addTypeNote"></div>
     </div>
     <div class="group" id="lapGroup">
       <h2>圈速 <span class="count" id="lapCount"></span></h2>
@@ -760,12 +761,71 @@ const ROW_PX = 24;
  *   refreshWindow(comp)    缩放窗口变了要不要重新取数：返回 Promise 或 null
  *   render(comp, b)        画
  *   encode(comp) / decode(comp, payload)  分享链接里的紧凑载荷
+ *   group / addNeed        添加下拉的分组，以及"为什么这类不能用"的口径
+ *   adoptChannels(comp, names)  换成别的显示形式时，把旧组件声明的通道搬进新槽位
  */
+const COMPONENT_GROUPS = [
+  { key: "curve", label: "曲线" },
+  { key: "aggregate", label: "聚合" },
+  { key: "attitude", label: "姿态" },
+  { key: "status", label: "状态与报告" },
+  { key: "other", label: "其他" },
+];
+const EMPTY_COMPONENT_HINT = "把左边的通道拖进来";
+
+function emptyHint(text) {
+  return ((DATA && DATA.channels) || []).length ? text : EMPTY_COMPONENT_HINT;
+}
+function cleanChannelNames(names) {
+  return (names || []).filter((name) => !!name);
+}
+function adoptGraphChannels(comp, names) {
+  comp.config.channels = cleanChannelNames(names);
+}
+function adoptScatterChannels(comp, names) {
+  const list = cleanChannelNames(names);
+  comp.config.x = list[0] || null;
+  comp.config.y = list[1] ? [list[1]] : (list[0] ? [list[0]] : []);
+  comp.config.colour = list[2] || null;
+}
+function adoptHistogramChannels(comp, names) {
+  const list = cleanChannelNames(names);
+  comp.config.channel = list[0] || null;
+  comp.config.colour = list[1] || null;
+}
+function adoptSpectrumChannels(comp, names) {
+  const list = cleanChannelNames(names);
+  comp.config.channel = list[0] || null;
+  comp.config.against = list[1] || null;
+}
+function adoptHeatmapChannels(comp, names) {
+  const list = cleanChannelNames(names);
+  comp.config.x = list[0] || null;
+  comp.config.y = list[1] || list[0] || null;
+  comp.config.z = list[2] || null;
+}
+function adoptTrackChannels(comp, names) {
+  comp.config.channel = cleanChannelNames(names)[0] || null;
+}
+function adoptGaugeChannels(comp, names) {
+  comp.config.channels = cleanChannelNames(names).slice(0, 8);
+}
+function adoptAttitudeChannels(comp, names) {
+  const list = cleanChannelNames(names);
+  comp.config.roll = list[0] || null;
+  comp.config.pitch = list[1] || null;
+  comp.config.yaw = list[2] || null;
+}
+function adoptReportChannels(comp, names) {
+  comp.config.channels = cleanChannelNames(names).slice(0, MAX_REPORT_CHANNELS);
+}
+
 const COMPONENT_TYPES = {
   graph: {
     label: "时间/距离图", cols: 12, rows: 8,
     defaults: graphDefaults, title: graphTitle, needs: graphNeeds,
     onAdd: graphOnAdd,
+    group: "curve", adoptChannels: adoptGraphChannels,
     get sidebar() { return graphSidebar; },
     encode: graphEncode, decode: graphDecode,
     render: renderGraphComponent,
@@ -773,6 +833,7 @@ const COMPONENT_TYPES = {
   scatter: {
     label: "散点图", cols: 4, rows: 13, caption: true,
     defaults: scatterDefaults, needs: scatterNeeds,
+    group: "curve", adoptChannels: adoptScatterChannels,
     controls: scatterControls, hooks: scatterHooks, sync: scatterSync,
     encode: scatterEncode, decode: scatterDecode,
     get data() { return scatterData; },
@@ -781,6 +842,7 @@ const COMPONENT_TYPES = {
   histogram: {
     label: "直方图", cols: 6, rows: 13, caption: true,
     defaults: histogramDefaults, title: histogramTitle, needs: histogramNeeds,
+    group: "aggregate", adoptChannels: adoptHistogramChannels,
     controls: histogramControls, sync: histogramSync,
     encode: histogramEncode, decode: histogramDecode,
     get data() { return histogramData; },
@@ -789,6 +851,7 @@ const COMPONENT_TYPES = {
   spectrum: {
     label: "频谱", cols: 6, rows: 13, caption: true,
     defaults: spectrumDefaults, title: spectrumTitle, needs: spectrumNeeds,
+    group: "aggregate", adoptChannels: adoptSpectrumChannels,
     controls: spectrumControls, sync: spectrumSync,
     encode: spectrumEncode, decode: spectrumDecode,
     get data() { return spectrumData; },
@@ -797,6 +860,7 @@ const COMPONENT_TYPES = {
   heatmap: {
     label: "热力图", cols: 6, rows: 13, caption: true,
     defaults: heatmapDefaults, title: heatmapTitle, needs: heatmapNeeds,
+    group: "aggregate", adoptChannels: adoptHeatmapChannels,
     controls: heatmapControls, hooks: heatmapHooks, sync: heatmapSync,
     encode: heatmapEncode, decode: heatmapDecode,
     get data() { return heatmapData; },
@@ -806,6 +870,7 @@ const COMPONENT_TYPES = {
     label: "赛道轨迹", cols: 4, rows: 13, caption: true,
     // window：all = 整场轨迹，zoom = 只看当前缩放出来的那一段（去问服务端要）
     defaults: () => ({ channel: null, window: "all" }),
+    group: "curve", adoptChannels: adoptTrackChannels,
     controls: trackControls,
     hooks: (comp, b) => b.canvas.addEventListener("click", (e) => onTrackClick(e, comp, b)),
     // 载荷 = 通道名 | 窗口。老链接里只有一个通道名（没有 "|"），照旧解成整场。
@@ -821,6 +886,7 @@ const COMPONENT_TYPES = {
   gauge: {
     label: "仪表", cols: 4, rows: 13, caption: true,
     defaults: gaugeDefaults, title: gaugeTitle, needs: gaugeNeeds,
+    group: "attitude", adoptChannels: adoptGaugeChannels,
     controls: gaugeControls, sync: gaugeSync,
     encode: gaugeEncode, decode: gaugeDecode,
     render: renderGaugeComponent,
@@ -828,6 +894,7 @@ const COMPONENT_TYPES = {
   attitude: {
     label: "姿态", cols: 4, rows: 13, caption: true,
     defaults: attitudeDefaults, title: attitudeTitle, needs: attitudeNeeds,
+    group: "attitude", addNeed: "attitude", adoptChannels: adoptAttitudeChannels,
     controls: attitudeControls, hooks: attitudeHooks, sync: attitudeSync,
     encode: attitudeEncode, decode: attitudeDecode,
     //: R 键复位视角归它管（声明，不是在外面按类型分派）。名字避开工具栏那个
@@ -837,10 +904,12 @@ const COMPONENT_TYPES = {
   },
   delta: {
     label: "时间差 Δ", cols: 12, rows: 8, caption: true,
+    group: "aggregate",
     render: renderDeltaComponent,
   },
   status: {
     label: "状态与故障", cols: 12, rows: 4, caption: true,
+    group: "status", addNeed: "status",
     hotkey: "e",        // E 加/去这个组件（i2 Pro 里是按 E 看状态通道）
     needs: (comp, add) => (DATA.status || []).forEach(add),
     render: renderStatusComponent,
@@ -848,6 +917,7 @@ const COMPONENT_TYPES = {
   report: {
     label: "时间报告", cols: 12, rows: 10, tabular: true,
     defaults: () => ({ filter: "all" }), title: reportTitle,
+    group: "status",
     table: "time", controls: reportControls,
     encode: reportEncode, decode: reportDecode,
     get data() { return reportData; },
@@ -857,6 +927,7 @@ const COMPONENT_TYPES = {
     label: "通道报告", cols: 12, rows: 12, tabular: true,
     defaults: () => ({ channels: [], by: "lap", lap: null, filter: "all" }),
     title: chreportTitle, table: "channels", onAdd: chreportOnAdd,
+    group: "status", addNeed: "any", adoptChannels: adoptReportChannels,
     controls: chreportControls,
     get sidebar() { return chreportSidebar; },
     encode: chreportEncode, decode: chreportDecode,
@@ -867,6 +938,11 @@ const COMPONENT_TYPES = {
 
 /** 组件的声明；没声明过的类型给 null（别拿它当分支条件猜）。 */
 function specOf(comp) { return (comp && COMPONENT_TYPES[comp.type]) || null; }
+
+function componentTypesInGroup(key) {
+  return Object.keys(COMPONENT_TYPES)
+    .filter((type) => ((COMPONENT_TYPES[type] || {}).group || "other") === key);
+}
 
 /** 哪个显示形式占用了这个快捷键（声明里的 hotkey）。没占用给 null。 */
 function componentTypeWithHotkey(letter) {
@@ -1832,11 +1908,19 @@ function channelsMatching(patterns, limit) {
   return found;
 }
 
+function freshComponentId(type) {
+  let id = type + "-" + (++compSeq);
+  while (state.components.some((other) => other.id === id)) {
+    id = type + "-" + (++compSeq);
+  }
+  return id;
+}
+
 function makeComponent(type, overrides) {
   const spec = COMPONENT_TYPES[type];
   const o = overrides || {};
   const comp = {
-    id: type + "-" + (++compSeq),
+    id: freshComponentId(type),
     type: type,
     x: o.x === undefined ? 0 : o.x,
     y: o.y === undefined ? 0 : o.y,
@@ -1844,13 +1928,6 @@ function makeComponent(type, overrides) {
     h: o.h === undefined ? spec.rows : o.h,
     config: {},
   };
-  // id 撞了就等于两份组件共用一个 bundle（SHEET 是拿 id 当键的），缓存键、
-  // 刷新键、光标全串在一起。从 localStorage 恢复的布局带着**上一次会话的 id**，
-  // 而 compSeq 每次开页都从 0 重新数——"恢复的 histogram-3"和"新加的
-  // histogram-3"就是这样撞上的（实测会让直方图无限重新请求）。这里兜底。
-  while (state.components.some((other) => other.id === comp.id)) {
-    comp.id = type + "-" + (++compSeq);
-  }
   // 默认配置完全由这一类自己的声明给（#19 / #20）：这里不再认类型。
   comp.config = Object.assign({}, spec.defaults ? spec.defaults(o) : {},
                               o.config || {});
@@ -3180,6 +3257,14 @@ function buildWorksheet() {
         openDisplayMenu(comp, cfgBtn);
       });
     }
+    const replaceBtn = makeEl("button", "", tools);
+    replaceBtn.textContent = "换成…";
+    replaceBtn.title = "换一种显示形式：尽量保留通道、位置与尺寸";
+    replaceBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openReplaceMenu(comp, replaceBtn);
+    });
+    btn("copy", "复制", "复制一份，并往右下错开一格");
     if (tabular) btn("csv", "CSV", "把这张表导出成 CSV（列序与界面上看到的一致）");
     btn("close", "✕", "移除这个组件");
     const body = makeEl("div", "compbody" + (tabular ? " tabular" : ""), el);
@@ -3401,6 +3486,72 @@ function refreshComponentTitle(comp) {
   if (bundle.titleSpan.textContent !== text) bundle.titleSpan.textContent = text;
 }
 
+function openReplaceMenu(comp, anchor) {
+  openPopMenu(anchor, "换成…", (menu) => {
+    for (const group of COMPONENT_GROUPS) {
+      const types = componentTypesInGroup(group.key);
+      if (!types.length) continue;
+      const row = makeEl("div", "poprow", menu);
+      makeEl("span", "poplabel", row).textContent = group.label;
+      for (const type of types) {
+        const chip = makeEl("button", "popchip", row);
+        chip.textContent = COMPONENT_TYPES[type].label;
+        chip.title = "换成「" + COMPONENT_TYPES[type].label + "」，尽量保留通道与位置";
+        if (type === comp.type) chip.classList.add("on");
+        chip.disabled = type === comp.type;
+        chip.addEventListener("click", (event) => {
+          event.stopPropagation();
+          closePopMenu();
+          replaceComponentType(comp, type);
+        });
+      }
+    }
+    const hint = makeEl("div", "pophint", menu);
+    hint.textContent = "换类型只改显示形式；通道会按新组件能用的槽位尽量搬过去，位置和尺寸保留。";
+  });
+}
+
+function copyComponent(comp) {
+  const idx = state.components.indexOf(comp);
+  if (idx < 0) return null;
+  const copy = copyComponents([comp])[0];
+  copy.id = freshComponentId(copy.type);
+  copy.x = clamp(comp.x + 1, 0, GRID_COLS - copy.w);
+  copy.y = Math.max(0, comp.y + 1);
+  state.components.splice(idx + 1, 0, copy);
+  state.focusId = copy.id;
+  return copy;
+}
+
+function replaceComponentType(comp, type) {
+  const spec = COMPONENT_TYPES[type];
+  const idx = state.components.indexOf(comp);
+  if (!spec || idx < 0) return null;
+  const names = componentChannels(comp);
+  const keep = ["palette", "colors", "show", "statsRange"];
+  const next = makeComponent(type, {
+    x: comp.x, y: comp.y, w: comp.w, h: comp.h,
+  });
+  if (spec.adoptChannels) spec.adoptChannels(next, names);
+  for (const key of keep) {
+    if (comp.config && comp.config[key] !== undefined) {
+      next.config[key] = copyComponents([comp.config[key]])[0];
+    }
+  }
+  state.components.splice(idx, 1, next);
+  next.id = comp.id;
+  state.focusId = next.id;
+  state.windowKey = "";
+  saveLayout();
+  buildWorksheet();
+  renderPresetButtons();
+  renderChannelList();
+  syncScatterSelectors();
+  refreshWindowTraces(true).then(() => { refreshAllComponentData().then(renderAll); });
+  renderAll();
+  return next;
+}
+
 function componentAction(comp, act) {
   const idx = state.components.indexOf(comp);
   if (act === "csv") {
@@ -3416,6 +3567,8 @@ function componentAction(comp, act) {
   } else if (act === "down" && idx >= 0 && idx < state.components.length - 1) {
     state.components.splice(idx, 1);
     state.components.splice(idx + 1, 0, comp);
+  } else if (act === "copy") {
+    copyComponent(comp);
   }
   saveLayout();
   buildWorksheet();
@@ -3459,7 +3612,7 @@ function renderGraphComponent(comp, b) {
     c.ctx.fillStyle = "#8b94a7";
     c.ctx.font = "12px Segoe UI";
     c.ctx.textAlign = "left";
-    c.ctx.fillText("这个图还没有通道 —— 点一下它，然后在左侧勾选通道", 12, 24);
+    c.ctx.fillText(EMPTY_COMPONENT_HINT, 12, 24);
     b.head.style.display = "none";
     return;
   }
@@ -4290,7 +4443,7 @@ function renderScatterComponent(comp, b) {
     ctx.fillStyle = "#8b94a7";
     ctx.font = "12px Segoe UI";
     ctx.textAlign = "left";
-    ctx.fillText("选 X / Y 通道", 12, 24);
+    ctx.fillText(emptyHint("选 X / Y 通道"), 12, 24);
     b.head.textContent = "";
     return;
   }
@@ -4480,7 +4633,7 @@ function renderHistogramComponent(comp, b) {
     ctx.textAlign = "left";
     ctx.fillText(text, 12, 24);
   };
-  if (!cfg.channel) { hint("选一条要看分布的通道"); b.head.textContent = ""; return; }
+  if (!cfg.channel) { hint(emptyHint("选一条要看分布的通道")); b.head.textContent = ""; return; }
   if (!b.data || !b.data.bins || !b.data.bins.length) {
     // 这句话既画在画布上，也写进表头——表头是 DOM，断言与读屏都拿得到。
     const message = b.dataError || (DATA.api ? "载入分布…"
@@ -4860,7 +5013,7 @@ function renderHeatmapComponent(comp, b) {
     ctx.fillText(text, 12, 24);
   };
   if (!cfg.x || !cfg.y) {
-    const message = "选两个通道：X 与 Y 分箱，色（可留空）决定颜色";
+    const message = emptyHint("选两个通道：X 与 Y 分箱，色（可留空）决定颜色");
     b.head.textContent = message;
     hint(message);
     return;
@@ -5098,7 +5251,7 @@ function renderSpectrumComponent(comp, b) {
     ctx.textAlign = "left";
     ctx.fillText(text, 12, 24);
   };
-  if (!cfg.channel) { hint("选一条要做频谱的通道"); b.head.textContent = ""; return; }
+  if (!cfg.channel) { hint(emptyHint("选一条要做频谱的通道")); b.head.textContent = ""; return; }
   if (!b.data || !b.data.power || !b.data.power.length) {
     const message = b.dataError || (DATA.api ? "算频谱…"
       : "快照里没带这条通道的频谱（导出时它没被勾选）——换一条，或用 serve 模式打开");
@@ -5393,7 +5546,7 @@ function renderAttitudeComponent(comp, b) {
     ctx.fillStyle = "#8b94a7";
     ctx.font = "12px Segoe UI";
     ctx.textAlign = "left";
-    ctx.fillText("给这个组件选 roll / pitch / yaw 三条通道", 12, 24);
+    ctx.fillText(emptyHint("给这个组件选 roll / pitch / yaw 三条通道"), 12, 24);
     let line = 44;
     for (const one of lacking) {
       ctx.fillText(one.name ? one.name + "：" + one.text : one.text, 12, line);
@@ -9392,8 +9545,47 @@ function wireSheetManage() {
 function renderAddTypeOptions() {
   const sel = $("addType");
   if (!sel) return;
-  sel.innerHTML = Object.keys(COMPONENT_TYPES)
-    .map((t) => '<option value="' + t + '">' + COMPONENT_TYPES[t].label + "</option>").join("");
+  const groups = COMPONENT_GROUPS.map((group) => ({
+    label: group.label,
+    types: componentTypesInGroup(group.key),
+  })).filter((group) => group.types.length);
+  sel.innerHTML = groups.map((group) =>
+    '<optgroup label="' + group.label + '">'
+      + group.types.map((t) => '<option value="' + t + '">'
+        + COMPONENT_TYPES[t].label + "</option>").join("")
+      + "</optgroup>").join("");
+  renderAddTypeNote();
+}
+
+function addTypeReason(type) {
+  const spec = COMPONENT_TYPES[type];
+  if (!spec || (!spec.needs && !spec.addNeed)) return "";
+  const channels = (DATA && DATA.channels) || [];
+  if (spec.addNeed === "attitude") {
+    const picked = attitudePick(channels.map((ch) => ch.name));
+    const missing = ["roll", "pitch", "yaw"].filter((axis) => !picked[axis]);
+    if (missing.length) {
+      return "这一场没有姿态通道（" + missing.join(" / ")
+        + "），先导入数据或用通道别名指一条";
+    }
+  }
+  if (spec.addNeed === "status" && !((DATA && DATA.status) || []).length) {
+    return "这一场没有状态通道，先导入数据或用通道别名指一条";
+  }
+  if (!channels.length) {
+    return "这一场没有任何通道，先导入数据或用通道别名指一条";
+  }
+  return "";
+}
+
+function renderAddTypeNote() {
+  const note = $("addTypeNote");
+  const sel = $("addType");
+  if (!note || !sel) return;
+  const first = Object.keys(COMPONENT_TYPES)[0] || "";
+  const reason = addTypeReason(sel.value || first);
+  note.textContent = reason;
+  note.style.display = reason ? "" : "none";
 }
 
 function addComponentOfType(type) {
@@ -9815,6 +10007,7 @@ function init() {
     renderAll();
   });
   $("addBtn").addEventListener("click", () => addComponentOfType($("addType").value));
+  $("addType").addEventListener("change", renderAddTypeNote);
   $("modeTime").addEventListener("click", () => {
     state.mode = "time"; state.view = null; state.panelZoom = {}; scheduleRefresh(); renderAll();
   });
@@ -9869,6 +10062,9 @@ window.i3pro = {
   groupsFor: groupsFor, selectedChannels: selectedChannels,
   addComponentOfType: addComponentOfType, applyPreset: applyPreset,
   componentAction: componentAction, refreshWindowTraces: refreshWindowTraces,
+  copyComponent: copyComponent, replaceComponentType: replaceComponentType,
+  renderAddTypeNote: renderAddTypeNote, addTypeReason: addTypeReason,
+  emptyComponentHint: () => EMPTY_COMPONENT_HINT,
   encodeLayout: encodeLayout, decodeLayout: decodeLayout, saveLayout: saveLayout,
   componentTypes: COMPONENT_TYPES, componentSpec: specOf,
   componentTypeWithHotkey: componentTypeWithHotkey,

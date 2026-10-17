@@ -3306,6 +3306,113 @@ class Checker:
                 "if(c)i3pro.componentAction(c,'close');return true;})()")
         time.sleep(0.3)
 
+    # ------------------------------------------- A92 组件栏的小改
+    def component_bar(self):
+        """#48：添加入口分组、不可用原因、空状态、换成与复制。
+
+        DOM 证明得了"下拉里有分组、原因行说得出下一步"；真鼠标这一段只补它证明不了
+        的两件：点「复制」之后两块能各改各的，点「换成…」之后同一个 id 还在、通道
+        还在。
+        """
+        def button_at(component_id, label):
+            raw = self.js(
+                "JSON.stringify((function(){var el=document.querySelector('[data-id=\""
+                + component_id + "\"] .ctools');if(!el)return null;"
+                "var b=[].filter.call(el.querySelectorAll('button'),function(x)"
+                "{return x.textContent===" + json.dumps(label, ensure_ascii=False) + ";})[0];"
+                "return b?__center(b):null;})())") or "null"
+            return json.loads(raw)
+
+        self.js("i3pro.applyPreset(i3pro.worksheetCatalogue().sheets[0].name); true")
+        time.sleep(0.8)
+        groups = json.loads(
+            self.js("JSON.stringify([].map.call(document.querySelectorAll('#addType optgroup'),"
+                    "function(g){return g.label;}))") or "[]")
+        self.check("#48 添加组件下拉按用途分组",
+                   groups == ["曲线", "聚合", "姿态", "状态与报告"], groups)
+        saved = json.loads(
+            self.js("JSON.stringify({channels:i3pro.data.channels,status:i3pro.data.status})"))
+        self.js("i3pro.data.channels=[];i3pro.data.status=[];"
+                "document.getElementById('addType').value='graph';"
+                "i3pro.renderAddTypeNote();true")
+        note = self.js("document.getElementById('addTypeNote').textContent")
+        self.check("#48 没有通道时添加入口写明原因和下一步",
+                   "这一场没有任何通道" in str(note) and "先导入数据" in str(note), note)
+        self.js("i3pro.data.channels=%s;i3pro.data.status=%s;i3pro.renderAddTypeNote();true"
+                % (json.dumps(saved["channels"], ensure_ascii=False),
+                   json.dumps(saved["status"], ensure_ascii=False)))
+        self.check("#48 空组件状态说得出下一步",
+                   self.js("i3pro.emptyComponentHint()") == "把左边的通道拖进来",
+                   self.js("i3pro.emptyComponentHint()"))
+
+        graph = json.loads(
+            self.js("JSON.stringify((function(){var c=i3pro.state.components.filter(function(x)"
+                    "{return x.type==='graph';})[0];"
+                    "if(!c)return null;c.config.channels=['Vx KF','GPS Speed'];"
+                    "i3pro.buildWorksheet();i3pro.renderAll();"
+                    "return {id:c.id,x:c.x,y:c.y};})())") or "null")
+        self.check("#48 工作表里有一张可复制、可换类型的图", bool(graph), graph)
+        if not graph:
+            return
+        copy_btn = button_at(graph["id"], "复制")
+        self.check("#48 真点得到组件栏上的「复制」",
+                   bool(copy_btn) and copy_btn.get("w", 0) > 0,
+                   json.dumps(copy_btn, ensure_ascii=False))
+        if not copy_btn:
+            return
+        self.browser.click(copy_btn["x"], copy_btn["y"], self.session)
+        time.sleep(0.6)
+        made_js = (
+            "JSON.stringify((function(){var a=i3pro.state.components;"
+            "var orig=a.filter(function(x){return x.id==="
+            + json.dumps(graph["id"]) + ";})[0];if(!orig)return null;"
+            "var idx=a.indexOf(orig);if(idx<0||!a[idx+1])return null;"
+            "var c=a[idx+1];"
+            "var copyX=c.x,copyY=c.y;"
+            "c.config.channels=(c.config.channels||[]).concat(['__copy__']);"
+            "return {id:c.id,x:copyX,y:copyY,independent:c.config!==orig.config"
+            "&&(orig.config.channels||[]).indexOf('__copy__')<0};})())")
+        made = json.loads(self.js(made_js) or "null")
+        self.check("#48 真点「复制」后多一块，而且两块配置独立",
+                   bool(made) and made.get("independent") is True, made)
+        if not made:
+            return
+
+        replace_btn = button_at(made["id"], "换成…")
+        self.check("#48 真点得到组件栏上的「换成…」",
+                   bool(replace_btn) and replace_btn.get("w", 0) > 0,
+                   json.dumps(replace_btn, ensure_ascii=False))
+        if not replace_btn:
+            return
+        self.browser.click(replace_btn["x"], replace_btn["y"], self.session)
+        time.sleep(0.4)
+        chip = json.loads(
+            self.js("JSON.stringify((function(){var b=[].filter.call("
+                    "document.querySelectorAll('.popmenu .popchip'),function(x)"
+                    "{return x.textContent==='直方图';})[0];return b?__center(b):null;})())")
+            or "null")
+        self.check("#48 换成菜单里有「直方图」",
+                   bool(chip) and chip.get("w", 0) > 0, json.dumps(chip, ensure_ascii=False))
+        if not chip:
+            self.js("i3pro.closePopMenu(); true")
+            return
+        self.browser.click(chip["x"], chip["y"], self.session)
+        time.sleep(0.8)
+        after = json.loads(
+            self.js("JSON.stringify((function(){var c=i3pro.state.components.filter(function(x)"
+                    "{return x.id===" + json.dumps(made["id"]) + ";})[0];"
+                    "return c?{id:c.id,type:c.type,channel:c.config.channel,x:c.x,y:c.y}:null;})())")
+            or "null")
+        self.check("#48 真点「换成…」后通道与位置都还在",
+                   bool(after) and after.get("type") == "histogram"
+                   and after.get("channel") == "Vx KF"
+                   and after.get("x") == made.get("x") and after.get("y") == made.get("y"),
+                   after)
+        self.js("(function(){var c=i3pro.state.components.filter(function(x)"
+                "{return x.id===" + json.dumps(made["id"]) + ";})[0];"
+                "if(c)i3pro.componentAction(c,'close');return true;})()")
+        time.sleep(0.3)
+
     # ------------------------------------------- A89 光标 A–B 区间统计
     def cursor_stats(self):
         """#44 光标 A–B 区间统计：真点「显示 → A–B」、真放 A/B、数跟着 B 跑。
@@ -3703,6 +3810,8 @@ def main(argv=None):
             checker.cursor_stats()
             # #45 热力图：真加一件、真悬停、色标真的画出来、真切范围、量一次响应。
             checker.heatmap()
+            # #48 组件栏小改：真复制一块、真换成直方图，通道与位置都还在。
+            checker.component_bar()
             errors = browser.page_errors()
             checker.check("整场没有页面级报错", not errors, errors[:3])
         bad = [name for name, ok in checker.results if not ok]

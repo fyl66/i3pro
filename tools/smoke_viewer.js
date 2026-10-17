@@ -753,6 +753,132 @@ if (api) {
   }
   check(state.components.length === beforeGauge, "cleaning up the gauge test components failed");
 
+  // 19b. 姿态（#43）：立体车体 / PFD 两个视图，跟光标走；缺通道说下一步。
+  //      矩阵与挑通道规则是后端 `src/i3pro/attitude.py` 的镜像——前端没有构建步骤、
+  //      跑不了 Python，重一份**不可避免**，所以这里拿后端算出来的数对拍：
+  //      重复必须可验证，不然两边的约定会悄悄分叉。
+  {
+    const reference = [[0.346929449655, -0.937758242512, -0.015793529119],
+                       [0.681632986593, 0.263669453487, -0.682535633418],
+                       [0.644217687238, 0.22602632125, 0.730681649936]];
+    const matrix = api.attitudeMatrix(0.3, 0.7, 1.1);
+    let worst = 0;
+    matrix.forEach((row, i) => row.forEach((value, j) => {
+      worst = Math.max(worst, Math.abs(value - reference[i][j]));
+    }));
+    check(worst < 1e-12, "3-2-1 矩阵与后端 attitude.py 不一致，最大差 " + worst);
+
+    const picked = api.attitudePick(["GPS Speed", "Aceinna Pitch", "Aceinna Roll",
+                                     "AngleLocalYaw", "YawAngAcc"]);
+    check(picked.roll === "Aceinna Roll" && picked.pitch === "Aceinna Pitch"
+      && picked.yaw === "AngleLocalYaw",
+      "姿态挑通道与后端不一致: " + JSON.stringify(picked));
+    const blank = api.attitudePick(["GPS Speed", "Brake Signal"]);
+    check(blank.roll === null && blank.pitch === null && blank.yaw === null,
+      "认不出姿态通道时该留空（不猜），现在挑了 " + JSON.stringify(blank));
+
+    const beforeAttitude = state.components.length;
+    api.addComponentOfType("attitude");
+    const attitude = state.components[state.components.length - 1];
+    check(state.components.length === beforeAttitude + 1 && attitude.type === "attitude",
+      "姿态组件加不进来");
+    check(attitude.config.roll === "Aceinna Roll" && attitude.config.pitch === "Aceinna Pitch"
+      && attitude.config.yaw === "AngleLocalYaw",
+      "加进来的姿态没按实测名字挑通道: "
+      + JSON.stringify([attitude.config.roll, attitude.config.pitch, attitude.config.yaw]));
+
+    // 静态快照只带导出时选中的通道（这一份是 12 条），三条姿态通道不在里面：
+    // 组件必须**说明白**是"这一份快照没带"，而不是静默不画。
+    check(String(api.bundleOf(attitude).titleSpan.textContent || "").indexOf("缺 3 条") >= 0,
+      "快照没带这三条通道时标题该写缺 3 条: "
+      + api.bundleOf(attitude).titleSpan.textContent);
+    let seen = { fillText: calls.fillText };
+    api.renderAll();
+    check(calls.fillText > seen.fillText, "缺数据时画布上该说下一步");
+
+    // 换成载荷里真的带了的通道：画法本身（线框 / 抬头 / 幽灵 / PFD）要能跑
+    const available = ["G Force Long", "G Force Lat", "GPS Heading", "Vx KF", "TH"]
+      .filter((name) => (api.state.traces || {})[name]);
+    check(available.length >= 3, "这一份快照带的通道太少，画法测不了");
+    if (available.length >= 3) {
+      attitude.config.roll = available[0];
+      attitude.config.pitch = available[1];
+      attitude.config.yaw = available[2];
+      seen = { stroke: calls.stroke, fillText: calls.fillText };
+      api.renderAll();
+      check(calls.stroke > seen.stroke, "姿态的立体车体没画线");
+      check(calls.fillText > seen.fillText, "姿态的抬头没写读数");
+      const head = String(api.bundleOf(attitude).head.textContent || "");
+      check(head.indexOf("roll") >= 0 && head.indexOf("pitch") >= 0 && head.indexOf("yaw") >= 0,
+        "姿态抬头该写全三条轴: " + head);
+      check(String(api.bundleOf(attitude).titleSpan.textContent || "").indexOf("缺 ") < 0,
+        "三条轴都齐了标题不该说缺: " + api.bundleOf(attitude).titleSpan.textContent);
+
+      // 单位换算：把三条通道写成常量 10，抬头必须**一律读成度**。
+      // 曾经这里把"单位系数"当除数，`unit:"rad"` 时 10 rad 被印成 "10.0°"（评审抓到的 bug）。
+      const kept = available.slice(0, 3).map((name) => api.state.traces[name].value);
+      available.slice(0, 3).forEach((name) => {
+        const trace = api.state.traces[name];
+        trace.value = trace.value.map(() => 10);
+      });
+      attitude.config.unit = "deg";
+      api.renderAll();
+      let reading = String(api.bundleOf(attitude).head.textContent || "");
+      check(reading.indexOf("10.0°") >= 0, "unit=deg 时 10 该读成 10.0°: " + reading);
+      attitude.config.unit = "rad";
+      api.renderAll();
+      reading = String(api.bundleOf(attitude).head.textContent || "");
+      check(reading.indexOf("-147.0°") >= 0,
+        "unit=rad 时 10 rad 该读成 -147.0°（归一化到 ±180 再换算成度）: " + reading);
+      attitude.config.unit = "deg";
+      available.slice(0, 3).forEach((name, index) => {
+        api.state.traces[name].value = kept[index];
+      });
+
+      // 幽灵：基准光标处那层 30% 透明的模型，关掉之后要少画一整套线框
+      state.datumOn = true;
+      state.datum = (api.lane()[0] + api.lane()[1]) / 2;
+      seen = { stroke: calls.stroke };
+      api.renderAll();
+      const withGhost = calls.stroke - seen.stroke;
+      attitude.config.ghost = false;
+      seen = { stroke: calls.stroke };
+      api.renderAll();
+      const plain = calls.stroke - seen.stroke;
+      check(withGhost > plain,
+        "关掉幽灵之后线该少画一整套（幽灵 " + withGhost + " 段 vs 平时 " + plain + " 段）");
+      attitude.config.ghost = true;
+      state.datumOn = false;
+
+      // PFD：天地线那块是填色 + 刻度文字
+      attitude.config.view = "pfd";
+      seen = { fillRect: calls.fillRect, fillText: calls.fillText };
+      api.renderAll();
+      check(calls.fillRect > seen.fillRect && calls.fillText > seen.fillText,
+        "PFD 没画天地线与刻度");
+      attitude.config.view = "model";
+    }
+
+    // 本场次没有这条通道：标题写"缺 N 条"，画布里说下一步（绝不静默少画一轴）
+    const savedYaw = attitude.config.yaw;
+    attitude.config.yaw = "本场没有这条通道";
+    seen = { fillText: calls.fillText };
+    api.renderAll();
+    check(calls.fillText > seen.fillText, "缺通道时画布上该有提示");
+    check(String(api.bundleOf(attitude).titleSpan.textContent || "").indexOf("缺 1 条") >= 0,
+      "标题没写缺了几条: " + api.bundleOf(attitude).titleSpan.textContent);
+    attitude.config.yaw = savedYaw;
+
+    // R 复位视角（E 被「状态与故障」占着）：改了相机再按 R 要回到默认
+    attitude.config.camera = { yaw: 140, pitch: 60 };
+    key("r");
+    const camera = attitude.config.camera;
+    check(camera && camera.yaw === 26 && camera.pitch === 18,
+      "R 没把姿态视角复位: " + JSON.stringify(camera));
+    api.componentAction(attitude, "close");
+    check(state.components.length === beforeAttitude, "收尾没把姿态测试组件去掉");
+  }
+
   // 20. free layout: drag to move, drag the corner to resize, both snap
   const target = state.components.find((c) => c.type === "scatter") || state.components[0];
   const element = SHEETEl(worksheet, target.id);
@@ -2546,12 +2672,17 @@ if (embeddedSpec && embeddedSpec.series) {
                   axis: "linear", span: "all" } },
       { id: "p5", type: "track", x: 6, y: 21, w: 4, h: 13,
         config: { channel: "GPS Speed", window: "zoom" } },
+      { id: "p6", type: "attitude", x: 4, y: 34, w: 4, h: 13,
+        config: { view: "pfd", roll: "G Force Long", pitch: "G Force Lat",
+                  yaw: "GPS Heading", unit: "rad", gains: [1, -1, 0.5],
+                  ghost: false, grid: false, camera: { yaw: 40, pitch: -12 } } },
     ];
     const chartBack = api.decodeLayout(api.encodeLayout(chartProbes));
-    check(!!chartBack && chartBack.length === 5, "五类图表形式的分享链接往返丢了组件");
-    if (chartBack && chartBack.length === 5) {
-      check(chartBack.map((c) => c.type).join(",") === "graph,scatter,histogram,spectrum,track",
-        "五类图表形式的分享链接往返换了类型或次序");
+    check(!!chartBack && chartBack.length === 6, "图表形式的分享链接往返丢了组件");
+    if (chartBack && chartBack.length === 6) {
+      check(chartBack.map((c) => c.type).join(",")
+        === "graph,scatter,histogram,spectrum,track,attitude",
+        "图表形式的分享链接往返换了类型或次序");
       check(chartBack[0].config.channels.join("|") === "Vx KF|GPS Speed"
         && chartBack[0].config.mode === "overlapped", "图的往返没保住通道或分栏方式");
       check(chartBack[1].config.x === "Vx KF" && chartBack[1].config.y.join("|") === "G Force Lat"
@@ -2568,6 +2699,13 @@ if (embeddedSpec && embeddedSpec.series) {
         "频谱的往返没保住点数 / 窗 / 重叠 / 平滑 / 纵轴 / 窗口 / 对比通道");
       check(chartBack[4].config.channel === "GPS Speed" && chartBack[4].config.window === "zoom",
         "轨迹的往返没保住通道或窗口");
+      check(chartBack[5].config.view === "pfd" && chartBack[5].config.roll === "G Force Long"
+        && chartBack[5].config.pitch === "G Force Lat" && chartBack[5].config.yaw === "GPS Heading"
+        && chartBack[5].config.unit === "rad"
+        && (chartBack[5].config.gains || []).join(",") === "1,-1,0.5"
+        && chartBack[5].config.ghost === false && chartBack[5].config.grid === false
+        && chartBack[5].config.camera.yaw === 40 && chartBack[5].config.camera.pitch === -12,
+        "姿态的往返没保住视图 / 三条通道 / 单位 / 倍数 / 幽灵 / 网格 / 相机");
     }
 
     // 两张散点同屏：各拿自己那一份数据（#21 的核心 —— 原来它们挤在

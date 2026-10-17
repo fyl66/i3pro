@@ -1746,6 +1746,20 @@ class TestAttitude(unittest.TestCase):
         self.assertEqual(picked["yaw"], "AngleLocalYaw")
 
 
+    def test_前端对拍用的冻结常量仍与后端一致(self):
+        """前端那份 3-2-1 矩阵在 `tools/smoke_viewer.js` 里拿**冻结常量**对拍。
+
+        常量是为了让"前端没有构建步骤、跑不了 Python"也能自查它；但常量会漂移——
+        后端改了约定、常量还停在旧值，smoke 照样绿。所以同一组数在后端再钉一遍：
+        这条红了就说明该去 smoke 里更新那三个数（反之亦然）。
+        """
+        frozen = [[0.346929449655, -0.937758242512, -0.015793529119],
+                  [0.681632986593, 0.263669453487, -0.682535633418],
+                  [0.644217687238, 0.22602632125, 0.730681649936]]
+        np.testing.assert_allclose(
+            attitudemod.rotation_matrix(0.3, 0.7, 1.1), frozen, atol=1e-12)
+
+
 class TestChannelGroups(unittest.TestCase):
     """i2 Pro groups channels that share a unit so they can share one axis."""
 
@@ -2660,7 +2674,7 @@ class TestComponentRegistry(unittest.TestCase):
 
     #: 注册表里声明过的全部显示形式（= 添加下拉里能看到的那几个 + 已声明的）。
     DECLARED = ("graph", "scatter", "histogram", "spectrum", "track", "gauge",
-                "delta", "status", "report", "chreport")
+                "attitude", "delta", "status", "report", "chreport")
 
     #: 需要服务端数据的显示形式：它们的声明里必须说清"这一屏问的问题"。
     NEEDS_DATA = ("scatter", "histogram", "spectrum", "track", "report", "chreport")

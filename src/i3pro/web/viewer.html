@@ -809,6 +809,16 @@ const COMPONENT_TYPES = {
     encode: gaugeEncode, decode: gaugeDecode,
     render: renderGaugeComponent,
   },
+  attitude: {
+    label: "姿态", cols: 4, rows: 13, caption: true,
+    defaults: attitudeDefaults, title: attitudeTitle, needs: attitudeNeeds,
+    controls: attitudeControls, hooks: attitudeHooks, sync: attitudeSync,
+    encode: attitudeEncode, decode: attitudeDecode,
+    //: R 键复位视角归它管（声明，不是在外面按类型分派）。名字避开工具栏那个
+    //: `#resetView` 按钮，免得读成"这个类型占用了全局重置按钮"。
+    resetsView: true,
+    render: renderAttitudeComponent,
+  },
   delta: {
     label: "时间差 Δ", cols: 12, rows: 8, caption: true,
     render: renderDeltaComponent,
@@ -848,6 +858,14 @@ function componentTypeWithHotkey(letter) {
   for (const type of Object.keys(COMPONENT_TYPES)) {
     const spec = COMPONENT_TYPES[type];
     if (spec && spec.hotkey && String(spec.hotkey).toLowerCase() === want) return type;
+  }
+  return null;
+}
+
+/** 哪个显示形式声明了这个标志（例如 `resetsView`——R 键复位视角）。没有给 null。 */
+function componentTypeWithFlag(flag) {
+  for (const type of Object.keys(COMPONENT_TYPES)) {
+    if (COMPONENT_TYPES[type] && COMPONENT_TYPES[type][flag]) return type;
   }
   return null;
 }
@@ -1267,6 +1285,341 @@ function gaugeDecode(comp, payload) {
   const parts = String(payload || "").split("|");
   comp.config.subtype = GAUGE_SUBTYPES[parts[0]] ? parts[0] : "numeric";
   comp.config.channels = parts[1] ? parts[1].split("~").filter(Boolean) : [];
+}
+
+/* --------------------------------------------------------- 姿态（attitude）
+ * 把三个角度画成一幅姿态图。**算术后端有一份权威实现**（`src/i3pro/attitude.py`，
+ * ticket #42 / 验收 A88）：单位换算、每通道倍数、3-2-1 旋转、正交投影、PFD 刻度。
+ * 这里是同一套约定的前端实现——前端没有构建步骤、跑不了 Python，所以
+ * `attitudeMatrix` 必须与后端**逐元素相同**，由 `tools/smoke_viewer.js` 拿后端
+ * 算出来的数对拍守住（重复不可避免，让它可验证）。
+ *
+ * 对齐的是 Marple 的 ATTITUDE / PFD 两个视图（docs/marple-parity.md 第 6/7 行）；
+ * 它在 Aurora 的账号上被 license 挡住（AEROSPACE 不在 features 里），只能照静态包对齐。
+ * 有意不同的两处：
+ *   · 不引 three.js——正交投影 + 线框车体够表达姿态，而「双击即开、离网可用」不能丢；
+ *   · 相机固定 3-2-1，不给 `eulerOrder` 六选一（那是个没人会改的配置坟墓）。
+ * 复位视角用 **R**：E 已经被「状态与故障」占了（它自己在注册表里声明的 hotkey）。
+ */
+const ATTITUDE_VIEWS = [["model", "立体车体"], ["pfd", "PFD 天地线"]];
+const ATTITUDE_UNITS = [["deg", "度"], ["rad", "弧度"]];
+//: 实测名字（与 channelpick.py 的三张表同一份清单）；写法差异由 normaliseName 抹平。
+const ATTITUDE_NAMES = {
+  roll: ["Aceinna Roll", "Roll (2)"],
+  pitch: ["Aceinna Pitch", "Pitch (2)"],
+  yaw: ["AngleLocalYaw"],
+};
+//: 兜底词（与 channelpick.ATTITUDE_NAME_HINTS 同一份清单）。
+const ATTITUDE_HINTS = { roll: ["roll"], pitch: ["pitch"], yaw: ["yaw", "heading"] };
+//: 车体线框的八个角（x 前 / y 左 / z 上）与十二根棱。
+const ATTITUDE_BOX = [
+  [-1, -0.55, -0.22], [1, -0.55, -0.22], [1, 0.55, -0.22], [-1, 0.55, -0.22],
+  [-1, -0.55, 0.22], [1, -0.55, 0.22], [1, 0.55, 0.22], [-1, 0.55, 0.22],
+];
+const ATTITUDE_EDGES = [
+  [0, 1], [1, 2], [2, 3], [3, 0],
+  [4, 5], [5, 6], [6, 7], [7, 4],
+  [0, 4], [1, 5], [2, 6], [3, 7],
+];
+//: PFD 三根刻度的格宽是 10°（与后端 `pfd_scales()` 同一份约定：闭环只画一次）。
+const ATTITUDE_PITCH_TICKS = [-90, -80, -70, -60, -50, -40, -30, -20, -10, 0,
+  10, 20, 30, 40, 50, 60, 70, 80, 90];
+const ATTITUDE_ROLL_TICKS = [-180, -170, -160, -150, -140, -130, -120, -110, -100, -90,
+  -80, -70, -60, -50, -40, -30, -20, -10, 0, 10, 20, 30, 40, 50, 60, 70, 80, 90,
+  100, 110, 120, 130, 140, 150, 160, 170];
+let attitudeDrag = null;
+
+function attitudeDefaults() {
+  return { view: "model", roll: null, pitch: null, yaw: null, unit: "deg",
+           gains: [1, 1, 1], ghost: true, grid: true,
+           camera: { yaw: 26, pitch: 18 } };
+}
+function attitudeDefaultCamera() { return { yaw: 26, pitch: 18 }; }
+function attitudeCamera(comp) {
+  const cam = comp.config.camera;
+  if (!cam || !Number.isFinite(cam.yaw) || !Number.isFinite(cam.pitch)) {
+    comp.config.camera = attitudeDefaultCamera();
+  }
+  return comp.config.camera;
+}
+function attitudeResetCamera(comp) {
+  comp.config.camera = attitudeDefaultCamera();
+  renderAll();
+}
+function attitudeTitle(comp) {
+  const view = ATTITUDE_VIEWS.find((pair) => pair[0] === (comp.config.view || "model"));
+  const unit = comp.config.unit === "rad" ? "rad" : "deg";
+  // "缺 N 条"写在标题上（ticket #34）：三条轴少一条，抬头就是唯一说得清
+  // "为什么车是歪的"的地方——不说的话用户只能怀疑是自己选错了。
+  const lack = ["roll", "pitch", "yaw"].filter(
+    (axis) => attitudeAxis(comp, axis).state !== "ok").length;
+  return typeTitle(comp, (view ? view[1] : "立体车体") + " · " + unit
+    + (lack ? " · 缺 " + lack + " 条" : ""));
+}
+function attitudeNeeds(comp, add) {
+  add(comp.config.roll);
+  add(comp.config.pitch);
+  add(comp.config.yaw);
+}
+/**
+ * 一条轴到底能不能画。**三态分开**（与通道列表那套判据一致，ticket #34）：
+ *   unset  —— 还没选；
+ *   missing—— 本场次没有这条通道；
+ *   nodata —— 通道在，但**这一份载荷**没带它的数据（静态快照只带导出时选中的通道）。
+ * 第三种最容易被糊成"组件坏了"：快照是固定的，用 `启动.bat`（服务模式）按需取数就有。
+ */
+function attitudeAxis(comp, axis) {
+  const name = comp.config[axis];
+  if (!name) return { name: null, state: "unset", text: "还没选" };
+  if (isMissingChannel(name)) return { name: name, state: "missing", text: "本场次没有这条通道" };
+  if (!traceOf(name)) {
+    // 与直方图 / 频谱那两句同一个说法：快照只嵌导出时勾选过的通道。
+    return { name: name, state: "nodata",
+             text: "快照里没带这条通道的数据（导出时它没被勾选）——用 serve 模式打开"
+                   + "（启动.bat），或重导快照时带上它" };
+  }
+  return { name: name, state: "ok", text: "" };
+}
+/** 通道名的「同一化」：与后端 `channelref.normalise` 同一条规则（去空格/下划线/大小写）。 */
+function normaliseName(text) {
+  return String(text || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+/**
+ * 这一场该拿哪三条通道当 roll / pitch / yaw——后端 `attitude.pick_channels` 的镜像。
+ * 三级：实测名字 → 名字里的词 → 留空；**同一条通道不派给两个轴**。
+ * 认不出就留空：挑错一条姿态通道，画出来的车是歪的，而没人看得出来。
+ */
+function attitudePick(names) {
+  const sorted = (names || []).slice().sort();
+  const byKey = new Map();
+  for (const name of sorted) {
+    const key = normaliseName(name);
+    if (key && !byKey.has(key)) byKey.set(key, name);
+  }
+  const out = { roll: null, pitch: null, yaw: null };
+  const taken = [];
+  for (const axis of ["roll", "pitch", "yaw"]) {
+    let hit = null;
+    for (const candidate of ATTITUDE_NAMES[axis]) {
+      const found = byKey.get(normaliseName(candidate));
+      if (found && taken.indexOf(found) < 0) { hit = found; break; }
+    }
+    if (!hit) {
+      for (const hint of ATTITUDE_HINTS[axis]) {
+        const wanted = normaliseName(hint);
+        for (const name of sorted) {
+          if (taken.indexOf(name) >= 0) continue;
+          if (wanted && normaliseName(name).indexOf(wanted) >= 0) { hit = name; break; }
+        }
+        if (hit) break;
+      }
+    }
+    out[axis] = hit;
+    if (hit) taken.push(hit);
+  }
+  return out;
+}
+/** 角度归一化到 [-π, π)：与后端 `attitude.normalize_angle` 同一条规则（这里收弧度）。 */
+function attitudeNormalize(radians) {
+  if (!Number.isFinite(radians)) return NaN;
+  const twoPi = Math.PI * 2;
+  let wrapped = radians % twoPi;
+  if (wrapped >= Math.PI) wrapped -= twoPi;
+  else if (wrapped < -Math.PI) wrapped += twoPi;
+  return wrapped;
+}
+function attitudeMul(a, b) {
+  const out = [];
+  for (let i = 0; i < a.length; i++) {
+    const row = [];
+    for (let j = 0; j < b[0].length; j++) {
+      let sum = 0;
+      for (let k = 0; k < b.length; k++) sum += a[i][k] * b[k][j];
+      row.push(sum);
+    }
+    out.push(row);
+  }
+  return out;
+}
+function attitudeApply(matrix, point) {
+  return [
+    matrix[0][0] * point[0] + matrix[0][1] * point[1] + matrix[0][2] * point[2],
+    matrix[1][0] * point[0] + matrix[1][1] * point[1] + matrix[1][2] * point[2],
+    matrix[2][0] * point[0] + matrix[2][1] * point[1] + matrix[2][2] * point[2],
+  ];
+}
+/** 三个角（**弧度**）→ 车身到世界的旋转矩阵：`Rz(yaw)·Ry(pitch)·Rx(roll)`（3-2-1）。 */
+function attitudeMatrix(roll, pitch, yaw) {
+  const cr = Math.cos(roll), sr = Math.sin(roll);
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  const rx = [[1, 0, 0], [0, cr, -sr], [0, sr, cr]];
+  const ry = [[cp, 0, -sp], [0, 1, 0], [sp, 0, cp]];
+  const rz = [[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]];
+  return attitudeMul(rz, attitudeMul(ry, rx));
+}
+/** 正交投影：与后端 `attitude.project` 同一套（相机先偏航后俯仰，屏幕 y 向下）。 */
+function attitudeProject(points, matrix, camera) {
+  const yaw = (camera.yaw || 0) * Math.PI / 180;
+  const pitch = (camera.pitch || 0) * Math.PI / 180;
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const turn = [[cy, sy, 0], [-sy, cy, 0], [0, 0, 1]];
+  const tilt = [[1, 0, 0], [0, cp, -sp], [0, sp, cp]];
+  const view = attitudeMul(tilt, turn);
+  return points.map((point) => {
+    const cam = attitudeApply(view, attitudeApply(matrix, point));
+    return [cam[0], -cam[2]];
+  });
+}
+/** 姿态的控件条：视图 / 单位 / 三条通道 / 每通道倍数 / 幽灵 / 复位。 */
+function attitudeControls(comp, bundle, body) {
+  const cfgBar = makeEl("div", "scattercfg", body);
+  const selView = makeEl("select", "", cfgBar);
+  selView.innerHTML = ATTITUDE_VIEWS.map(
+    (pair) => '<option value="' + pair[0] + '">' + pair[1] + "</option>").join("");
+  selView.value = comp.config.view || "model";
+  selView.title = "立体车体跟着光标转；PFD 是「开飞机」那块天地线";
+  const selUnit = makeEl("select", "", cfgBar);
+  selUnit.innerHTML = ATTITUDE_UNITS.map(
+    (pair) => '<option value="' + pair[0] + '">' + pair[1] + "</option>").join("");
+  selUnit.value = comp.config.unit === "rad" ? "rad" : "deg";
+  selUnit.title = "通道的单位；选错的话姿态会差很多倍";
+  const selects = {};
+  const gains = [];
+  for (const axis of ["roll", "pitch", "yaw"]) {
+    makeEl("span", "", cfgBar).textContent = axis;
+    const sel = makeEl("select", "", cfgBar);
+    sel.title = "哪条通道是这个轴（默认按实测名字挑：Aceinna Roll / Aceinna Pitch / AngleLocalYaw）";
+    selects[axis] = sel;
+    const input = makeEl("input", "", cfgBar);
+    input.type = "number";
+    input.step = "0.5";
+    input.style.width = "58px";
+    input.title = axis + " 的倍数：「方向反了」就填 -1，不要改代码里的约定";
+    gains.push(input);
+  }
+  const chkGhost = makeEl("input", "", cfgBar);
+  chkGhost.type = "checkbox";
+  chkGhost.checked = comp.config.ghost !== false;
+  chkGhost.title = "在基准光标（A）处叠一个 30% 透明的模型，跟光标处的姿态对比";
+  makeEl("span", "", cfgBar).textContent = "幽灵";
+  const btnReset = makeEl("button", "", cfgBar);
+  btnReset.textContent = "复位视角";
+  btnReset.title = "把相机转回默认的斜视角（也可以按 R）";
+  bundle.selView = selView;
+  bundle.selUnit = selUnit;
+  bundle.selRoll = selects.roll;
+  bundle.selPitch = selects.pitch;
+  bundle.selYaw = selects.yaw;
+  bundle.gainInputs = gains;
+  bundle.chkGhost = chkGhost;
+  bundle.btnReset = btnReset;
+  const changed = () => {
+    comp.config.view = selView.value === "pfd" ? "pfd" : "model";
+    comp.config.unit = selUnit.value === "rad" ? "rad" : "deg";
+    comp.config.roll = selects.roll.value || null;
+    comp.config.pitch = selects.pitch.value || null;
+    comp.config.yaw = selects.yaw.value || null;
+    comp.config.gains = gains.map((input) => {
+      const value = Number(input.value);
+      return Number.isFinite(value) && value !== 0 ? value : 1;
+    });
+    comp.config.ghost = chkGhost.checked;
+    bundle.cacheKey = "";
+    saveLayout();          // 与 scatter / spectrum / report 同一条纪律：改完要落盘
+    renderAll();
+  };
+  selView.addEventListener("change", changed);
+  selUnit.addEventListener("change", changed);
+  for (const axis of ["roll", "pitch", "yaw"]) {
+    selects[axis].addEventListener("change", changed);
+  }
+  for (const input of gains) input.addEventListener("change", changed);
+  chkGhost.addEventListener("change", changed);
+  btnReset.addEventListener("click", (event) => {
+    event.stopPropagation();
+    attitudeResetCamera(comp);
+  });
+}
+/** 通道下拉的候选与默认值（和仪表同一条纪律：本场没这条就重挑）。 */
+function attitudeSync(comp, b, pool) {
+  const names = (pool && (pool.all && pool.all.length ? pool.all : pool.selected)) || [];
+  if (!b || !b.selRoll || !names.length) return;
+  const picked = attitudePick(names);
+  for (const axis of ["roll", "pitch", "yaw"]) {
+    const value = comp.config[axis];
+    if (!value || names.indexOf(value) < 0) comp.config[axis] = picked[axis];
+  }
+  fillSelect(b.selRoll, names, comp.config.roll, true);
+  fillSelect(b.selPitch, names, comp.config.pitch, true);
+  fillSelect(b.selYaw, names, comp.config.yaw, true);
+  b.selView.value = comp.config.view || "model";
+  b.selUnit.value = comp.config.unit === "rad" ? "rad" : "deg";
+  const gains = comp.config.gains || [1, 1, 1];
+  b.gainInputs.forEach((input, index) => { input.value = String(gains[index] || 1); });
+  b.chkGhost.checked = comp.config.ghost !== false;
+}
+function attitudeEncode(comp) {
+  const cfg = comp.config;
+  const cam = cfg.camera || attitudeDefaultCamera();
+  return [cfg.view || "model", cfg.roll || "", cfg.pitch || "", cfg.yaw || "",
+          cfg.unit === "rad" ? "rad" : "deg",
+          (cfg.gains || [1, 1, 1]).join("~"),
+          cfg.ghost === false ? "0" : "1",
+          cfg.grid === false ? "0" : "1",
+          Math.round(cam.yaw || 0), Math.round(cam.pitch || 0)].join("|");
+}
+function attitudeDecode(comp, payload) {
+  const parts = String(payload || "").split("|");
+  comp.config.view = parts[0] === "pfd" ? "pfd" : "model";
+  comp.config.roll = parts[1] || null;
+  comp.config.pitch = parts[2] || null;
+  comp.config.yaw = parts[3] || null;
+  comp.config.unit = parts[4] === "rad" ? "rad" : "deg";
+  const gains = (parts[5] || "").split("~").map((value) => Number(value));
+  comp.config.gains = [0, 1, 2].map((index) => (
+    Number.isFinite(gains[index]) && gains[index] !== 0 ? gains[index] : 1));
+  comp.config.ghost = parts[6] !== "0";
+  comp.config.grid = parts[7] !== "0";
+  const yaw = Number(parts[8]);
+  const pitch = Number(parts[9]);
+  comp.config.camera = {
+    yaw: Number.isFinite(yaw) ? yaw : 26,
+    pitch: Number.isFinite(pitch) ? pitch : 18,
+  };
+}
+/**
+ * 拖拽转视角。**必须 stopPropagation**：不然 mousedown 会被工作表判成「平移时间轴」，
+ * 而 mousemove 会顺手把光标也带着跑（画出来的姿态跟着鼠标乱转）。
+ */
+function attitudeHooks(comp, b) {
+  const canvas = b.canvas;
+  const isModel = () => (comp.config.view || "model") === "model";
+  canvas.addEventListener("mousedown", (event) => {
+    if (!isModel()) return;
+    attitudeDrag = { comp: comp, x: event.clientX, y: event.clientY };
+    event.stopPropagation();
+    event.preventDefault();
+  });
+  canvas.addEventListener("mousemove", (event) => {
+    if (!attitudeDrag || attitudeDrag.comp !== comp) return;
+    const cam = attitudeCamera(comp);
+    cam.yaw += (event.clientX - attitudeDrag.x) * 0.6;
+    cam.pitch = Math.max(-80, Math.min(80, cam.pitch + (event.clientY - attitudeDrag.y) * 0.5));
+    attitudeDrag.x = event.clientX;
+    attitudeDrag.y = event.clientY;
+    event.stopPropagation();
+    renderAll();
+  });
+  const stop = () => { if (attitudeDrag && attitudeDrag.comp === comp) attitudeDrag = null; };
+  canvas.addEventListener("mouseup", stop);
+  canvas.addEventListener("mouseleave", stop);
+  canvas.addEventListener("dblclick", (event) => {
+    if (!isModel()) return;
+    event.stopPropagation();
+    attitudeResetCamera(comp);
+  });
 }
 
 function sectionFilterTitle(comp) {
@@ -1943,7 +2296,9 @@ function channelState(name) {
 const ALIAS_PREFIX = "@";
 //: 组件配置里**可以放通道名**的那几个槽。别名替换只在这几个键上做——
 //: 全部字符串都替的话，一条数学表达式里的 `@` 也会被当成别名。
-const ALIAS_SLOTS = ["channels", "channel", "x", "y", "colour", "against"];
+//: 姿态（#43）的 roll / pitch / yaw 也在这里：一条 `@左前姿态` 别名照样该能落到通道上。
+const ALIAS_SLOTS = ["channels", "channel", "x", "y", "colour", "against",
+                     "roll", "pitch", "yaw"];
 
 function isAliasReference(value) {
   return typeof value === "string"
@@ -4485,6 +4840,239 @@ function gaugeDefaultChannel(subtype) {
     return brake || throttle || names[0];
   }
   return names[0];
+}
+
+/** 姿态组件（ticket #43）：立体车体 / PFD 两个视图，跟着光标走。 */
+function renderAttitudeComponent(comp, b) {
+  const cfg = comp.config;
+  const c = sizeCanvas(b.canvas, b.canvas.clientWidth || 320,
+                       Math.max(150, comp.h * ROW_PX - 24));
+  const ctx = c.ctx;
+  ctx.clearRect(0, 0, c.w, c.h);
+  const axes = ["roll", "pitch", "yaw"];
+  const perAxis = axes.map((axis) => attitudeAxis(comp, axis));
+  const lacking = perAxis.filter((one) => one.state !== "ok");
+  if (lacking.length) {
+    ctx.fillStyle = "#8b94a7";
+    ctx.font = "12px Segoe UI";
+    ctx.textAlign = "left";
+    ctx.fillText("给这个组件选 roll / pitch / yaw 三条通道", 12, 24);
+    let line = 44;
+    for (const one of lacking) {
+      ctx.fillText(one.name ? one.name + "：" + one.text : one.text, 12, line);
+      line += 16;
+    }
+    b.head.textContent = "";
+    return;
+  }
+  const traces = perAxis.map((one) => traceOf(one.name));
+  const gains = cfg.gains || [1, 1, 1];
+  const toRad = cfg.unit === "rad" ? 1 : Math.PI / 180;
+  const anglesAt = (when) => {
+    if (when === null || when === undefined) return null;
+    const raw = traces.map((trace, index) => {
+      const value = valueAt(trace, when);
+      return Number.isFinite(value) ? attitudeNormalize(value * gains[index] * toRad) : NaN;
+    });
+    // NaN 那一帧**不画、不补零**：补零会画出一个"车突然躺平"的假姿态。
+    return raw.some((value) => !Number.isFinite(value)) ? null : raw;
+  };
+  const span = lane();
+  const when = state.cursor === null ? (span[0] + span[1]) / 2 : state.cursor;
+  const live = anglesAt(when);
+  const ghost = cfg.ghost === false ? null : anglesAt(state.datumOn ? state.datum : null);
+  if (!live) {
+    ctx.fillStyle = "#8b94a7";
+    ctx.font = "12px Segoe UI";
+    ctx.textAlign = "left";
+    ctx.fillText("光标这一帧没有有效姿态（NaN 不补零）", 12, 24);
+    b.head.textContent = "";
+    return;
+  }
+  if (cfg.view === "pfd") drawAttitudePfd(ctx, c, live);
+  else drawAttitudeModel(ctx, c, comp, live, ghost);
+  // 抬头**一律印度**：`live` 是弧度（单位已经在上一步折算过了），所以要乘 180/π。
+  // 以前这里拿 `单位系数` 当除数，`unit:"rad"` 时把弧度当度印出来（评审抓到的 bug）。
+  const toDeg = 180 / Math.PI;
+  b.head.textContent = "roll " + (live[0] * toDeg).toFixed(1) + "° · pitch "
+    + (live[1] * toDeg).toFixed(1) + "° · yaw " + (live[2] * toDeg).toFixed(1) + "°";
+  // 三条通道在这一屏里**一点没变**时说明白：两台车的 IMU 不同，按名字挑到的那三条
+  // 在某一台上可能是空模板通道（实测：高避的 `Aceinna Roll/Pitch` 全是 0，活的在
+  // `Roll (2)`/`Pitch (2)`；耐久正好反过来）。不说的话用户只会觉得"这图坏了"。
+  const flat = traces.some((trace) => {
+    const stats = visibleStats(trace, span[0], span[1]);
+    return stats && stats.max - stats.min < 1e-9;
+  });
+  if (flat) {
+    ctx.fillStyle = "#8b94a7";
+    ctx.font = "11px Segoe UI";
+    ctx.textAlign = "left";
+    ctx.fillText("这三条这一屏没有变化（可能是空模板通道）——从上面换成有数据的", 12, c.h - 8);
+  }
+}
+
+/** 立体车体：线框盒子 + 地面网格；基准光标处叠一层 30% 透明的"幽灵"（与 Marple 一致）。 */
+function drawAttitudeModel(ctx, c, comp, live, ghost) {
+  const cam = attitudeCamera(comp);
+  const scale = Math.min(c.w, c.h) / 4.6;
+  const ox = c.w / 2, oy = c.h / 2 + 6;
+  const project = (points, matrix) => attitudeProject(points, matrix, cam)
+    .map((point) => [ox + point[0] * scale, oy + point[1] * scale]);
+  const identity = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  if (comp.config.grid !== false) {
+    ctx.strokeStyle = "#2b313c";
+    ctx.lineWidth = 1;
+    for (let step = -3; step <= 3; step++) {
+      const segments = [
+        [[step / 3, -1, -0.62], [step / 3, 1, -0.62]],
+        [[-1, step / 3, -0.62], [1, step / 3, -0.62]],
+      ];
+      for (const segment of segments) {
+        const pts = project(segment, identity);
+        ctx.beginPath();
+        ctx.moveTo(pts[0][0], pts[0][1]);
+        ctx.lineTo(pts[1][0], pts[1][1]);
+        ctx.stroke();
+      }
+    }
+  }
+  const paint = (angles, alpha, colour) => {
+    const matrix = attitudeMatrix(angles[0], angles[1], angles[2]);
+    const pts = project(ATTITUDE_BOX, matrix);
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = colour;
+    ctx.lineWidth = 1.7;
+    for (const edge of ATTITUDE_EDGES) {
+      ctx.beginPath();
+      ctx.moveTo(pts[edge[0]][0], pts[edge[0]][1]);
+      ctx.lineTo(pts[edge[1]][0], pts[edge[1]][1]);
+      ctx.stroke();
+    }
+    // 车头那根棱加粗：姿态里有一半信息是"车朝哪"，光看盒子看不出来。
+    const nose = project([[-1, -0.55, 0.22], [1, -0.55, 0.22]], matrix);
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(nose[0][0], nose[0][1]);
+    ctx.lineTo(nose[1][0], nose[1][1]);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  };
+  if (ghost) paint(ghost, 0.3, "#ffb454");
+  paint(live, 1, "#4cc2ff");
+}
+
+/** PFD：天地线 + 俯仰刻度 + 滚转弧 + 航向带（每 10° 一格）。 */
+function drawAttitudePfd(ctx, c, angles) {
+  const toDeg = (radians) => radians * 180 / Math.PI;
+  const roll = toDeg(angles[0]);
+  const pitch = toDeg(angles[1]);
+  let heading = toDeg(angles[2]) % 360;
+  if (heading < 0) heading += 360;
+  const ox = c.w / 2, oy = c.h / 2 + 14;
+  const radius = Math.max(40, Math.min(c.w, c.h) * 0.34);
+  const perDegree = radius / 30;          // 一个半径 = 30° 俯仰
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(ox, oy, radius, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.translate(ox, oy);
+  ctx.rotate(-roll * Math.PI / 180);
+  const shift = pitch * perDegree;
+  ctx.fillStyle = "#26374a";
+  ctx.fillRect(-radius * 2, -radius * 2, radius * 4, radius * 2 + shift);
+  ctx.fillStyle = "#3a2f22";
+  ctx.fillRect(-radius * 2, shift, radius * 4, radius * 2);
+  ctx.strokeStyle = "#e6e9ef";
+  ctx.lineWidth = 1.6;
+  ctx.beginPath();
+  ctx.moveTo(-radius * 2, shift);
+  ctx.lineTo(radius * 2, shift);
+  ctx.stroke();
+  ctx.font = "10px Segoe UI";
+  for (const tick of ATTITUDE_PITCH_TICKS) {
+    if (tick === 0) continue;
+    const y = shift - tick * perDegree;
+    const half = tick % 20 === 0 ? radius * 0.34 : radius * 0.17;
+    ctx.strokeStyle = "#9aa4b6";
+    ctx.beginPath();
+    ctx.moveTo(-half, y);
+    ctx.lineTo(half, y);
+    ctx.stroke();
+    if (tick % 20 === 0) {
+      ctx.fillStyle = "#9aa4b6";
+      ctx.textAlign = "right";
+      ctx.fillText(String(tick), -half - 3, y + 3);
+      ctx.textAlign = "left";
+      ctx.fillText(String(tick), half + 3, y + 3);
+    }
+  }
+  ctx.restore();
+  // 滚转弧（固定在飞机上）+ 跟着 roll 走的指针
+  ctx.save();
+  ctx.translate(ox, oy);
+  for (const tick of ATTITUDE_ROLL_TICKS) {
+    if (Math.abs(tick) > 60) continue;
+    const at = (tick - 90) * Math.PI / 180;      // 0° 在正上方
+    const inner = tick % 30 === 0 ? radius * 0.84 : radius * 0.9;
+    ctx.strokeStyle = "#9aa4b6";
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(at) * inner, Math.sin(at) * inner);
+    ctx.lineTo(Math.cos(at) * radius, Math.sin(at) * radius);
+    ctx.stroke();
+    if (tick % 30 === 0) {
+      ctx.fillStyle = "#9aa4b6";
+      ctx.textAlign = "center";
+      ctx.fillText(String(tick), Math.cos(at) * radius * 0.76,
+                   Math.sin(at) * radius * 0.76 + 3);
+    }
+  }
+  ctx.rotate(-roll * Math.PI / 180);
+  ctx.fillStyle = "#4cc2ff";
+  ctx.beginPath();
+  ctx.moveTo(0, -radius);
+  ctx.lineTo(-6, -radius + 12);
+  ctx.lineTo(6, -radius + 12);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+  // 航向带：看得见 ±45°，每 10° 一格，0° 写 N
+  const tapeH = 18;
+  const tapeW = Math.min(c.w - 24, radius * 2);
+  const tapeX = ox - tapeW / 2;
+  const tapeY = 6;
+  ctx.save();
+  ctx.fillStyle = "#171a21";
+  ctx.fillRect(tapeX, tapeY, tapeW, tapeH);
+  ctx.strokeStyle = "#2b313c";
+  ctx.strokeRect(tapeX, tapeY, tapeW, tapeH);
+  ctx.beginPath();
+  ctx.rect(tapeX, tapeY, tapeW, tapeH);
+  ctx.clip();
+  const perHeading = tapeW / 90;
+  ctx.font = "10px Segoe UI";
+  ctx.textAlign = "center";
+  for (let value = 0; value < 360; value += 10) {
+    let delta = value - heading;
+    while (delta > 180) delta -= 360;
+    while (delta < -180) delta += 360;
+    if (Math.abs(delta) > 45) continue;
+    const x = ox + delta * perHeading;
+    ctx.strokeStyle = "#2b313c";
+    ctx.beginPath();
+    ctx.moveTo(x, tapeY + tapeH - 5);
+    ctx.lineTo(x, tapeY + tapeH);
+    ctx.stroke();
+    ctx.fillStyle = "#9aa4b6";
+    ctx.fillText(value === 0 ? "N" : String(value), x, tapeY + 11);
+  }
+  ctx.restore();
+  ctx.fillStyle = "#4cc2ff";
+  ctx.beginPath();
+  ctx.moveTo(ox, tapeY + tapeH + 2);
+  ctx.lineTo(ox - 5, tapeY + tapeH + 9);
+  ctx.lineTo(ox + 5, tapeY + tapeH + 9);
+  ctx.closePath();
+  ctx.fill();
 }
 
 function renderGaugeComponent(comp, b) {
@@ -7160,6 +7748,18 @@ function onKeyDown(event) {
         ensureOverlay().then(renderAll);
       }
       stop(); return;
+    case "r": case "R": {
+      // 姿态图的相机复位（#43）。**用 R 不用 E**：E 已经被「状态与故障」占了
+      // ——那是它自己在注册表里声明的 hotkey（i2 Pro 里按 E 看状态通道）。
+      // 哪个类型吃这个键也由它自己声明（`resetsView`），这里不认类型名。
+      const owner = componentTypeWithFlag("resetsView");
+      const attitude = owner ? state.components.find((item) => item.type === owner) : null;
+      if (attitude) {
+        attitudeResetCamera(attitude);
+        toast("姿态视角已复位");
+      } else toast("先加一个姿态组件");
+      stop(); return;
+    }
     default: return;
   }
 }
@@ -8751,6 +9351,8 @@ window.i3pro = {
   setHeadField: setHeadField, openColorMenu: openColorMenu,
   closePopMenu: closePopMenu,
   setUpsample: setUpsample, upsampleModes: UPSAMPLE_MODES,
+  // 姿态（#43）：矩阵与 pick 规则要和后端 attitude.py 一致，由 smoke 对拍守住
+  attitudeMatrix: attitudeMatrix, attitudePick: attitudePick,
   // 侧边栏快速跳转（A78）
   jumpTargets: JUMP_TARGETS, jumpTo: jumpTo, syncJumpActive: syncJumpActive,
   jumpButtons: () => jumpButtons.map((e) => e.button),

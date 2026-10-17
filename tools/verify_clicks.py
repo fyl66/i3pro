@@ -3050,6 +3050,134 @@ class Checker:
         click_chip("sheetGroup")
 
     # ------------------------------------------- A83 写路径的唯一出口
+    def attitude(self):
+        """#43 姿态图：真鼠标拖拽转视角、真按 R 复位、真移动光标重画。
+
+        假 DOM 证明不了"用户拖得动、点得到"——那里的元素没有面积、没有命中测试，
+        disabled 的控件照样收得到 click。而这一票的验收里正好有三条是这一类：
+        **拖拽后画布像素变化**、**复位回到初始视角**、**移动光标后画布再变**。
+        （单位换算那一条在无头那边钉得更死：常量 10 + 精确读数，这里不重复。）
+        """
+        def rect_of(component_id):
+            raw = self.js(
+                "(function(){var c=document.querySelector('[data-id=\"" + component_id
+                + "\"] canvas');return c?JSON.stringify(__center(c)):null;})()")
+            return json.loads(raw) if raw and raw != "null" else None
+
+        def attitude_of():
+            raw = self.js(
+                "JSON.stringify((function(){var c=i3pro.state.components.filter("
+                "function(x){return x.type==='attitude';})[0];"
+                "return c?{id:c.id,camera:c.config.camera}:null;})())")
+            return json.loads(raw) if raw and raw != "null" else None
+
+        def pixels(component_id):
+            return self.js(
+                "(function(){var c=document.querySelector('[data-id=\"" + component_id
+                + "\"] canvas');if(!c)return '';var d=c.toDataURL();"
+                "return d.length+':'+d.slice(-48);})()")
+
+        def head_of(component_id):
+            return self.js(
+                "(function(){var el=document.querySelector('[data-id=\"" + component_id
+                + "\"] .graphhead');return el?el.textContent:'';})()")
+
+        self.js("i3pro.applyPreset(i3pro.worksheetCatalogue().sheets[0].name); true")
+        time.sleep(0.8)
+        before = self.js("i3pro.state.components.length")
+        self.js("(function(){document.getElementById('addType').value='attitude';"
+                "return true;})()")
+        add = json.loads(self.js("JSON.stringify(__rectOf('addBtn'))"))
+        self.browser.click(add["x"], add["y"], self.session)
+        self.browser.wait_for("i3pro.state.components.length === %d" % (before + 1),
+                              self.session, timeout=10)
+        time.sleep(0.8)
+        made = attitude_of()
+        self.check("#43 真点「添加」就加出一个姿态组件", bool(made),
+                   json.dumps(made, ensure_ascii=False))
+        if not made:
+            return
+        component_id = made["id"]
+        box = rect_of(component_id)
+        self.check("#43 姿态画布真的占地方（点得到、拖得动）",
+                   bool(box) and box.get("w", 0) > 0 and box.get("h", 0) > 0, box)
+        if not box:
+            return
+
+        # 两台车的 IMU 不一样：按名字自动挑到的那三条**在某一台上是空模板通道**
+        # （实测：高避的 `Aceinna Roll/Pitch` 全是 0，活的在 `Roll (2)`/`Pitch (2)`；
+        # 耐久正好反过来）。这一组验的是"拖得动 / 跟光标"，所以换成两份金标准里
+        # 都一定有数的三条；"按名字挑到哪三条"归无头那边（它拿后端算出来的名字对拍）。
+        switched = self.js(
+            "(function(){var el=document.querySelector('[data-id=\"" + component_id
+            + "\"] .scattercfg');if(!el)return '';var s=el.querySelectorAll('select');"
+            "if(s.length<5)return 'selects='+s.length;"
+            "['Vx KF','G Force Lat','G Force Long'].forEach(function(name,i){"
+            "s[2+i].value=name;s[2+i].dispatchEvent(new Event('change'));});"
+            "var c=i3pro.state.components.filter(function(x){return x.type==='attitude';})[0];"
+            "return [c.config.roll,c.config.pitch,c.config.yaw].join('|');})()")
+        time.sleep(0.6)
+        self.check("#43 从下拉里换成有数据的通道（这一场自动挑到的是空模板）",
+                   switched == "Vx KF|G Force Lat|G Force Long", switched)
+
+        # 1) 真拖拽：相机跟着转，画布像素也真的变
+        start_camera = made.get("camera")
+        start_pixels = pixels(component_id)
+        x0 = box["x"] - box["w"] * 0.2
+        y0 = box["y"]
+        self.browser.mouse("mouseMoved", x0, y0, self.session, buttons=0)
+        self.browser.mouse("mousePressed", x0, y0, self.session)
+        for step in range(1, 7):
+            self.browser.mouse("mouseMoved", x0 + step * 11, y0 + step * 4, self.session)
+            time.sleep(0.05)
+        self.browser.mouse("mouseReleased", x0 + 66, y0 + 24, self.session, buttons=0)
+        time.sleep(0.4)
+        dragged = attitude_of()
+        self.check("#43 真拖一下画布，相机跟着转",
+                   bool(dragged) and bool(start_camera)
+                   and abs(dragged["camera"]["yaw"] - start_camera["yaw"]) > 5,
+                   "%s → %s" % (start_camera, dragged and dragged.get("camera")))
+        self.check("#43 拖拽之后画布像素真的变了", pixels(component_id) != start_pixels,
+                   start_pixels)
+
+        # 2) 真按 R：回到默认视角（E 被「状态与故障」占着，所以姿态用 R）
+        self.browser.click(x0, y0, self.session)          # 让焦点离开任何输入框
+        # 单字母键要走 key_named：只给 text 的话页面收到的 event.key 不是 "r"，
+        # 单键快捷键一条都不触发（A78 那条"回车跳不动"就是这么空转的）。
+        self.browser.key_named("r", "KeyR", 82, self.session, text="r")
+        time.sleep(0.4)
+        reset = attitude_of()
+        self.check("#43 按 R 把视角复位",
+                   bool(reset) and reset["camera"] == {"yaw": 26, "pitch": 18},
+                   "%s · toast=%r" % (reset and reset.get("camera"), self.toast()))
+
+        # 3) 真移动光标：光标换一刻，姿态跟着重画
+        cursor_before = self.js("i3pro.state.cursor")
+        pixels_before = pixels(component_id)
+        graph = json.loads(self.js(
+            "JSON.stringify((function(){var c=i3pro.state.components.filter("
+            "function(x){return x.type==='graph';})[0];"
+            "var el=c&&document.querySelector('[data-id=\"'+c.id+'\"] canvas');"
+            "return el?__center(el):null;})())") or "null")
+        if graph:
+            self.browser.mouse("mouseMoved", graph["x"] - graph["w"] * 0.3, graph["y"],
+                               self.session, buttons=0)
+            time.sleep(0.4)
+            self.check("#43 在图上游走换到了另一刻的光标",
+                       self.js("i3pro.state.cursor") != cursor_before,
+                       "%s → %s" % (cursor_before, self.js("i3pro.state.cursor")))
+            head_before = head_of(component_id)
+            pixels_now = pixels(component_id)
+            self.check("#43 光标一换，姿态画布跟着重画",
+                       pixels_now != pixels_before,
+                       "读数 %r → %r · 像素 %s vs %s"
+                       % (head_before, head_of(component_id), pixels_before, pixels_now))
+
+        self.js("(function(){var c=i3pro.state.components.filter(function(x)"
+                "{return x.type==='attitude';})[0];"
+                "if(c)i3pro.componentAction(c,'close');return true;})()")
+        time.sleep(0.3)
+
     def write_seam(self):
         """A83：写路径只有 ``sessionRequest`` 一个出口，服务端那句中文原因要活着到用户眼前。
 
@@ -3297,6 +3425,8 @@ def main(argv=None):
             # 用户踩到的那一步；这一条必须在 text_import **之后**。
             checker.channel_processing_on_an_imported_session(
                 "http://127.0.0.1:%d/" % args.port, work_dir)
+            # #43 姿态图：假 DOM 证明不了的那三条（拖得动 / 复位 / 跟光标）。
+            checker.attitude()
             errors = browser.page_errors()
             checker.check("整场没有页面级报错", not errors, errors[:3])
         bad = [name for name, ok in checker.results if not ok]

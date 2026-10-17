@@ -28,6 +28,7 @@
 | 规模 | 20 个源文件 / 10.5 MB / 244 万 AST 节点 / 1003 条 findings |
 | 运行时采集 | 2026-10-17 18:39–18:42，Edge 155.0.4283.45，CDP `127.0.0.1:9222`，页面 `/visualisation`（已登录 Aurora workspace） |
 | 运行时 `evidence_id` | 页面 `ev_1a9890e96f045901b1eab5caab3bf0215fc31e5dd08ac2c7d0fc89607c3a9602`、无障碍 `ev_c03064287be6cf8b8c7ed58153ea0a4fa5c5cc85469b5152f22e1b4dc40eec07`、场景 `ev_d9cc36ef5d6b27761b4f347ee748ba8a5aa1f916aaf75d6371480ae77c531197` |
+| 运行时（光标/取数） | 2026-10-17 18:51，同一页面摆好 A/B 光标后做 60 秒观察，`evidence_id ev_32ba7a57c38faaa6b08764d364f1cf202492388e014b686ec08931776591d94b` |
 
 复现判据：重跑上面那条命令，根 artifact sha 与本节一致，事实不变。
 （`out/` 已 gitignore，证据不进仓库；换机器要重新采集。）
@@ -53,16 +54,17 @@
 | 8 | 热力图 | `HEATMAP="heatmap"` | 无 | 做（P3） |
 | 9 | 通用表格 | `TABULAR="tabular"`；渲染三选一 `TABLE` / `NUMBER` / `BARCHART` | `report`（时间报告）+ `chreport`（通道报告）两张专用表 | 押后（现有两张覆盖了主要用途） |
 | 10 | 报文/元数据图 | `MESSAGE="message"` / `METADATA="metadata"` | CAN 帧表已能导入成场次 + `status` 组件 | 押后 |
-| 11 | **光标 A–B 区间统计** | 端点 `/signals/cursor/values`、`/signals/cursor/stats`；前端 `valuesBetweenCursors`、"Loading cursor stats" | A–B 目前**只作为导出范围**；图上抬头是「可见区间 min/max/avg + 光标值 + Δ」 | **做（P2）** — 缺的是"在 A–B 这个范围上算一遍统计" |
-| 12 | **绘图分辨率** | 设置项 `PLOT_RESOLUTION`（默认档位 `2`）与 `SHOW_DATAPOINTS`（默认 `true`）；档位枚举实测 `["Min","Low","Medium","High","Max"]`，取值是 **`500 × 2^档位`** → 500 / 1000 / **2000（默认 Medium）** / 4000 / 8000 点；取数请求带 `resolution`，并自带 `subsampled = 估计采样率 × 窗口秒数 > 2 × resolution` 这条判据交给服务端降采样 | serve 模式按可见区间重取全分辨率；快照预先抽稀；A79 已有"曲线连接"（线性/阶梯保持） | 做（P4）——把散落的三处抽稀收成**一个用户可见的五档旋钮** |
-| 13 | 区段轴 | 横轴模式枚举 `{DISTANCE, SEGMENTS}`；端点 `/sources/segments` | 区段是**带子 + 报表分组**；横轴只有时间/距离/双圈 | 押后 |
-| 14 | 导出任务化 | `exportJobs`；`DATA_EXPORT` / `PLOT_EXPORT` / `FIGURES_EXPORT` 三种模态 | 导出是同步的（已有预计行数 + 进度条 + 取消） | 押后 |
-| 15 | 函数目录 | 前端 12 个：`calibration` `clamp` `cumsum` `difference` `discrete_derivative` `integral` `moving_aggregate` `outliers_fixed` `outliers_stddev` `sample_shift` `time` `zeroing`；**参数带类型**（signal / enum / number），表单按类型渲染 | `maths.py` **53 个函数** + 插入通道下拉 + 本地/全局作用域 | 已超越（只借鉴"参数类型驱动表单"这一条表述） |
-| 16 | 通道别名与库筛选 | `FILTER_FUNCTION_ONLY_MINE` / `FILTER_*_TAGS`、`/tags`、`SETTING_LIBRARY_COLUMNS` | 通道别名（有序候选）、工作表 `pick` 挑通道 | 已超越（服务端库/标签体系不做） |
-| 17 | 配色方案 | `SETTING_OVERLAY_PALETTE`（含 "Matplotlib (tab10)"） | 三套调色板 + 手选色 + ΔE/WCAG 可辨性实测 | 已覆盖 |
-| 18 | 标注 | 端点 `/annotations/add`、`/annotations/remove`、`LOAD_ANNOTATIONS` | Notes 组件（琥珀色虚线 + 就地改名 + 侧车） | 已覆盖 |
-| 19 | 仪表族 | `jr = {TABLE, NUMBER, BARCHART}`；组件子类型 | `gauge` 组件五种：数值 / 列表 / 条形 / 表盘 / 方向盘 | 已覆盖 |
-| 20 | 通道处理 | `zeroing`（"Offset the signal to be 0 at the first datapoint inside zoom range"）等 | A75 通道处理：低通（含零相位）/ 移动平均 / 增益 / 偏置 / 光标归零 | 已覆盖 |
+| 11 | **光标 A–B 区间统计** | 端点 `POST /api/v1/signals/cursor/stats`；**实测响应只有三个数** `{request_time, message:[{uuid, stats:{min, mean, max}}]}`（请求带 `signals[].cursors:[t,t]` 与通道元数据）——并不比"可见区间统计"多做多少 | A–B 目前**只作为导出范围**；图上抬头是「可见区间 min/max/avg + 光标值 + Δ」 | **做（P2，比原设想小）**：把现有那三个统计量的**范围**从"可见区间"换成"A–B"即对齐；σ / 斜率 / 积分属于**超出 Marple** 的自选增量，另算 |
+| 12 | **绘图分辨率（兼"曲线为什么丝滑"）** | `PLOT_RESOLUTION`（默认 `2`）与 `SHOW_DATAPOINTS`（默认 `true`）；档位枚举 `["Min","Low","Medium","High","Max"]`，取值 **`500 × 2^档位`** → 500 / 1000 / **2000（默认）** / 4000 / 8000 点；`subsampled = 估计采样率 × 窗口秒数 > 2 × resolution`。**取数端点 `POST /api/v1/signals/t_base` 实测为分桶包络**：`message[].{uuid, status, subsampled, bucket_count[], low_bound[], up_bound[], time[], x_base[], x_base_name, z_signal[]}`——每桶给下界与上界；`x_base_name` 说明横轴可以是命名基准（距离轴）；`z_signal` 是第三通道（着色用） | serve 模式按可见区间重取全分辨率；快照预先抽稀；A79 已有"曲线连接"（线性/阶梯保持） | 做（P4）：收成一个**五档旋钮**，并照抄**按桶取 min/max 包络**的思路——它"看起来丝滑"靠的是包络，不是插值 |
+| 13 | 通道清单与元数据 | `POST /api/v1/sources/signals`：请求 `{dataset_filter:{dataset,stream,layer_shift}, signal_filters:[{name}]}` → 响应 `{message:{signal_list:[{count, datatype, display_name, frequency, metadata:{id, unit, min, max, mean, sum, storage_status, description, count_pre, count_value, count_text}}]}}` | `channels` 命令 + 侧边栏通道列表（单位 / 采样率 / 小数位 / min / max） | 已覆盖；只有 `storage_status` 可作参考 |
+| 14 | 区段轴 | 横轴模式枚举 `{DISTANCE, SEGMENTS}`；端点 `/sources/segments` | 区段是**带子 + 报表分组**；横轴只有时间/距离/双圈 | 押后 |
+| 15 | 导出任务化 | `exportJobs`；`DATA_EXPORT` / `PLOT_EXPORT` / `FIGURES_EXPORT` 三种模态 | 导出是同步的（已有预计行数 + 进度条 + 取消） | 押后 |
+| 16 | 函数目录 | 前端 12 个：`calibration` `clamp` `cumsum` `difference` `discrete_derivative` `integral` `moving_aggregate` `outliers_fixed` `outliers_stddev` `sample_shift` `time` `zeroing`；**参数带类型**（signal / enum / number），表单按类型渲染 | `maths.py` **53 个函数** + 插入通道下拉 + 本地/全局作用域 | 已超越（只借鉴"参数类型驱动表单"这一条表述） |
+| 17 | 通道别名与库筛选 | `FILTER_FUNCTION_ONLY_MINE` / `FILTER_*_TAGS`、`/tags`、`SETTING_LIBRARY_COLUMNS` | 通道别名（有序候选）、工作表 `pick` 挑通道 | 已超越（服务端库/标签体系不做） |
+| 18 | 配色方案 | `SETTING_OVERLAY_PALETTE`（含 "Matplotlib (tab10)"） | 三套调色板 + 手选色 + ΔE/WCAG 可辨性实测 | 已覆盖 |
+| 19 | 标注 | 端点 `/annotations/add`、`/annotations/remove`、`LOAD_ANNOTATIONS` | Notes 组件（琥珀色虚线 + 就地改名 + 侧车） | 已覆盖 |
+| 20 | 仪表族 | `jr = {TABLE, NUMBER, BARCHART}`；组件子类型 | `gauge` 组件五种：数值 / 列表 / 条形 / 表盘 / 方向盘 | 已覆盖 |
+| 21 | 通道处理 | `zeroing`（"Offset the signal to be 0 at the first datapoint inside zoom range"）等 | A75 通道处理：低通（含零相位）/ 移动平均 / 增益 / 偏置 / 光标归零 | 已覆盖 |
 
 ## 不做（除非单独翻案）
 
@@ -76,12 +78,15 @@
 
 ## 本轮候选（P 排序）
 
-1. **P1 姿态图 + PFD**：数据已经在场次里（MTi 三轴姿态），缺的只是画法。
-   这是唯一一条"**数据齐了、只差视图**"的能力，性价比最高，也是 i2 Pro 没有的差异点。
-2. **P2 光标 A–B 区间统计**：把现有的"可见区间 min/max/avg"抬成"任意 A–B 区间"的一组量
-   （min/max/avg/σ/斜率/积分/耗时），顺带补上你反馈过的"空格的时间轴 delta 好像没用"。
-3. **P3 热力图**：复用现有的散点着色与直方图取样管线，做 RPM×MAP / 速度×横向加速度这类图。
-4. **P4 绘图分辨率旋钮**：把"快照抽稀 / serve 全分辨率 / 曲线连接"收成一个用户可见的设置。
+1. **P1 姿态图 + PFD**：数据已经在场次里（Xsens MTi 与 Aceinna 的 roll/pitch/yaw），缺的只是画法。
+   这是"**数据齐了、只差视图**"的能力，也是 i2 Pro 没有的差异点；也是唯一还需要补一次运行时观察的
+   （要点到那一类图才知道它长什么样）。
+2. **P4 绘图分辨率 + 分桶包络**：机制已经量清（五档 `500 × 2^档位`、`subsampled` 判据、
+   `t_base` 的 `low_bound/up_bound/bucket_count`）。它顺带回答"为什么 i2 Pro 看起来更丝滑"：
+   不是插值，是**按桶取 min/max 包络**。可以直接开票。
+3. **P2 光标 A–B 区间统计**：实测 Marple 只有 `min/mean/max`，对齐成本很小
+   （把现有三个量的范围从"可见区间"换成 A–B）；σ / 斜率 / 积分是**自选增量**，不属于对齐。
+4. **P3 热力图**：复用现有的散点着色与直方图取样管线，做 RPM×MAP / 速度×横向加速度这类图。
 
 每一条落到 issue 时必须带**可跑的验收命令或截图判据**；落不下的说明它还是需求而不是计划。
 功能票的回归沿用四道，其中 `tools/verify_ld_vs_csv.py` **不可谈判**。
@@ -109,8 +114,9 @@
   以及第三方统计（`__tea_*`）与客服（`gleap-widget-*`）。静态包里
   `workspace-settings:${id}` 这条推断得到了字面确认。
 - **第三方**：Auth0（登录）、Gleap（客服）、`gator.volces.com`（统计）、`rsms.me/inter`（字体）。
+- **摆好 A/B 光标后的 60 秒观察**（用户操作，18:51）又抓到三条：`POST /signals/cursor/stats`
+  （响应只有 `min/mean/max`）、`POST /signals/t_base`（**分桶 min/max 包络**）+ `x_base_name` + `z_signal`、
+  `POST /sources/signals`（按 `dataset_filter` 列通道，附每条通道的 min/max/mean/sum/frequency/storage_status）。
 
-**绘图分辨率的取值**已经从静态包里量到了（见对照表第 12 行），不用再操作。
-**仍然缺两项**，都要"边操作边观察"（人点几处即可，方法写在采集规程里）：
-① `/signals/cursor/stats` 的返回量清单（P2 的输入）；② 姿态图/PFD 的实际渲染与配置项（P1 的输入）。
-这两项没拿到之前，P1/P2 的 spec 只算"有方向"。
+**只差一项**：姿态图 / PFD 的实际渲染与配置项（P1 的输入）——需要 `Add Plot` 选到那一类，
+方法写在采集规程第四步。P2 与 P4 的证据已齐，可以直接进 `/to-spec`。

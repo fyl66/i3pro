@@ -217,15 +217,19 @@ Marple 的取数端点返回的是**每桶的下界与上界**（`low_bound` / `
 
 ## 8. 建议的票切分（交给 `/to-tickets`）
 
-| 票 | 内容 | 阻塞边 |
-| --- | --- | --- |
-| T1a | `attitude.py` 纯函数 + 通道默认优先级 + 单测 | 无 |
-| T1b | `attitude` 组件（model / pfd 两个视图、拖拽相机、光标幽灵、空通道提示）+ smoke + 真鼠标 + A88 | ← T1a |
-| T2 | 抬头统计的范围开关（可见区间 / A–B）+ 单测 + smoke + A89 | 无 |
-| T3 | `heatmap` 组件 + `heatmap.py` 分箱 + smoke + A90 | 无 |
-| T4a | 分辨率五档设置（UI + 工作表持久化 + 两条渲染路都遵守） | 无 |
-| T4b | 服务端分桶包络 + 包络绘制 + "已抽稀（包络）"标识 + 性能数字 + A91 | ← T4a |
-| T5 | UI 借鉴的小改：加组件分组、不可用原因文案、空状态文案、复制/换类型 + A92 | 无 |
+| 票 | issue | 内容 | 阻塞边 |
+| --- | --- | --- | --- |
+| T1a | [#42](https://github.com/fyl66/i3pro/issues/42) | `attitude.py` 纯函数 + 通道默认优先级 + 单测 | 无 |
+| T1b | [#43](https://github.com/fyl66/i3pro/issues/43) | `attitude` 组件（model / pfd 两个视图、拖拽相机、光标幽灵、空通道提示）+ smoke + 真鼠标 + A88 | ← #42 |
+| T2 | [#44](https://github.com/fyl66/i3pro/issues/44) | 抬头统计的范围开关（可见区间 / A–B）+ 单测 + smoke + A89 | 无 |
+| T3 | [#45](https://github.com/fyl66/i3pro/issues/45) | `heatmap` 组件 + `heatmap.py` 分箱 + smoke + A90 | 无 |
+| T4a | [#46](https://github.com/fyl66/i3pro/issues/46) | 分辨率五档设置（UI + 工作表持久化 + 两条渲染路都遵守） | 无 |
+| T4b | [#47](https://github.com/fyl66/i3pro/issues/47) | 服务端分桶包络 + 包络绘制 + "已抽稀（包络）"标识 + 性能数字 + A91 | ← #46 |
+| T5 | [#48](https://github.com/fyl66/i3pro/issues/48) | UI 借鉴的小改：加组件分组、不可用原因文案、空状态文案、复制/换类型 + A92 | 无 |
+
+票已落到本仓库的 GitHub Issues（#42–#48，2026-10-17 建）。其中 **#43←#42 与 #47←#46 是原生的
+blocking 链接**（`addBlockedBy`），不是正文里的一句话——所以"阻塞先做"是机器可判的。
+可以并行起步的是 **#42 / #44 / #45 / #46 / #48** 这五张。
 
 每票落地时按 AGENTS.md 规则 1 交五件：实现（纯函数）/ 单测 / 无头断言 / 验收条目（带可跑命令与判据）/
 两份金标准实跑。纯 UI 的那部分按规则 1 的分级条款，允许只交"可跑验收或截图判据"。

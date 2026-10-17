@@ -61,7 +61,52 @@ rea list-browser-targets http://127.0.0.1:9222
 rea inspect-web-network-capture out\_marple\runtime\<name>.har --format json
 ```
 
-## 第三步：证据怎么存
+## 第三步：要拿接口与数据模型，用 connect 模式的场景（本轮实测可用）
+
+`inspect-web-page` 是**附着之后**才开始记录的，所以页面已经在跑的时候抓不到启动请求。
+场景命令可以**连到同一个已登录的浏览器**并驱动它重载，把整段启动序列抓下来
+（实测一次拿到 56 个请求 / 292 条事件）。存成 `scenario.json`：
+
+```json
+{
+  "browser": {
+    "mode": "connect",
+    "cdp_endpoint": "http://127.0.0.1:9222",
+    "target_id": "<list-browser-targets 给的 target_id>"
+  },
+  "start_url": { "url": "https://insight.marpledata.com/visualisation" },
+  "actions": [
+    { "step_id": "settle", "action": "wait_for_timeout", "duration_ms": 12000 }
+  ],
+  "capture": {
+    "at_end": ["url", "accessibility"],
+    "events": ["network", "console", "page-errors"],
+    "network": { "request_body": true, "response_body": true, "header_values": false }
+  }
+}
+```
+
+```powershell
+rea capture-browser-scenario scenario.json --format json > out\_marple\runtime\<时间戳>-scenario.json
+```
+
+要点：`mode` 必须用 `connect`（`launch` 会开一个没有登录态的新实例，只会停在登录页）；
+响应体挂在 `events.items` 里 `kind === "network-content"` 的条目上，要按 `transaction_id`
+与 `kind === "request"` 的条目配起来才知道是哪个 URL。
+
+## 第四步：剩下三项靠"人点 + observe-web-session"
+
+光标区间统计、姿态图/PFD 的渲染、`PLOT_RESOLUTION` 的档位，只在**操作时**才发请求。
+开着那个窗口时跑：
+
+```powershell
+rea observe-web-session http://127.0.0.1:9222 <target_id> --observation-ms 60000
+```
+
+这 60 秒里在那台 Edge 上依次做：① 在图上摆好 A/B 两个光标并让统计显示出来；
+② `Add Plot` → 选姿态图/PFD，等它画出来；③ 打开绘图设置看分辨率档位。
+
+## 第五步：证据怎么存
 
 - 全部落在 **`out\_marple\runtime\`**（`out/` 已 gitignore，证据不进仓库）。
 - 文件名带**时间戳 + 目标**：`2026-10-17T21-30_page.json`、`…_har.har`、`…_attitude.png`。
@@ -69,8 +114,13 @@ rea inspect-web-network-capture out\_marple\runtime\<name>.har --format json
 - 结论回填 [marple-parity.md](marple-parity.md) 对应行的"证据"栏；**顺手给出字面值**
   （字段名、枚举取值、数值档位），不要只写"和预期一致"。
 
-## 判据
+## 判据与现状
 
-本轮算完成的标志：`signal` / `segment` / `figure` / `function` 四个概念的**字段名**有字面证据；
-`/signals/cursor/stats` 的返回量清单**列得出来**；姿态图的渲染方式**看一眼就能定性**
-（有网格/相机/3D 模型 vs 2D 罗盘）。做到这些，P1–P4 的 spec 才有资格开票。
+**2026-10-17 已完成**：启动序列（12 个 `/api/v1/*` 端点）、数据集模型
+（`dataset_filter.dataset/stream/layer_shift`、`nsignals`、`datapoints`、`datapool`）、
+顶层导航与各页路径、分析页控件清单、本地存储键、以及"没有 WebSocket"这一条——
+全部拿到字面证据（汇总见 [marple-parity.md](marple-parity.md) 的运行时一节）。
+
+**还没做**：`/signals/cursor/stats` 的返回量、姿态图/PFD 的实际渲染、`PLOT_RESOLUTION` 的档位。
+这三项拿到之后，P1（姿态图）、P2（光标区间统计）、P4（绘图分辨率）的 spec 才有资格开票；
+P3（热力图）不受影响，它只依赖已有的绘图管线。

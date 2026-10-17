@@ -26,6 +26,8 @@
 | 根 artifact sha256 | `8703bdbe0cad1865d9330db784f7ec9f91138a014dfecf588a0614d201e4292b`（整个 `out/_marple`） |
 | 关键文件 sha256 | `index.html` `46ea1a4b…`、`index-KeLGy6Gr.js` `340d45c4…`、`vendor-charts-BallmZBw.js` `77af60a8…`、`FigureAttitude-DMq-SsjD.js` `e5846605…` |
 | 规模 | 20 个源文件 / 10.5 MB / 244 万 AST 节点 / 1003 条 findings |
+| 运行时采集 | 2026-10-17 18:39–18:42，Edge 155.0.4283.45，CDP `127.0.0.1:9222`，页面 `/visualisation`（已登录 Aurora workspace） |
+| 运行时 `evidence_id` | 页面 `ev_1a9890e96f045901b1eab5caab3bf0215fc31e5dd08ac2c7d0fc89607c3a9602`、无障碍 `ev_c03064287be6cf8b8c7ed58153ea0a4fa5c5cc85469b5152f22e1b4dc40eec07`、场景 `ev_d9cc36ef5d6b27761b4f347ee748ba8a5aa1f916aaf75d6371480ae77c531197` |
 
 复现判据：重跑上面那条命令，根 artifact sha 与本节一致，事实不变。
 （`out/` 已 gitignore，证据不进仓库；换机器要重新采集。）
@@ -46,7 +48,7 @@
 | 3 | 频谱 | `FREQUENCY="frequency"` | `spectrum` 组件（Welch，五种窗，PSD/有效值） | 已覆盖 |
 | 4 | 状态图 | `STATE="state"` | `status` 组件（状态与故障带） | 已覆盖 |
 | 5 | 赛道地图 | `MAP="map"` + `vendor-leaflet` + `api.mapbox.com` 瓦片 + `latOffset/longOffset` | `track` 组件（本地坐标系绘制，速度着色） | 已覆盖；**在线瓦片押后**（离线优先） |
-| 6 | **姿态图** | `ATTITUDE="attitude"`；`FigureAttitude-*.js`：`rollSignal` / `pitchSignal` / `yawSignal` + `angleUnits` + **每通道 multiplier** + `eulerOrder` + `customModels` + 相机复位事件；**光标 A 处叠一个 30% 透明模型**与实时姿态同屏对比 | 无（但 `dbc/261004` 已解出 Xsens MTi 的姿态/角速度通道，数据已经在场次里） | **做（P1）** |
+| 6 | **姿态图** | `ATTITUDE="attitude"`；`FigureAttitude-*.js`：`rollSignal` / `pitchSignal` / `yawSignal` + `angleUnits` + **每通道 multiplier** + `eulerOrder` + `customModels` + 相机复位事件；**光标 A 处叠一个 30% 透明模型**与实时姿态同屏对比。运行时旁证：分析页工具栏第一个按钮就是 `Add Plot`，本 workspace 的数据集里实测存在 `Aceinna Pitch` / `Aceinna Roll` / `accZ MTI` 这类姿态通道 | 无（但 `dbc/261004` 已解出 Xsens MTi 的姿态/角速度通道，数据已经在场次里） | **做（P1）** |
 | 7 | **主飞行显示** | `PFD="pfd"`（与 attitude 并列的一种绘图类型） | 无 | **做（P1，与姿态图同一票或紧随）** |
 | 8 | 热力图 | `HEATMAP="heatmap"` | 无 | 做（P3） |
 | 9 | 通用表格 | `TABULAR="tabular"`；渲染三选一 `TABLE` / `NUMBER` / `BARCHART` | `report`（时间报告）+ `chreport`（通道报告）两张专用表 | 押后（现有两张覆盖了主要用途） |
@@ -84,8 +86,30 @@
 每一条落到 issue 时必须带**可跑的验收命令或截图判据**；落不下的说明它还是需求而不是计划。
 功能票的回归沿用四道，其中 `tools/verify_ld_vs_csv.py` **不可谈判**。
 
-## 运行时证据（还没做）
+## 运行时证据（2026-10-17 采了一轮）
 
-上表的证据全部来自**静态包**。运行时（WebSocket 消息形状、真实 API 响应字段、
-姿态图的实际渲染）要靠 CDP 抓一轮，步骤见 [marple-runtime-capture.md](marple-runtime-capture.md)。
-没有这一轮，`signal / segment / figure` 的**字段名**仍然是推断而不是实测。
+采集流程见 [marple-runtime-capture.md](marple-runtime-capture.md)，原始证据在
+`out/_marple/runtime/`（gitignored，逐文件 sha 见那里的 README）。**登录态**下实测到：
+
+- **启动序列**（进 `/visualisation` 必跑，三次加载完全一致）：
+  `GET /api/v1/version` → Auth0 `/authorize`(web_message, `prompt=none`) + `/oauth/token` →
+  `GET /api/v1/auth/config` → `/user/info` → `/workspace/info` → `/workspace/license?refresh_cache=true` →
+  `/connection` → `POST /sources/search` → `/library/workbook/all` → `/reporter/template/all` →
+  `/dashboard/all` → `/sandbox/all`，外加 `POST /api/v1/log` 上报。**没有 WebSocket**——
+  "实时"靠轮询与请求，不是推送。
+- **数据集模型**（`POST /sources/search` 的响应，这是最值钱的一条）：
+  `{request_time, message:[{display_name, dataset_filter:{dataset, stream, layer_shift}, metadata[], timestamp_start, timestamp_stop, realtime}]}`；
+  `metadata[].key` 实测出现 `dataset / stream / layer_shift / created_at / datapoints / nsignals / datapool / stream_name`。
+  也就是它把一份记录拆成 **dataset → stream → layer（按位偏移寻址）**，通道数记在 `nsignals`。
+- **顶层导航**（无障碍树实测）：`Home / Analysis(/visualisation) / Overview / Reports / Functions / Database`，
+  外加 workspace 切换（菜单项实测文案 `Workspace AURORA Formula Student Team`）、Settings、Help。
+- **分析页控件**：`Add Plot`、`refresh`、`download`、`image`、`save`、`save_as`、`share`、`layers`、
+  `merge`、`Organise datasets`、`Signals`（sort / filter / settings）、`Datasets`、工作表分页 `Tab 1 + add`。
+- **本地存储键**：`user-settings`、`workspace-settings:<workspace uuid>`、`loglevel`，
+  以及第三方统计（`__tea_*`）与客服（`gleap-widget-*`）。静态包里
+  `workspace-settings:${id}` 这条推断得到了字面确认。
+- **第三方**：Auth0（登录）、Gleap（客服）、`gator.volces.com`（统计）、`rsms.me/inter`（字体）。
+
+**仍然缺三项**，都要"边操作边观察"（人点几处即可，方法写在采集规程里）：
+① `/signals/cursor/stats` 的返回量清单（P2 的输入）；② 姿态图/PFD 的实际渲染与配置项（P1 的输入）；
+③ `PLOT_RESOLUTION` 的取值档位（P4 的输入）。这三项没拿到之前，P1/P2/P4 的 spec 只算"有方向"。

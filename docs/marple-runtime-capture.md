@@ -94,17 +94,21 @@ rea capture-browser-scenario scenario.json --format json > out\_marple\runtime\<
 响应体挂在 `events.items` 里 `kind === "network-content"` 的条目上，要按 `transaction_id`
 与 `kind === "request"` 的条目配起来才知道是哪个 URL。
 
-## 第四步：剩下三项靠"人点 + observe-web-session"
+## 第四步：只在操作时才发的请求，靠"人点 + observe-web-session"
 
-光标区间统计、姿态图/PFD 的渲染、`PLOT_RESOLUTION` 的档位，只在**操作时**才发请求。
-开着那个窗口时跑：
+光标区间统计这类请求只在**操作时**才发。开着那个窗口时跑：
 
 ```powershell
 rea observe-web-session http://127.0.0.1:9222 <target_id> --observation-ms 60000
 ```
 
-这 60 秒里在那台 Edge 上依次做：① 在图上摆好 A/B 两个光标并让统计显示出来；
-② `Add Plot` → 选姿态图/PFD，等它画出来；③ 打开绘图设置看分辨率档位。
+这 60 秒里在那台 Edge 上操作即可。**2026-10-17 已用这一步拿到光标统计与两个取数端点**
+（见下面"判据与现状"）。
+
+> **姿态图/PFD 在 Aurora 的账号上抓不到**：`Add Plot` 的选项按 license 过滤，
+> `Attitude` 与 `PFD` 属于 `AEROSPACE` 包，而这份 sponsorship license 的
+> `features` 里没有它。换到有 AEROSPACE 的账号（或官方 demo）时，这一步仍然可用：
+> 点 `Add Plot` → Aerospace 组 → 选 Attitude/PFD，等它画出来。
 
 ## 第五步：证据怎么存
 
@@ -126,5 +130,6 @@ rea observe-web-session http://127.0.0.1:9222 <target_id> --observation-ms 60000
 带 `x_base_name` 与 `z_signal`）、`/sources/signals`（通道清单 + 每条通道元数据）三份字段路径。
 P2 与 P4 由此证据齐备，可以直接进 `/to-spec`。
 
-**还没做**：姿态图 / PFD 的实际渲染与配置项——`Add Plot` 选到那一类才能看到，
-这一步做完 P1 才有资格开票。P3（热力图）只依赖已有绘图管线，不受影响。
+**姿态图/PFD 不再需要补采集**：它在你们账号上被 license 挡住（`AEROSPACE` 不在
+`features` 里），证据停在静态 chunk 那一层，而那一层已经够写 spec。
+目前 P1–P4 四条都不缺证据了。

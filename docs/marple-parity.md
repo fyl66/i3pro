@@ -49,8 +49,8 @@
 | 3 | 频谱 | `FREQUENCY="frequency"` | `spectrum` 组件（Welch，五种窗，PSD/有效值） | 已覆盖 |
 | 4 | 状态图 | `STATE="state"` | `status` 组件（状态与故障带） | 已覆盖 |
 | 5 | 赛道地图 | `MAP="map"` + `vendor-leaflet` + `api.mapbox.com` 瓦片 + `latOffset/longOffset` | `track` 组件（本地坐标系绘制，速度着色） | 已覆盖；**在线瓦片押后**（离线优先） |
-| 6 | **姿态图** | `ATTITUDE="attitude"`；`FigureAttitude-*.js`：`rollSignal` / `pitchSignal` / `yawSignal` + `angleUnits` + **每通道 multiplier** + `eulerOrder` + `customModels` + 相机复位事件；**光标 A 处叠一个 30% 透明模型**与实时姿态同屏对比。运行时旁证：分析页工具栏第一个按钮就是 `Add Plot`，本 workspace 的数据集里实测存在 `Aceinna Pitch` / `Aceinna Roll` / `accZ MTI` 这类姿态通道 | 无（但 `dbc/261004` 已解出 Xsens MTi 的姿态/角速度通道，数据已经在场次里） | **做（P1）** |
-| 7 | **主飞行显示** | `PFD="pfd"`（与 attitude 并列的一种绘图类型） | 无 | **做（P1，与姿态图同一票或紧随）** |
+| 6 | **姿态图** | `ATTITUDE="attitude"`（图标 `3d_rotation`，显示名 `Attitude`）；`FigureAttitude-*.js`：`rollSignal` / `pitchSignal` / `yawSignal` + `angleUnits` + **每通道 multiplier** + `eulerOrder` + `customModels` + 相机复位事件；**光标 A 处叠一个 30% 透明模型**与实时姿态同屏对比。**许可证门控（2026-10-17 实测）**：`Add Plot` 的三组是 `Explore(BASE) / Aggregate(BASE) / Aerospace(AEROSPACE)`，最后按 `license.features` 过滤，`Attitude` 与 `PFD` 只在 Aerospace 组；本 workspace 的 license `features = [DATAMINER, OVERVIEW, FUNCTIONS, REPORTING_V2, MOTORSPORT]` **不含 AEROSPACE**，所以菜单里根本看不到——运行时观察这一步在你们账号上做不到，P1 的证据只能用静态包 | 无（但 `dbc/261004` 已解出 Xsens MTi 的姿态/角速度通道，数据已经在场次里） | **做（P1）** |
+| 7 | **主飞行显示** | `PFD="pfd"`（图标就是 `pfd`，显示名 `PFD`），与 `Attitude` 同属 **Aerospace** 组，同样被 license 挡住（见第 6 行） | 无 | **做（P1，与姿态图同一票或紧随）** |
 | 8 | 热力图 | `HEATMAP="heatmap"` | 无 | 做（P3） |
 | 9 | 通用表格 | `TABULAR="tabular"`；渲染三选一 `TABLE` / `NUMBER` / `BARCHART` | `report`（时间报告）+ `chreport`（通道报告）两张专用表 | 押后（现有两张覆盖了主要用途） |
 | 10 | 报文/元数据图 | `MESSAGE="message"` / `METADATA="metadata"` | CAN 帧表已能导入成场次 + `status` 组件 | 押后 |
@@ -118,5 +118,9 @@
   （响应只有 `min/mean/max`）、`POST /signals/t_base`（**分桶 min/max 包络**）+ `x_base_name` + `z_signal`、
   `POST /sources/signals`（按 `dataset_filter` 列通道，附每条通道的 min/max/mean/sum/frequency/storage_status）。
 
-**只差一项**：姿态图 / PFD 的实际渲染与配置项（P1 的输入）——需要 `Add Plot` 选到那一类，
-方法写在采集规程第四步。P2 与 P4 的证据已齐，可以直接进 `/to-spec`。
+**没有"还差一项"了**：姿态图/PFD 在你们账号上**看不到**（license 不含 `AEROSPACE`，见对照表第 6 行），
+所以它的证据就停在静态 chunk 那一层——而那一层已经给出 `roll/pitch/yaw` 三通道 + 单位 + 每通道倍数 +
+欧拉序 + 自定义模型 + 光标处 30% 幽灵模型这些关键行为，够写 spec 了。
+另外顺带量到 license 本身：`type=SPONSORSHIP`、`features=[DATAMINER, OVERVIEW, FUNCTIONS, REPORTING_V2, MOTORSPORT]`、
+`editors 10`、`storage -1`；`DATAMINER` 这条管着 Aggregate 组（Table/Number/Bar/Heatmap），你们有。
+P1 / P2 / P3 / P4 四条的证据现在都齐了，可以整体进 `/to-spec`。

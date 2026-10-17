@@ -41,6 +41,7 @@ __all__ = [
     "build_payload",
     "build_overlay",
     "downsample",
+    "envelope_needed",
     "channel_index",
     "trace",
     "points",
@@ -529,40 +530,97 @@ def snapshot_spectra(
     }
 
 
+def envelope_needed(sample_count: int, buckets: int) -> bool:
+    """Whether a trace is dense enough that Marple-style bucketing applies.
+
+    The measured rule is ``estimated_sample_rate × window_seconds > 2 ×
+    resolution``.  For a regular timebase that estimate is the number of raw
+    samples (within one sample at the boundary), so the code carries the exact
+    sample count and uses the equivalent, reproducible condition
+    ``sample_count > 2 × buckets``.
+    """
+    return int(sample_count) > 2 * max(1, int(buckets))
+
+
+def _bucket_edges(n: int, buckets: int) -> np.ndarray:
+    """Bucket boundaries for ``n`` samples; first starts at 0, last ends at n."""
+    return np.linspace(0, int(n), max(1, int(buckets)) + 1).astype(np.int64)
+
+
 def downsample(
     time: np.ndarray,
     values: np.ndarray,
     distance: np.ndarray | None = None,
     buckets: int = DEFAULT_BUCKETS,
 ) -> dict:
-    """Min/max decimation that keeps spikes (per MoTeC / i3rs practice).
+    """Package a trace as raw samples or per-bucket min/max envelopes.
 
-    Each pixel column contributes both the local minimum and the local maximum,
-    so a one-sample brake-pressure spike survives zooming out - a plain
-    every-nth-sample decimation would drop it.
+    When the raw sample count exceeds ``2 × buckets``, the trace is reduced to
+    one envelope bucket per horizontal slot: ``min`` / ``max`` keep the actual
+    excursion, ``value`` is the bucket mean for cursor/statistics, and
+    ``count`` makes the mean reproducible by the UI.  Otherwise the raw points
+    are returned unchanged.
     """
     n = time.size
+    buckets = max(1, int(buckets))
     values = _finite(values)
-    if n <= buckets * 2:
+    if not envelope_needed(n, buckets):
         picked = np.arange(n)
-    else:
-        edges = np.linspace(0, n, buckets + 1).astype(int)
-        rows: list[int] = []
-        for a, b in zip(edges, edges[1:]):
-            if b <= a:
-                continue
-            chunk = values[a:b]
-            lo = int(np.argmin(chunk))
-            hi = int(np.argmax(chunk))
-            rows.extend(sorted({a + lo, a + hi}))
-        picked = np.asarray(rows, dtype=np.int64)
+        out = {
+            "time": np.round(time[picked], 4).tolist(),
+            "value": np.round(values[picked], 5).tolist(),
+            "envelope": False,
+            "samples": int(n),
+            "buckets": buckets,
+        }
+        if distance is not None and distance.size == n:
+            out["distance"] = np.round(_finite(distance)[picked], 3).tolist()
+        return out
+
+    edges = _bucket_edges(n, buckets)
+    bucket_time: list[float] = []
+    bucket_distance: list[float] = []
+    bucket_mean: list[float] = []
+    bucket_min: list[float] = []
+    bucket_max: list[float] = []
+    bucket_count: list[int] = []
+    distances = (
+        _finite(distance)
+        if distance is not None and distance.size == n
+        else None
+    )
+    for a, b in zip(edges, edges[1:]):
+        if b <= a:
+            continue
+        chunk = values[a:b]
+        bucket_time.append(float((time[a] + time[b - 1]) / 2.0))
+        if distances is not None:
+            bucket_distance.append(float((distances[a] + distances[b - 1]) / 2.0))
+        bucket_mean.append(float(np.mean(chunk)))
+        bucket_min.append(float(np.min(chunk)))
+        bucket_max.append(float(np.max(chunk)))
+        bucket_count.append(int(b - a))
 
     out = {
-        "time": np.round(time[picked], 4).tolist(),
-        "value": np.round(values[picked], 5).tolist(),
+        "time": np.round(np.asarray(bucket_time), 4).tolist(),
+        "value": np.round(np.asarray(bucket_mean), 5).tolist(),
+        "min": np.round(np.asarray(bucket_min), 5).tolist(),
+        "max": np.round(np.asarray(bucket_max), 5).tolist(),
+        "count": bucket_count,
+        "envelope": True,
+        "samples": int(n),
+        "buckets": buckets,
+        # The first and last bucket cover the full requested interval. Keeping
+        # the span explicit makes that promise testable without reconstructing
+        # the edges from the payload.
+        "span": [round(float(time[0]), 4), round(float(time[-1]), 4)],
     }
-    if distance is not None and distance.size == n:
-        out["distance"] = np.round(_finite(distance)[picked], 3).tolist()
+    if distances is not None:
+        out["distance"] = np.round(np.asarray(bucket_distance), 3).tolist()
+        out["distance_span"] = [
+            round(float(distances[0]), 3),
+            round(float(distances[-1]), 3),
+        ]
     return out
 
 
@@ -609,11 +667,11 @@ def trace(
     end: float | None = None,
     upsample: str = DEFAULT_UPSAMPLE,
 ) -> dict:
-    """One channel on the master time base, min/max decimated.
+    """One channel on the master time base, raw or min/max enveloped.
 
     ``upsample`` 定的是"原始采样点之间怎么取值"（i2 Pro 的 Up-sampling 属性）：
     画图默认 ``linear``，分析路径用的是 ``previous``。两条路都只影响**取到的值**，
-    抽稀与"留下尖峰"的做法一模一样。
+    抽稀与"留下尖峰"的做法一模一样；是否启用包络由 :func:`envelope_needed` 一处定。
     """
     values = derive.upsample_to_master(log, name, upsample)[: time.size]
     if start is not None or end is not None:

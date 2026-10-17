@@ -3413,6 +3413,107 @@ class Checker:
                 "if(c)i3pro.componentAction(c,'close');return true;})()")
         time.sleep(0.3)
 
+    # ------------------------------------------- A91 分桶 min/max 包络
+    def resolution_envelope(self):
+        """#47：真切分辨率，请求点数变化，画面也真的变。"""
+        def pixels(component_id):
+            return self.js(
+                "(function(){var c=document.querySelector('[data-id=\"" + component_id
+                + "\"] canvas');if(!c)return '';var d=c.toDataURL();"
+                "return d.length+':'+d.slice(-48);})()")
+
+        def graph():
+            raw = self.js(
+                "JSON.stringify((function(){var c=i3pro.state.components.filter(function(x)"
+                "{return x.type==='graph';})[0];if(!c)return null;"
+                "var name=(c.config.channels||[]).filter(function(n){return i3pro.data.channels"
+                ".some(function(ch){return ch.name===n&&ch.has_data!==false;});})[0]||"
+                "(c.config.channels||[])[0];var t=name?i3pro.state.traces[name]:null;"
+                "return {id:c.id,name:name,title:i3pro.componentTitle(c),"
+                "buckets:t&&t.buckets,points:t&&(t.time||[]).length,"
+                "envelope:!!(t&&i3pro.traceUsesEnvelope(t)),"
+                "hasMin:!!(t&&t.min&&t.min.length),hasMax:!!(t&&t.max&&t.max.length)};})())")
+            return json.loads(raw) if raw and raw != "null" else None
+
+        def choose(key):
+            self.js(
+                "(function(){var s=document.getElementById('plotResolution');"
+                "s.value=%s;s.dispatchEvent(new Event('change'));return true;})()"
+                % json.dumps(key))
+
+        self.js("i3pro.applyPreset(i3pro.worksheetCatalogue().sheets[0].name);"
+                "i3pro.state.mode='time';i3pro.state.view=null;"
+                "i3pro.state.windowKey='';i3pro.renderAll();true")
+        time.sleep(0.8)
+        before = graph()
+        self.check("#47 第一张曲线图有点可验，且用到了包络",
+                   bool(before) and before.get("envelope") is True
+                   and before.get("hasMin") and before.get("hasMax"), before)
+        if not before:
+            return
+        name = before["name"]
+        component_id = before["id"]
+
+        mark = self.js("window.__fetchLog.length")
+        choose("max")
+        got_max = self.browser.wait_for(
+            "((i3pro.state.traces[%s]||{}).buckets===8000)"
+            % json.dumps(name), self.session, timeout=30)
+        time.sleep(0.5)
+        top = graph()
+        urls_max = json.loads(
+            self.js("JSON.stringify((window.__fetchLog||[]).slice(%d).map(function(e)"
+                    "{return e.url;}))" % int(mark)) or "[]")
+        self.check("#47 切到最多档后 /trace 请求带 8000，返回点数 <= 8000",
+                   bool(got_max) and any("buckets=8000" in u for u in urls_max)
+                   and bool(top) and 0 < top["points"] <= 8000, top)
+        top_pixels = pixels(component_id)
+
+        mark = self.js("window.__fetchLog.length")
+        choose("min")
+        got_min = self.browser.wait_for(
+            "((i3pro.state.traces[%s]||{}).buckets===500)" % json.dumps(name),
+            self.session, timeout=30)
+        time.sleep(0.5)
+        low = graph()
+        urls_min = json.loads(
+            self.js("JSON.stringify((window.__fetchLog||[]).slice(%d).map(function(e)"
+                    "{return e.url;}))" % int(mark)) or "[]")
+        self.check("#47 切到最少档后 /trace 请求带 500，返回点数 <= 500",
+                   bool(got_min) and any("buckets=500" in u for u in urls_min)
+                   and bool(low) and 0 < low["points"] <= 500, low)
+        self.check("#47 切档后标题写明「已抽稀（包络）」",
+                   bool(top) and "已抽稀（包络）" in str(top.get("title") or "")
+                   and bool(low) and "已抽稀（包络）" in str(low.get("title") or ""),
+                   "%s / %s" % (top and top.get("title"), low and low.get("title")))
+        self.check("#47 点数真的变：最多档比最少档多",
+                   bool(top) and bool(low) and top["points"] > low["points"],
+                   "%s -> %s" % (top and top.get("points"), low and low.get("points")))
+        low_pixels = pixels(component_id)
+        self.check("#47 最少档与最多档的画布像素不同",
+                   bool(top_pixels) and bool(low_pixels) and top_pixels != low_pixels,
+                   "%s vs %s" % (top_pixels, low_pixels))
+        timings = {}
+        for key, count in (("min", 500), ("medium", 2000), ("max", 8000)):
+            spent = self.js(
+                "(async function(){var t0=performance.now();"
+                "await i3pro.apiGet(i3pro.apiUrl('/trace',{channels:%s,buckets:%d,"
+                "upsample:'linear'}));return Math.round(performance.now()-t0);})()"
+                % (json.dumps(name), count))
+            timings[key] = spent
+        self.check("#47 三档 /trace 都能在 2000 ms 内返回（实测写进 A91）",
+                   all(isinstance(v, (int, float)) and v < 2000
+                       for v in timings.values()), timings)
+        print("  NOTE  #47 /trace 金标准切档耗时：500=%s ms, 2000=%s ms, 8000=%s ms"
+              % (timings.get("min"), timings.get("medium"), timings.get("max")))
+
+        # 让后面的验收回到默认档，不留一个"最少档"的全局状态。
+        choose("medium")
+        self.browser.wait_for(
+            "((i3pro.state.traces[%s]||{}).buckets===2000)" % json.dumps(name),
+            self.session, timeout=30)
+        time.sleep(0.4)
+
     # ------------------------------------------- A89 光标 A–B 区间统计
     def cursor_stats(self):
         """#44 光标 A–B 区间统计：真点「显示 → A–B」、真放 A/B、数跟着 B 跑。
@@ -3812,6 +3913,8 @@ def main(argv=None):
             checker.heatmap()
             # #48 组件栏小改：真复制一块、真换成直方图，通道与位置都还在。
             checker.component_bar()
+            # #47 分桶包络：真切档位，请求点数变化，画布像素也跟着变。
+            checker.resolution_envelope()
             errors = browser.page_errors()
             checker.check("整场没有页面级报错", not errors, errors[:3])
         bad = [name for name, ok in checker.results if not ok]

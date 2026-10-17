@@ -998,6 +998,7 @@ const PLOT_RESOLUTIONS = [
   ["max", 8000, "最多"],
 ];
 const DEFAULT_RESOLUTION = "medium";
+const ENVELOPE_TITLE = "已抽稀（包络）";
 function resolutionKey(key) {
   const want = String(key || "").toLowerCase();
   return PLOT_RESOLUTIONS.some((row) => row[0] === want) ? want : DEFAULT_RESOLUTION;
@@ -1017,6 +1018,12 @@ function resolutionDrawsPoints() {
   // "绘图分辨率也决定点样式的点到底画不画"一致。
   return resolutionPoints(state.resolution) <= 4000;
 }
+function traceUsesEnvelope(trace) {
+  return !!(trace && trace.envelope
+    && Array.isArray(trace.min) && Array.isArray(trace.max)
+    && trace.min.length === trace.max.length
+    && trace.min.length === (trace.time || []).length);
+}
 function graphTitle(comp) {
   const names = comp.config.channels || [];
   const n = names.length;
@@ -1027,8 +1034,11 @@ function graphTitle(comp) {
   // 换了非默认的连接方式时标题里留一句：否则"这条曲线为什么是平顶"没人说得清。
   const upsample = state.upsample && state.upsample !== "linear"
     ? " · 曲线：" + (UPSAMPLE_LABELS[state.upsample] || state.upsample) : "";
+  // 包络是这一屏真实发生过的抽稀，不是导出设置；标题里必须留痕（A91）。
+  const envelope = names.some((name) => traceUsesEnvelope(traceOf(name)))
+    ? " · " + ENVELOPE_TITLE : "";
   return typeTitle(comp, (n ? n + " 通道 · " : "")
-    + (gone ? "缺 " + gone + " 条 · " : "") + mode) + upsample;
+    + (gone ? "缺 " + gone + " 条 · " : "") + mode) + upsample + envelope;
 }
 function graphNeeds(comp, add) { (comp.config.channels || []).forEach(add); }
 /** 刚加进来的图先看侧边栏勾着的那些通道，别给一张空图。 */
@@ -3082,6 +3092,59 @@ function drawTraces(ctx, pad, plotW, plotH, x0, x1, y0, y1, specs) {
     // 尖角相接的折线（噪声大的通道最明显）用圆角连接：同样这些点，观感顺一截。
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
+    if (spec.envelope && spec.min && spec.max) {
+      // 每个桶一条竖线保真地盖住桶内极值；相邻桶的上界连上界、下界连下界，
+      // 就是外轮廓。点样式在这里没有意义（一个点代表一整桶），按线画。
+      ctx.globalAlpha = 0.48;
+      ctx.beginPath();
+      for (let i = 0; i < xs.length; i++) {
+        const xv = xs[i];
+        if (!Number.isFinite(xv) || !Number.isFinite(spec.min[i])
+            || !Number.isFinite(spec.max[i])) continue;
+        if (xv < x0) continue;
+        if (xv > x1) break;
+        const px = sx(xv);
+        ctx.moveTo(px, sy(spec.max[i]));
+        ctx.lineTo(px, sy(spec.min[i]));
+      }
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      const outline = (values) => {
+        ctx.beginPath();
+        let started = false;
+        let prevX = 0, prevY = 0;
+        for (let i = 0; i < xs.length; i++) {
+          const xv = xs[i], yv = values[i];
+          if (!Number.isFinite(xv) || !Number.isFinite(yv)) continue;
+          if (xv < x0) continue;
+          if (xv > x1) break;
+          const px = sx(xv), py = sy(yv);
+          if (!started) {
+            ctx.moveTo(px, py);
+            started = true;
+          } else if (state.upsample === "previous") {
+            ctx.lineTo(px, prevY);
+            ctx.lineTo(px, py);
+          } else if (state.upsample === "next") {
+            ctx.lineTo(prevX, py);
+            ctx.lineTo(px, py);
+          } else if (state.upsample === "closest") {
+            const mid = (prevX + px) / 2;
+            ctx.lineTo(mid, prevY);
+            ctx.lineTo(mid, py);
+            ctx.lineTo(px, py);
+          } else {
+            ctx.lineTo(px, py);
+          }
+          prevX = px;
+          prevY = py;
+        }
+        ctx.stroke();
+      };
+      outline(spec.max);
+      outline(spec.min);
+      continue;
+    }
     if (state.style === "points" && !spec.forceLine && resolutionDrawsPoints()) {
       for (let i = 0; i < xs.length; i++) {
         const xv = xs[i];
@@ -3144,6 +3207,24 @@ function valueAt(trace, x) {
 function rangeStats(trace, x0, x1) {
   const xs = traceX(trace);
   if (!xs || !xs.length) return null;
+  if (traceUsesEnvelope(trace)) {
+    let lo = Infinity, hi = -Infinity, sum = 0, n = 0;
+    for (let i = 0; i < xs.length; i++) {
+      const xv = xs[i];
+      if (xv < x0 || xv > x1) continue;
+      const mn = trace.min[i], mx = trace.max[i], mean = trace.value[i];
+      const count = Number.isFinite(trace.count && trace.count[i])
+        ? trace.count[i] : 1;
+      if (Number.isFinite(mn) && mn < lo) lo = mn;
+      if (Number.isFinite(mx) && mx > hi) hi = mx;
+      if (Number.isFinite(mean)) {
+        sum += mean * count;
+        n += count;
+      }
+    }
+    if (!n) return null;
+    return { min: lo, max: hi, avg: sum / n, n: n };
+  }
   let lo = Infinity, hi = -Infinity, sum = 0, n = 0;
   for (let i = 0; i < xs.length; i++) {
     const xv = xs[i];
@@ -3211,12 +3292,21 @@ function groupScaleFor(group, comp) {
       if (xs[i] < x0) continue;
       if (xs[i] > x1) break;
       values.push(trace.value[i]);
+      if (traceUsesEnvelope(trace)) {
+        values.push(trace.min[i], trace.max[i]);
+      }
     }
   }
   if (!values.length) {
     for (const name of group.channels) {
       const trace = traceOf(name);
-      if (trace) for (const v of trace.value.slice(0, 400)) values.push(v);
+      if (trace) {
+        for (const v of trace.value.slice(0, 400)) values.push(v);
+        if (traceUsesEnvelope(trace)) {
+          for (const v of trace.min.slice(0, 400)) values.push(v);
+          for (const v of trace.max.slice(0, 400)) values.push(v);
+        }
+      }
     }
   }
   return niceBounds(values);
@@ -3682,7 +3772,11 @@ function renderGraphComponent(comp, b) {
                ticks, state.mode === "time");
       drawTraces(octx, pad, plotW, plotH,
                  r[0], r[1], scale[0], scale[1], group.channels.map((name) => ({
-        x: traceX(traceOf(name)), values: (traceOf(name) || {}).value,
+        x: traceX(traceOf(name)),
+        values: (traceOf(name) || {}).value,
+        min: (traceOf(name) || {}).min,
+        max: (traceOf(name) || {}).max,
+        envelope: traceUsesEnvelope(traceOf(name)),
         color: channelColor(name, comp),
       })));
     });
@@ -4250,6 +4344,10 @@ function renderOverview() {
   const plotW = c.w - pad.l - pad.r, plotH = c.h - pad.t - pad.b;
   let lo = Infinity, hi = -Infinity;
   for (const v of overview.value) { if (!Number.isFinite(v)) continue; if (v < lo) lo = v; if (v > hi) hi = v; }
+  if (traceUsesEnvelope(overview)) {
+    for (const v of overview.min) { if (Number.isFinite(v) && v < lo) lo = v; }
+    for (const v of overview.max) { if (Number.isFinite(v) && v > hi) hi = v; }
+  }
   if (!Number.isFinite(lo)) { lo = 0; hi = 1; }
   if (hi - lo < 1e-9) hi = lo + 1;
   const full = [overview.time[0], overview.time[overview.time.length - 1] || 1];
@@ -10160,10 +10258,12 @@ window.i3pro = {
   setChannelColor: setChannelColor, setComponentPalette: setComponentPalette,
   setHeadField: setHeadField, openColorMenu: openColorMenu,
   closePopMenu: closePopMenu,
+  drawTraces: drawTraces,
   setUpsample: setUpsample, upsampleModes: UPSAMPLE_MODES,
   setResolution: setResolution, resolutionKey: resolutionKey,
   resolutionPoints: resolutionPoints, resolutionLabel: resolutionLabel,
   plotResolutions: PLOT_RESOLUTIONS, renderResolutionControl: renderResolutionControl,
+  traceUsesEnvelope: traceUsesEnvelope,
   // 姿态（#43）：矩阵与 pick 规则要和后端 attitude.py 一致，由 smoke 对拍守住
   attitudeMatrix: attitudeMatrix, attitudePick: attitudePick,
   // 侧边栏快速跳转（A78）

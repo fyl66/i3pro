@@ -4255,6 +4255,63 @@ if (canMeta) {
   api.renderAll();
 }
 
+// 38. 分桶 min/max 包络（ticket #47 / A91）：标题角标出现/消失。
+{
+  const api = window.i3pro;
+  const comp = api.state.components.filter((c) => c.type === "graph")[0];
+  const name = comp && (comp.config.channels || [])
+    .find((ch) => api.traceUsesEnvelope(api.state.traces[ch]));
+  check(!!name, "快照里没有一条启用包络的曲线，A91 的角标用例没得验");
+  if (comp && name) {
+    const traces = (comp.config.channels || []).map((ch) => api.state.traces[ch])
+      .filter((trace) => api.traceUsesEnvelope(trace));
+    const was = traces.map((trace) => trace.envelope);
+    const title = () => String(api.bundleOf(comp).titleSpan.textContent || "");
+    api.renderAll();
+    check(title().indexOf("已抽稀（包络）") >= 0,
+      "包络生效时标题没写「已抽稀（包络）」：" + title());
+    traces.forEach((trace) => { trace.envelope = false; });
+    api.renderAll();
+    check(title().indexOf("已抽稀（包络）") < 0,
+      "包络关掉后标题还留着抽稀角标：" + title());
+    traces.forEach((trace, i) => { trace.envelope = was[i]; });
+    api.renderAll();
+  }
+  const rec = {
+    fills: 0, strokes: 0, lines: 0,
+    fillRect() { this.fills += 1; },
+    beginPath() {}, moveTo() {},
+    lineTo() { this.lines += 1; },
+    stroke() { this.strokes += 1; },
+  };
+  const savedStyle = api.state.style, savedUpsample = api.state.upsample;
+  api.state.style = "points";
+  api.drawTraces(rec, { l: 0, t: 0 }, 100, 100, 0, 10, 0, 10, [{
+    x: [1, 2, 3], values: [1, 2, 3], min: [0, 1, 2], max: [2, 3, 4],
+    envelope: true, color: "#fff",
+  }]);
+  check(rec.fills === 0 && rec.strokes >= 3,
+    "包络生效时点样式没有回退成线：" + JSON.stringify(rec));
+  api.drawTraces(rec, { l: 0, t: 0 }, 100, 100, 0, 10, 0, 10, [{
+    x: [1, 2, 3], values: [1, 2, 3], color: "#fff",
+  }]);
+  check(rec.fills === 3, "非包络曲线在点样式下没有画点：" + JSON.stringify(rec));
+  const lineShape = (mode) => {
+    const one = { lines: 0, beginPath() {}, moveTo() {}, lineTo() { this.lines += 1; },
+                  stroke() {} };
+    api.state.upsample = mode;
+    api.drawTraces(one, { l: 0, t: 0 }, 100, 100, 0, 10, 0, 10, [{
+      x: [1, 2, 3], values: [1, 2, 3], min: [0, 1, 2], max: [2, 3, 4],
+      envelope: true, color: "#fff",
+    }]);
+    return one.lines;
+  };
+  check(lineShape("previous") > lineShape("linear"),
+    "包络模式下「阶梯保持」没有改变桶间连线形态");
+  api.state.upsample = savedUpsample;
+  api.state.style = savedStyle;
+}
+
 const header = registry.get("fileInfo");
 check(header && (header.innerHTML.indexOf(".ld") >= 0
   || header.innerHTML.indexOf(".csv") >= 0

@@ -740,6 +740,78 @@ class TestRender(unittest.TestCase):
             self.assertIn('"laps"', text)
 
 
+class TestTraceEnvelope(unittest.TestCase):
+    """分桶 min/max 包络（ticket #47 / A91）的纯函数口径。"""
+
+    def test_envelope_bucket_count_and_span(self):
+        time = np.linspace(10.0, 20.0, 1001)
+        values = np.sin(time)
+        out = render.downsample(time, values, buckets=100)
+        self.assertTrue(out["envelope"])
+        self.assertEqual(out["samples"], 1001)
+        self.assertEqual(out["buckets"], 100)
+        self.assertLessEqual(len(out["time"]), 100)
+        self.assertEqual(out["span"], [round(float(time[0]), 4), round(float(time[-1]), 4)])
+        edges = render._bucket_edges(1001, 100)
+        self.assertEqual(int(edges[0]), 0)
+        self.assertEqual(int(edges[-1]), 1001)
+        self.assertEqual(len(edges), 101)
+
+    def test_envelope_buckets_match_numpy(self):
+        values = np.asarray([3.0, -1.0, 5.0, 2.0, 7.0, -4.0, 6.0, 1.0, 9.0, 0.0, -2.0])
+        time = np.arange(values.size, dtype=np.float64)
+        buckets = 3
+        out = render.downsample(time, values, buckets=buckets)
+        self.assertTrue(out["envelope"])
+        edges = render._bucket_edges(values.size, buckets)
+        want_min, want_max, want_count, want_mean = [], [], [], []
+        for a, b in zip(edges, edges[1:]):
+            chunk = values[a:b]
+            want_min.append(round(float(np.min(chunk)), 5))
+            want_max.append(round(float(np.max(chunk)), 5))
+            want_count.append(int(b - a))
+            want_mean.append(round(float(np.mean(chunk)), 5))
+        self.assertEqual(out["min"], want_min)
+        self.assertEqual(out["max"], want_max)
+        self.assertEqual(out["count"], want_count)
+        self.assertEqual(out["value"], want_mean)
+
+    def test_raw_points_when_not_over_twice_buckets(self):
+        time = np.arange(100, dtype=np.float64)
+        values = np.arange(100, dtype=np.float64)
+        exact = render.downsample(time, values, buckets=50)
+        self.assertFalse(exact["envelope"])
+        self.assertEqual(exact["time"], time.tolist())
+        self.assertEqual(exact["value"], values.tolist())
+        self.assertNotIn("min", exact)
+        self.assertTrue(render.envelope_needed(101, 50))
+        self.assertFalse(render.envelope_needed(100, 50))
+
+    def test_rate_times_window_threshold_is_reproducible(self):
+        rate = 100.0
+        window_seconds = 20.005
+        buckets = 1000
+        estimated = rate * window_seconds
+        self.assertGreater(estimated, 2 * buckets)
+        self.assertTrue(render.envelope_needed(int(estimated) + 1, buckets))
+        self.assertFalse(render.envelope_needed(int(2 * buckets), buckets))
+
+    @_needs(HILL)
+    def test_snapshot_payload_uses_envelope(self):
+        with ld.LogFile.read(HILL) as log:
+            payload = render.build_payload(log, channels=["Vx KF"], buckets=100)
+        spec = payload["traces"]["Vx KF"]
+        self.assertTrue(spec["envelope"])
+        self.assertEqual(len(spec["min"]), len(spec["time"]))
+        self.assertEqual(len(spec["max"]), len(spec["time"]))
+        self.assertEqual(len(spec["count"]), len(spec["time"]))
+        self.assertLessEqual(len(spec["time"]), 100)
+        self.assertEqual(spec["samples"], 46400)
+        self.assertLessEqual(spec["span"][0], spec["time"][0])
+        self.assertGreaterEqual(spec["span"][1], spec["time"][-1])
+        self.assertLess(spec["min"][0], spec["max"][0])
+
+
 class TestServer(unittest.TestCase):
     @_needs(HILL)
     def test_http_api_end_to_end(self):

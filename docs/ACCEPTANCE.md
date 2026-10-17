@@ -4784,7 +4784,7 @@ python -m unittest tests.test_i3pro.TestPlotResolution -v   # 末尾 OK
 node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"  # PASS
 node tools\smoke_viewer.js "out\20260524-耐久正赛.html"     # PASS
 python tools\verify_ld_vs_csv.py                            # PASS - 0 channel(s) outside tolerance
-python tools\verify_clicks.py                               # 需要 Edge + 金标准数据；末尾 292 项通过、0 失败
+python tools\verify_clicks.py                               # 需要 Edge + 金标准数据；末尾 299 项通过、0 失败
 ```
 
 **通过判据（本机实测，2026-10-18）**：
@@ -4793,10 +4793,54 @@ python tools\verify_clicks.py                               # 需要 Edge + 金�
 | --- | --- |
 | 单测（新增 `TestPlotResolution` 4 项） | 五档键 / 点数 / 默认回落 · 工作表 `resolution` round-trip · 前端五档表与 `resolution` 模块逐项一致 · 金标准快照载荷按工作表 `min` 预抽稀（`buckets=500`，`Vx KF` 点数 ≤ 1000），显式 `max` 为 `buckets=8000` 且点数更多 |
 | 无头断言（新增 #37 一组） | 五档映射 · 非法档位回落中档 · 文案含"最少（500点）" · 切到 `min` 后 `/trace` 请求带 `buckets=500` |
-| 两份金标准快照 | 高避 `PASS`（1 397 238 line segments / 1 416 752 point rects / 467 通道行） · 耐久 `PASS`（1 488 786 / 1 479 060 / 372 通道行） |
-| 真鼠标（`tools\verify_clicks.py`） | **292 项通过、0 失败** |
-| 全量单测 | **600 项**全绿（`Ran 600 tests in 213.923s` + `OK`） |
+| 两份金标准快照（#47 后重测） | 高避 `PASS`（3 908 297 line segments / 32 859 point rects / 467 通道行） · 耐久 `PASS`（3 646 760 / 142 043 / 372 通道行） |
+| 真鼠标（`tools\verify_clicks.py`） | **299 项通过、0 失败** |
+| 全量单测 | **605 项**全绿（`Ran 605 tests in 215.037s` + `OK`） |
 | 解析裁判 | `python tools\verify_ld_vs_csv.py` → `PASS - 0 channel(s) outside tolerance` |
+
+---
+
+## A91 · 分桶 min/max 包络：抽稀改成包络 + “已抽稀（包络）”（本次新增，ticket #47）
+
+**要解决的问题**：A91a 的五档只决定了“最多画多少个点”，但服务端仍把抽稀结果
+打包成一条点列；桶内极值虽然被保留下来，前端却看不出一“点”代表一整桶。Marple
+实测的取数机制是每桶 `low_bound` / `up_bound`，对应“桶内真实上下界”，不是插值。
+这一票把抽稀结果改成包络：每桶一条竖线，相邻桶连外轮廓，并在图上诚实标出抽稀。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 纯函数 | `render.envelope_needed(sample_count, buckets)` 复现 `估计采样率 × 窗口秒数 > 2 × 分辨率` 的等价判据；`_bucket_edges` 用固定边界切桶，首桶从 0 开始、末桶到 `n` 结束 |
+| 载荷 | `render.downsample` 在 `sample_count > 2 × buckets` 时返回每桶 `min` / `max` / `value`（桶均值）/ `count`、桶中心 `time`（distance 模式同中心 `distance`）、`span` 与 `envelope=true`；否则照旧返回原始点 |
+| 服务 / 快照 | `/trace` 与静态快照都走 `render.trace -> render.downsample`，两条路共享同一包络规则；不再各写一份“等距点列”含义 |
+| 前端 | `drawTraces` 认 `envelope`：每桶画 `max -> min` 竖线，再把相邻桶的 `max` 连成上轮廓、`min` 连成下轮廓；点样式在包络生效时自动回退成线 |
+| 诚实标识 | `graphTitle` 在任一通道本次用了包络时追加 **“已抽稀（包络）”**；标题随取数结果刷新，切档或换窗口后不会留旧角标 |
+| 统计 / 缩放 | 抬头 min/max 直接用桶上下界，avg 用 `Σ(桶均值 × 桶样本数) / Σ样本数`；纵轴范围把 `min` / `max` 一并纳入，避免包络竖线被裁掉 |
+
+```powershell
+python -m unittest tests.test_i3pro.TestTraceEnvelope -v   # 末尾 OK
+python -m unittest discover -s tests -v                    # 末尾 OK
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"  # PASS
+node tools\smoke_viewer.js "out\20260524-耐久正赛.html"     # PASS
+python tools\verify_ld_vs_csv.py                            # PASS - 0 channel(s) outside tolerance
+python tools\verify_clicks.py                               # 需要 Edge + 金标准数据；末尾 299 项通过、0 失败
+```
+
+**通过判据（本机实测，2026-10-18）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 单测（新增 `TestTraceEnvelope` 5 项） | 桶数 ≤ 档位 · 首末桶覆盖区间两端 · 每桶 `min` / `max` / `mean` / `count` 与 `numpy` 对照 · 不超过 `2 × 档位` 时不启用包络 · `估计采样率 × 窗口秒数 > 2 × 分辨率` 判据可复现 · 金标准快照载荷按同一规则生成包络 |
+| 无头断言（新增 #38 一组） | 快照里至少有一条曲线启用包络；标题出现“已抽稀（包络）”；把本次包络标记关掉后标题角标消失；包络生效时点样式不画点；“阶梯保持”真的改变包络桶间连线形态 |
+| 真鼠标（`tools\verify_clicks.py`） | **299 项通过、0 失败**（含 #47 新增 **7 项**：找到包络曲线 · 切到最多档 `/trace?buckets=8000` 且点数 ≤ 8000 · 切到最少档 `buckets=500` 且点数 ≤ 500 · 标题写“已抽稀（包络）” · 最多档点数 > 最少档 · 两档画布像素不同 · 三档请求均在 2000 ms 内返回） |
+| 性能（高避金标准，真浏览器端到端 `/trace`） | 500 桶 **12 ms** · 2000 桶 **31 ms** · 8000 桶 **104 ms** |
+| 两份金标准快照 | 高避 `PASS`（3 908 297 line segments / 32 859 point rects / 10 917 labels / 7 lap rows / 467 通道行） · 耐久 `PASS`（3 646 760 / 142 043 / 12 486 / 26 / 372） |
+| 全量单测 | **605 项**全绿（`Ran 605 tests in 215.037s` + `OK`） |
+| 解析裁判 | `python tools\verify_ld_vs_csv.py` → `PASS - 0 channel(s) outside tolerance` |
+
+**已知边界**：包络的 `value` 是桶均值，供光标读数与平均统计使用；min/max 是桶内真实极值。
+因此在包络生效的整场视图里，平均统计不再假装“用的是原始逐点样本”，而按下采样可见信息计算。
+统计区间命中桶中心时会把该桶的 `min/max/count` 一并计入；A–B 或可见区间的边界如果只截到桶的一半，
+边界桶会按整桶参与统计。要看逐点读数就放大窗口，让样本数跌回 `≤ 2 × 分辨率`，包络会自动退出。
 
 ---
 
@@ -4821,7 +4865,7 @@ python -m unittest discover -s tests -v      # 末尾 OK
 node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"   # PASS
 node tools\smoke_viewer.js "out\20260524-耐久正赛.html"      # PASS
 python tools\verify_ld_vs_csv.py             # PASS - 0 channel(s) outside tolerance
-python tools\verify_clicks.py                # 需要 Edge + 金标准数据；末尾 292 项通过、0 失败
+python tools\verify_clicks.py                # 需要 Edge + 金标准数据；末尾 299 项通过、0 失败
 ```
 
 **通过判据（本机实测，2026-10-18）**：
@@ -4829,9 +4873,9 @@ python tools\verify_clicks.py                # 需要 Edge + 金标准数据；�
 | 断言 | 实测 |
 | --- | --- |
 | 无头断言（新增 #48 一组） | 分组标签四项齐全 · 没有通道时添加入口写原因和下一步 · 状态通道缺失也有下一步 · 空组件文案是"把左边的通道拖进来" · "换成…"后 id 不变且通道与位置还在 · "复制"后新 id 独立，改复制件不影响原件 |
-| 两份金标准快照 | 高避 `PASS`（1 394 003 line segments / 1 416 706 point rects / 467 通道行） · 耐久 `PASS`（1 485 569 / 1 479 014 / 372 通道行） |
-| 真鼠标（`tools\verify_clicks.py`） | **292 项通过、0 失败**（含 #48 新增 **9 项**：分组标签 · 原因文案 · 空状态文案 · 找到可复制可换类型的图 · 真点「复制」 · 两块配置独立 · 真点「换成…」 · 换成菜单里有直方图 · 换后通道和位置都还在） |
-| 全量单测 | **600 项**全绿（`Ran 600 tests in 213.923s` + `OK`） |
+| 两份金标准快照（#47 后重测） | 高避 `PASS`（3 908 297 line segments / 32 859 point rects / 467 通道行） · 耐久 `PASS`（3 646 760 / 142 043 / 372 通道行） |
+| 真鼠标（`tools\verify_clicks.py`） | **299 项通过、0 失败**（含 #48 新增 **9 项**：分组标签 · 原因文案 · 空状态文案 · 找到可复制可换类型的图 · 真点「复制」 · 两块配置独立 · 真点「换成…」 · 换成菜单里有直方图 · 换后通道和位置都还在） |
+| 全量单测 | **605 项**全绿（`Ran 605 tests in 215.037s` + `OK`） |
 | 解析裁判 | `python tools\verify_ld_vs_csv.py` → `PASS - 0 channel(s) outside tolerance` |
 
 **已知边界**：换类型只保证"**能搬过去的通道**与位置尺寸保留"，不会把旧组件所有控件设置原样复制成另一套组件；

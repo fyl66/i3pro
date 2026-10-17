@@ -2086,6 +2086,173 @@ if (embeddedHist && embeddedHist.series) {
   }
 }
 
+/* 27b. 热力图（#45）：两个通道分箱 + （可选）第三通道着色
+ * "数算得对不对"归单测（与 numpy.histogram2d 逐箱对拍），这里钉的是**界面那条路**：
+ *   ① 快照模式：说清"要 serve 模式打开"，不静默空白、也不偷偷拿抽稀的点凑；
+ *   ② serve 模式：请求真的带着两个轴 / 格数 / 着色 / 窗口；
+ *   ③ 画得出来：色标（几十个矩形）在、抬头写着样本数与色标上下限；
+ *   ④ 悬停：圈到哪一格，抬头就写那一箱多少点；
+ *   ⑤ 范围选「选中圈」又没选圈：说下一步，而不是发一个算不出来的请求。 */
+{
+  const api = window.i3pro;
+  const state = api.state;
+  const before = state.components.length;
+  const savedApi = api.data.api;
+  api.data.api = null;                       // 先按快照模式加进来
+  api.addComponentOfType("heatmap");
+  const comp = state.components[state.components.length - 1];
+  check(state.components.length === before + 1 && comp.type === "heatmap",
+    "热力图组件加不进来");
+  const b = api.bundleOf(comp);
+  check(!!(b && b.selX && b.selY && b.selZ && b.inBx && b.inBy && b.selScheme && b.selRange),
+    "热力图的控件条没建全（X / Y / 色 / 格 ×2 / 着色 / 范围）");
+  check(!!comp.config.x && !!comp.config.y && comp.config.x !== comp.config.y,
+    "热力图的 X / Y 默认没挑到两条不同的通道："
+    + JSON.stringify([comp.config.x, comp.config.y]));
+
+  // 格数夹取：与后端 heatmap.clamp_bins 同一口径（8–200）
+  check(api.heatmapBins({ bins: [3, 9999] }).join(",") === "8,200",
+    "界面上的格数没夹到 8–200：" + api.heatmapBins({ bins: [3, 9999] }).join(","));
+  check(api.heatmapBins({ bins: [60, 40] }).join(",") === "60,40",
+    "合法的格数被改了：" + api.heatmapBins({ bins: [60, 40] }).join(","));
+
+  // ① 快照模式：说清要 serve 模式（这句话是这一票的已知边界，见 A90）
+  comp.config.x = "Vx KF";
+  comp.config.y = "G Force Lat";
+  b.data = null;
+  b.dataKey = "";
+  api.renderAll();
+  const snapHead = String(b.head.textContent);
+  check(snapHead.indexOf("serve 模式") >= 0 && snapHead.indexOf("启动.bat") >= 0,
+    "快照模式下没说清热力图要用 serve 模式：" + snapHead);
+
+  // ⑤ 范围选「选中圈」又没选圈：说下一步，而且不许发请求
+  const savedRef = state.ref;
+  state.ref = null;
+  comp.config.range = "lap";
+  b.dataKey = "";
+  api.renderAll();
+  check(String(b.head.textContent).indexOf("还没选圈") >= 0,
+    "没选圈时没说下一步：" + b.head.textContent);
+  check(api.heatmapWindow(comp.config).error
+    && api.heatmapWindow(comp.config).error.indexOf("圈速") >= 0,
+    "heatmapWindow 没把「没选圈」这一态说出来：" + JSON.stringify(api.heatmapWindow(comp.config)));
+  state.ref = savedRef;
+  comp.config.range = "view";
+
+  // ② serve 模式：参数一个不少
+  api.data.api = "/api";
+  comp.config.x = "Vx KF";
+  comp.config.y = "G Force Lat";
+  comp.config.z = "TH";
+  comp.config.bins = [45, 35];
+  comp.config.scheme = "z-mean";
+  comp.config.range = "view";
+  b.dataKey = "";
+  const beforeHeat = httpCalls.length;
+  api.refreshComponentData(comp, true).then(() => {}, () => {});
+  const heatCalls = httpCalls.slice(beforeHeat)
+    .filter((call) => call.url.indexOf("/heatmap") >= 0);
+  check(heatCalls.length === 1,
+    "serve 模式下没有向 /heatmap 要分箱（拿到 " + heatCalls.length + " 个请求）");
+  if (heatCalls.length === 1) {
+    const url = decodeURIComponent(heatCalls[0].url);
+    check(url.indexOf("x=Vx KF") >= 0 && url.indexOf("y=G Force Lat") >= 0
+      && url.indexOf("z=TH") >= 0, "热力图请求没带 X / Y / 色 三条通道：" + url);
+    check(url.indexOf("bx=45") >= 0 && url.indexOf("by=35") >= 0,
+      "热力图请求没带格数：" + url);
+    check(url.indexOf("scheme=z-mean") >= 0, "热力图请求没带着色方式：" + url);
+    check(url.indexOf("from=") >= 0 && url.indexOf("to=") >= 0,
+      "「当前窗口」这一段没把窗口发出去：" + url);
+  }
+  // 缩放之后是另一个问题，必须重新问一次
+  const heatKeyBefore = api.heatmapKey(comp);
+  const savedView = state.view;
+  state.view = [10, 20];
+  check(api.heatmapKey(comp) !== heatKeyBefore,
+    "缩放之后热力图的刷新键没变：会拿旧窗口的分箱糊弄");
+  state.view = savedView;
+  // 着色方式的默认：**没写过**（scheme=null）时跟着色通道走（规格 §5）
+  comp.config.scheme = null;
+  comp.config.z = "TH";
+  check(api.heatmapKey(comp).indexOf("z-mean") >= 0,
+    "选了色通道而没写过着色方式时，该默认按第三通道均值：" + api.heatmapKey(comp));
+  comp.config.scheme = "count";
+  check(api.heatmapKey(comp).indexOf("z-mean") < 0,
+    "明确选了「样本数」却被改成了均值：" + api.heatmapKey(comp));
+  // 工作表 / 分享链接带进来的"要均值却没选色通道"：按样本数画，但要**说明白**
+  comp.config.scheme = "z-mean";
+  comp.config.z = null;
+  check(api.heatmapKey(comp).indexOf("z-mean") < 0,
+    "没有色通道却还把 z-mean 写进了刷新键：" + api.heatmapKey(comp));
+  api.syncHistogramSelectors();
+  check(b.selScheme.value === "count",
+    "面板上还写着「第三通道均值」，但画出来的是样本数（假一致）：" + b.selScheme.value);
+  comp.config.scheme = "z-mean";      // 留着，下面注入载荷时看抬头那句话
+  comp.config.z = "TH";
+  api.data.api = savedApi;
+
+  // ③④ 画出来 + 悬停：塞一份受控载荷（形状与服务端 heatmap.py 一模一样）
+  const nbx = 10, nby = 8;
+  const counts = [];
+  for (let ix = 0; ix < nbx; ix++) {
+    counts.push(Array.from({ length: nby }, (_, iy) => ((ix + iy) % 4 === 0 ? 7 : 0)));
+  }
+  const grid = {
+    scheme: "count", bins: [nbx, nby],
+    x_range: [0, 100], y_range: [0, 50],
+    count: counts.flat().reduce((sum, v) => sum + v, 0), excluded: 0,
+    counts: counts, z_mean: null, z_min: null, z_max: null,
+    count_range: [0, 7], z_range: null, notice: null,
+    x: "甲X", y: "甲Y", z: null, x_unit: "km/h", y_unit: "G", z_unit: "",
+    window: [0, 10],
+  };
+  b.data = grid;
+  b.dataKey = api.componentSpec(comp).data.key(comp);
+  b.cacheKey = "";
+  b.hover = null;
+  api.renderAll();
+  check(b.heatMap && b.heatMap.nbx === nbx && b.heatMap.nby === nby,
+    "热力图没把格子的映射记下来（悬停就没法算第几格）");
+  check(calls.fillRect > 0, "热力图一个矩形都没画");
+  const headText = String(b.head.textContent);
+  check(headText.indexOf("Vx KF × G Force Lat") >= 0 && headText.indexOf("样本数") >= 0
+    && headText.indexOf(String(grid.count) + " 点") >= 0,
+    "热力图抬头没写清画的是什么：" + headText);
+  // 悬停：圈到 (2, 2) 那一格（(2+2) % 4 === 0 → counts[2][2] = 7），抬头要写"这一箱 7 点"
+  b.hover = { ix: 2, iy: 2 };
+  const rectsBefore = calls.fillRect;
+  api.renderAll();
+  check(String(b.head.textContent).indexOf("这一箱 7 点") >= 0,
+    "悬停没写出这一箱多少点：" + b.head.textContent);
+  check(calls.fillRect >= rectsBefore, "悬停之后画面反而不画了");
+  b.hover = null;
+  api.renderAll();
+  check(String(b.head.textContent).indexOf("这一箱") < 0, "鼠标离开之后悬停那句话还留着");
+
+  // 工作表里写着"要按第三通道均值"却没选色通道：画的是样本数，抬头必须说明白
+  const savedScheme = comp.config.scheme;
+  const savedZ = comp.config.z;
+  comp.config.scheme = "z-mean";
+  comp.config.z = null;
+  // 快照模式下 key 一变就被判成"要重取"，而快照里没有热力图——所以这里把那份
+  // 受控载荷**再塞一次**，验的是"画出来是样本数时抬头有没有说明白"。
+  b.data = grid;
+  b.dataKey = api.componentSpec(comp).data.key(comp);
+  b.cacheKey = "";
+  api.renderAll();
+  check(String(b.head.textContent).indexOf("没选色通道") >= 0,
+    "面板写着均值、画出来是样本数，抬头却没说明白：" + b.head.textContent);
+  comp.config.scheme = savedScheme;
+  comp.config.z = savedZ;
+  api.renderAll();
+
+  // 收尾：把这件组件撤掉，别给后面的用例留东西
+  state.components = state.components.filter((one) => one.id !== comp.id);
+  api.buildWorksheet();
+  api.renderAll();
+}
+
 /* 28. 频谱（#10）：快照离线可用 / serve 参数一个不少 / 布局能带走
  *
  * 频谱和直方图一个规矩：算在服务端（按通道**自己的采样率**）。所以这里同样分两半验：
@@ -2597,7 +2764,7 @@ if (embeddedSpec && embeddedSpec.series) {
     "调试句柄没有导出取数入口（#21）");
   if (api.componentTypes && api.apiUrl) {
     const types2 = api.componentTypes;
-    const charts = ["graph", "scatter", "histogram", "spectrum", "track"];
+    const charts = ["graph", "scatter", "histogram", "spectrum", "heatmap", "track"];
 
     // 收口：每一种显示形式都得声明 label 与 render —— 表是「有哪些显示形式」
     // 的唯答案；表格类还必须声明 table（服务端就是按它分两套列的）。
@@ -2617,7 +2784,7 @@ if (embeddedSpec && embeddedSpec.series) {
       check(!!(spec && spec.defaults && spec.encode && spec.decode && spec.render),
         "图表类 " + t + " 的声明不完整（默认配置 / 分享链接 / 画）");
     }
-    for (const t of ["scatter", "histogram", "spectrum", "track"]) {
+    for (const t of ["scatter", "histogram", "spectrum", "heatmap", "track"]) {
       const d = types2[t] && types2[t].data;
       check(!!(d && d.key && d.load && d.error),
         t + " 没声明取数（键 / 去哪里要 / 出错说什么）");
@@ -2676,12 +2843,15 @@ if (embeddedSpec && embeddedSpec.series) {
         config: { view: "pfd", roll: "G Force Long", pitch: "G Force Lat",
                   yaw: "GPS Heading", unit: "rad", gains: [1, -1, 0.5],
                   ghost: false, grid: false, camera: { yaw: 40, pitch: -12 } } },
+      { id: "p7", type: "heatmap", x: 8, y: 34, w: 6, h: 13,
+        config: { x: "Vx KF", y: "G Force Lat", z: "TH", bins: [45, 35],
+                  range: "lap", scheme: "z-mean" } },
     ];
     const chartBack = api.decodeLayout(api.encodeLayout(chartProbes));
-    check(!!chartBack && chartBack.length === 6, "图表形式的分享链接往返丢了组件");
-    if (chartBack && chartBack.length === 6) {
+    check(!!chartBack && chartBack.length === 7, "图表形式的分享链接往返丢了组件");
+    if (chartBack && chartBack.length === 7) {
       check(chartBack.map((c) => c.type).join(",")
-        === "graph,scatter,histogram,spectrum,track,attitude",
+        === "graph,scatter,histogram,spectrum,track,attitude,heatmap",
         "图表形式的分享链接往返换了类型或次序");
       check(chartBack[0].config.channels.join("|") === "Vx KF|GPS Speed"
         && chartBack[0].config.mode === "overlapped", "图的往返没保住通道或分栏方式");
@@ -2706,6 +2876,11 @@ if (embeddedSpec && embeddedSpec.series) {
         && chartBack[5].config.ghost === false && chartBack[5].config.grid === false
         && chartBack[5].config.camera.yaw === 40 && chartBack[5].config.camera.pitch === -12,
         "姿态的往返没保住视图 / 三条通道 / 单位 / 倍数 / 幽灵 / 网格 / 相机");
+      check(chartBack[6].config.x === "Vx KF" && chartBack[6].config.y === "G Force Lat"
+        && chartBack[6].config.z === "TH"
+        && (chartBack[6].config.bins || []).join("x") === "45x35"
+        && chartBack[6].config.range === "lap" && chartBack[6].config.scheme === "z-mean",
+        "热力图的往返没保住两个轴 / 色通道 / 格数 / 范围 / 着色方式");
     }
 
     // 两张散点同屏：各拿自己那一份数据（#21 的核心 —— 原来它们挤在

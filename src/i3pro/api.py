@@ -36,6 +36,7 @@ from . import (
     export as exportmod,
     gpsfix,
     histogram as histogrammod,
+    heatmap as heatmapmod,
     importer,
     laps as lapsmod,
     maths,
@@ -215,6 +216,7 @@ class _Call:
         "trace": "act_trace",
         "points": "act_points",
         "histogram": "act_histogram",
+        "heatmap": "act_heatmap",
         "spectrum": "act_spectrum",
         "overview": "act_overview",
         "overlay": "act_overlay",
@@ -563,6 +565,34 @@ class _Call:
                     gate_lo=float_arg(query, "gate_min"),
                     gate_hi=float_arg(query, "gate_max"),
                     colour=colour,
+                )
+            )
+        except ValueError as exc:
+            return self._error(400, str(exc))
+
+    def act_heatmap(self, log, name: str, query: dict, method: str) -> Response:
+        # 两个通道的联合分布（ticket #45）。窗口默认由界面传当前缩放区间；不传就是整场。
+        # 数的是**原始样本**（不是画图那份抽稀），所以这里按需现算，快照里没有它。
+        x = (query.get("x") or [None])[0]
+        y = (query.get("y") or [None])[0]
+        if not x or not y:
+            return self._error(
+                400, "heatmap 需要 ?x= 与 ?y= 两个通道名（要分箱的那两个轴）"
+            )
+        z = (query.get("z") or [None])[0] or None
+        try:
+            return self._json(
+                render.heatmap(
+                    log,
+                    timebase.axis(log),
+                    x,
+                    y,
+                    z=z,
+                    bins=(int_arg(query, "bx", heatmapmod.DEFAULT_BINS[0]),
+                          int_arg(query, "by", heatmapmod.DEFAULT_BINS[1])),
+                    scheme=(query.get("scheme") or ["count"])[0],
+                    start=float_arg(query, "from"),
+                    end=float_arg(query, "to"),
                 )
             )
         except ValueError as exc:

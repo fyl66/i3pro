@@ -695,6 +695,10 @@ const GRID = "#232833";
 const $ = (id) => document.getElementById(id);
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
+/** 蓝 → 红的连续色带（0 → 1）。直方图的柱子、热力图的格子与它的色标都用这一条，
+ * 所以"图上的颜色"与"色标上的颜色"永远是同一个算法（写两份就会漂开）。 */
+const heatRamp = (f) => "hsl(" + (210 - 210 * clamp(f, 0, 1)) + ",85%,60%)";
+
 // This file is the *template*. The data payload is injected by
 // `i3pro render` / `i3pro serve`; opening it straight from disk has no data, so
 // everything below stays null-safe and init() shows instructions instead.
@@ -789,6 +793,14 @@ const COMPONENT_TYPES = {
     encode: spectrumEncode, decode: spectrumDecode,
     get data() { return spectrumData; },
     render: renderSpectrumComponent,
+  },
+  heatmap: {
+    label: "热力图", cols: 6, rows: 13, caption: true,
+    defaults: heatmapDefaults, title: heatmapTitle, needs: heatmapNeeds,
+    controls: heatmapControls, hooks: heatmapHooks, sync: heatmapSync,
+    encode: heatmapEncode, decode: heatmapDecode,
+    get data() { return heatmapData; },
+    render: renderHeatmapComponent,
   },
   track: {
     label: "赛道轨迹", cols: 4, rows: 13, caption: true,
@@ -4515,7 +4527,7 @@ function renderHistogramComponent(comp, b) {
       if (v > cHi) cHi = v;
     }
   }
-  const ramp = (f) => "hsl(" + (210 - 210 * clamp(f, 0, 1)) + ",85%,60%)";
+  const ramp = heatRamp;        // 色带只有一处实现（见文件顶上的 heatRamp）
   const accent = channelColor(cfg.channel, null);
   if ((cfg.style || "bars") === "line") {
     ctx.strokeStyle = accent;
@@ -4585,6 +4597,412 @@ function renderHistogramComponent(comp, b) {
   }
   b.head.textContent = bits.join(" · ");
   if (hist.notice) b.head.textContent += " · " + hist.notice;
+}
+
+/* -------------------------------------------------------------- 热力图（#45）
+ * 两个通道分箱、第三通道（或样本数）着色。它和直方图同属"聚合类"，纪律也是同一条：
+ * **数的是原始样本**（不是画图那份 Min/Max 抽稀——抽稀扔掉的正好是分布两端），
+ * 所以只在 serve 模式按需问 `/heatmap`。
+ *
+ * 快照里**没有**热力图，而且这不是偷懒：直方图是"一条通道一份"，可以事先算好内嵌；
+ * 热力图是**两个通道的组合**，从 12 条通道里能凑出上百对，没法对每一对都先算好。
+ * 快照打开时组件会把这件事说清楚并指路（A90 的已知边界）。
+ */
+const HEATMAP_SCHEMES = [["count", "样本数"], ["z-mean", "第三通道均值"]];
+const HEATMAP_RANGES = [["view", "当前窗口"], ["lap", "选中圈"], ["all", "整场"]];
+//: 格数夹取口径与后端 `heatmap.py` 同一份（`TestViewerScript` 逐字比那两个数）。
+const HEATMAP_MIN_BINS = 8;
+const HEATMAP_MAX_BINS = 200;
+//: 没选圈时那句指路。**只有一份**：导出面板那句是它 + "再回来导出。"，热力图是它 +
+//: "再看这一屏。"——同一句怎么做，别抄两遍（A89 的同一条教训）。
+const NO_LAP_HINT = "还没选圈：先在右边「圈速」表里点一行（或按 F 跳到最快圈），";
+
+function heatmapDefaults() {
+  // `scheme: null` = **没写过**。规格 §5 的口径是"z 非空时默认按第三通道均值"，
+  // 所以"没写过"与"用户明确选了样本数"必须分得开：前者跟着 z 走，后者就是样本数。
+  return { x: null, y: null, z: null, bins: [60, 40], range: "view", scheme: null };
+}
+/** 格数：取整并夹进 8–200（与后端 `heatmap.clamp_bins` 同一个口径）。 */
+function heatmapBins(cfg) {
+  const raw = (cfg && cfg.bins) || [];
+  const one = (value, fallback) => {
+    const n = Math.round(Number(value));
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(HEATMAP_MIN_BINS, Math.min(HEATMAP_MAX_BINS, n));
+  };
+  return [one(raw[0], 60), one(raw[1], 40)];
+}
+/** 真正用的着色：没写过就跟着 z 走（有色通道按均值，没有按样本数）；
+ * 写过 `z-mean` 却没有色通道时按样本数画，但**抬头会说明白**（见 heatmapSchemeNote）。 */
+function heatmapScheme(cfg) {
+  if (cfg.scheme === "count") return "count";
+  if (cfg.scheme === "z-mean") return cfg.z ? "z-mean" : "count";
+  return cfg.z ? "z-mean" : "count";
+}
+/** 工作表 / 分享链接里带进来的"要按第三通道着色却没选色通道"：不能悄悄换成样本数——
+ * 那正是"面板上写着均值、画出来是样本数"这种假一致。抬头里说清这一句。 */
+function heatmapSchemeNote(cfg) {
+  return (!cfg.z && cfg.scheme === "z-mean")
+    ? "这一份工作表写着「第三通道均值」但没选色通道——现在按样本数着色，选一条色通道就生效"
+    : "";
+}
+function heatmapRangeLabel(cfg) {
+  const pair = HEATMAP_RANGES.find((one) => one[0] === (cfg.range || "view"));
+  return pair ? pair[1] : HEATMAP_RANGES[0][1];
+}
+function heatmapTitle(comp) {
+  const cfg = comp.config;
+  const bins = heatmapBins(cfg);
+  const bits = [(cfg.x || "？") + " × " + (cfg.y || "？"), bins[0] + "×" + bins[1],
+                heatmapRangeLabel(cfg)];
+  bits.push(heatmapScheme(cfg) === "z-mean"
+    ? "色=" + cfg.z + "（均值）" : (cfg.z ? "色=" + cfg.z + "（样本数）" : "样本数"));
+  const note = heatmapSchemeNote(cfg);
+  if (note) bits.push(note);
+  return typeTitle(comp, bits.join(" · "));
+}
+function heatmapNeeds(comp, add) {
+  add(comp.config.x);
+  add(comp.config.y);
+  add(comp.config.z);
+}
+function heatmapEncode(comp) {
+  const cfg = comp.config;
+  const bins = heatmapBins(cfg);
+  return [cfg.x || "", cfg.y || "", cfg.z || "", bins[0], bins[1],
+          cfg.scheme || "", cfg.range || "view"].join("|");
+}
+function heatmapDecode(comp, payload) {
+  const parts = String(payload || "").split("|");
+  comp.config.x = parts[0] || null;
+  comp.config.y = parts[1] || null;
+  comp.config.z = parts[2] || null;
+  comp.config.bins = heatmapBins({ bins: [parts[3], parts[4]] });
+  // 空 = **没写过**（不是"选了样本数"）：带着 z 的老链接因此仍然按均值着色。
+  comp.config.scheme = HEATMAP_SCHEMES.some((one) => one[0] === parts[5])
+    ? parts[5] : null;
+  comp.config.range = HEATMAP_RANGES.some((one) => one[0] === parts[6])
+    ? parts[6] : "view";
+}
+
+/** 这一屏问的是哪一段（当前窗口 / 选中圈 / 整场）。**只有这一处决定**这件事：
+ * 控件、缓存键、请求、标题都从它读——三处各写一遍就是三种口径。 */
+function heatmapWindow(cfg) {
+  const mode = cfg.range || "view";
+  if (mode === "all") return { from: null, to: null, label: "整场" };
+  if (mode === "lap") {
+    const row = (DATA.laps || []).filter((lap) => lap.lap === state.ref)[0];
+    if (!row) return { error: NO_LAP_HINT + "再看这一屏。" };
+    return { from: row.start_time, to: row.end_time, label: "圈 " + row.lap };
+  }
+  const w = windowRange();
+  return { from: w.from, to: w.to, label: "当前窗口" };
+}
+
+/** 这一屏的热力图对应的"问题"：换一个就得重新问一次服务。 */
+function heatmapKey(comp) {
+  const cfg = comp.config;
+  const bins = heatmapBins(cfg);
+  const spot = heatmapWindow(cfg);
+  const span = spot.error ? "no-lap"
+    : (spot.from === null ? "all"
+       : Math.round(spot.from * 1000) + "-" + Math.round(spot.to * 1000));
+  return [cfg.x || "", cfg.y || "", cfg.z || "", bins[0] + "x" + bins[1],
+          heatmapScheme(cfg), cfg.range || "view", span,
+          DATA.api ? "serve" : "snap"].join("|");
+}
+
+const heatmapData = {
+  error: "取不到热力图",
+  key: heatmapKey,
+  load: (comp) => {
+    const cfg = comp.config;
+    if (!cfg.x || !cfg.y) return null;
+    const spot = heatmapWindow(cfg);
+    if (spot.error) return null;              // 没选圈：那句话由 render 说，别发请求
+    const bins = heatmapBins(cfg);
+    return apiGet(apiUrl("/heatmap", {
+      x: cfg.x, y: cfg.y, z: cfg.z || undefined,
+      bx: bins[0], by: bins[1], scheme: heatmapScheme(cfg),
+      from: spot.from === null ? undefined : spot.from,
+      to: spot.to === null ? undefined : spot.to,
+    }));
+  },
+  // 快照里没有：两个通道的组合没法对每一对都先算好（快照打开时组件会说明白）。
+  snapshot: () => null,
+};
+
+/** 热力图的控件条。控件全部打进 bundle，heatmapSync 负责填值。 */
+function heatmapControls(comp, bundle, body) {
+  const cfgBar = makeEl("div", "scattercfg", body);
+  const pick = (role, title) => {
+    const sel = makeEl("select", "", cfgBar);
+    sel.dataset.heat = role;
+    sel.title = title;
+    return sel;
+  };
+  makeEl("span", "", cfgBar).textContent = "X";
+  const selX = pick("x", "X 轴通道（横向分箱）");
+  makeEl("span", "", cfgBar).textContent = "Y";
+  const selY = pick("y", "Y 轴通道（纵向分箱）");
+  makeEl("span", "", cfgBar).textContent = "色";
+  const selZ = pick("z", "第三通道：每格取它的均值着色；留空就是按这一格有多少点着色");
+  makeEl("span", "", cfgBar).textContent = "格";
+  const num = (role, title) => {
+    const box = makeEl("input", "", cfgBar);
+    box.type = "number";
+    box.min = String(HEATMAP_MIN_BINS);
+    box.max = String(HEATMAP_MAX_BINS);
+    box.step = "1";
+    box.style.width = "48px";
+    box.dataset.heat = role;
+    box.title = title;
+    return box;
+  };
+  const inX = num("bx", "横向分几格（" + HEATMAP_MIN_BINS + "–" + HEATMAP_MAX_BINS + "）");
+  makeEl("span", "", cfgBar).textContent = "×";
+  const inY = num("by", "纵向分几格（" + HEATMAP_MIN_BINS + "–" + HEATMAP_MAX_BINS + "）");
+  const selScheme = makeEl("select", "", cfgBar);
+  selScheme.dataset.heat = "scheme";
+  selScheme.innerHTML = HEATMAP_SCHEMES.map(
+    (one) => '<option value="' + one[0] + '">' + one[1] + "</option>"
+  ).join("");
+  const selRange = makeEl("select", "", cfgBar);
+  selRange.dataset.heat = "range";
+  selRange.title = "算哪一段：当前缩放窗口 / 选中圈的起止 / 整场";
+  selRange.innerHTML = HEATMAP_RANGES.map(
+    (one) => '<option value="' + one[0] + '">' + one[1] + "</option>"
+  ).join("");
+  bundle.selX = selX;
+  bundle.selY = selY;
+  bundle.selZ = selZ;
+  bundle.inBx = inX;
+  bundle.inBy = inY;
+  bundle.selScheme = selScheme;
+  bundle.selRange = selRange;
+  const changed = () => {
+    comp.config.x = selX.value || null;
+    comp.config.y = selY.value || null;
+    comp.config.z = selZ.value || null;
+    comp.config.bins = heatmapBins({ bins: [inX.value, inY.value] });
+    inX.value = String(comp.config.bins[0]);
+    inY.value = String(comp.config.bins[1]);
+    comp.config.range = selRange.value;
+    if (selScheme.value === "z-mean" && !comp.config.z) {
+      // 没有色通道却选"第三通道均值"：**拦下来**并说一句，而不是发一个会被服务端打回
+      // 的请求（服务端那边是 400 + 同一句理由，见 heatmap.check_scheme）。界面这句子
+      // 不一样是有意的：这里要"先怎么办"，那里只说"这个组合不成"。
+      toast("按第三通道着色得先在「色」里选一条通道；现在先按样本数着色。");
+      comp.config.scheme = "count";
+    } else {
+      comp.config.scheme = selScheme.value;
+    }
+    selScheme.value = comp.config.scheme;
+    bundle.cacheKey = "";
+    refreshComponentTitle(comp);
+    saveLayout();
+    scheduleRefresh();          // 换一对通道 / 换一段，都得重新问一次服务
+    renderAll();
+  };
+  [selX, selY, selZ, inX, inY, selScheme, selRange].forEach(
+    (el) => el.addEventListener("change", changed)
+  );
+}
+
+/** 热力图自己的下拉填值（注册表 #20：由它自己声明，工作表不再认类型）。 */
+function heatmapSync(comp, b, pool) {
+  if (!b || !b.selX) return;
+  const names = pool.all;
+  for (const key of ["x", "y", "z"]) {
+    if (comp.config[key] && names.indexOf(comp.config[key]) < 0) comp.config[key] = null;
+  }
+  fillChannelSelectGrouped(b.selX, comp.config.x, false);
+  fillChannelSelectGrouped(b.selY, comp.config.y, false);
+  fillChannelSelectGrouped(b.selZ, comp.config.z, true);
+  if (!comp.config.x && names.length) comp.config.x = names[0];
+  if (!comp.config.y && names.length) {
+    // 两个轴默认别是同一条通道：同一条通道对自己画出来只有一条对角线，
+    // 用户第一眼会以为"这图坏了"。
+    comp.config.y = names.find((name) => name !== comp.config.x) || names[0];
+  }
+  b.selX.value = comp.config.x || "";
+  b.selY.value = comp.config.y || "";
+  b.selZ.value = comp.config.z || "";
+  const bins = heatmapBins(comp.config);
+  b.inBx.value = String(bins[0]);
+  b.inBy.value = String(bins[1]);
+  // 面板上显示**真正用的那个**：不然会出现"面板写着第三通道均值、画出来是样本数"。
+  // 文件里那份"想按均值但没选色通道"的意图，由抬头那句话交代。
+  b.selScheme.value = heatmapScheme(comp.config);
+  b.selRange.value = comp.config.range || "view";
+}
+
+/** 一格的颜色按哪一段归一化：按样本数就看最大那一格，按 z 就看 z 的均值范围。 */
+function heatmapScale(grid) {
+  if (grid.scheme === "z-mean" && grid.z_range) {
+    return { lo: grid.z_range[0], hi: grid.z_range[1], label: "均值" };
+  }
+  const top = (grid.count_range || [0, 0])[1] || 0;
+  return { lo: 0, hi: top, label: "点数" };
+}
+
+function renderHeatmapComponent(comp, b) {
+  const cfg = comp.config;
+  const c = sizeCanvas(b.canvas, b.canvas.clientWidth || 420,
+                       Math.max(150, comp.h * ROW_PX - 26));
+  const ctx = c.ctx;
+  ctx.clearRect(0, 0, c.w, c.h);
+  b.heatMap = null;
+  const hint = (text) => {
+    ctx.fillStyle = "#8b94a7";
+    ctx.font = "12px Segoe UI";
+    ctx.textAlign = "left";
+    ctx.fillText(text, 12, 24);
+  };
+  if (!cfg.x || !cfg.y) {
+    const message = "选两个通道：X 与 Y 分箱，色（可留空）决定颜色";
+    b.head.textContent = message;
+    hint(message);
+    return;
+  }
+  const spot = heatmapWindow(cfg);
+  if (spot.error) {
+    b.head.textContent = spot.error;
+    hint(spot.error);
+    return;
+  }
+  if (!b.data || !b.data.counts || !b.data.counts.length) {
+    const message = b.dataError || (DATA.api ? "算热力图…"
+      : "热力图要两个通道的组合，快照里没法对每一对都先算好——用 启动.bat（serve 模式）"
+        + "打开，或者换用直方图（一条通道就能内嵌）");
+    b.head.textContent = message;
+    hint(message);
+    return;
+  }
+  const grid = b.data;
+  const counts = grid.counts;
+  const nbx = counts.length;
+  const nby = counts[0].length;
+  const scale = heatmapScale(grid);
+  const pad = { l: 46, r: 74, t: 8, b: 20 };
+  const plotW = Math.max(10, c.w - pad.l - pad.r);
+  const plotH = Math.max(10, c.h - pad.t - pad.b);
+  const cw = plotW / nbx;
+  const chh = plotH / nby;
+  const x0 = grid.x_range[0], x1 = grid.x_range[1];
+  const y0 = grid.y_range[0], y1 = grid.y_range[1];
+  const frac = (value) => (scale.hi > scale.lo
+    ? clamp((value - scale.lo) / (scale.hi - scale.lo), 0, 1) : 0);
+  // 一格一个矩形：格子多的时候这一屏有几千个矩形，所以**不做离屏缓存**——
+  // 悬停要重画，缓存反而每动一下鼠标就作废一次。
+  for (let ix = 0; ix < nbx; ix++) {
+    for (let iy = 0; iy < nby; iy++) {
+      const count = counts[ix][iy];
+      if (!count) continue;
+      const value = grid.scheme === "z-mean"
+        ? (grid.z_mean ? grid.z_mean[ix][iy] : null) : count;
+      if (value === null || value === undefined || !Number.isFinite(value)) continue;
+      ctx.fillStyle = heatRamp(frac(value));
+      // 画布的 y 朝下，Y 轴取值大的画在上面：行号翻过来。
+      ctx.fillRect(pad.l + ix * cw, pad.t + (nby - 1 - iy) * chh,
+                   Math.max(1, cw + 0.5), Math.max(1, chh + 0.5));
+    }
+  }
+  ctx.strokeStyle = GRID;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(pad.l + 0.5, pad.t + 0.5, plotW, plotH);
+  ctx.fillStyle = "#8b94a7";
+  ctx.font = "10px Segoe UI";
+  ctx.textAlign = "center";
+  for (let i = 0; i <= 4; i++) {
+    ctx.fillText(fmt(x0 + ((x1 - x0) * i) / 4), pad.l + (plotW * i) / 4, pad.t + plotH + 13);
+  }
+  ctx.textAlign = "right";
+  for (let i = 0; i <= 2; i++) {
+    ctx.fillText(fmt(y0 + ((y1 - y0) * i) / 2), pad.l - 4,
+                 pad.t + plotH - (plotH * i) / 2 + 3);
+  }
+  // 色标：与格子同一段归一化，所以颜色不骗人。
+  const barX = pad.l + plotW + 8;
+  const barW = 10;
+  const steps = 32;
+  for (let i = 0; i < steps; i++) {
+    ctx.fillStyle = heatRamp(1 - i / (steps - 1));
+    ctx.fillRect(barX, pad.t + (plotH * i) / steps, barW, plotH / steps + 1);
+  }
+  const unit = (grid.scheme === "z-mean" && grid.z_unit) ? " [" + grid.z_unit + "]" : "";
+  const colourName = grid.scheme === "z-mean"
+    ? ("色=" + (grid.z || "") + " 均值") : "样本数";
+  ctx.fillStyle = "#8b94a7";
+  ctx.textAlign = "left";
+  ctx.fillText(fmt(scale.hi, 1), barX + barW + 3, pad.t + 8);
+  ctx.fillText(fmt(scale.lo, 1), barX + barW + 3, pad.t + plotH);
+  ctx.fillText(scale.label + unit, barX + barW + 3, pad.t + plotH / 2);
+  // 悬停：圈出那一格，并把"这一箱多少点 / 色通道的均值"写进抬头
+  const hover = b.hover;
+  let hoverText = "";
+  if (hover && hover.ix >= 0 && hover.ix < nbx && hover.iy >= 0 && hover.iy < nby) {
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 1.4;
+    ctx.strokeRect(pad.l + hover.ix * cw + 0.5,
+                   pad.t + (nby - 1 - hover.iy) * chh + 0.5,
+                   Math.max(2, cw - 1), Math.max(2, chh - 1));
+    const count = counts[hover.ix][hover.iy];
+    const xMid = x0 + ((hover.ix + 0.5) / nbx) * (x1 - x0);
+    const yMid = y0 + ((hover.iy + 0.5) / nby) * (y1 - y0);
+    hoverText = "这一箱 " + count + " 点 · X " + fmt(xMid)
+      + (grid.x_unit ? " " + grid.x_unit : "")
+      + " · Y " + fmt(yMid) + (grid.y_unit ? " " + grid.y_unit : "");
+    if (grid.scheme === "z-mean" && count) {
+      const mean = grid.z_mean ? grid.z_mean[hover.ix][hover.iy] : null;
+      const lo = grid.z_min ? grid.z_min[hover.ix][hover.iy] : null;
+      const hi = grid.z_max ? grid.z_max[hover.ix][hover.iy] : null;
+      hoverText += " · " + grid.z + " 均值 " + fmt(mean)
+        + (Number.isFinite(lo) && Number.isFinite(hi)
+           ? "（" + fmt(lo, 1) + "…" + fmt(hi, 1) + "）" : "");
+    }
+  }
+  const bits = [cfg.x + " × " + cfg.y,
+                spot.label + " · " + (grid.count || 0) + " 点",
+                colourName + "：" + fmt(scale.lo, 1) + "–" + fmt(scale.hi, 1)
+                + (grid.scheme === "z-mean" ? unit : " 点")];
+  const schemeNote = heatmapSchemeNote(cfg);
+  if (schemeNote) bits.push(schemeNote);
+  if (hoverText) bits.push(hoverText);
+  b.head.textContent = bits.join(" · ") + (grid.notice ? " · " + grid.notice : "");
+  b.heatMap = { pad: pad, plotW: plotW, plotH: plotH, nbx: nbx, nby: nby,
+                cssW: c.w, cssH: c.h };
+}
+
+/** 悬停：鼠标在第几格就记下来，重画一次。**只在格子真的换了**的时候重画，
+ * 不然鼠标每动一下整张表都跟着重画（这一屏可能有几千个矩形）。 */
+function heatmapHooks(comp, b) {
+  const cellAt = (event) => {
+    const map = b.heatMap;
+    if (!map || !b.canvas.getBoundingClientRect) return null;
+    const rect = b.canvas.getBoundingClientRect();
+    const sx = rect.width ? map.cssW / rect.width : 1;
+    const sy = rect.height ? map.cssH / rect.height : 1;
+    const x = (event.clientX - rect.left) * sx;
+    const y = (event.clientY - rect.top) * sy;
+    if (x < map.pad.l || x > map.pad.l + map.plotW) return null;
+    if (y < map.pad.t || y > map.pad.t + map.plotH) return null;
+    const col = Math.min(map.nbx - 1, Math.floor((x - map.pad.l) / map.plotW * map.nbx));
+    const row = Math.min(map.nby - 1, Math.floor((y - map.pad.t) / map.plotH * map.nby));
+    return { ix: col, iy: map.nby - 1 - row };
+  };
+  b.canvas.addEventListener("mousemove", (event) => {
+    const next = cellAt(event);
+    const now = b.hover || null;
+    if ((!next && !now) || (next && now && next.ix === now.ix && next.iy === now.iy)) return;
+    b.hover = next;
+    renderAll();
+  });
+  b.canvas.addEventListener("mouseleave", () => {
+    if (!b.hover) return;
+    b.hover = null;
+    renderAll();
+  });
 }
 
 /* -------------------------------------------------------------- 频谱（#10） */
@@ -8088,7 +8506,8 @@ function exportPreset(cfg) {
   }
   if (cfg.range === "lap") {
     const row = (DATA.laps || []).filter((l) => l.lap === state.ref)[0];
-    if (!row) return { error: "还没选圈：先在右边「圈速」表里点一行（或按 F 跳到最快圈），再回来导出。" };
+    // 那句话只有一份（见 NO_LAP_HINT）：热力图那边说的是同一个指路。
+    if (!row) return { error: NO_LAP_HINT + "再回来导出。" };
     return { from: row.start_time, to: row.end_time, axis: "time", label: "圈 " + row.lap };
   }
   if (cfg.range === "cursor") {
@@ -9498,6 +9917,8 @@ window.i3pro = {
   refreshComponentData: refreshComponentData,
   histogramKey: histogramKey,
   mergeCounts: mergeCounts, snapshotHistogramFor: snapshotHistogramFor,
+  // 热力图（#45）：缓存键 / 这一段问哪一段 / 格数夹取，都是 smoke 对拍用的
+  heatmapKey: heatmapKey, heatmapWindow: heatmapWindow, heatmapBins: heatmapBins,
   syncHistogramSelectors: syncHistogramSelectors, componentTitle: componentTitle,
   spectrumKey: spectrumKey,
   snapshotSpectrumFor: snapshotSpectrumFor, spectrumY: spectrumY,

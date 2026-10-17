@@ -50,6 +50,7 @@ from i3pro import (  # noqa: E402
     attitude as attitudemod,
     cache, canlog, channelpick, channelref, channels, csvlog, dbc, derive, gpsfix,
     cursorstats as cursorstatsmod,
+    heatmap as heatmapmod,
     cli,
     laps as lapsmod, ld, library as librarymod,
     maths as mathsmod, motec_csv,
@@ -1872,6 +1873,179 @@ class TestCursorStats(unittest.TestCase):
         self.assertAlmostEqual(got["max"], float(inside.max()))
 
 
+class TestHeatmap(unittest.TestCase):
+    """热力图引擎（ticket #45）：两个通道分箱 + （可选）第三通道着色。
+
+    判据绑死在"**与 `numpy.histogram2d` 逐箱相等**"上——先把数算对，再谈好不好看。
+    这条不是形式：写这份实现时第一版自己算等宽边界（`(last-first)*i/count`），
+    与 numpy 的 `linspace` 差一个末位，边界上的样本就落到隔壁格，逐箱比立刻红了。
+
+    口径写在 :mod:`i3pro.heatmap` 的模块说明里；这里钉的是它真的成立。
+    """
+
+    def test_随机数据逐箱与_numpy_相等(self):
+        rng = np.random.default_rng(45)
+        x = rng.normal(3, 1.5, 40000)
+        y = rng.normal(-2, 0.7, 40000)
+        got = heatmapmod.payload(x, y, bins=(60, 40))
+        ref, xe, ye = np.histogram2d(x, y, bins=[60, 40])
+        self.assertEqual(np.asarray(got["counts"]).shape, (60, 40))
+        np.testing.assert_array_equal(np.asarray(got["counts"]), ref.astype(int))
+        self.assertEqual(got["count"], int(ref.sum()))
+        self.assertEqual(got["excluded"], 0)
+        np.testing.assert_allclose(got["x_range"], [xe[0], xe[-1]], rtol=0, atol=1e-12)
+        np.testing.assert_allclose(got["y_range"], [ye[0], ye[-1]], rtol=0, atol=1e-12)
+
+    def test_给定范围时范围外的样本既不入格也不算进样本数(self):
+        """范围外**丢掉**（照 numpy 的规矩），但要把条数报出来——塞进边缘格会凭空变热。"""
+        rng = np.random.default_rng(7)
+        x = rng.uniform(-5, 15, 20000)
+        y = rng.uniform(-5, 15, 20000)
+        got = heatmapmod.payload(x, y, bins=(37, 23), x_range=(-4, 14), y_range=(-4, 14))
+        ref, _, _ = np.histogram2d(x, y, bins=[37, 23], range=[[-4, 14], [-4, 14]])
+        np.testing.assert_array_equal(np.asarray(got["counts"]), ref.astype(int))
+        self.assertEqual(got["count"], int(ref.sum()))
+        self.assertEqual(got["count"] + got["excluded"], x.size)
+
+    def test_正好落在边界上的样本进最后一格(self):
+        x = np.array([0.0, 1.0, 2.5, 9.0, 10.0])
+        y = np.array([0.0, 1.0, 2.5, 9.0, 10.0])
+        got = heatmapmod.payload(x, y, bins=(10, 10), x_range=(0, 10), y_range=(0, 10))
+        ref, _, _ = np.histogram2d(x, y, bins=[10, 10], range=[[0, 10], [0, 10]])
+        np.testing.assert_array_equal(np.asarray(got["counts"]), ref.astype(int))
+        counts = np.asarray(got["counts"])
+        # 最后一格是 [9, 10]：9.0 与 10.0 都进去（把上界丢掉的话这里是 1，与 numpy 的对拍也就红了）
+        self.assertEqual(counts[9][9], 2, "上界 10.0 该进最后一格（与 9.0 同一格）")
+        self.assertEqual(counts[0][0], 1, "0.0 是下界，该进第一格")
+
+    def test_一条轴整段是常量时范围撑开(self):
+        """常量列：轴宽是 0 就什么也画不出来，所以照 numpy 的规矩撑开 ±0.5。"""
+        rng = np.random.default_rng(11)
+        x = np.full(1000, 4.2)
+        y = rng.normal(0, 1, 1000)
+        got = heatmapmod.payload(x, y, bins=(8, 8))
+        ref, xe, _ = np.histogram2d(x, y, bins=[8, 8])
+        np.testing.assert_array_equal(np.asarray(got["counts"]), ref.astype(int))
+        np.testing.assert_allclose(got["x_range"], [xe[0], xe[-1]], rtol=0, atol=1e-12)
+        self.assertIn("一直是一个值", got["notice"])
+
+    def test_按第三通道着色的均值与_numpy_加权直方图一致(self):
+        rng = np.random.default_rng(3)
+        x = rng.uniform(0, 10, 30000)
+        y = rng.uniform(0, 10, 30000)
+        z = rng.normal(size=30000)
+        got = heatmapmod.payload(x, y, z, bins=(25, 17), scheme="z-mean")
+        counts = np.asarray(got["counts"])
+        weights, _, _ = np.histogram2d(x, y, bins=[25, 17], weights=z)
+        want = np.where(counts > 0, weights / np.maximum(counts, 1), np.nan)
+        mean = np.array([[np.nan if v is None else v for v in row] for row in got["z_mean"]])
+        np.testing.assert_allclose(mean[~np.isnan(want)], want[~np.isnan(want)])
+        self.assertEqual(int(np.isnan(mean).sum()), int(np.isnan(want).sum()))
+        # 每格的极值框住均值；色标用的是均值的范围
+        lo = np.array([[np.nan if v is None else v for v in row] for row in got["z_min"]])
+        hi = np.array([[np.nan if v is None else v for v in row] for row in got["z_max"]])
+        inside = ~np.isnan(want)
+        self.assertTrue((lo[inside] <= mean[inside] + 1e-12).all())
+        self.assertTrue((hi[inside] >= mean[inside] - 1e-12).all())
+        self.assertAlmostEqual(got["z_range"][0], float(np.nanmin(mean)), places=9)
+        self.assertAlmostEqual(got["z_range"][1], float(np.nanmax(mean)), places=9)
+
+    def test_NaN_不进格子也不炸(self):
+        x = np.array([1.0, np.nan, 3.0, 5.0, 7.0])
+        y = np.array([1.0, 2.0, np.nan, 5.0, 7.0])
+        got = heatmapmod.payload(x, y, bins=(8, 8))
+        # 只有 (1,1) / (5,5) / (7,7) 三对是两条都有限的
+        self.assertEqual(got["count"], 3)
+        self.assertEqual(got["excluded"], 2)
+        self.assertIn("没进格子", got["notice"])
+
+    def test_全_NaN_给一句能照做的提示(self):
+        got = heatmapmod.payload([np.nan] * 5, [np.nan] * 5, bins=(8, 8))
+        self.assertEqual(got["count"], 0)
+        self.assertEqual(np.asarray(got["counts"]).sum(), 0)
+        self.assertIn("没有有效样本", got["notice"])
+
+    def test_格数夹在_8_到_200(self):
+        x = np.arange(100.0)
+        self.assertEqual(heatmapmod.clamp_bins(2)[0], heatmapmod.MIN_BINS)
+        self.assertIn("最少", heatmapmod.clamp_bins(2)[1])
+        self.assertEqual(heatmapmod.clamp_bins(9999)[0], heatmapmod.MAX_BINS)
+        self.assertIn("最多", heatmapmod.clamp_bins(9999)[1])
+        got = heatmapmod.payload(x, x, bins=(3, 3))
+        self.assertEqual(got["bins"], [heatmapmod.MIN_BINS, heatmapmod.MIN_BINS])
+        self.assertIn("格数最少", got["notice"])
+
+    def test_着色只认两种且_z_mean_必须有色通道(self):
+        with self.assertRaises(ValueError) as caught:
+            heatmapmod.payload([1.0], [1.0], scheme="rainbow")
+        self.assertIn("count", str(caught.exception))
+        self.assertIn("z-mean", str(caught.exception))
+        with self.assertRaises(ValueError) as caught:
+            heatmapmod.payload([1.0], [1.0], scheme="z-mean")
+        self.assertIn("第三通道", str(caught.exception))
+
+    @_needs(HILL)
+    def test_高避金标准上逐箱与_numpy_相等(self):
+        with ld.LogFile.read(HILL) as log:
+            time = timebase.axis(log)
+            x = derive.hold_to_master(log, "Vx KF")
+            y = derive.hold_to_master(log, "G Force Lat")
+            start, end = float(time[len(time) // 4]), float(time[len(time) // 2])
+            lo = int(np.searchsorted(time, start))
+            hi = int(np.searchsorted(time, end))
+            got = render.heatmap(log, time, "Vx KF", "G Force Lat", start=start, end=end)
+            unit = log.channel("G Force Lat").unit
+        ref, _, _ = np.histogram2d(x[lo:hi], y[lo:hi], bins=[60, 40])
+        np.testing.assert_array_equal(np.asarray(got["counts"]), ref.astype(int))
+        self.assertEqual(got["count"], int(ref.sum()))
+        self.assertEqual(got["x"], "Vx KF")
+        self.assertEqual(got["y_unit"], unit)
+
+    @_needs(ENDURANCE)
+    def test_耐久金标准上第三通道着色也对(self):
+        with ld.LogFile.read(ENDURANCE) as log:
+            time = timebase.axis(log)
+            got = render.heatmap(log, time, "Vx KF", "G Force Lat", z="TH",
+                                 scheme="z-mean", bins=(40, 30))
+            x = derive.hold_to_master(log, "Vx KF")
+            y = derive.hold_to_master(log, "G Force Lat")
+            z = derive.hold_to_master(log, "TH")
+        ref, _, _ = np.histogram2d(x, y, bins=[40, 30], weights=z)
+        counts = np.asarray(got["counts"])
+        want = np.where(counts > 0, ref / np.maximum(counts, 1), np.nan)
+        mean = np.array([[np.nan if v is None else v for v in row] for row in got["z_mean"]])
+        np.testing.assert_allclose(mean[~np.isnan(want)], want[~np.isnan(want)])
+
+    @_needs(HILL)
+    def test_空窗口也不把_z_mean_降级(self):
+        """空窗口（起止反了）也要走同一句报错，而不是"顺手退回按样本数着色"。
+
+        退回的后果是**随窗口变**的：缩到没样本的一段，颜色含义就从"第三通道均值"
+        变成"样本数"，而面板上还写着均值。所以 z-mean 没有色通道时，空窗口也报错。
+        """
+        with ld.LogFile.read(HILL) as log:
+            time = timebase.axis(log)
+            with self.assertRaises(ValueError) as caught:
+                render.heatmap(log, time, "Vx KF", "G Force Lat",
+                               scheme="z-mean", start=100.0, end=50.0)
+            self.assertIn("第三通道", str(caught.exception))
+            got = render.heatmap(log, time, "Vx KF", "G Force Lat", z="TH",
+                                 scheme="z-mean", start=100.0, end=50.0)
+        self.assertEqual(got["scheme"], "z-mean", "空窗口把用户选的着色方式换掉了")
+        self.assertEqual(got["count"], 0)
+        self.assertIn("没有样本", got["notice"])
+
+    @_needs(ENDURANCE)
+    def test_本场次没有的通道报错要说下一步(self):
+        with ld.LogFile.read(ENDURANCE) as log:
+            time = timebase.axis(log)
+            with self.assertRaises(ValueError) as caught:
+                render.heatmap(log, time, "Vx KF", "没有这条通道")
+        message = str(caught.exception)
+        self.assertIn("没有这条通道", message)
+        self.assertIn("通道", message)
+
+
 class TestChannelGroups(unittest.TestCase):
     """i2 Pro groups channels that share a unit so they can share one axis."""
 
@@ -2765,6 +2939,36 @@ class TestViewerScript(unittest.TestCase):
         self.assertIn("const key = traceKey();", page,
                       "/trace 那条取数路没有用 traceKey")
 
+    def test_热力图的格数与档位与后端同一份(self):
+        """A90：界面上的格数上下限与两排档位必须与 `i3pro.heatmap` 一样。
+
+        漂开的后果不报错、只有用户看得见：界面允许 500 格而后端夹到 200，用户
+        设的格数与拿到的格子数对不上；档位名写错则是请求里带一个服务端不认的词。
+        """
+        page = (ROOT / "src" / "i3pro" / "web" / "viewer.html").read_text(encoding="utf-8")
+        low = re.search(r"const HEATMAP_MIN_BINS = (\d+);", page)
+        high = re.search(r"const HEATMAP_MAX_BINS = (\d+);", page)
+        self.assertIsNotNone(low, "界面里没有 HEATMAP_MIN_BINS")
+        self.assertIsNotNone(high, "界面里没有 HEATMAP_MAX_BINS")
+        self.assertEqual(int(low.group(1)), heatmapmod.MIN_BINS,
+                         "界面允许的最少格数与 heatmap.MIN_BINS 不是同一个数")
+        self.assertEqual(int(high.group(1)), heatmapmod.MAX_BINS,
+                         "界面允许的最多格数与 heatmap.MAX_BINS 不是同一个数")
+        schemes = re.search(r"const HEATMAP_SCHEMES = \[(.*?)\];", page, re.S)
+        self.assertIsNotNone(schemes, "界面里没有 HEATMAP_SCHEMES 这张表")
+        found = re.findall(r'\["([a-z-]+)", "([^"]+)"\]', schemes.group(1))
+        self.assertEqual([name for name, _ in found], list(heatmapmod.SCHEMES),
+                         "界面上的着色档位与 heatmap.SCHEMES 不是同一份")
+        for _, label in found:
+            self.assertTrue(label, "有档位没有中文名")
+        ranges = re.search(r"const HEATMAP_RANGES = \[(.*?)\];", page, re.S)
+        self.assertIsNotNone(ranges, "界面里没有 HEATMAP_RANGES 这张表")
+        spans = re.findall(r'\["([a-z]+)", "([^"]+)"\]', ranges.group(1))
+        self.assertEqual([name for name, _ in spans], ["view", "lap", "all"],
+                         "热力图的三段范围变了（当前窗口 / 选中圈 / 整场）")
+        self.assertEqual(len({label for _, label in spans}), 3, "两段范围重名了")
+        self.assertIn('range: "view"', page, "热力图默认该是「当前窗口」")
+
     def test_统计范围的两档与界面上那张表是同一份(self):
         """A89：界面上的两枚按钮由 JS 里那张表建出来，必须与 ``cursorstats.RANGES`` 一样。
 
@@ -2832,10 +3036,11 @@ class TestComponentRegistry(unittest.TestCase):
 
     #: 注册表里声明过的全部显示形式（= 添加下拉里能看到的那几个 + 已声明的）。
     DECLARED = ("graph", "scatter", "histogram", "spectrum", "track", "gauge",
-                "attitude", "delta", "status", "report", "chreport")
+                "attitude", "heatmap", "delta", "status", "report", "chreport")
 
     #: 需要服务端数据的显示形式：它们的声明里必须说清"这一屏问的问题"。
-    NEEDS_DATA = ("scatter", "histogram", "spectrum", "track", "report", "chreport")
+    NEEDS_DATA = ("scatter", "histogram", "spectrum", "heatmap", "track",
+                  "report", "chreport")
 
     #: 迁移之后还剩几处 `type === "..."`。实测值：9 处"哪个组件是图"
     #: （`channelColor` / `focusedComponent` / 键盘与侧边栏作用在谁身上），
@@ -5349,8 +5554,9 @@ class TestApiLayerWithoutASocket(unittest.TestCase):
 
     def test_动作清单就是文档里那一份(self):
         expected = {
-            "info", "trace", "points", "histogram", "spectrum", "overview", "overlay",
-            "track", "laps", "sections", "notes", "gps", "report", "maths", "at", "export",
+            "info", "trace", "points", "histogram", "heatmap", "spectrum", "overview",
+            "overlay", "track", "laps", "sections", "notes", "gps", "report", "maths",
+            "at", "export",
         }
         self.assertEqual(set(self.api._Call.ACTIONS), expected,
                          "动作清单变了：加/删动作请把这条与 docs/ACCEPTANCE.md 一起改")
@@ -7189,6 +7395,74 @@ class TestHistogramOverHttp(unittest.TestCase):
                                    f"?channel={urllib.parse.quote('没有这条')}")
                 self.assertEqual(status, 400)
                 self.assertIn("先", body["error"])
+            finally:
+                http.close()
+
+
+class TestHeatmapOverHttp(unittest.TestCase):
+    """#45 走到界面之前的那一段：/heatmap 的参数、单位与报错。
+
+    引擎的数算得对不对归 `TestHeatmap`（与 numpy 逐箱对拍）；这里钉的是**参数有没有
+    真的传到引擎上**——两个轴、色通道、格数、着色方式、窗口，少一个都会让界面上的图
+    与面板上选的东西不一致，而那不会报错、只会画错。
+    """
+
+    @_needs(HILL)
+    def test_heatmap_endpoint(self):
+        with http_session(HILL, buckets=50) as http:
+            quoted = http.quoted
+            get = http.get
+
+            try:
+                status, body = get(
+                    f"/api/session/{quoted}/heatmap"
+                    f"?x={urllib.parse.quote('Vx KF')}&y={urllib.parse.quote('G Force Lat')}"
+                    f"&bx=12&by=8&from=100&to=200")
+                self.assertEqual(status, 200, body)
+                self.assertEqual(body["bins"], [12, 8])
+                self.assertEqual(body["x"], "Vx KF")
+                self.assertEqual(body["y_unit"], "G")
+                self.assertEqual(body["x_unit"], "km/h")
+                self.assertGreater(body["count"], 0)
+                self.assertEqual(len(body["counts"]), 12)
+                self.assertEqual(len(body["counts"][0]), 8)
+                self.assertEqual(body["scheme"], "count")
+
+                # 第三通道着色：均值要真的算出来，色标有范围
+                status, body = get(
+                    f"/api/session/{quoted}/heatmap"
+                    f"?x={urllib.parse.quote('Vx KF')}&y={urllib.parse.quote('G Force Lat')}"
+                    f"&z={urllib.parse.quote('TH')}&scheme=z-mean&bx=12&by=8")
+                self.assertEqual(status, 200, body)
+                self.assertEqual(body["scheme"], "z-mean")
+                self.assertEqual(body["z"], "TH")
+                self.assertIsNotNone(body["z_range"])
+                means = [v for row in body["z_mean"] for v in row if v is not None]
+                occupied = sum(1 for row in body["counts"] for v in row if v)
+                self.assertTrue(means, "第三通道着色一个格子的均值都没算出来")
+                self.assertEqual(len(means), occupied,
+                                 "有样本的格子数与给出均值的格子数对不上")
+
+                # 少一个轴：400 + 说清要什么
+                status, body = get(f"/api/session/{quoted}/heatmap"
+                                   f"?x={urllib.parse.quote('Vx KF')}")
+                self.assertEqual(status, 400)
+                self.assertIn("y=", body["error"])
+
+                # 没有这条通道：400 + 下一步（先看通道列表 / 检查拼写）
+                status, body = get(
+                    f"/api/session/{quoted}/heatmap"
+                    f"?x={urllib.parse.quote('Vx KF')}&y={urllib.parse.quote('没有这条通道')}")
+                self.assertEqual(status, 400)
+                self.assertIn("通道", body["error"])
+
+                # 着色方式不认：400 + 列出认得的两个
+                status, body = get(
+                    f"/api/session/{quoted}/heatmap"
+                    f"?x={urllib.parse.quote('Vx KF')}&y={urllib.parse.quote('G Force Lat')}"
+                    f"&scheme=rainbow")
+                self.assertEqual(status, 400)
+                self.assertIn("z-mean", body["error"])
             finally:
                 http.close()
 

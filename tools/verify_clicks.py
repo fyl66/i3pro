@@ -3178,6 +3178,134 @@ class Checker:
                 "if(c)i3pro.componentAction(c,'close');return true;})()")
         time.sleep(0.3)
 
+    # ------------------------------------------- A90 热力图
+    def heatmap(self):
+        """#45 热力图：真点「添加」加一件、真悬停、色标真的画出来、真切范围、量一次响应。
+
+        假 DOM 证明不了两件事：**色标真的画在画布上**（那边的 canvas 只记计数、没有
+        文字）与**鼠标划过真的圈到那一格**。这一票的验收里"悬停提示出现"与"切 range
+        后点数变化"正是这一类。（"分箱的数算得对不对"归单测：与 `numpy.histogram2d`
+        逐箱对拍，这里不重复。）
+        """
+        def head_of(component_id):
+            return self.js(
+                "(function(){var el=document.querySelector('[data-id=\"" + component_id
+                + "\"] .graphhead');return el?el.textContent:'';})()")
+
+        def box_of(component_id):
+            raw = self.js(
+                "JSON.stringify((function(){var c=document.querySelector('[data-id=\""
+                + component_id + "\"] canvas');return c?__center(c):null;})())")
+            return json.loads(raw) if raw and raw != "null" else None
+
+        def fills_since(mark):
+            raw = self.js("JSON.stringify(window.__fills.slice(%s).map(function(f)"
+                          "{return f.t;}))" % int(mark))
+            return json.loads(raw) if raw and raw != "null" else []
+
+        self.js("(function(){document.getElementById('addType').value='heatmap';"
+                "return true;})()")
+        add = json.loads(self.js("JSON.stringify(__rectOf('addBtn'))"))
+        before = self.js("i3pro.state.components.length")
+        self.browser.click(add["x"], add["y"], self.session)
+        self.browser.wait_for("i3pro.state.components.length === %d" % (before + 1),
+                              self.session, timeout=10)
+        time.sleep(0.8)
+        made = json.loads(self.js(
+            "JSON.stringify((function(){var c=i3pro.state.components.filter(function(x)"
+            "{return x.type==='heatmap';})[0];"
+            "return c?{id:c.id,x:c.config.x,y:c.config.y,z:c.config.z,range:c.config.range}"
+            ":null;})())") or "null")
+        self.check("#45 真点「添加」就加出一个热力图组件", bool(made),
+                   json.dumps(made, ensure_ascii=False))
+        if not made:
+            return
+        component_id = made["id"]
+        self.check("#45 默认挑到两条不同的通道（同一条自己对自己只有一条对角线）",
+                   bool(made["x"]) and bool(made["y"]) and made["x"] != made["y"],
+                   "%s × %s" % (made["x"], made["y"]))
+
+        # 换成两份金标准上一定有数的三条通道。原生 <select> 在真命中测试里点不开
+        # （系统弹层），所以按仓库里既有的做法改值 + 派发 change。
+        switched = self.js(
+            "(function(){var el=document.querySelector('[data-id=\"" + component_id
+            + "\"] .scattercfg');if(!el)return 'no-bar';var s=el.querySelectorAll('select');"
+            "if(s.length<5)return 'selects='+s.length;"
+            "['Vx KF','G Force Lat','TH'].forEach(function(name,i){s[i].value=name;"
+            "s[i].dispatchEvent(new Event('change'));});"
+            "var c=i3pro.state.components.filter(function(x){return x.type==='heatmap';})[0];"
+            "return [c.config.x,c.config.y,c.config.z].join('|');})()")
+        time.sleep(0.6)
+        self.check("#45 从三个下拉里换成有数据的通道", switched == "Vx KF|G Force Lat|TH",
+                   switched)
+        ready = self.browser.wait_for(
+            "String((document.querySelector('[data-id=\"" + component_id
+            + "\"] .graphhead')||{}).textContent||'').indexOf('点') >= 0",
+            self.session, timeout=30)
+        self.check("#45 serve 模式下真的把热力图算回来了（抬头有点数）", bool(ready),
+                   head_of(component_id))
+        window_head = head_of(component_id)
+        self.check("#45 抬头写着这是哪一段 + 多少点 + 色标范围",
+                   "当前窗口" in window_head and "点" in window_head
+                   and "样本数" in window_head, window_head)
+
+        # 真切范围：当前窗口 → 整场，点数必须变（同一段数据，窗口大了样本就多）
+        self.js("(function(){var el=document.querySelector('[data-id=\"" + component_id
+                + "\"] .scattercfg');var s=el.querySelectorAll('select');"
+                "s[4].value='all';s[4].dispatchEvent(new Event('change'));return true;})()")
+        time.sleep(0.4)
+        self.browser.wait_for(
+            "String((document.querySelector('[data-id=\"" + component_id
+            + "\"] .graphhead')||{}).textContent||'').indexOf('整场') >= 0",
+            self.session, timeout=30)
+        whole_head = head_of(component_id)
+        self.check("#45 切到「整场」之后抬头换了一段、点数也跟着变",
+                   "整场" in whole_head and whole_head != window_head,
+                   "%s -> %s" % (window_head, whole_head))
+
+        # 悬停：真把鼠标移到画布中间 —— 抬头要写出"这一箱 N 点"
+        box = box_of(component_id)
+        self.check("#45 热力图画布点得到（有面积）",
+                   bool(box) and box.get("w", 0) > 0 and box.get("h", 0) > 0,
+                   json.dumps(box, ensure_ascii=False))
+        if not box:
+            return
+        mark = self.js("window.__fills.length")
+        # 空格子也照样会写"这一箱 0 点"（那是真的没有样本），所以多探几个位置，
+        # 要求**至少有一格是有样本的**——不然这条断言连"悬停映射对不对"都证明不了。
+        hover_head = ""
+        for dx, dy in ((0.0, 0.0), (-0.12, -0.05), (0.15, 0.1), (-0.2, 0.12)):
+            self.browser.mouse("mouseMoved", box["x"] + box["w"] * dx,
+                               box["y"] + box["h"] * dy, self.session, buttons=0)
+            time.sleep(0.4)
+            hover_head = head_of(component_id)
+            if "这一箱" in hover_head and "这一箱 0 点" not in hover_head:
+                break
+        self.check("#45 真悬停：抬头写出「这一箱 N 点」，而且真的落到有样本的格子上",
+                   "这一箱" in hover_head and "这一箱 0 点" not in hover_head, hover_head)
+        drawn = fills_since(mark)
+        self.check("#45 色标真的画在画布上（画布文字里有「点数」）",
+                   any("点数" in str(one) for one in drawn),
+                   "这一段画布文字：" + json.dumps(drawn[-12:], ensure_ascii=False))
+
+        # 真发一次整场 + 第三通道着色的请求，把耗时量下来（写进 A90）
+        spent = self.js(
+            "(async function(){var t0=performance.now();"
+            "await i3pro.apiGet(i3pro.apiUrl('/heatmap',{x:'Vx KF',y:'G Force Lat',z:'TH',"
+            "bx:60,by:40,scheme:'z-mean'}));"
+            "return Math.round(performance.now()-t0);})()")
+        self.check("#45 整场 60×40 带第三通道着色的一次请求 < 2000 ms（实测写进 A90）",
+                   isinstance(spent, (int, float)) and spent < 2000, "%s ms" % spent)
+        print("  NOTE  #45 实测一次 /heatmap（整场 60×40 + z 着色）：%s ms" % spent)
+        self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-heatmap.png"),
+                          self.session)
+
+        # 收尾：把这件组件撤掉，别给后面的验收留东西
+        self.js("(function(){var c=i3pro.state.components.filter(function(x)"
+                "{return x.type==='heatmap';})[0];"
+                "if(c)i3pro.componentAction(c,'close');return true;})()")
+        time.sleep(0.3)
+
     # ------------------------------------------- A89 光标 A–B 区间统计
     def cursor_stats(self):
         """#44 光标 A–B 区间统计：真点「显示 → A–B」、真放 A/B、数跟着 B 跑。
@@ -3573,6 +3701,8 @@ def main(argv=None):
             checker.attitude()
             # #44 光标 A–B 区间统计：真点「显示 → A–B」、真放 A/B、数跟着 B 跑。
             checker.cursor_stats()
+            # #45 热力图：真加一件、真悬停、色标真的画出来、真切范围、量一次响应。
+            checker.heatmap()
             errors = browser.page_errors()
             checker.check("整场没有页面级报错", not errors, errors[:3])
         bad = [name for name, ok in checker.results if not ok]

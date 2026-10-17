@@ -25,7 +25,8 @@ from . import channelpick as channelpickmod
 from . import axes as axesmod
 from . import channelref
 from . import channels as channelsmod
-from . import derive, gpsfix, histogram as histogrammod, laps as lapsmod
+from . import (derive, gpsfix, heatmap as heatmapmod, histogram as histogrammod,
+               laps as lapsmod)
 from . import notes as notesmod, report as reportmod, sections as sectionsmod
 from . import ld as ldmod
 from . import palette as palettemod
@@ -43,6 +44,7 @@ __all__ = [
     "trace",
     "points",
     "histogram",
+    "heatmap",
     "spectrum",
     "groups",
     "pick_channels",
@@ -364,6 +366,65 @@ def snapshot_histograms(
         "series": series,
         "notice": None if series else "本场没有可统计的通道",
     }
+
+
+def heatmap(
+    log: ldmod.LogFile,
+    time: np.ndarray,
+    x: str,
+    y: str,
+    z: str | None = None,
+    bins: tuple[int, int] = heatmapmod.DEFAULT_BINS,
+    scheme: str = "count",
+    start: float | None = None,
+    end: float | None = None,
+) -> dict:
+    """两个通道在一个窗口里的联合分布（ticket #45）。
+
+    窗口与直方图同一个口径：``[start, end)``。数的是**原始样本**（不是画图那份抽稀），
+    所以这条路只在 serve 模式按需调用——快照里没有它，见组件里的那句话。
+
+    **z 着色的两种问法都在**：``count`` 不需要 z；``z-mean`` 要 z，缺了直接报错（而不是
+    悄悄退回按样本数着色——那样用户看到的颜色与面板上选的东西对不上）。
+    """
+    for name, role in ((x, "X"), (y, "Y"), (z, "色")):
+        if name and not log.has(name):
+            raise ValueError(
+                f"本场次没有{role}通道 {name!r}。先在左侧「通道」里搜一下名字——"
+                f"名字里含空格 / 括号 / 短横线的，在表达式里要用单引号括起来。"
+            )
+    # 着色方式与"有没有色通道"配不配：判据与话术都在引擎里（见 heatmap.check_scheme），
+    # 这里先判一次，是为了**空窗口那条分支也报同一句 400**——不然"这一段没样本"会顺手
+    # 把 z-mean 降级成按样本数着色，用户看到的颜色含义随窗口变。
+    heatmapmod.check_scheme(scheme, bool(z))
+
+    size = int(time.size)
+    lo = 0 if start is None else max(0, int(np.searchsorted(time, float(start))))
+    hi = size if end is None else min(size, int(np.searchsorted(time, float(end))))
+    payload: dict
+    if hi <= lo:
+        # 空窗口：格子全是 0。这里按 count 造一张空表，再把 ``scheme`` 原样写回去——
+        # 用户选的是"第三通道均值"，面板上就该还是它（颜色一个格子都没有，靠 notice 说话）。
+        payload = heatmapmod.payload([], [], None, bins=bins, scheme="count")
+        payload["scheme"] = scheme
+        payload["notice"] = "这个区间里没有样本——时间轴的起止是不是选反了？"
+    else:
+        series = {name: derive.hold_to_master(log, name)[:size][lo:hi]
+                  for name in (x, y) + ((z,) if z else ())}
+        payload = heatmapmod.payload(
+            series[x], series[y],
+            series[z] if z else None,
+            bins=bins,
+            scheme=scheme,
+        )
+    for key, name in (("x", x), ("y", y), ("z", z)):
+        payload[key] = name
+        payload[key + "_unit"] = log.channel(name).unit if name else ""
+    payload["window"] = [
+        None if hi <= lo else round(float(time[lo]), 4),
+        None if hi <= lo else round(float(time[max(lo, hi - 1)]), 4),
+    ]
+    return payload
 
 
 def spectrum(

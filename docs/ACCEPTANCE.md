@@ -4513,3 +4513,52 @@ python out\_probes\time_home.py "第一次（重建）" "第二次（命中）"
 `TestListingCache.test_只重算钥匙变了的那个场次`（同类里那条冷启动用例照旧）；
 ③ 无头断言不加——这是服务端的缓存粒度，页面载荷的形状一个字没动；
 ④ 本条目；⑤ 两份金标准快照照旧 `PASS`。
+
+## A88 · 姿态引擎：三个角度 → 可画的姿态（本次新增，ticket #42）
+
+Marple Insight 有一个立体姿态图（`ATTITUDE`）和一块 PFD。它在 Aurora 的账号上被 license
+挡住（`Add Plot` 的选项按 `license.features` 过滤，`Aerospace` 组不在里面），所以这一票
+只能照**静态包**的行为对齐（`FigureAttitude-*.js`）：roll / pitch / yaw 三条通道 +
+角度单位 + **每通道倍数**。本轮先落**算术那一半**，画布与光标幽灵在 ticket #43
+（组件的判据接着补进这一条）。
+
+数据不用新采：两份金标准都带 `Aceinna Roll` / `Aceinna Pitch` / `AngleLocalYaw`
+（deg、100 Hz、2 位小数；高避 **46,400** 点 / 耐久 **194,300** 点）。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 约定写死，不做配置 | 世界系 x 前 / y 左 / z 上；**正 roll 抬左、正 pitch 抬头、正 yaw 左转**；`R = Rz(yaw)·Ry(pitch)·Rx(roll)`（3-2-1）；屏幕 y 向下 |
+| `attitude.normalize_angle` | 单位只认 `deg`/`rad`（别的**报错并说下一步**）；每通道倍数；归一化到 `[-π, π)`；**NaN 原样返回**（画法要跳过那一帧，不许悄悄给 0） |
+| `attitude.rotation_matrix` / `project` / `pfd_scales` | 纯函数、无第三方依赖；相机先偏航后俯仰、`scale` 是像素/单位；刻度每 10° |
+| `attitude.pick_channels` | 三级：**实测名字**（`channelpick.ATTITUDE_*`，写法差异由 `channelref` 判）→ 名字里的词 → **留空**；同一条通道不派给两个轴 |
+| 不抄的 | `eulerOrder` 六选一、自定义 3D 模型——方向不对用**每通道倍数**掰正（那正是 Marple 自己留的 `multipliers`） |
+
+```powershell
+python -m unittest discover -s tests -p test_i3pro.py -k TestAttitude -v
+```
+
+**通过判据（本机实测，2026-10-17）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 姿态引擎单测 | **22 项全过**（单位与倍数 · 归一化到半开区间 · 非有限值 · 90° 特例 · 正交右手 · **3-2-1 顺序且六种排法两两可分辨** · 投影四种相机 · 相机缺键报错 · PFD 三根刻度 · 挑通道六条） |
+| 金标准上挑通道 | **两份都跑**：高避5圈 与 耐久正赛 → roll `Aceinna Roll`、pitch `Aceinna Pitch`、yaw `AngleLocalYaw` |
+| 全量单测 | **567 项**（545 + 22）全绿，`Ran 567 tests in 209.195s` |
+| 解析裁判 | `python tools\verify_ld_vs_csv.py` → `PASS - 0 channel(s) outside tolerance` |
+| 两份金标准快照 | 高避 `PASS`（466 通道行 / 7 圈）、耐久 `PASS`（372 / 26） |
+| 真鼠标 | `python tools\verify_clicks.py` → **256 项通过、0 失败** |
+
+**已知边界（写清楚）**：角度**不做多圈累计**（连续横滚两圈会在显示上跳），真实数据里没出现过；
+`pfd_scales` 的闭环刻度只画一次（航向不取 360、滚转不取 180，否则两条刻度线重叠）；
+兜底那一级可能挑到"名字里有这个词但不是姿态"的通道（例如 `YawAngAcc` 是角加速度），
+所以实测名字永远优先，组件还要把挑中的名字显示出来。
+
+**评审后的更正（2026-10-17，`/code-review` 两轴）**：原文写"固定 ZXY，与 Marple 默认一致"，
+但实现是 **ZYX / 3-2-1**，且原来那条"钉顺序"的用例在 `pitch=0` 上跑（ZYX 与 ZXY 那时
+逐元素相同）——**是空断言**。现在规格改口径（只声明我们自己用 3-2-1，不声称与它一致），
+用例改成三轴非零 + 与其余五种排法都可分辨；另外补上"相机缺键直接报错"、
+"非有限值（含 `inf`）原样返回"、"耐久金标准也跑一遍"三处。
+
+**五件套的落点**：① `src/i3pro/attitude.py` + `channelpick.py` 的三张姿态表与兜底词表；
+② 单测 `TestAttitude`（22 项，两份金标准各一条）；③ 无头断言不加——这一票不动前端
+（组件的断言在 #43 补）；④ 本条目；⑤ 两份金标准实跑。

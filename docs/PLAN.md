@@ -163,7 +163,7 @@ i2 Pro 的结构是 `Project → Workbook → Worksheet → Component`。我们�
 
 ### M3 — 工程化（已完成）
 
-单测（真实数据回归 + HTTP 端到端 + 无头 JS 冒烟）从当时的 21 项起一路加上来，现在 **545 项**
+单测（真实数据回归 + HTTP 端到端 + 无头 JS 冒烟）从当时的 21 项一路加上来，现在 **567 项**
 （`python -m unittest discover -s tests`）、零第三方运行期依赖、git 仓库。
 
 **验收从"三条"变"四条"**：无头冒烟（`tools/smoke_viewer.js`，629 个断言点）跑在

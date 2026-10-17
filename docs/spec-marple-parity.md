@@ -77,7 +77,7 @@ config: {
   找不到就留空——**不猜**，交给 3.5 的提示。
 - 纯函数（新增 `src/i3pro/attitude.py`）：
   `normalize_angle(value, unit, gain)`（角度归一化 + 单位换算 + 倍数，返回弧度）、
-  `rotation_matrix(roll, pitch, yaw)`（固定 **ZXY**，与 Marple 默认一致）、
+  `rotation_matrix(roll, pitch, yaw)`（固定 **ZYX / 3-2-1**：`Rz(yaw)·Ry(pitch)·Rx(roll)`）、
   `project(vertices, matrix, camera)`（正交投影，输入输出都是纯 Python/NumPy）、
   `pfd_scales()`（俯仰 −90…90、滚转 −180…180 的刻度位置，供 PFD 画）。
 
@@ -105,7 +105,7 @@ config: {
 
 | Marple 有 | 我们不做 | 理由 |
 | --- | --- | --- |
-| `eulerOrder` 六选一 | 固定 ZXY | 六选一是配置坟墓，没人会改；默认值就是它给的默认 |
+| `eulerOrder` 六选一 | 固定 3-2-1 | 六选一是配置坟墓，没人会改。**更正（2026-10-17，评审发现）**：原文写"固定 ZXY，与 Marple 默认一致"，但它的默认值我们**没有实证**（那个 chunk 不在仓库里，只有 minify 过的映射表），所以改成只声明**我们自己**用 3-2-1，不声称与它一致 |
 | 自定义 3D 模型（`customModels`，带 URL 与标定） | 不做 | 需要模型托管与格式支持，收益低；线框车体够表达姿态 |
 | three.js + 相机控制 | 不做 | 为一张小图引入 1 MB+ 运行时依赖不值；纯 Canvas 正交投影约 100 行 |
 

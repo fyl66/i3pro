@@ -17,6 +17,10 @@
 from __future__ import annotations
 
 __all__ = [
+    "ATTITUDE_NAME_HINTS",
+    "ATTITUDE_PITCH",
+    "ATTITUDE_ROLL",
+    "ATTITUDE_YAW",
     "DEFAULT_CHANNEL_PRIORITY",
     "OVERLAY_PRIORITY",
     "SPEED_FOR_COLORING",
@@ -61,3 +65,20 @@ OVERLAY_PRIORITY = (
 
 #: 轨迹图按哪条速度上色（第一条本场次有的就用它）。
 SPEED_FOR_COLORING = ("Vx KF", "Ground Speed", "GPS Speed", "SpeedFR", "SpeedFL")
+
+#: 姿态图的三轴默认候选（实测名字，写法差异由 :mod:`i3pro.channelref` 判）。
+#: 金标准里实测存在 ``Aceinna Roll`` / ``Aceinna Pitch`` / ``AngleLocalYaw``；
+#: ``Roll (2)`` / ``Pitch (2)`` 是 MTi 那一路解出来的同名量（没有单位）。
+#: 兜底（"名字里带 roll/pitch/yaw"）是**规则**不是名字表，所以住在 :mod:`i3pro.attitude`。
+ATTITUDE_ROLL = ("Aceinna Roll", "Roll (2)")
+ATTITUDE_PITCH = ("Aceinna Pitch", "Pitch (2)")
+ATTITUDE_YAW = ("AngleLocalYaw",)
+
+#: 姿态图的**兜底**词表：实测名字一条都对不上时，拿这些词去名字里找（忽略空格 / 下划线 /
+#: 大小写）。放在这里而不是 :mod:`i3pro.attitude`，是因为"哪几类名字算姿态通道"与上面三张表
+#: 是同一个问题；**怎么匹配**（顺序、排重）那条规则仍在 :func:`i3pro.attitude.pick_channels`。
+ATTITUDE_NAME_HINTS = {
+    "roll": ("roll",),
+    "pitch": ("pitch",),
+    "yaw": ("yaw", "heading"),
+}

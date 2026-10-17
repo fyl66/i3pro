@@ -13,12 +13,14 @@ Run:  python -m unittest discover -s tests -v
 from __future__ import annotations
 
 import json
+import math
 import contextlib
 import atexit
 import csv
 import dataclasses
 import hashlib
 import io
+import itertools
 import os
 import re
 import shutil
@@ -45,6 +47,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from i3pro import (  # noqa: E402
     axes as axesmod,
+    attitude as attitudemod,
     cache, canlog, channelpick, channelref, channels, csvlog, dbc, derive, gpsfix,
     cli,
     laps as lapsmod, ld, library as librarymod,
@@ -1543,6 +1546,204 @@ class TestDistanceAxisLookup(unittest.TestCase):
             self.assertIsNone(lapsmod.time_at_distance(log, float("nan")))
         self.assertIsNotNone(inside)
         self.assertEqual(walked, sorted(walked), "the mapping must not run backwards")
+
+
+class TestAttitude(unittest.TestCase):
+    """姿态引擎（ticket #42）：三个角度 → 可画的姿态。**这一层只做算术**。
+
+    画布、相机拖拽、光标幽灵都在 #43。这里管四件事：单位与倍数、正负号约定、
+    正交投影、PFD 刻度，外加"这一场该挑哪三条通道"。
+
+    约定写死在这几条断言里，免得下一个人从画法里反推：
+
+    * 世界系 **x 前 / y 左 / z 上**；**正 roll 抬左、正 pitch 抬头、正 yaw 左转**；
+    * 组合顺序 ``R = Rz(yaw) · Ry(pitch) · Rx(roll)``（航空常用的 3-2-1）；
+    * 屏幕系 **y 向下**（canvas 约定），所以向上的轴投影出负 y。
+
+    方向要是不对（传感器符号不同），用每通道倍数 ``gain`` 的负号去掰，**不要改这里**——
+    改这里等于把所有车的约定一起改掉。
+    """
+
+    @staticmethod
+    def _same_axis(matrix, source, wanted) -> None:
+        """``matrix @ source`` 与 ``wanted`` 同向同长。"""
+        np.testing.assert_allclose(
+            np.asarray(matrix, dtype=float) @ np.asarray(source, dtype=float),
+            np.asarray(wanted, dtype=float), atol=1e-12)
+
+    def test_单位换算与每通道倍数(self):
+        self.assertAlmostEqual(attitudemod.normalize_angle(90, "deg"), math.pi / 2)
+        self.assertAlmostEqual(attitudemod.normalize_angle(math.pi / 3, "rad"), math.pi / 3)
+        self.assertAlmostEqual(attitudemod.normalize_angle(10, "deg", -2), -20 * math.pi / 180)
+        self.assertAlmostEqual(attitudemod.normalize_angle(90, "deg", 0.5), math.pi / 4)
+        self.assertAlmostEqual(attitudemod.normalize_angle(0, "deg", 7), 0.0)
+
+    def test_角度归一化到半开区间(self):
+        for raw, wanted in ((190, -170), (-190, 170), (180, -180), (540, -180), (0, 0)):
+            self.assertAlmostEqual(
+                attitudemod.normalize_angle(raw, "deg"), math.radians(wanted),
+                msg=f"{raw}° 该落成 {wanted}°")
+
+    def test_非有限值原样返回(self):
+        """NaN / 无穷的帧在画法里要能认出来并跳过，所以这一层不能悄悄给个 0，
+        也不能让 ``inf`` 落到 ``math.fmod`` 上炸一个英文报错。"""
+        self.assertTrue(math.isnan(attitudemod.normalize_angle(float("nan"), "deg")))
+        self.assertTrue(math.isnan(attitudemod.normalize_angle(float("nan"), "rad", -3)))
+        self.assertTrue(math.isinf(attitudemod.normalize_angle(float("inf"), "deg")))
+        self.assertTrue(math.isinf(attitudemod.normalize_angle(float("-inf"), "rad")))
+
+    def test_单位只认_deg_与_rad(self):
+        with self.assertRaises(ValueError) as caught:
+            attitudemod.normalize_angle(1.0, "gon")
+        message = str(caught.exception)
+        self.assertIn("deg", message)
+        self.assertIn("gon", message)
+
+    def test_旋转矩阵的_90_度特例(self):
+        self._same_axis(attitudemod.rotation_matrix(math.pi / 2, 0, 0), [0, 1, 0], [0, 0, 1])
+        self._same_axis(attitudemod.rotation_matrix(0, math.pi / 2, 0), [1, 0, 0], [0, 0, 1])
+        self._same_axis(attitudemod.rotation_matrix(0, 0, math.pi / 2), [1, 0, 0], [0, 1, 0])
+
+    def test_组合顺序是_321_且六种排法可分辨(self):
+        """**三轴都非零**才有分辨力：pitch=0 时不同顺序会退化成同一个矩阵。
+
+        评审点出来的坑是原来那条只在 pitch=0 上验证——换个顺序实现照样全绿。这里改成：
+        用一组三轴都非零的角度，断言结果等于 ``Rz(yaw)·Ry(pitch)·Rx(roll)``（3-2-1），
+        并且与**其余五种排法**都差得出来（>0.05）。
+        """
+        roll, pitch, yaw = 0.3, 0.7, 1.1
+
+        def about(axis, angle):
+            cos, sin = math.cos(angle), math.sin(angle)
+            if axis == "x":
+                return np.array([[1, 0, 0], [0, cos, -sin], [0, sin, cos]], dtype=float)
+            if axis == "y":
+                return np.array([[cos, 0, -sin], [0, 1, 0], [sin, 0, cos]], dtype=float)
+            return np.array([[cos, -sin, 0], [sin, cos, 0], [0, 0, 1]], dtype=float)
+
+        factors = {"x": about("x", roll), "y": about("y", pitch), "z": about("z", yaw)}
+        products = {}
+        for order in itertools.permutations("xyz"):
+            matrix = np.eye(3)
+            for axis in order:
+                matrix = matrix @ factors[axis]
+            products["".join(order)] = matrix
+
+        got = attitudemod.rotation_matrix(roll, pitch, yaw)
+        np.testing.assert_allclose(got, products["zyx"], atol=1e-12)
+        for order, matrix in products.items():
+            if order == "zyx":
+                continue
+            self.assertGreater(
+                float(np.abs(got - matrix).max()), 0.05,
+                f"这组角度下 3-2-1 与 {order} 本该差得出来；差不出来说明用例没有分辨力")
+
+    def test_旋转矩阵是正交的右手系(self):
+        matrix = attitudemod.rotation_matrix(0.3, -0.4, 1.1)
+        np.testing.assert_allclose(matrix.T @ matrix, np.eye(3), atol=1e-12)
+        self.assertAlmostEqual(float(np.linalg.det(matrix)), 1.0, places=12)
+
+    def test_投影_默认相机是侧视(self):
+        screen = attitudemod.project(
+            [(1, 0, 0), (0, 0, 1), (0, 1, 0)], np.eye(3),
+            {"yaw": 0, "pitch": 0, "scale": 10})
+        np.testing.assert_allclose(screen, [[10, 0], [0, -10], [0, 0]], atol=1e-12)
+
+    def test_投影_相机会用到模型旋转(self):
+        """横滚 90° 之后车左(y) 朝上，投影出来就到屏幕上方。"""
+        screen = attitudemod.project(
+            [(0, 1, 0)], attitudemod.rotation_matrix(math.pi / 2, 0, 0),
+            {"yaw": 0, "pitch": 0, "scale": 10})
+        np.testing.assert_allclose(screen, [[0, -10]], atol=1e-12)
+
+    def test_投影_相机偏航_90_度能看见侧向(self):
+        screen = attitudemod.project(
+            [(1, 0, 0), (0, 1, 0)], np.eye(3),
+            {"yaw": 90, "pitch": 0, "scale": 10})
+        np.testing.assert_allclose(screen, [[0, 0], [10, 0]], atol=1e-9)
+
+    def test_投影_相机俯仰_90_度是俯视(self):
+        screen = attitudemod.project(
+            [(1, 0, 0), (0, 1, 0), (0, 0, 1)], np.eye(3),
+            {"yaw": 0, "pitch": 90, "scale": 10})
+        np.testing.assert_allclose(screen, [[10, 0], [0, -10], [0, 0]], atol=1e-9)
+
+    def test_投影的缩放是像素每单位(self):
+        vertex = [(1, 0, 0)]
+        camera = {"yaw": 0, "pitch": 0, "scale": 1}
+        self.assertAlmostEqual(float(attitudemod.project(vertex, np.eye(3), camera)[0][0]), 1.0)
+        camera["scale"] = 40
+        self.assertAlmostEqual(float(attitudemod.project(vertex, np.eye(3), camera)[0][0]), 40.0)
+
+    def test_投影的相机缺键就报错(self):
+        """少一个键要当场炸：默默按"相机 0 度"画出来的姿态看不出错（评审点过这条）。"""
+        for missing in ("yaw", "pitch", "scale"):
+            camera = {"yaw": 0, "pitch": 0, "scale": 1}
+            del camera[missing]
+            with self.assertRaises(KeyError, msg=f"缺 {missing} 该报错"):
+                attitudemod.project([(1, 0, 0)], np.eye(3), camera)
+
+    def test_pfd_刻度(self):
+        scales = attitudemod.pfd_scales()
+        pitch, roll, heading = scales["pitch"], scales["roll"], scales["heading"]
+        self.assertEqual(len(pitch), 19)
+        self.assertEqual((pitch[0], pitch[-1]), (-90, 90))
+        self.assertEqual(list(pitch), sorted(pitch))
+        self.assertEqual(len(roll), 36)
+        self.assertEqual((roll[0], roll[-1]), (-180, 170))
+        self.assertEqual(len(heading), 36)
+        self.assertEqual((heading[0], heading[-1]), (0, 350))
+
+    def test_挑通道_实测名字优先(self):
+        known = {"Aceinna Roll", "Aceinna Pitch", "AngleLocalYaw", "GPS Speed"}
+        self.assertEqual(
+            attitudemod.pick_channels(known),
+            {"roll": "Aceinna Roll", "pitch": "Aceinna Pitch", "yaw": "AngleLocalYaw"})
+
+    def test_挑通道_写法差异不算另一条(self):
+        """``Aceinna_Roll`` 就是 ``Aceinna Roll``（判定只有 channelref 一处）。"""
+        picked = attitudemod.pick_channels({"Aceinna_Roll", "aceinna pitch", "ANGLELOCALYAW"})
+        self.assertEqual(
+            picked, {"roll": "Aceinna_Roll", "pitch": "aceinna pitch", "yaw": "ANGLELOCALYAW"})
+
+    def test_挑通道_认不出就留空不猜(self):
+        self.assertEqual(
+            attitudemod.pick_channels({"GPS Speed", "Brake Signal"}),
+            {"roll": None, "pitch": None, "yaw": None})
+
+    def test_挑通道_名字里有词就用它(self):
+        picked = attitudemod.pick_channels({"Body Roll Angle", "Body Pitch Angle", "GPS Heading"})
+        self.assertEqual(
+            picked, {"roll": "Body Roll Angle", "pitch": "Body Pitch Angle", "yaw": "GPS Heading"})
+
+    def test_挑通道_同词多条时确定性(self):
+        picked = attitudemod.pick_channels({"Beta Roll", "Alpha Roll"})
+        self.assertEqual(picked["roll"], "Alpha Roll")
+        self.assertEqual(
+            attitudemod.pick_channels({"Beta Roll", "Alpha Roll"})["roll"], "Alpha Roll")
+
+    def test_挑通道_同一条通道不派给两个轴(self):
+        """一个名字里同时带 roll 与 pitch 时，兜底只该派一次——不然车会画成"两个轴同源"。"""
+        picked = attitudemod.pick_channels({"Body Roll Pitch"})
+        self.assertEqual(picked["roll"], "Body Roll Pitch")
+        self.assertIsNone(picked["pitch"])
+
+    @_needs(HILL)
+    def test_挑通道_在高避金标准上落到实测通道(self):
+        with ld.LogFile.read(HILL) as log:
+            picked = attitudemod.pick_channels(channelref.known_names(log))
+        self.assertEqual(picked["roll"], "Aceinna Roll")
+        self.assertEqual(picked["pitch"], "Aceinna Pitch")
+        self.assertEqual(picked["yaw"], "AngleLocalYaw")
+
+    @_needs(ENDURANCE)
+    def test_挑通道_在耐久金标准上落到实测通道(self):
+        """五件套第⑤条要**两份**金标准，不是一份（评审点出来的）。"""
+        with ld.LogFile.read(ENDURANCE) as log:
+            picked = attitudemod.pick_channels(channelref.known_names(log))
+        self.assertEqual(picked["roll"], "Aceinna Roll")
+        self.assertEqual(picked["pitch"], "Aceinna Pitch")
+        self.assertEqual(picked["yaw"], "AngleLocalYaw")
 
 
 class TestChannelGroups(unittest.TestCase):

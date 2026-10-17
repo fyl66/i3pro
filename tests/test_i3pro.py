@@ -58,6 +58,7 @@ from i3pro import (  # noqa: E402
     aliases as aliasesmod,
     palette as palettemod,
     pairing,
+    resolution as resolutionmod,
     server, sidecar, store, timebase,
     txtlog,
     worksheets as worksheetsmod,
@@ -2776,6 +2777,81 @@ class TestSplitSessionsAreWhole(unittest.TestCase):
                              sum(item.stat().st_size for item in members), name)
         # 车队要是把重名/跨目录那几份收拾干净了，这里就一份都不读——**不因为"数据变
         # 整齐了"而变红**（结构那半条已经查过了）。
+
+
+class TestPlotResolution(unittest.TestCase):
+    """ticket #46：绘图分辨率五档与工作表持久化。"""
+
+    def test_五档映射与默认回落(self):
+        self.assertEqual([row[0] for row in resolutionmod.PLOT_RESOLUTIONS],
+                         ["min", "low", "medium", "high", "max"])
+        self.assertEqual([row[1] for row in resolutionmod.PLOT_RESOLUTIONS],
+                         [500, 1000, 2000, 4000, 8000])
+        self.assertEqual(resolutionmod.DEFAULT_RESOLUTION, "medium")
+        self.assertEqual(resolutionmod.points("min"), 500)
+        self.assertEqual(resolutionmod.points("max"), 8000)
+        for bad in (None, "", "中", "MEDIUM?", 999):
+            self.assertEqual(resolutionmod.normalise(bad), "medium")
+            self.assertEqual(resolutionmod.points(bad), 2000)
+
+    def test_工作表编解码往返保住分辨率(self):
+        with tempfile.TemporaryDirectory(prefix="i3pro-resolution-") as tmp:
+            directory = Path(tmp) / "worksheets"
+            sheet = worksheetsmod.create(directory, {
+                "name": "分辨率样例",
+                "resolution": "max",
+                "components": [{"type": "graph", "x": 0, "y": 0}],
+            })
+            self.assertEqual(sheet["resolution"], "max")
+            raw = json.loads((directory / "sheet.json").read_text(encoding="utf-8"))
+            self.assertEqual(raw["resolution"], "max")
+            again = worksheetsmod.read_sheet(directory, "sheet")
+            self.assertEqual(again["resolution"], "max")
+            body = worksheetsmod.export_payload(again)
+            self.assertEqual(body["resolution"], "max")
+
+    def test_前端五档表没有和后端常量漂开(self):
+        page = (ROOT / "src" / "i3pro" / "web" / "viewer.html").read_text(encoding="utf-8")
+        match = re.search(r"const PLOT_RESOLUTIONS = \[(.*?)\];", page, re.S)
+        self.assertIsNotNone(match, "viewer.html 里没有 PLOT_RESOLUTIONS 这张表")
+        rows = re.findall(r'\["([a-z]+)",\s*(\d+),\s*"([^"]+)"\]', match.group(1))
+        self.assertEqual([(key, int(points)) for key, points, _label in rows],
+                         [(key, count) for key, count, _label
+                          in resolutionmod.PLOT_RESOLUTIONS])
+        self.assertEqual([label for _key, _points, label in rows],
+                         [label for _key, _points, label in resolutionmod.PLOT_RESOLUTIONS])
+
+    @_needs(HILL)
+    def test_快照载荷按工作表分辨率预抽稀(self):
+        with tempfile.TemporaryDirectory(prefix="i3pro-resolution-") as tmp:
+            root = Path(tmp)
+            directory = root / "worksheets"
+            directory.mkdir()
+            (directory / "min.json").write_text(json.dumps({
+                "name": "最少",
+                "order": 1,
+                "resolution": "min",
+                "components": [{"type": "graph", "x": 0, "y": 0,
+                                "pick": {"channels": {"limit": 1}}}],
+            }, ensure_ascii=False), encoding="utf-8")
+            (directory / "max.json").write_text(json.dumps({
+                "name": "最多",
+                "order": 2,
+                "resolution": "max",
+                "components": [{"type": "graph", "x": 0, "y": 0,
+                                "pick": {"channels": {"limit": 1}}}],
+            }, ensure_ascii=False), encoding="utf-8")
+            with ld.LogFile.read(HILL) as log:
+                small = render.build_payload(log, channels=["Vx KF"],
+                                             worksheets_dir=root)
+                large = render.build_payload(
+                    log, channels=["Vx KF"], worksheets_dir=root,
+                    buckets=resolutionmod.points("max"))
+            self.assertLessEqual(len(small["traces"]["Vx KF"]["time"]), 1000)
+            self.assertEqual(small["buckets"], 500)
+            self.assertEqual(large["buckets"], 8000)
+            self.assertGreater(len(large["traces"]["Vx KF"]["time"]),
+                               len(small["traces"]["Vx KF"]["time"]))
 
 
 class TestViewerScript(unittest.TestCase):

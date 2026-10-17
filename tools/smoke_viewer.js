@@ -4224,6 +4224,37 @@ if (canMeta) {
   }
 }
 
+// 37. 绘图分辨率五档（ticket #46）：档位映射、工作表设置、取数请求。
+{
+  const rows = api.plotResolutions || [];
+  check(rows.map((r) => r[0]).join(",") === "min,low,medium,high,max"
+    && rows.map((r) => r[1]).join(",") === "500,1000,2000,4000,8000",
+    "绘图分辨率五档映射不对：" + JSON.stringify(rows));
+  check(api.resolutionKey("bogus") === api.resolutionKey("")
+    && api.resolutionPoints(api.resolutionKey("")) === 2000,
+    "非法 / 缺省分辨率没有回落到中档");
+  check(api.resolutionLabel("min").indexOf("最少") === 0
+    && api.resolutionLabel("min").indexOf("500") >= 0,
+    "分辨率按钮文案不对：" + api.resolutionLabel("min"));
+
+  const savedApi = api.data.api;
+  const savedResolution = api.state.resolution;
+  const before = httpCalls.length;
+  api.data.api = "/api";
+  api.setResolution("min");
+  api.refreshWindowTraces(true);
+  const asked = httpCalls.slice(before).map((c) => c.url)
+    .filter((u) => u.indexOf("/trace") >= 0);
+  check(api.state.resolution === "min" && api.resolutionPoints(api.state.resolution) === 500,
+    "切到最少没有落到状态上：" + api.state.resolution);
+  check(asked.length >= 1 && asked[0].indexOf("buckets=500") >= 0,
+    "切分辨率后取数请求没带新点数：" + JSON.stringify(asked.slice(0, 2)));
+  api.state.resolution = savedResolution;
+  api.data.api = savedApi;
+  api.renderResolutionControl();
+  api.renderAll();
+}
+
 const header = registry.get("fileInfo");
 check(header && (header.innerHTML.indexOf(".ld") >= 0
   || header.innerHTML.indexOf(".csv") >= 0

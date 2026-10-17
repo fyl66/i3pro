@@ -43,6 +43,7 @@
   "schema": 1,
   "name": "分析",
   "order": 10,
+  "resolution": "medium",
   "hints": ["Vx KF", "Brake Signal"],
   "aliases": [
     {"name": "左后轮速", "candidates": ["SpeedRL", "Gear Speed1", "GPS Speed"]}
@@ -61,6 +62,7 @@
 | `schema` | 是 | 现在只认 `1`。以后改格式时靠它认新旧 |
 | `name` | 是 | 按钮上的名字。不能和别的工作表重名 |
 | `order` | 否 | 按钮顺序，小的在前；缺省 50 |
+| `resolution` | 否 | 绘图分辨率：`min` / `low` / `medium` / `high` / `max` = 500 / 1000 / 2000 / 4000 / 8000 点；缺省 `medium` |
 | `hints` | 否 | 挑通道用的提示词，见下面「挑通道」 |
 | `aliases` | 否 | 通道别名：同一套工作表换一份数据还能用的机制，见下面「通道别名」 |
 | `components` | 是 | 组件列表，**顺序就是组件在工作表里的顺序**，至少一个 |

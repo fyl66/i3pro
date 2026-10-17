@@ -399,6 +399,11 @@
         <button id="addBtn">＋ 添加组件</button>
       </div>
       <div class="hint" id="addTypeNote"></div>
+      <div class="row" id="sheetDisplay">
+        <span class="hint" style="margin:0">显示</span>
+        <span class="hint" style="margin:0">绘图分辨率</span>
+        <select id="plotResolution" title="这一套工作表画曲线时用多少点；快照与服务两种打开方式都按它取数"></select>
+      </div>
     </div>
     <div class="group" id="lapGroup">
       <h2>圈速 <span class="count" id="lapCount"></span></h2>
@@ -985,6 +990,33 @@ const UPSAMPLE_HINT = {
   closest: "取最近的那个采样点",
   next: "取下一个采样点",
 };
+const PLOT_RESOLUTIONS = [
+  ["min", 500, "最少"],
+  ["low", 1000, "少"],
+  ["medium", 2000, "中"],
+  ["high", 4000, "多"],
+  ["max", 8000, "最多"],
+];
+const DEFAULT_RESOLUTION = "medium";
+function resolutionKey(key) {
+  const want = String(key || "").toLowerCase();
+  return PLOT_RESOLUTIONS.some((row) => row[0] === want) ? want : DEFAULT_RESOLUTION;
+}
+function resolutionPoints(key) {
+  const want = resolutionKey(key);
+  const row = PLOT_RESOLUTIONS.find((one) => one[0] === want);
+  return row ? row[1] : 2000;
+}
+function resolutionLabel(key) {
+  const want = resolutionKey(key);
+  const row = PLOT_RESOLUTIONS.find((one) => one[0] === want);
+  return (row ? row[2] : "中") + "（" + resolutionPoints(want) + " 点）";
+}
+function resolutionDrawsPoints() {
+  // 最多档 8000 点时点样式已经密到糊成线；这时按线画，和 CONTEXT 那条
+  // "绘图分辨率也决定点样式的点到底画不画"一致。
+  return resolutionPoints(state.resolution) <= 4000;
+}
 function graphTitle(comp) {
   const names = comp.config.channels || [];
   const n = names.length;
@@ -2190,6 +2222,7 @@ function saveLayout() {
       layoutKey(),
       JSON.stringify({
         preset: state.preset, components: state.components, upsample: state.upsample,
+        resolution: state.resolution,
       }));
   } catch (err) { /* private mode: the worksheet simply will not persist */ }
 }
@@ -2231,6 +2264,9 @@ const state = {
   //: 零阶保持会把 10 Hz 的通道放大成 65 px 宽的平顶；分析路径（距离轴 / 切圈 /
   //: 报表 / 导出）永远用保持，改的只有画图取到的值。
   upsample: "linear",
+  //: 绘图分辨率档位（ticket #46）：最小/少/中/多/最多 = 500/1000/2000/4000/8000 桶。
+  //: 它跟着工作表走，但 localStorage 也记一份，免得刚切完还没保存就刷新丢。
+  resolution: "medium",
   groupMode: "tiled",
   show: { measure: true, legend: true, values: false },
   ref: (DATA && DATA.ref) || null,
@@ -2552,12 +2588,11 @@ function windowKey() {
 }
 
 /**
- * /trace 的键：窗口 **加上** 曲线连接方式。连接方式也是"这一屏问服务端的问题"
- * 之一——换了它必须重新取数，否则界面换了个选中状态、曲线还是上一种（这正是
- * A79 要防的那种"看起来点了、其实没变"）。
+ * /trace 的键：窗口 **加上** 曲线连接方式和绘图分辨率。两者都是"这一屏问服务端
+ * 的问题"——换了必须重新取数，否则界面换了个选中状态、曲线还是上一种。
  */
 function traceKey() {
-  return windowKey() + "|" + state.upsample;
+  return windowKey() + "|" + state.upsample + "|" + state.resolution;
 }
 
 function windowRange() {
@@ -2698,7 +2733,7 @@ async function refreshWindowTraces(force) {
     const w = windowRange();
     const body = await apiGet(apiUrl("/trace", {
       channels: names.join(","), from: w.from, to: w.to,
-      buckets: Math.round(plotWidth()),
+      buckets: resolutionPoints(state.resolution),
       upsample: state.upsample,
     }));
     Object.assign(state.traces, body);
@@ -3047,7 +3082,7 @@ function drawTraces(ctx, pad, plotW, plotH, x0, x1, y0, y1, specs) {
     // 尖角相接的折线（噪声大的通道最明显）用圆角连接：同样这些点，观感顺一截。
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
-    if (state.style === "points" && !spec.forceLine) {
+    if (state.style === "points" && !spec.forceLine && resolutionDrawsPoints()) {
       for (let i = 0; i < xs.length; i++) {
         const xv = xs[i];
         if (!Number.isFinite(xv) || xv < x0) continue;
@@ -3545,6 +3580,7 @@ function replaceComponentType(comp, type) {
   saveLayout();
   buildWorksheet();
   renderPresetButtons();
+  renderResolutionControl();
   renderChannelList();
   syncScatterSelectors();
   refreshWindowTraces(true).then(() => { refreshAllComponentData().then(renderAll); });
@@ -9092,11 +9128,14 @@ function restoreWorksheet() {
     state.preset = saved.preset || defaultWorksheetName();
     // 曲线连接方式跟着这一套场景走（A79）：换过它的下次进来还是那个样子。
     if (UPSAMPLE_MODES.indexOf(saved.upsample) >= 0) state.upsample = saved.upsample;
+    state.resolution = resolutionKey(saved.resolution);
     adoptComponentIds(state.components);
     return;
   }
   state.components = defaultComponents();
   state.preset = defaultWorksheetName();
+  const first = currentSheet();
+  state.resolution = resolutionKey(first && first.resolution);
   adoptComponentIds(state.components);
 }
 
@@ -9148,6 +9187,7 @@ function applyPreset(name) {
   if (!presets[name]) return;
   state.components = copyComponents(presets[name]);
   state.preset = name;
+  state.resolution = resolutionKey(currentSheet() && currentSheet().resolution);
   loadSheetAliases();
   state.focusId = null;
   state.view = null;
@@ -9330,7 +9370,8 @@ async function saveCurrentSheet() {
   try {
     const data = await sheetRequest("/" + encodeURIComponent(sheet.id), "PUT",
                                     { components: currentSheetBody(),
-                                      aliases: currentSheetAliases() });
+                                      aliases: currentSheetAliases(),
+                                      resolution: resolutionKey(state.resolution) });
     applySheetState(data);
     state.preset = data.worksheet.name;
     saveLayout();
@@ -9347,7 +9388,8 @@ async function saveSheetAs(name) {
   try {
     const data = await sheetRequest("", "POST",
       { sheet: { name: name, components: currentSheetBody(),
-                 aliases: currentSheetAliases() } });
+                 aliases: currentSheetAliases(),
+                 resolution: resolutionKey(state.resolution) } });
     applySheetState(data);
     state.preset = data.worksheet.name;
     saveLayout();
@@ -9369,7 +9411,8 @@ async function newSheet(name) {
                    pick: { channels: { limit: 8 } } }];
   try {
     const data = await sheetRequest("", "POST",
-                                    { sheet: { name: name, components: blank } });
+                                    { sheet: { name: name, components: blank,
+                                                resolution: resolutionKey(state.resolution) } });
     applySheetState(data);
     applyPreset(data.worksheet.name);
     toast("已新建「" + data.worksheet.name + "」（" + data.worksheet.id + ".json）");
@@ -9459,6 +9502,7 @@ async function importSheetFile(file) {
 function sheetExportPayload(sheet) {
   return {
     schema: 1, name: sheet.name, order: sheet.order, hints: sheet.hints || [],
+    resolution: resolutionKey(sheet.resolution || state.resolution),
     components: sheet.components || [],
   };
 }
@@ -9588,6 +9632,30 @@ function renderAddTypeNote() {
   note.style.display = reason ? "" : "none";
 }
 
+function renderResolutionControl() {
+  const sel = $("plotResolution");
+  if (!sel) return;
+  sel.innerHTML = PLOT_RESOLUTIONS.map((row) =>
+    '<option value="' + row[0] + '">' + row[2] + "（" + row[1] + "点）</option>"
+  ).join("");
+  sel.value = resolutionKey(state.resolution);
+  sel.title = "这一套工作表画曲线时用多少点；服务模式会按这个点数取数，快照按导出时工作表的设置预抽稀";
+}
+
+function setResolution(key) {
+  const next = resolutionKey(key);
+  if (next === state.resolution) return;
+  state.resolution = next;
+  state.windowKey = "";
+  saveLayout();
+  renderResolutionControl();
+  if (!DATA.api) {
+    toast("快照里的波形是导出时按工作表分辨率预抽稀的；要切换就在 serve 模式打开。");
+    return;
+  }
+  refreshWindowTraces(true).then(renderAll);
+}
+
 function addComponentOfType(type) {
   const comp = makeComponent(type);
   const spec = specOf(comp);
@@ -9617,7 +9685,7 @@ function setStatus() {
   if (focusComp && focusComp.type === "graph") {
     bits.push("「" + (focusComp.config.mode === "overlapped" ? "重叠" : "分栏") + "」");
   }
-  bits.push(state.style === "line" ? "线" : "点");
+  bits.push(state.style === "points" && resolutionDrawsPoints() ? "点" : "线");
   if (state.datumOn && state.datum !== null) {
     bits.push("基准光标 " + fmt(state.datum, 2) + axisUnit()
       + (state.cursor !== null ? " · Δ " + fmt(state.cursor - state.datum, 3) + axisUnit() : ""));
@@ -9871,6 +9939,7 @@ function init() {
   renderPresetButtons();
   wireSheetManage();
   renderAddTypeOptions();
+  renderResolutionControl();
   attachInteractions();
 
   $("chSearch").addEventListener("input", renderChannelList);
@@ -10008,6 +10077,7 @@ function init() {
   });
   $("addBtn").addEventListener("click", () => addComponentOfType($("addType").value));
   $("addType").addEventListener("change", renderAddTypeNote);
+  $("plotResolution").addEventListener("change", () => setResolution($("plotResolution").value));
   $("modeTime").addEventListener("click", () => {
     state.mode = "time"; state.view = null; state.panelZoom = {}; scheduleRefresh(); renderAll();
   });
@@ -10091,6 +10161,9 @@ window.i3pro = {
   setHeadField: setHeadField, openColorMenu: openColorMenu,
   closePopMenu: closePopMenu,
   setUpsample: setUpsample, upsampleModes: UPSAMPLE_MODES,
+  setResolution: setResolution, resolutionKey: resolutionKey,
+  resolutionPoints: resolutionPoints, resolutionLabel: resolutionLabel,
+  plotResolutions: PLOT_RESOLUTIONS, renderResolutionControl: renderResolutionControl,
   // 姿态（#43）：矩阵与 pick 规则要和后端 attitude.py 一致，由 smoke 对拍守住
   attitudeMatrix: attitudeMatrix, attitudePick: attitudePick,
   // 侧边栏快速跳转（A78）

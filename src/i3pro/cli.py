@@ -1082,8 +1082,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--channels")
     p.add_argument("--ref", help="基准圈标签")
     p.add_argument("--cmp", help="对比圈标签")
-    p.add_argument("--buckets", type=int, default=rendermod.DEFAULT_BUCKETS,
-                   help="每通道下采样像素列数")
+    p.add_argument("--buckets", type=int, default=None,
+                   help="每通道下采样像素列数 (默认: 跟随工作表分辨率)")
     p.add_argument("--maths", default=None,
                    help="全局数学定义的根目录 (默认: 仓库根目录，读 maths/global.json)")
     p.add_argument("--worksheets", default=None,
@@ -1110,8 +1110,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--data", action="append", default=[],
                    help="场次所在目录 (可重复, 默认 i2pro_data；CAN 原始帧表放 can_data)")
     p.add_argument("--out", default="out", help="输出目录")
-    p.add_argument("--buckets", type=int, default=rendermod.DEFAULT_BUCKETS,
-                   help="每通道下采样像素列数 (越大越清晰、文件越大)")
+    p.add_argument("--buckets", type=int, default=None,
+                   help="每通道下采样像素列数 (默认: 跟随工作表分辨率；越大越清晰、文件越大)")
     p.add_argument("--open", action="store_true", help="生成后打开索引页")
     p.add_argument("--maths", default=None,
                    help="全局数学定义的根目录 (默认: 仓库根目录，读 maths/global.json)")

@@ -4766,6 +4766,40 @@ python tools\verify_clicks.py                # 需要 Edge + 金标准数据
 
 ---
 
+## A91a · 绘图分辨率五档（本次新增，ticket #46）
+
+**要解决的问题**：绘图抽稀原来是服务端 / 快照参数与前端画布宽度各算各的，
+用户看不见"这条线用了多少点"。这一票先把 Marple 实测的 `500 × 2^档位` 收成
+工作表级五档旋钮：**最少（500）/ 少（1000）/ 中（2000，默认）/ 多（4000）/ 最多（8000）**。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 单源 | 新增 `src/i3pro/resolution.py`：后端单源；`render.DEFAULT_BUCKETS` 从它来。前端是受测副本，单测按源码逐项对拍，漂开会红 |
+| 工作表 | `worksheets/*.json` 顶层新增 `resolution`。旧文件不写就是 `medium`；导出时 `medium` 不写回，避免七份老文件全出 diff |
+| 前端 | 工作表栏加「绘图分辨率」下拉； `/trace` 请求按当前档位带 `buckets=`，`traceKey` 带上分辨率，切档会重新取数 |
+| 快照 / 服务 | `render` / `snapshot` 的 `--buckets` 默认改为跟随工作表分辨率；显式传 `--buckets` 时仍以命令行为准 |
+
+```powershell
+python -m unittest tests.test_i3pro.TestPlotResolution -v   # 末尾 OK
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"  # PASS
+node tools\smoke_viewer.js "out\20260524-耐久正赛.html"     # PASS
+python tools\verify_ld_vs_csv.py                            # PASS - 0 channel(s) outside tolerance
+python tools\verify_clicks.py                               # 需要 Edge + 金标准数据；末尾 292 项通过、0 失败
+```
+
+**通过判据（本机实测，2026-10-18）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 单测（新增 `TestPlotResolution` 4 项） | 五档键 / 点数 / 默认回落 · 工作表 `resolution` round-trip · 前端五档表与 `resolution` 模块逐项一致 · 金标准快照载荷按工作表 `min` 预抽稀（`buckets=500`，`Vx KF` 点数 ≤ 1000），显式 `max` 为 `buckets=8000` 且点数更多 |
+| 无头断言（新增 #37 一组） | 五档映射 · 非法档位回落中档 · 文案含"最少（500点）" · 切到 `min` 后 `/trace` 请求带 `buckets=500` |
+| 两份金标准快照 | 高避 `PASS`（1 397 238 line segments / 1 416 752 point rects / 467 通道行） · 耐久 `PASS`（1 488 786 / 1 479 060 / 372 通道行） |
+| 真鼠标（`tools\verify_clicks.py`） | **292 项通过、0 失败** |
+| 全量单测 | **600 项**全绿（`Ran 600 tests in 213.923s` + `OK`） |
+| 解析裁判 | `python tools\verify_ld_vs_csv.py` → `PASS - 0 channel(s) outside tolerance` |
+
+---
+
 ## A92 · 组件栏：分组 / 原因 / 空状态 / 换成与复制（本次新增，ticket #48）
 
 **要解决的问题**：组件入口原来是一串平铺的类型名，选到本场次没有通道的类型也不说话；组件加错类型时只能删掉重加，想试一张图的两个位置也只能从头再配。
@@ -4797,7 +4831,7 @@ python tools\verify_clicks.py                # 需要 Edge + 金标准数据；�
 | 无头断言（新增 #48 一组） | 分组标签四项齐全 · 没有通道时添加入口写原因和下一步 · 状态通道缺失也有下一步 · 空组件文案是"把左边的通道拖进来" · "换成…"后 id 不变且通道与位置还在 · "复制"后新 id 独立，改复制件不影响原件 |
 | 两份金标准快照 | 高避 `PASS`（1 394 003 line segments / 1 416 706 point rects / 467 通道行） · 耐久 `PASS`（1 485 569 / 1 479 014 / 372 通道行） |
 | 真鼠标（`tools\verify_clicks.py`） | **292 项通过、0 失败**（含 #48 新增 **9 项**：分组标签 · 原因文案 · 空状态文案 · 找到可复制可换类型的图 · 真点「复制」 · 两块配置独立 · 真点「换成…」 · 换成菜单里有直方图 · 换后通道和位置都还在） |
-| 全量单测 | **596 项**全绿（`Ran 596 tests in 217.835s` + `OK`） |
+| 全量单测 | **600 项**全绿（`Ran 600 tests in 213.923s` + `OK`） |
 | 解析裁判 | `python tools\verify_ld_vs_csv.py` → `PASS - 0 channel(s) outside tolerance` |
 
 **已知边界**：换类型只保证"**能搬过去的通道**与位置尺寸保留"，不会把旧组件所有控件设置原样复制成另一套组件；

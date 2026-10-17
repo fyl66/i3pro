@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from . import aliases as aliasesmod
+from . import resolution as resolutionmod
 
 __all__ = [
     "SCHEMA",
@@ -64,7 +65,8 @@ DEFAULT_ORDER = 50
 
 #: 一份工作表顶层认得的键。``aliases``（ticket #36）是"这套表要用哪条车速"那类
 #: 有序候选表——它跟着工作表走，不进 ``.ld``、不进日志侧车。
-_TOP_KEYS = {"schema", "name", "order", "hints", "components", "aliases"}
+_TOP_KEYS = {"schema", "name", "order", "hints", "components", "aliases",
+             "resolution"}
 _COMPONENT_KEYS = {"type", "x", "y", "w", "h", "config", "pick"}
 _PICK_KEYS = {"patterns", "limit", "index", "special"}
 
@@ -155,6 +157,8 @@ def export_payload(sheet: dict) -> dict:
     # 免得"加了一个功能"变成"七份文件全都有 diff"。
     if sheet.get("aliases"):
         body["aliases"] = [dict(one) for one in sheet["aliases"]]
+    if sheet.get("resolution") != resolutionmod.DEFAULT_RESOLUTION:
+        body["resolution"] = sheet["resolution"]
     return body
 
 
@@ -233,7 +237,8 @@ def create(directory: str | Path, payload: Any, *, name: str | None = None) -> d
 
 
 def replace(
-    directory: str | Path, stem: str, components: Any, aliases: Any = None
+    directory: str | Path, stem: str, components: Any, aliases: Any = None,
+    resolution: Any = None,
 ) -> dict:
     """把**已经在文件里的**那套工作表的组件换掉（界面上的"保存"）。
 
@@ -247,6 +252,8 @@ def replace(
     body["components"] = components
     if aliases is not None:
         body["aliases"] = aliases
+    if resolution is not None:
+        body["resolution"] = resolution
     return write_sheet(directory, stem, body)
 
 
@@ -445,6 +452,7 @@ def normalise(payload: Any, name: str, where: str | None = None) -> dict:
     hints = _strings(payload.get("hints", []), "hints", spot) if "hints" in payload else []
     aliases = aliasesmod.normalise(payload.get("aliases"), spot) \
         if "aliases" in payload else []
+    resolution = resolutionmod.normalise(payload.get("resolution"))
     components = payload.get("components")
     if not isinstance(components, list) or not components:
         raise WorksheetError(
@@ -458,6 +466,7 @@ def normalise(payload: Any, name: str, where: str | None = None) -> dict:
         "hints": hints,
         #: 通道别名（ticket #36）：有序候选，取第一条在本场次存在的。
         "aliases": aliases,
+        "resolution": resolution,
         "components": [
             _component(item, i, spot) for i, item in enumerate(components)
         ],

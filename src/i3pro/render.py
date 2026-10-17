@@ -30,6 +30,7 @@ from . import (derive, gpsfix, heatmap as heatmapmod, histogram as histogrammod,
 from . import notes as notesmod, report as reportmod, sections as sectionsmod
 from . import ld as ldmod
 from . import palette as palettemod
+from . import resolution as resolutionmod
 from . import spectrum as spectrummod
 from . import timebase
 from . import worksheets as worksheetsmod
@@ -63,7 +64,7 @@ TEMPLATE = Path(__file__).with_name("web") / "viewer.html"
 
 #: Pixel columns per channel in a static snapshot. Higher = smoother when you
 #: zoom in, at the cost of file size (2000 ≈ 1.2 MB for a 12 channel payload).
-DEFAULT_BUCKETS = 2000
+DEFAULT_BUCKETS = resolutionmod.points(resolutionmod.DEFAULT_RESOLUTION)
 
 #: 画图用哪条"点与点之间"的规则（i2 Pro 的 Channel Up-sampling）。**默认线性**：
 #: 零阶保持会把慢通道画成一排平顶（高避金标准 437 条里 147 条慢于 50 Hz），
@@ -975,7 +976,7 @@ def build_payload(
     channels: list[str] | None = None,
     ref: str | None = None,
     cmp: str | None = None,
-    buckets: int = DEFAULT_BUCKETS,
+    buckets: int | None = None,
     api_base: str | None = None,
     step: float = 1.0,
     with_track: bool = True,
@@ -988,6 +989,9 @@ def build_payload(
     """Everything the workbench needs. Traces are only embedded in static mode."""
     time = timebase.axis(log)
     sheets, sheet_problems = worksheetsmod.load_dir(worksheets_dir)
+    if buckets is None:
+        first_resolution = (sheets[0].get("resolution") if sheets else None)
+        buckets = resolutionmod.points(first_resolution)
     # 每条别名**这一场**落到了哪条通道（ticket #36）。判定只有 aliases.landing
     # 一处实现，页面这边只是把结果贴上——前端查表，不重写一遍规则。
     # 候选池 = **原生 + 数学通道**（channelref.known_names）：CONTEXT.md 写着数学通道
@@ -1112,7 +1116,7 @@ def render_html(
     channels: list[str] | None = None,
     ref: str | None = None,
     cmp: str | None = None,
-    buckets: int = DEFAULT_BUCKETS,
+    buckets: int | None = None,
     with_track: bool = True,
     with_report: bool = True,
     with_histograms: bool = True,

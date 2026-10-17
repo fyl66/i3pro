@@ -431,7 +431,8 @@ class _Call:
                 "先在工作台上放一个组件再保存。"
             )
         sheet = worksheetsmod.replace(directory, stem, components,
-                                      aliases=body.get("aliases"))
+                                      aliases=body.get("aliases"),
+                                      resolution=body.get("resolution"))
         state = self.worksheets_state(directory)
         state["worksheet"] = self.with_aliases(sheet)
         return self._json(state)

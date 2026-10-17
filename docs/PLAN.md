@@ -141,7 +141,7 @@ i2 Pro 的结构是 `Project → Workbook → Worksheet → Component`。我们�
 | 半宽 / 全宽 | 相邻两个半宽组件自动并排（保留原来"赛道图 + 散点"的观感） |
 | 内置预设（当时 5 套，现已 7 套） | 分析 / 双圈对比 / 动力 / 底盘 / 车手 / 仪表台 / 报表，各自带通道挑选取样 |
 | 布局持久化 | URL `layout=` > `localStorage` > 内置预设；**这是 i2 Pro 做不到的**（它的布局只在本机文件里） |
-| 图表抬头 = i2 的 Measurements 列 | `通道名 \| 光标值 \| Min \| Max \| Avg`，光标值实时跳动 |
+| 图表抬头 = i2 的 Measurements 列 | `通道名 \| 光标值 \| Min \| Max \| Avg`，光标值实时跳动；Min/Max/Avg 的范围可选**可见区间 / 光标 A–B**（#44，见 [A89](ACCEPTANCE.md)） |
 | 左侧「光标值」降级为 Values 窗口 | `V` 键开关，默认关闭（i2 Pro 就是这样） |
 | 每个图自己有通道列表 | 点组件把它设为编辑目标，左侧勾选就写进它；两个图可以看不同通道 |
 | 离屏缓存 | 波形画一次缓存起来，移动鼠标只重画光标，抬头数字才能跟得上 |
@@ -163,10 +163,10 @@ i2 Pro 的结构是 `Project → Workbook → Worksheet → Component`。我们�
 
 ### M3 — 工程化（已完成）
 
-单测（真实数据回归 + HTTP 端到端 + 无头 JS 冒烟）从当时的 21 项一路加上来，现在 **568 项**
+单测（真实数据回归 + HTTP 端到端 + 无头 JS 冒烟）从当时的 21 项一路加上来，现在 **581 项**
 （`python -m unittest discover -s tests`）、零第三方运行期依赖、git 仓库。
 
-**验收从"三条"变"四条"**：无头冒烟（`tools/smoke_viewer.js`，650 个断言点）跑在
+**验收从"三条"变"四条"**：无头冒烟（`tools/smoke_viewer.js`，662 个断言点）跑在
 假 DOM 上——元素没有面积、没有遮挡，disabled 的控件照样派发 `click`。它能证明"代码
 调用了它该调用的函数"，证明不了**用户点得到**。所以补了第四条
 `tools/verify_clicks.py`：用 Edge 的 DevTools 协议发**真鼠标 / 真键盘**，跑在

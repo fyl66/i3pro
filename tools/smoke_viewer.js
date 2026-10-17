@@ -3438,6 +3438,114 @@ if (api && exportDlg) {
   check(api.headFields(comp).avg === true, "还原之后抬头开关没回到默认");
 }
 
+/* ------------------- 光标 A–B 区间统计（ticket #44） -------------------------
+ * 范围开关只有两个取值："可见区间"就是原来那套，A–B 是这一票加的。这一组钉三件事：
+ *   ① 选 A–B 而**没放基准光标**时，抬头不印数字、改说那句现成的下一步；
+ *   ② 摆好 A/B 之后，三个数与后端 `cursorstats.interval_stats` 的**同一组冻结常量**
+ *      一致（含反序自动交换、闭区间两端、空区间给"--"而不是 0）；
+ *   ③ **B 动、数就动**——主光标跟着鼠标走，这是这一票的卖点。
+ * "那个菜单真点得到"归真浏览器那关（tools/verify_clicks.py）。
+ *
+ * 前端没有构建步骤、跑不了 Python，所以这三个数是两边各钉一遍的（那一组数同时
+ * 写在 `tests/test_i3pro.py::TestCursorStats` 里），与姿态矩阵那条同一个做法。 */
+{
+  const api = window.i3pro;
+  const comp = api.state.components.filter((c) => c.type === "graph")[0];
+  check(api.noAbHint
+    === "没有 A–B：按 D 打开基准光标，把鼠标放到 A 的位置按空格；再移到 B 按空格。",
+    "「没有 A–B」那句原文与后端对不上了：" + api.noAbHint);
+  check(api.statsRanges.join("|") === "view|ab",
+    "统计范围的两档变了：" + api.statsRanges.join("|"));
+
+  // 抬头**第一行**（一个通道一行）的三个格子（lmm）与那句提示（labnote）：
+  // 与 #35 那组同一个找法——`insideOf(head, "lmm")` 会把每行的都收进来，
+  // 所以先钉住一行，再看这一行里的三个格子。
+  const find = () => {
+    const element = SHEETEl(registry.get("worksheet"), comp.id);
+    const head = insideOf(element, "graphhead")[0];
+    const legend = insideOf(head, "glegend")[0];
+    const row = (legend && legend._children ? legend._children : [])
+      .filter((c) => String(c.className).indexOf("lrow") >= 0)[0];
+    const rowKids = row && row._children ? row._children : [];
+    const label = rowKids.filter((c) => String(c.className).indexOf("lname") >= 0)[0];
+    return {
+      head: head, row: row,
+      name: label ? String(label.textContent) : "",
+      spans: rowKids.filter((c) => String(c.className).indexOf("lmm") >= 0),
+      note: insideOf(head, "labnote")[0],
+    };
+  };
+  const read = () => find().spans.map((s) => String(s.textContent || "")).join("|");
+  const hidden = () => find().spans.filter((s) => s.style.display === "none").length;
+  check(find().spans.length === 3, "抬头里不是三个统计格子：" + find().spans.length);
+  const name = find().name;
+  const trace = name ? api.state.traces[name] : null;
+  check(!!trace && !!trace.time, "抬头第一行那条通道没取到数，A–B 统计用例没法验：" + name);
+
+  // 把这条通道换成一段**受控**的五点序列：时间 0,1,2,3,4 秒、值 10..50。
+  // A=1,B=3 -> 20/40/30；B 再挪到 4 -> 20/50/35（均值把 30..50 一起算进去）。
+  const kept = { time: trace.time, value: trace.value };
+  const origin = api.lane()[0];
+  trace.time = [0, 1, 2, 3, 4].map((step) => origin + step);
+  trace.value = [10, 20, 30, 40, 50];
+
+  api.setStatsRange(comp, "ab");
+  check(comp.config.statsRange === "ab"
+    && ((JSON.parse(JSON.stringify(api.sheetComponent(comp))).config || {})
+          .statsRange === "ab"),
+    "选了 A–B 却没写进工作表配置：" + JSON.stringify(comp.config.statsRange));
+
+  // ① 没有基准光标：三个格子藏起来（连上一次留下的字也擦掉），改说下一步
+  api.state.datumOn = false;
+  api.state.datum = null;
+  api.state.cursor = origin + 3;
+  api.renderAll();
+  check(hidden() === 3 && read() === "||",
+    "选 A–B 而没有基准光标时还在印数字：" + read() + "（藏了 " + hidden() + " 格）");
+  check(String((find().note || {}).textContent || "").indexOf("按 D 打开基准光标") >= 0
+    && find().note.style.display !== "none",
+    "没有基准光标时那句下一步没出来："
+    + (find().note ? find().note.textContent + " · display=" + find().note.style.display
+                   : "(没有那句话的元素)"));
+
+  // ② 摆好 A/B：三个数与后端那份一致（闭区间两端都算，A 在 1 秒、B 在 3 秒）
+  api.state.datumOn = true;
+  api.state.datum = origin + 1;
+  api.state.cursor = origin + 3;
+  api.renderAll();
+  check(read() === "20.00|40.00|30.00",
+    "A–B 的 20/40/30 没算对：" + read() + "（提示还亮着？"
+    + (find().note ? find().note.style.display : "?") + "）");
+
+  // ③ B 动、数就动：主光标挪到 4 秒，最大值与均值跟着变
+  api.state.cursor = origin + 4;
+  api.renderAll();
+  check(read() === "20.00|50.00|35.00", "B 挪了一格，三个数没跟着变：" + read());
+
+  // 反序自动交换：A 放到 B 右边，应该还是同一个区间
+  api.state.datum = origin + 3;
+  api.state.cursor = origin + 1;
+  api.renderAll();
+  check(read() === "20.00|40.00|30.00", "A 在 B 右边时没有自动交换：" + read());
+
+  // 空区间：3.2–3.8 秒之间一个样本都没有 —— 印"--"，**不是 0**
+  api.state.datum = origin + 3.2;
+  api.state.cursor = origin + 3.8;
+  api.renderAll();
+  check(hidden() === 0 && read() === "--|--|--",
+    "空区间该印 -- 而不是 0：" + read());
+
+  // 还原：范围回到"可见区间"，通道数据也放回去（后面的用例还要用）
+  api.setStatsRange(comp, "view");
+  api.state.datumOn = false;
+  api.state.cursor = null;
+  trace.time = kept.time;
+  trace.value = kept.value;
+  check(api.statsRangeOf(comp) === "view" && read() !== "--|--|--",
+    "还原成可见区间之后抬头没回到原来的口径：" + read() + " · " + api.statsRangeOf(comp));
+  api.renderAll();
+}
+
 /* -------------------- 通道别名（ticket #36） --------------------------------
  * 规矩只有一条：**有序候选，取第一条在本场次存在的**。它实现一次（Python 的
  * `aliases.landing`），随页面载荷贴成一张落点表；前端只**查表**，不重写规则。

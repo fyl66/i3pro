@@ -3178,6 +3178,150 @@ class Checker:
                 "if(c)i3pro.componentAction(c,'close');return true;})()")
         time.sleep(0.3)
 
+    # ------------------------------------------- A89 光标 A–B 区间统计
+    def cursor_stats(self):
+        """#44 光标 A–B 区间统计：真点「显示 → A–B」、真放 A/B、数跟着 B 跑。
+
+        假 DOM 证明不了"这个菜单点得到"：那里的元素没有面积、没有命中测试。
+        这一票的验收里"摆好 A/B 后抬头数值随光标变化"正是这一类。
+        （三个数的**算法**在无头那边钉得死：受控序列 + 精确读数，这里不重复。）
+        """
+        sys.path.insert(0, os.path.join(ROOT, "src"))
+        from i3pro import cursorstats as cursorstatsmod
+
+        def graph_of():
+            raw = self.js(
+                "JSON.stringify((function(){var c=i3pro.state.components.filter(function(x)"
+                "{return x.type==='graph';})[0];"
+                "return c?{id:c.id,range:i3pro.statsRangeOf(c)}:null;})())")
+            return json.loads(raw) if raw and raw != "null" else None
+
+        def head_of(component_id):
+            """抬头第一行的三格数字 + 那句提示（有没有显示出来）。"""
+            raw = self.js(
+                "(function(){var el=document.querySelector('[data-id=\"" + component_id
+                + "\"] .graphhead');if(!el)return null;"
+                "var rows=el.querySelectorAll('.lrow');"
+                "for(var i=0;i<rows.length;i++){"
+                "if(String(rows[i].className).indexOf('labnote')>=0)continue;"
+                "var mm=rows[i].querySelectorAll('.lmm');"
+                "if(!mm.length)continue;"
+                "var note=el.querySelector('.labnote');"
+                "return JSON.stringify({mm:[].map.call(mm,function(s){return s.textContent;}),"
+                "shown:[].map.call(mm,function(s){return s.style.display!=='none';}),"
+                "note:note?note.textContent:'',"
+                "noteShown:!!(note&&note.style.display!=='none')});}return null;})()")
+            return json.loads(raw) if raw and raw != "null" else None
+
+        self.js("i3pro.applyPreset(i3pro.worksheetCatalogue().sheets[0].name); true")
+        time.sleep(0.8)
+        made = graph_of()
+        self.check("#44 页面上有一件时间/距离图（统计范围挂在它上面）", bool(made),
+                   json.dumps(made, ensure_ascii=False))
+        if not made:
+            return
+        component_id = made["id"]
+
+        # 1) 真点标题栏上的「显示」：菜单真的开出来（这一件组件的按钮里按文案找）
+        button = json.loads(self.js(
+            "JSON.stringify((function(){var el=document.querySelector('[data-id=\"" + component_id
+            + "\"] .ctools');if(!el)return null;"
+            "var b=[].filter.call(el.querySelectorAll('button'),function(x)"
+            "{return x.textContent==='显示';})[0];"
+            "return b?__center(b):null;})())") or "null")
+        self.check("#44 「显示」按钮点得到", bool(button) and button.get("w", 0) > 0,
+                   json.dumps(button, ensure_ascii=False))
+        if not button:
+            return
+        self.browser.click(button["x"], button["y"], self.session)
+        time.sleep(0.4)
+
+        # 2) 菜单里真点「A–B」
+        chip = json.loads(self.js(
+            "JSON.stringify((function(){"
+            "var c=document.querySelector('.popmenu [data-stats-range=\"ab\"]');"
+            "return c?__center(c):null;})())") or "null")
+        self.check("#44 菜单里有一枚点得到的「A–B」按钮",
+                   bool(chip) and chip.get("w", 0) > 0, json.dumps(chip, ensure_ascii=False))
+        if not chip:
+            self.js("i3pro.closePopMenu(); true")
+            return
+        self.browser.click(chip["x"], chip["y"], self.session)
+        time.sleep(0.5)
+        self.check("#44 真点「A–B」之后这一件组件换了统计范围",
+                   (graph_of() or {}).get("range") == "ab",
+                   json.dumps(graph_of(), ensure_ascii=False))
+        self.js("i3pro.closePopMenu(); true")
+        time.sleep(0.2)
+
+        # 3) 没有基准光标：抬头不印数字，改说那句现成的下一步（与导出面板同一句）
+        self.js("i3pro.state.datumOn=false;i3pro.state.datum=null;i3pro.renderAll();true")
+        time.sleep(0.3)
+        empty = head_of(component_id)
+        self.check("#44 选了 A–B 又没放基准光标：抬头不印数字、改说下一步",
+                   bool(empty) and not any(empty["shown"])
+                   and all(one == "" for one in empty["mm"]) and empty["noteShown"]
+                   # 那句话不在这个文件里再抄一遍：拿后端那份常量当裁判
+                   and empty["note"].strip() == cursorstatsmod.MISSING_AB,
+                   json.dumps(empty, ensure_ascii=False))
+
+        # 4) 真移动鼠标 + 真按空格放 A，再移动鼠标：三个数跟着 B 跑
+        box = json.loads(self.js(
+            "JSON.stringify((function(){var c=document.querySelector('[data-id=\"" + component_id
+            + "\"] canvas');return c?__center(c):null;})())") or "null")
+        if not box:
+            self.check("#44 这一件组件的画布点得到", False, "找不到 canvas")
+            return
+        left = box["x"] - box["w"] * 0.25
+        right = box["x"] + box["w"] * 0.30
+        self.browser.mouse("mouseMoved", left, box["y"], self.session, buttons=0)
+        time.sleep(0.4)
+        at_left = self.js("i3pro.state.cursor")
+        self.browser.key_named(" ", "Space", 32, self.session, text=" ")
+        time.sleep(0.4)
+        self.check("#44 真按空格把基准光标 A 放在光标处",
+                   self.js("i3pro.state.datumOn===true") is True
+                   and abs(self.js("i3pro.state.datum") - at_left) < 1e-9,
+                   "A=%s，放之前光标在 %s" % (self.js("i3pro.state.datum"), at_left))
+        first = head_of(component_id)
+        self.check("#44 摆好 A/B 之后抬头又印数字了",
+                   bool(first) and all(first["shown"]) and not first["noteShown"],
+                   json.dumps(first, ensure_ascii=False))
+
+        # 前端算出来的区间与后端同一口径（两边分叉时，一个在浏览器里、一个在
+        # points/报表里，用户看到的是两套数）
+        span = json.loads(self.js("JSON.stringify(i3pro.abSpan())"))
+        expected = cursorstatsmod.span_of(self.js("i3pro.state.datum"),
+                                          self.js("i3pro.state.cursor"))
+        self.check("#44 前端算出来的 A–B 区间与后端 cursorstats 同一口径",
+                   span.get("from") == expected[0] and span.get("to") == expected[1],
+                   "%s vs %s" % (json.dumps(span), expected))
+
+        self.browser.mouse("mouseMoved", right, box["y"], self.session, buttons=0)
+        time.sleep(0.5)
+        second = head_of(component_id)
+        self.check("#44 主光标 B 一动，抬头那三个数跟着变",
+                   bool(second) and all(second["shown"]) and second["mm"] != first["mm"],
+                   "%s -> %s" % (json.dumps(first and first["mm"]),
+                                 json.dumps(second and second["mm"])))
+        # 截图是给人复核用的，不是断言：导入那两关开过别的标签页之后，被压到后台的
+        # 这张 target 上 captureScreenshot 会一直等（实测 30 s 超时）——先把它调到
+        # 前台；万一还是没截下来，说一声、别把整条回归拖下水。
+        try:
+            self.browser.call("Page.bringToFront", session=self.session)
+            time.sleep(0.2)
+            self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-ab-stats.png"),
+                              self.session)
+        except Exception as trouble:      # noqa: BLE001 - 截图失败不该是一条断言
+            print("  NOTE  #44 截图没存下来（不影响断言）：%s" % trouble)
+
+        # 收尾：范围回到默认（可见区间），别给后面的验收留下一个改了范围的组件
+        self.js("(function(){var c=i3pro.state.components.filter(function(x)"
+                "{return x.type==='graph';})[0];"
+                "if(c)i3pro.setStatsRange(c,'view');"
+                "i3pro.state.datumOn=false;i3pro.renderAll();return true;})()")
+        time.sleep(0.3)
+
     def write_seam(self):
         """A83：写路径只有 ``sessionRequest`` 一个出口，服务端那句中文原因要活着到用户眼前。
 
@@ -3427,6 +3571,8 @@ def main(argv=None):
                 "http://127.0.0.1:%d/" % args.port, work_dir)
             # #43 姿态图：假 DOM 证明不了的那三条（拖得动 / 复位 / 跟光标）。
             checker.attitude()
+            # #44 光标 A–B 区间统计：真点「显示 → A–B」、真放 A/B、数跟着 B 跑。
+            checker.cursor_stats()
             errors = browser.page_errors()
             checker.check("整场没有页面级报错", not errors, errors[:3])
         bad = [name for name, ok in checker.results if not ok]

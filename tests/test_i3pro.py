@@ -49,6 +49,7 @@ from i3pro import (  # noqa: E402
     axes as axesmod,
     attitude as attitudemod,
     cache, canlog, channelpick, channelref, channels, csvlog, dbc, derive, gpsfix,
+    cursorstats as cursorstatsmod,
     cli,
     laps as lapsmod, ld, library as librarymod,
     maths as mathsmod, motec_csv,
@@ -1760,6 +1761,117 @@ class TestAttitude(unittest.TestCase):
             attitudemod.rotation_matrix(0.3, 0.7, 1.1), frozen, atol=1e-12)
 
 
+class TestCursorStats(unittest.TestCase):
+    """光标区间统计（ticket #44）：**同一组数，两种范围**。
+
+    Marple 的 `POST /api/v1/signals/cursor/stats` 实测只回 `{min, mean, max}` 三个数，
+    所以这一票**不加新统计量**（σ / 斜率 / 积分不做），只把"算哪一段"从"当前可见
+    区间"扩成可选 **A–B**。口径钉在这里：
+
+    * **左闭右闭**——正好落在 A 或 B 上的样本算数，与导出那套范围同一个口径；
+    * **反序自动交换**——A 在 B 右边与正常顺序是同一个区间；
+    * 只数**有效样本**（NaN / inf 不算）；空区间给 `None`，**不是 0**。
+
+    前端 `viewer.html` 里的 `rangeStats` / `abSpan` 是这一份的镜像（没有构建步骤、
+    跑不了 Python）。下面那组受控常量与 `tools/smoke_viewer.js` 里那份**逐字相同**：
+    哪一边先改，另一边就会红。
+    """
+
+    #: 受控序列：时间 0,1,2,3,4 秒，值 10..50（与 smoke 里那条一模一样）。
+    X = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
+    V = np.array([10.0, 20.0, 30.0, 40.0, 50.0])
+
+    def test_受控序列上的三个数与前端那份一致(self):
+        """A=1、B=3 → 20 / 40 / 30；B 挪到 4 → 20 / 50 / 35。
+
+        这一组数是**两边共用的冻结常量**（`tools/smoke_viewer.js` 里逐字写着
+        `20.00|40.00|30.00` 与 `20.00|50.00|35.00`）。改了这里的口径就要改那边。
+        """
+        self.assertEqual(cursorstatsmod.interval_stats(self.X, self.V, 1, 3),
+                         {"min": 20.0, "max": 40.0, "avg": 30.0, "n": 3})
+        self.assertEqual(cursorstatsmod.interval_stats(self.X, self.V, 1, 4),
+                         {"min": 20.0, "max": 50.0, "avg": 35.0, "n": 4})
+
+    def test_闭区间两端都算数(self):
+        # 端点是样本本身：半开区间会各少一个（n=3 而不是 5）
+        self.assertEqual(cursorstatsmod.interval_stats(self.X, self.V, 0, 4)["n"], 5)
+        self.assertEqual(cursorstatsmod.interval_stats(self.X, self.V, 0, 2)["n"], 3)
+
+    def test_与_numpy_算出来的一样(self):
+        rng = np.random.default_rng(20261017)
+        x = np.sort(rng.uniform(0.0, 100.0, 4000))
+        v = rng.normal(size=4000)
+        v[::37] = np.nan          # 撒一把 NaN：它不该进统计，但也不该让整段变成 None
+        for a, b in ((0.0, 100.0), (12.5, 60.25), (-5.0, 5.0), (99.0, 101.0)):
+            with self.subTest(span=(a, b)):
+                got = cursorstatsmod.interval_stats(x, v, a, b)
+                inside = v[(x >= a) & (x <= b) & np.isfinite(v)]
+                self.assertEqual(got["n"], int(inside.size))
+                self.assertAlmostEqual(got["min"], float(inside.min()))
+                self.assertAlmostEqual(got["max"], float(inside.max()))
+                self.assertAlmostEqual(got["avg"], float(inside.mean()))
+
+    def test_反序自动交换(self):
+        self.assertEqual(cursorstatsmod.interval_stats(self.X, self.V, 4, 1),
+                         cursorstatsmod.interval_stats(self.X, self.V, 1, 4))
+        self.assertEqual(cursorstatsmod.span_of(4, 1), (1.0, 4.0))
+        self.assertEqual(cursorstatsmod.span_of(1, 1), (1.0, 1.0))
+
+    def test_缺一头就是没有区间(self):
+        self.assertIsNone(cursorstatsmod.span_of(None, 3))
+        self.assertIsNone(cursorstatsmod.span_of(3, None))
+        self.assertIsNone(cursorstatsmod.interval_stats(self.X, self.V, None, 3))
+        self.assertIsNone(cursorstatsmod.interval_stats(self.X, self.V, 3, None))
+
+    def test_空区间给_None_而不是_0(self):
+        """给 0 会被读成"这一段的值真的是 0"——比没有数更糟。"""
+        self.assertIsNone(cursorstatsmod.interval_stats(self.X, self.V, 1.2, 1.8))
+        self.assertIsNone(cursorstatsmod.interval_stats([0.0, 1.0], [np.nan, np.nan], 0, 1))
+
+    def test_两个光标落在同一个位置算一个点(self):
+        self.assertEqual(cursorstatsmod.interval_stats(self.X, self.V, 2, 2),
+                         {"min": 30.0, "max": 30.0, "avg": 30.0, "n": 1})
+
+    def test_两列长度不齐时按短的算(self):
+        """取数那两条路（主时间基 / 通道列）理论上一样长，但别让越界的索引炸掉统计。"""
+        self.assertEqual(cursorstatsmod.interval_stats([0.0, 1.0, 2.0], [5.0, 6.0], 0, 2),
+                         {"min": 5.0, "max": 6.0, "avg": 5.5, "n": 2})
+
+    def test_范围只有两档且默认是可见区间(self):
+        self.assertEqual(cursorstatsmod.RANGES, ("view", "ab"))
+        self.assertEqual(cursorstatsmod.DEFAULT_RANGE, "view")
+        self.assertIn("A–B", cursorstatsmod.MISSING_AB)
+
+    @_needs(HILL)
+    def test_高避金标准上的一段与_numpy_一致(self):
+        with ld.LogFile.read(HILL) as log:
+            times = timebase.axis(log)
+            values = derive.hold_to_master(log, "Vx KF")
+            a = float(times[len(times) // 3])
+            b = float(times[len(times) // 2])
+        got = cursorstatsmod.interval_stats(times, values, a, b)
+        inside = values[(times >= a) & (times <= b) & np.isfinite(values)]
+        self.assertGreater(got["n"], 100, "这一段本该有上百个样本")
+        self.assertEqual(got["n"], int(inside.size))
+        self.assertAlmostEqual(got["min"], float(inside.min()))
+        self.assertAlmostEqual(got["max"], float(inside.max()))
+        self.assertAlmostEqual(got["avg"], float(inside.mean()))
+
+    @_needs(ENDURANCE)
+    def test_耐久金标准上的一段与_numpy_一致(self):
+        """五件套第⑤条要**两份**金标准（#42 评审点出来的）。"""
+        with ld.LogFile.read(ENDURANCE) as log:
+            times = timebase.axis(log)
+            values = derive.hold_to_master(log, "GPS Speed")
+            a = float(times[len(times) // 4])
+            b = float(times[len(times) // 2])
+        got = cursorstatsmod.interval_stats(times, values, b, a)     # 顺手反着给
+        inside = values[(times >= a) & (times <= b) & np.isfinite(values)]
+        self.assertGreater(got["n"], 100, "这一段本该有上百个样本")
+        self.assertEqual(got["n"], int(inside.size))
+        self.assertAlmostEqual(got["max"], float(inside.max()))
+
+
 class TestChannelGroups(unittest.TestCase):
     """i2 Pro groups channels that share a unit so they can share one axis."""
 
@@ -2652,6 +2764,52 @@ class TestViewerScript(unittest.TestCase):
         self.assertIn("function traceKey()", page, "没有 traceKey：换档就没法只重取曲线")
         self.assertIn("const key = traceKey();", page,
                       "/trace 那条取数路没有用 traceKey")
+
+    def test_统计范围的两档与界面上那张表是同一份(self):
+        """A89：界面上的两枚按钮由 JS 里那张表建出来，必须与 ``cursorstats.RANGES`` 一样。
+
+        漂开的后果不报错、只有用户看得见：界面写了一个后端不认的范围，抬头就静默
+        退回（或者反过来，后端只认 view / ab 而界面上写着别的词）。
+        """
+        page = (ROOT / "src" / "i3pro" / "web" / "viewer.html").read_text(encoding="utf-8")
+        match = re.search(r"const STATS_RANGES = \[(.*?)\];", page)
+        self.assertIsNotNone(match, "界面里没有 STATS_RANGES 这张表")
+        names = re.findall(r'"([a-z]+)"', match.group(1))
+        self.assertEqual(names, list(cursorstatsmod.RANGES),
+                         "界面上的两档与 cursorstats.RANGES 不是同一份")
+        labels = re.search(r"const STATS_RANGE_LABELS = \{(.*?)\};", page, re.S)
+        self.assertIsNotNone(labels, "界面里没有 STATS_RANGE_LABELS 这张表")
+        for mode in cursorstatsmod.RANGES:
+            found = re.search(r'%s:\s*"([^"]*)"' % mode, labels.group(1))
+            self.assertIsNotNone(found, f"「{mode}」在按钮上没有中文名")
+            # 逐字比，不只比"有没有"：按钮上的中文名是用户唯一看得见的那个词，
+            # 两份各写一半（界面一份、Python 一份）时不比对文字就会悄悄漂开。
+            self.assertEqual(found.group(1), cursorstatsmod.LABELS[mode],
+                             f"「{mode}」在界面上的中文名与 cursorstats.LABELS 不是同一份")
+        # 默认范围：界面上得有个常量、`statsRangeOf` 得真的用它，而且与后端那个相等——
+        # 否则 Python 那份 `DEFAULT_RANGE` 只是"一个被测试读了一下的常量"，与现实无关。
+        default = re.search(r'const STATS_RANGE_DEFAULT = "([a-z]+)";', page)
+        self.assertIsNotNone(default, "界面里没有 STATS_RANGE_DEFAULT")
+        self.assertEqual(default.group(1), cursorstatsmod.DEFAULT_RANGE,
+                         "界面上的默认范围与 cursorstats.DEFAULT_RANGE 不是同一个词")
+        self.assertIn(": STATS_RANGE_DEFAULT;", page,
+                      "statsRangeOf 没有用那个默认常量（改了常量也不会生效）")
+
+    def test_没有_A_B_时那句话只写一遍(self):
+        """A89 验收原文："（复用，别写第二遍。）"
+
+        这句话原来长在导出面板的「光标 A–B」预置里。抬头那一栏选了 A–B 又没放基准
+        光标时要说同一句——**同一个常量两处用**，而不是抄一份。抄一份的代价是下次
+        改文案只改一处，用户在两个地方看到两种说法。
+        """
+        page = (ROOT / "src" / "i3pro" / "web" / "viewer.html").read_text(encoding="utf-8")
+        self.assertEqual(page.count(cursorstatsmod.MISSING_AB), 1,
+                         "「没有 A–B」那句话在前端出现了不止一次（该共用 NO_AB_HINT）")
+        self.assertEqual(page.count("const NO_AB_HINT"), 1, "NO_AB_HINT 定义了两遍")
+        self.assertGreaterEqual(
+            page.count("NO_AB_HINT"), 4,
+            "NO_AB_HINT 没被两处共用（定义 + 抬头 + 导出预置 + 导出表），现在只有 "
+            + str(page.count("NO_AB_HINT")) + " 处")
 
 
 class TestComponentRegistry(unittest.TestCase):

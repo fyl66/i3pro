@@ -209,6 +209,10 @@
      和"真实通道"那几行的配色区分开（调色板里没有这个色，ticket #34）。 */
   .lrow.lmissing { position:absolute; left:70px; right:8px; color:#c9a227;
                    background:rgba(201,162,39,.12); }
+  /* 选 A–B 又没放基准光标时那一行（ticket #44）：同样是贴底的一句话，
+     但它是"怎么把范围放出来"的指路，不是错误，所以用普通的灰。 */
+  .lrow.labnote { position:absolute; left:70px; right:8px; color:var(--muted);
+                  background:rgba(15,17,21,.72); }
   /* Three resize affordances: drag the right edge, the bottom edge, or the
      corner (both). The old single 6 px strip at the very bottom was almost
      impossible to hit because the canvas usually does not fill the body. */
@@ -3007,7 +3011,13 @@ function valueAt(trace, x) {
   return trace.value[lo];
 }
 
-function visibleStats(trace, x0, x1) {
+/** 一条通道在 ``[x0, x1]``（左闭右闭）里的三个统计量；窗口里没有有效样本给 null。
+ *
+ * 名字不叫 "visible"：从 #44 起它既服务"可见区间"，也服务"光标 A–B"——按**调用方给的
+ * 那个区间**算，自己不管这个区间是怎么来的。口径与 `src/i3pro/cursorstats.py` 同一份
+ * （左闭右闭、只认有效样本、不插值）。
+ */
+function rangeStats(trace, x0, x1) {
   const xs = traceX(trace);
   if (!xs || !xs.length) return null;
   let lo = Infinity, hi = -Infinity, sum = 0, n = 0;
@@ -3023,6 +3033,42 @@ function visibleStats(trace, x0, x1) {
   }
   if (!n) return null;
   return { min: lo, max: hi, avg: sum / n, n: n };
+}
+
+/* ---------------------------------------- 光标 A–B 区间统计（ticket #44）
+ * 抬头那三项（Min / Max / Avg）原本只算"当前可见区间"。这一票加一个**范围开关**：
+ * 可见区间（默认，现状）/ 光标 A–B（两个光标钉死，左闭右闭）。
+ *
+ * 口径与后端 `src/i3pro/cursorstats.py` 是**同一份**：前端没有构建步骤、跑不了
+ * Python，重一份不可避免，所以由 `tools/smoke_viewer.js` 拿**冻结常量**对拍
+ * （那组数同时钉在 `tests/test_i3pro.py::TestCursorStats` 里，两边分叉就会红）。
+ *
+ * `NO_AB_HINT` 在前端**只写一遍**：导出面板的「光标 A–B」预置与抬头共用它——
+ * 验收原文是"复用，别写第二遍"。`TestViewerScript` 按源码钉住这一点。
+ */
+const NO_AB_HINT = "没有 A–B：按 D 打开基准光标，把鼠标放到 A 的位置按空格；再移到 B 按空格。";
+const STATS_RANGES = ["view", "ab"];
+//: 默认范围：不写 `config.statsRange` 就是"跟着缩放走"那个。与后端
+//: `cursorstats.DEFAULT_RANGE` 是同一份（`TestViewerScript` 逐字比）。
+const STATS_RANGE_DEFAULT = "view";
+const STATS_RANGE_LABELS = { view: "可见区间", ab: "光标 A–B" };
+
+/** 这一件组件的统计范围：可见区间（默认）还是光标 A–B。 */
+function statsRangeOf(comp) {
+  const cfg = (comp && comp.config) || {};
+  return cfg.statsRange === "ab" ? "ab" : STATS_RANGE_DEFAULT;
+}
+
+/** A–B 区间（左闭右闭，反序自动交换）；两头不齐就带着那句现成的下一步回来。
+ *
+ * 主光标跟着鼠标走，所以这里的"区间"每次重画都在变——**B 动、数就动**，
+ * 与 Marple 的 cursor stats 是同一个交互。 */
+function abSpan() {
+  if (!state.datumOn || state.datum === null || state.cursor === null) {
+    return { error: NO_AB_HINT };
+  }
+  return { from: Math.min(state.datum, state.cursor),
+           to: Math.max(state.datum, state.cursor) };
 }
 
 function panelKey(comp, group) { return (comp ? comp.id + "|" : "") + group.key; }
@@ -3127,7 +3173,8 @@ function buildWorksheet() {
     const body = makeEl("div", "compbody" + (tabular ? " tabular" : ""), el);
     const bundle = { comp: comp, el: el, body: body, canvas: null, head: null,
                      sizeSpan: sizeSpan, titleSpan: titleSpan,
-                     off: null, cacheKey: "", legendKey: "", valueNodes: [] };
+                     off: null, cacheKey: "", legendKey: "", valueNodes: [],
+                     abNote: null };
     // 控件条由组件自己声明（注册表 #17/#19/#20）。位置与迁移前一致：在 canvas 之前。
     if (spec && spec.controls) spec.controls(comp, bundle, body);
     if (tabular) {
@@ -3454,9 +3501,23 @@ function renderGraphComponent(comp, b) {
   renderGraphHead(comp, b, groups, panels, overlapped);
 }
 
+/** 抬头里"贴底的一句话"（"本场次没有" / 选 A–B 而没放基准光标）：绝对定位，
+ * 不动图例的排版。贴在 `panel` 这个分栏的**底部往上 30 px**——再往下就压到横轴的
+ * 刻度字上了（第一次真浏览器截图里那行正好盖住 "1:00"）；`lift` 再往上抬，给
+ * 同时出现的那两句话错开一行。（这两行原来各写了一遍同一个算式，评审点出来后
+ * 收成一个函数。） */
+function headNote(host, cls, panel, lift, text) {
+  const spot = panel || { top: 0, panelH: 0 };
+  const row = makeEl("div", "lrow " + cls, host);
+  row.style.top = Math.max(2, spot.top + spot.panelH - 30 - (lift || 0)) + "px";
+  row.textContent = text;
+  return row;
+}
+
 /**
  * The i2 Pro graph header: one row per channel showing the value at the cursor
- * alongside the min / max / average of the visible range.
+ * alongside the min / max / average of the chosen range — the visible range by
+ * default, or the datum-to-cursor (A–B) span since #44.
  */
 function renderGraphHead(comp, b, groups, panels, overlapped) {
   const r = lane();
@@ -3469,12 +3530,15 @@ function renderGraphHead(comp, b, groups, panels, overlapped) {
     + "|" + (comp.config.mode || "tiled") + "|" + gone.join(",")
     // 处理过的通道会多一个 ƒ 角标（A75）：这套处理的名单变了，抬头就得重画。
     + "|" + Object.keys(processedChannels()).join(",")
+    // 统计范围（#44）也算进签名：标签里写着范围名，换范围就得重画抬头。
+    + "|" + statsRangeOf(comp)
     + "|" + [fields.cursor, fields.delta, fields.min, fields.max, fields.avg,
              fields.unit].join(",");
   b.head.style.display = state.show.legend ? "" : "none";
   if (b.legendKey !== signature) {
     b.head.innerHTML = "";
     b.valueNodes = [];
+    b.abNote = null;
     b.head.style.paddingLeft = "70px";
     let stacked = 0;
     groups.forEach((group, gi) => {
@@ -3525,14 +3589,23 @@ function renderGraphHead(comp, b, groups, panels, overlapped) {
     });
     if (gone.length) {
       const last = panels[panels.length - 1];
-      const row = makeEl("div", "lrow lmissing", b.head);
-      // 贴在最后一个分栏的**底部往上 30 px**：再往下就压到横轴的刻度字上了
-      // （第一次真浏览器截图里那行正好盖住 "1:00"）。
-      row.style.top = Math.max(2, last.top + last.panelH - 30) + "px";
-      row.textContent = "本场次没有（不画）：" + gone.join("、");
+      headNote(b.head, "lmissing", last, 0, "本场次没有（不画）：" + gone.join("、"));
     }
+    // 选 A–B 又没放基准光标时，抬头**不印数字**，改说那句现成的下一步（ticket #44）。
+    // 贴法与上面那条"本场次没有"共用同一个函数：同一个锚点（最后一个分栏的底部往上
+    // 30 px，再往下就压到横轴的刻度字上了）、两句话都在时错开一行。它一建出来就是
+    // 藏着的，显示与否由下面每帧的更新循环说了算（值随光标变）。
+    const note = headNote(b.head, "labnote", panels[panels.length - 1], gone.length ? 15 : 0,
+                          NO_AB_HINT);
+    note.style.display = "none";
+    b.abNote = note;
     b.legendKey = signature;
   }
+  // 统计范围（#44）：可见区间（默认）或光标 A–B。A–B 拿不到（没放基准光标 /
+  // 主光标不在图上）时**一律不印数字**，由 abNote 那句现成的话顶上。
+  const wantAB = statsRangeOf(comp) === "ab";
+  const ab = wantAB ? abSpan() : null;
+  const statsOn = state.show.measure && !(ab && ab.error);   // M 总闸 + A–B 拿不拿得到
   for (const node of b.valueNodes) {
     const trace = traceOf(node.name);
     const at = state.cursor === null ? null : valueAt(trace, state.cursor);
@@ -3546,8 +3619,10 @@ function renderGraphHead(comp, b, groups, panels, overlapped) {
     } else {
       node.delta.style.display = "none";
     }
-    if (state.show.measure && trace) {
-      const st = visibleStats(trace, r[0], r[1]);
+    if (trace && statsOn) {
+      // 数的是原始样本：A–B 两端左闭右闭，与导出那条范围一个口径（见
+      // `src/i3pro/cursorstats.py`——这段是它的镜像）。
+      const st = rangeStats(trace, wantAB ? ab.from : r[0], wantAB ? ab.to : r[1]);
       node.min.textContent = st ? fmt(st.min) : "--";
       node.max.textContent = st ? fmt(st.max) : "--";
       node.avg.textContent = st ? fmt(st.avg) : "--";
@@ -3556,8 +3631,18 @@ function renderGraphHead(comp, b, groups, panels, overlapped) {
       node.max.style.display = fields.max ? "" : "none";
       node.avg.style.display = fields.avg ? "" : "none";
     } else {
+      // 不印数字：连上一次那一屏留下的字也擦掉（不然缩一下窗口就印出旧值）。
+      node.min.textContent = "";
+      node.max.textContent = "";
+      node.avg.textContent = "";
       node.min.style.display = node.max.style.display = node.avg.style.display = "none";
     }
+  }
+  if (b.abNote) {
+    const needed = state.show.measure && ab && !!ab.error
+      && (fields.min || fields.max || fields.avg);
+    b.abNote.style.display = needed ? "" : "none";
+    if (needed) b.abNote.textContent = ab.error;
   }
 }
 
@@ -3654,6 +3739,17 @@ function setHeadField(comp, key, on) {
   renderAll();
 }
 
+/** 改这一件组件的统计范围（可见区间 / 光标 A–B，存进工作表）。 */
+function setStatsRange(comp, mode) {
+  if (STATS_RANGES.indexOf(mode) < 0) return;
+  comp.config.statsRange = mode;
+  const bundle = SHEET.get(comp.id);
+  // 抬头那三格的字与三个数都得重算：图例要重画（标签里写着范围名）。
+  if (bundle) { bundle.cacheKey = ""; bundle.legendKey = ""; }
+  saveLayout();
+  renderAll();
+}
+
 /**
  * 曲线"点与点之间"怎么取值（A79）。它**不是**每件组件自己的设置：取数只有一条路、
  * 一个 `state.traces` 存一份（ticket #21），两件图要两种连接方式就得多取一遍数、
@@ -3743,15 +3839,38 @@ function openDisplayMenu(comp, anchor) {
         openDisplayMenu(comp, anchor);   // 重开一次，让选中状态跟着走
       });
     }
+    // 统计范围（ticket #44）：下面那三项统计量到底算哪一段——可见区间（现状）/
+    // 光标 A–B。放在这三项**旁边**（而不是全局面板里），因为它就是"这一张图的
+    // 抬头怎么算"，与调色板、抬头字段同一档。
+    const scope = makeEl("div", "poprow", menu);
+    makeEl("span", "poplabel", scope).textContent = "统计范围";
+    const mode = statsRangeOf(comp);
+    for (const key of STATS_RANGES) {
+      const chip = makeEl("button", "popchip", scope);
+      chip.textContent = STATS_RANGE_LABELS[key];
+      chip.title = key === "ab"
+        ? "只算基准光标 A 到主光标 B 这一段（左闭右闭，和导出那条范围一个口径）"
+        : "跟着缩放走：这一屏能看到多少就算多少（默认）";
+      chip.dataset.statsRange = key;
+      if (key === mode) chip.classList.add("on");
+      chip.addEventListener("click", () => {
+        setStatsRange(comp, key);
+        openDisplayMenu(comp, anchor);   // 重开一次，让按钮上的选中状态跟着走
+      });
+    }
     const fields = headFields(comp);
+    // 标签跟着范围走：选 A–B 时还写"可见区间最小"就是在骗人。
+    const where = STATS_RANGE_LABELS[mode];
     popCheck(menu, "光标值", fields.cursor, (on) => setHeadField(comp, "cursor", on));
     popCheck(menu, "Δ（与基准光标之差）", fields.delta, (on) => setHeadField(comp, "delta", on));
-    popCheck(menu, "Min（可见区间最小）", fields.min, (on) => setHeadField(comp, "min", on));
-    popCheck(menu, "Max（可见区间最大）", fields.max, (on) => setHeadField(comp, "max", on));
-    popCheck(menu, "Avg（可见区间平均）", fields.avg, (on) => setHeadField(comp, "avg", on));
+    popCheck(menu, "Min（" + where + "最小）", fields.min, (on) => setHeadField(comp, "min", on));
+    popCheck(menu, "Max（" + where + "最大）", fields.max, (on) => setHeadField(comp, "max", on));
+    popCheck(menu, "Avg（" + where + "平均）", fields.avg, (on) => setHeadField(comp, "avg", on));
     popCheck(menu, "单位", fields.unit, (on) => setHeadField(comp, "unit", on));
     const hint = makeEl("div", "pophint", menu);
-    hint.textContent = "这几项跟着工作表存/还原；全局的「L 图例」「M 测量」仍然管所有组件。";
+    hint.textContent = (mode === "ab"
+      ? "选 A–B 而没放基准光标时，抬头不印数字，只说下一步（按 D 或空格）。"
+      : "") + "这几项跟着工作表存/还原；全局的「L 图例」「M 测量」仍然管所有组件。";
   });
 }
 
@@ -4819,7 +4938,7 @@ function renderStatusComponent(comp, b) {
 function gaugeRange(name) {
   const trace = traceOf(name);
   const r = lane();
-  const st = trace ? visibleStats(trace, r[0], r[1]) : null;
+  const st = trace ? rangeStats(trace, r[0], r[1]) : null;
   if (st && st.max > st.min) return [Math.min(0, st.min), st.max];
   return [0, 1];
 }
@@ -4900,7 +5019,7 @@ function renderAttitudeComponent(comp, b) {
   // 在某一台上可能是空模板通道（实测：高避的 `Aceinna Roll/Pitch` 全是 0，活的在
   // `Roll (2)`/`Pitch (2)`；耐久正好反过来）。不说的话用户只会觉得"这图坏了"。
   const flat = traces.some((trace) => {
-    const stats = visibleStats(trace, span[0], span[1]);
+    const stats = rangeStats(trace, span[0], span[1]);
     return stats && stats.max - stats.min < 1e-9;
   });
   if (flat) {
@@ -7974,7 +8093,9 @@ function exportPreset(cfg) {
   }
   if (cfg.range === "cursor") {
     if (!state.datumOn || state.datum === null) {
-      return { error: "没有 A–B：按 D 打开基准光标，把鼠标放到 A 的位置按空格；再移到 B 按空格。" };
+      // 这句话只有一份（ticket #44 的验收要求"复用，别写第二遍"）：抬头那边
+      // 选 A–B 又没放基准光标时，说的也是它。
+      return { error: NO_AB_HINT };
     }
     if (state.cursor === null) return { error: "把鼠标移到图上（让光标落在 B），再点导出。" };
     const a = Math.min(state.datum, state.cursor);
@@ -9266,7 +9387,7 @@ function init() {
     setSelectedChannels(selectedChannels().filter((name) => {
       const trace = traceOf(name);
       if (!trace) return false;
-      const st = visibleStats(trace, r[0], r[1]);
+      const st = rangeStats(trace, r[0], r[1]);
       return !!st && st.max - st.min > 1e-9;
     }));
     buildWorksheet();
@@ -9346,6 +9467,10 @@ window.i3pro = {
   exportMissingChannels: exportMissingChannels,
   palettes: PALETTE_SET, missingColor: MISSING_COLOR,
   headFields: headFields,
+  // 光标 A–B 区间统计（#44）：两档范围、"没有 A–B"那句原文，以及与后端
+  // cursorstats.py 同一份口径的两个函数（由 smoke 拿冻结常量对拍）。
+  statsRangeOf: statsRangeOf, setStatsRange: setStatsRange, abSpan: abSpan,
+  statsRanges: STATS_RANGES, noAbHint: NO_AB_HINT,
   channelColor: channelColor, channelColorIsManual: channelColorIsManual,
   setChannelColor: setChannelColor, setComponentPalette: setComponentPalette,
   setHeadField: setHeadField, openColorMenu: openColorMenu,

@@ -90,7 +90,7 @@
 | --- | --- | --- |
 | `type` | 是 | 显示形式，取 `viewer.html` 里 `COMPONENT_TYPES` 的键：`graph` / `scatter` / `histogram` / `spectrum` / `track` / `gauge` / `attitude` / `delta` / `status` / `report` / `chreport` |
 | `x` `y` `w` `h` | 否 | 格子位置与大小，缺省用这一类自己的默认尺寸（`x`/`y` 缺省 0） |
-| `config` | 否 | 这一类的配置项，能写什么由 `viewer.html` 里这一类的 `defaults()` 决定（例如 `gauge` 的 `subtype`、`graph` 的 `mode`、`histogram` 的 `bins`） |
+| `config` | 否 | 这一类的配置项，能写什么由 `viewer.html` 里这一类的 `defaults()` 决定（例如 `gauge` 的 `subtype`、`graph` 的 `mode` 与 `statsRange`、`histogram` 的 `bins`） |
 | `pick` | 否 | 通道从本场次里挑，见下 |
 
 ### 挑通道

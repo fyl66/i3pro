@@ -121,6 +121,7 @@ rea observe-web-session http://127.0.0.1:9222 <target_id> --observation-ms 60000
 顶层导航与各页路径、分析页控件清单、本地存储键、以及"没有 WebSocket"这一条——
 全部拿到字面证据（汇总见 [marple-parity.md](marple-parity.md) 的运行时一节）。
 
-**还没做**：`/signals/cursor/stats` 的返回量、姿态图/PFD 的实际渲染、`PLOT_RESOLUTION` 的档位。
-这三项拿到之后，P1（姿态图）、P2（光标区间统计）、P4（绘图分辨率）的 spec 才有资格开票；
-P3（热力图）不受影响，它只依赖已有的绘图管线。
+**还没做**：`/signals/cursor/stats` 的返回量、姿态图/PFD 的实际渲染（各需要人点几处）。
+拿到之后 P1（姿态图）、P2（光标区间统计）的 spec 才有资格开票。`PLOT_RESOLUTION` 不用再操作——
+档位与降采样判据已经从静态包里量到（`500 × 2^档位`，默认 Medium=2000，见对照表第 12 行），
+P4 可以直接开票；P3（热力图）只依赖已有绘图管线，也不受影响。

@@ -54,7 +54,7 @@
 | 9 | 通用表格 | `TABULAR="tabular"`；渲染三选一 `TABLE` / `NUMBER` / `BARCHART` | `report`（时间报告）+ `chreport`（通道报告）两张专用表 | 押后（现有两张覆盖了主要用途） |
 | 10 | 报文/元数据图 | `MESSAGE="message"` / `METADATA="metadata"` | CAN 帧表已能导入成场次 + `status` 组件 | 押后 |
 | 11 | **光标 A–B 区间统计** | 端点 `/signals/cursor/values`、`/signals/cursor/stats`；前端 `valuesBetweenCursors`、"Loading cursor stats" | A–B 目前**只作为导出范围**；图上抬头是「可见区间 min/max/avg + 光标值 + Δ」 | **做（P2）** — 缺的是"在 A–B 这个范围上算一遍统计" |
-| 12 | **绘图分辨率** | 设置项 `PLOT_RESOLUTION`、`SHOW_DATAPOINTS` | serve 模式按可见区间全分辨率重取；快照预先抽稀；A79 已有"曲线连接"（线性/阶梯） | 做（P4）——把散落的三处抽稀收成一个用户可见的旋钮 |
+| 12 | **绘图分辨率** | 设置项 `PLOT_RESOLUTION`（默认档位 `2`）与 `SHOW_DATAPOINTS`（默认 `true`）；档位枚举实测 `["Min","Low","Medium","High","Max"]`，取值是 **`500 × 2^档位`** → 500 / 1000 / **2000（默认 Medium）** / 4000 / 8000 点；取数请求带 `resolution`，并自带 `subsampled = 估计采样率 × 窗口秒数 > 2 × resolution` 这条判据交给服务端降采样 | serve 模式按可见区间重取全分辨率；快照预先抽稀；A79 已有"曲线连接"（线性/阶梯保持） | 做（P4）——把散落的三处抽稀收成**一个用户可见的五档旋钮** |
 | 13 | 区段轴 | 横轴模式枚举 `{DISTANCE, SEGMENTS}`；端点 `/sources/segments` | 区段是**带子 + 报表分组**；横轴只有时间/距离/双圈 | 押后 |
 | 14 | 导出任务化 | `exportJobs`；`DATA_EXPORT` / `PLOT_EXPORT` / `FIGURES_EXPORT` 三种模态 | 导出是同步的（已有预计行数 + 进度条 + 取消） | 押后 |
 | 15 | 函数目录 | 前端 12 个：`calibration` `clamp` `cumsum` `difference` `discrete_derivative` `integral` `moving_aggregate` `outliers_fixed` `outliers_stddev` `sample_shift` `time` `zeroing`；**参数带类型**（signal / enum / number），表单按类型渲染 | `maths.py` **53 个函数** + 插入通道下拉 + 本地/全局作用域 | 已超越（只借鉴"参数类型驱动表单"这一条表述） |
@@ -110,6 +110,7 @@
   `workspace-settings:${id}` 这条推断得到了字面确认。
 - **第三方**：Auth0（登录）、Gleap（客服）、`gator.volces.com`（统计）、`rsms.me/inter`（字体）。
 
-**仍然缺三项**，都要"边操作边观察"（人点几处即可，方法写在采集规程里）：
-① `/signals/cursor/stats` 的返回量清单（P2 的输入）；② 姿态图/PFD 的实际渲染与配置项（P1 的输入）；
-③ `PLOT_RESOLUTION` 的取值档位（P4 的输入）。这三项没拿到之前，P1/P2/P4 的 spec 只算"有方向"。
+**绘图分辨率的取值**已经从静态包里量到了（见对照表第 12 行），不用再操作。
+**仍然缺两项**，都要"边操作边观察"（人点几处即可，方法写在采集规程里）：
+① `/signals/cursor/stats` 的返回量清单（P2 的输入）；② 姿态图/PFD 的实际渲染与配置项（P1 的输入）。
+这两项没拿到之前，P1/P2 的 spec 只算"有方向"。

@@ -161,6 +161,61 @@ class WebSocket:
                     return b"".join(pieces).decode("utf-8")
 
 
+#: 页面侧的"忙不忙"探针。``open()`` 用 ``Page.addScriptToEvaluateOnNewDocument``
+#: 装它，所以它跑在页面自己的脚本**之前**，第一次绘制也截得住。
+#:
+#: 记两件事：**最近一次异步活动**的时刻（``fetch`` 发出/回来、短 ``setTimeout``
+#: 挂上/触发），以及还没触发的短定时器个数。
+#:
+#: 为什么要连 ``setTimeout`` 一起包：这个工作台不少重绘是**防抖之后**才发的
+#: （``scheduleRefresh`` 就是 150 ms）。只等 ``fetch`` 会在"防抖还没到点、请求根本
+#: 没发出去"的空档里提前返回，然后那条断言就去量一个还没换过的画面——这正是
+#: "等多久靠猜"会偶尔闪的原因。
+#:
+#: 只看 **≤2 s** 的定时器：长的是"四秒后收起提示"这类收尾，不该算忙。
+#:
+#: 为什么不用 ``requestAnimationFrame`` 当"画过了"的凭据（第一版用的就是它）：
+#: 隐藏的标签页 rAF **完全停**（实测 0 fps），而这个盘同时开着十几个标签页，只有
+#: 最后开的是 ``visible``。于是"等两帧"在某些页上永远等不到，只能撞满超时——实测
+#: 有约 13 次撞满 5 s，合计 60 s 以上，正好是"等安静"总耗时里的大头。改成一条时间
+#: 下限（``MIN_MS``）之后这个坑没有了，而且更简单。
+#:
+#: 为什么是 ``Date.now()`` 而不是 ``performance.now()``（第二版用的就是后者）：
+#: ``performance.now()`` **每个文档各从 0 起算**，而工作台在保存侧车之后会
+#: ``location.reload()``。跨过那次重载，"现在 - 开始时"直接变成负数，那条下限永远
+#: 满足不了——实测正好卡在 ``/session/...`` 上撞满 5 s 超时两次。``Date.now()`` 跨
+#: 文档连续，"距上次活动多久"这个数才是它看上去的意思。
+SETTLE_HOOK = """
+(function () {
+  window.__i3proAct = Date.now();
+  var watched = new Set();
+  var touch = function () { window.__i3proAct = Date.now(); };
+  var rawFetch = window.fetch;
+  if (rawFetch) {
+    window.fetch = function () {
+      touch();
+      var settle = function () { touch(); };
+      try {
+        return rawFetch.apply(this, arguments).then(
+          function (r) { settle(); return r; },
+          function (e) { settle(); throw e; });
+      } catch (e) { settle(); throw e; }
+    };
+  }
+  var rawSet = window.setTimeout, rawClear = window.clearTimeout;
+  window.setTimeout = function (fn, delay) {
+    var rest = Array.prototype.slice.call(arguments, 2), id = 0;
+    var wrapped = function () { watched.delete(id); touch(); return fn.apply(this, arguments); };
+    id = rawSet.apply(window, [wrapped, delay].concat(rest));
+    if (!(delay > 2000)) { watched.add(id); touch(); }
+    return id;
+  };
+  window.clearTimeout = function (id) { watched.delete(id); return rawClear.call(window, id); };
+  window.__i3proPending = function () { return watched.size; };
+})();
+"""
+
+
 class Browser:
     """一个无头 Edge + 一条 CDP 连接。"""
 
@@ -188,6 +243,9 @@ class Browser:
         )
         self._id = 0
         self.events = []
+        #: 每一次 ``settle()`` 的耗时。整场跑完打一行 NOTE——"还剩多少时间是纯等"
+        #: 是这张盘自己的账（ticket #67）。
+        self.settle_times: list[float] = []
         self.ws = None
         for _ in range(200):
             try:
@@ -227,13 +285,19 @@ class Browser:
 
     def open(self, url, wait=0.0, init_script=None):
         """开一个标签页。``init_script`` 在页面自己的脚本**之前**跑（CDP 的
-        addScriptToEvaluateOnNewDocument），所以能截住页面第一次绘制。"""
+        addScriptToEvaluateOnNewDocument），所以能截住页面第一次绘制。
+
+        ``SETTLE_HOOK`` 每次都会装上——``settle()`` 靠它。``init_script`` 是另外给人
+        加的钩子（A104 的 ``AXIS_HOOK``）；CDP 允许装多条，两个并存。
+        """
         target = self.call("Target.createTarget", {"url": "about:blank"})
         session = self.call(
             "Target.attachToTarget", {"targetId": target["targetId"], "flatten": True}
         )["sessionId"]
         self.call("Page.enable", session=session)
         self.call("Runtime.enable", session=session)
+        self.call("Page.addScriptToEvaluateOnNewDocument",
+                  {"source": SETTLE_HOOK}, session=session)
         if init_script:
             self.call("Page.addScriptToEvaluateOnNewDocument",
                       {"source": init_script}, session=session)
@@ -261,7 +325,85 @@ class Browser:
             time.sleep(0.1)
         return False
 
+    #: ``settle()`` 的耐心上限。等的是"安静下来"，不是"等够久"；真卡住了也该有个头，
+    #: 而且**不在这一层报错**——把那件事留给紧随其后的断言，它才知道这条在验什么。
+    SETTLE_TIMEOUT = 5.0
+
+    #: "安静"的定义：距上一次异步活动（fetch 发出/回来、短定时器挂上/触发）至少这么久。
+    #: **看的是"最近有没有动过"，不是"现在有没有在飞"**——后者会被一次长下载一直摁住：
+    #: 实测第一版就是"有 fetch 在飞"当判据，167 次里有约 8 次撞满 10 s 超时（合计 80 s，
+    #: 正好是那 87.9 s 里的大头）。长下载本来就该让它自己在后台跑，需要等它的那条
+    #: 断言本来就另有 ``wait_for``。
+    QUIET_MS = 120.0
+
+    #: 每次 ``settle()`` 至少等这么久：一个同步重画（不进 fetch、不挂定时器）的点击
+    #: 什么活动都不留，只靠"空闲"当判据会立刻返回，浏览器还没轮到绘制那一帧。
+    #: 60 ms ≈ 60 Hz 下四帧，和原来"等两帧"是一个意思，但不依赖 rAF 真的在跑。
+    MIN_MS = 60.0
+
+    def settle(self, session, timeout=None):
+        """等页面安静下来，再往下走。
+
+        安静 = 待触发的短定时器一个不剩、距上一次异步活动至少 ``QUIET_MS``、而且本次
+        至少已经等了 ``MIN_MS``（见那两个常量的来历）。
+
+        代替"发个事件然后睡死 0.25/0.5/1.0 秒"：实测一次交互**通常 60-70 ms** 就返回，
+        比原来最短的 0.4 s 还省；而**该等的时候等得更足**——防抖还没到点的那种，
+        固定睡 0.5 s 常常不够，这里会一直等到那个定时器真的触发完。
+
+        （也顺手 :meth:`bring_to_front`：四个动作助手都会先调它，单独调 ``settle`` 的
+        地方则靠这里兜底。为什么必须先到前台见那个方法。）
+
+        返回 True/False。False 只是"到点了还没安静"，照旧往下走。
+        """
+        started = time.perf_counter()
+        quiet, note = self._settle(session, timeout)
+        self.settle_times.append((time.perf_counter() - started, note))
+        return quiet
+
+    def _settle(self, session, timeout):
+        """``settle()`` 的实活；外面那层只负责记账（ticket #67）。
+
+        返回 ``(安静了吗, 备注)``。备注只在"没安静"时给，写清当时页面在干什么——
+        下次有人问"这一票之后还剩多少时间是纯等"，那一行就是答案。
+        """
+        timeout = self.SETTLE_TIMEOUT if timeout is None else timeout
+        self.bring_to_front(session)
+        probe = "[Date.now() - window.__i3proAct, window.__i3proPending()]"
+        start = self.js(probe, session, timeout=timeout)
+        if not isinstance(start, list):
+            # 钩子没装上（页面在它之前就崩了之类）。别在这里假装成功，也别比原来
+            # 更省——退回一个固定的小等待，让后面的断言照旧有它的机会。
+            time.sleep(0.25)
+            return False, "探针读不出来（SETTLE_HOOK 没装上）"
+        #: 下限用**我这边**的单调钟量：页面的钟是每个文档一份，重载一次就从头算
+        #: （见 ``SETTLE_HOOK`` 那段）。所以"这次等够 60 ms 没有"只能在 Python 侧量。
+        began = time.perf_counter()
+        deadline = time.time() + timeout
+        last = start
+        while time.time() < deadline:
+            now = self.js(probe, session, timeout=timeout)
+            if isinstance(now, list):
+                last = now
+                waited = (time.perf_counter() - began) * 1000.0
+                if (now[1] == 0 and now[0] >= self.QUIET_MS and waited >= self.MIN_MS):
+                    return True, ""
+            time.sleep(0.01)
+        return False, ("%s · 待触发定时器 %s 个 · 距上次异步活动 %.0f ms"
+                       % (self.js("location.pathname", session), last[1], last[0]))
+
     # ---- 真输入 ----
+    def bring_to_front(self, session):
+        """动手之前先把这一页带到前台（ticket #67）。
+
+        这个盘同时开着十几个标签页，只有最后开的那个是 ``visible``。隐藏页有三个实测
+        过的坑：rAF **完全停**（0 fps）、``setTimeout`` 被浏览器降到 1 s 以上、以及
+        **往它派发鼠标事件本身就慢**——``Input.dispatchMouseEvent`` 要等渲染器回话，
+        而渲染器正被冻着：实测同一个 ``click`` 在隐藏页要 **5.09 s**、在可见页
+        **0.14 s**。真人本来也只会点看得见的那一页。
+        """
+        self.call("Page.bringToFront", {}, session=session)
+
     def mouse(self, kind, x, y, session, clicks=1, buttons=1):
         self.call("Input.dispatchMouseEvent", {
             "type": kind, "x": x, "y": y, "button": "left",
@@ -269,21 +411,23 @@ class Browser:
         }, session=session)
 
     def click(self, x, y, session, clicks=1):
+        self.bring_to_front(session)
         self.mouse("mouseMoved", x, y, session, buttons=0)
         for i in range(clicks):
             self.mouse("mousePressed", x, y, session, clicks=i + 1)
             self.mouse("mouseReleased", x, y, session, clicks=i + 1, buttons=0)
             time.sleep(0.05)
-        time.sleep(0.25)
+        self.settle(session)
 
     def double_click(self, x, y, session):
         self.click(x, y, session, clicks=2)
 
     def key(self, text, session):
+        self.bring_to_front(session)
         for ch in text:
             self.call("Input.dispatchKeyEvent", {"type": "keyDown", "text": ch}, session=session)
             self.call("Input.dispatchKeyEvent", {"type": "keyUp"}, session=session)
-        time.sleep(0.2)
+        self.settle(session)
 
     def insert_text(self, text, session):
         """中文没法用 keyDown 的 ``text`` 塞进去（要走 IME），用 Input.insertText。
@@ -291,13 +435,15 @@ class Browser:
         输入的是**真文本**，和"直接改 value + 派发 change"不是一回事：中间那些
         输入法 / 编辑框的行为仍然是真的。
         """
+        self.bring_to_front(session)
         self.call("Input.insertText", {"text": text}, session=session)
-        time.sleep(0.2)
+        self.settle(session)
 
     def key_named(self, key, code, windows_code, session, modifiers=0, text=None):
         """发一次真按键。``text`` 只有需要"按键默认动作"时才给（回车要它才会
         真的激活聚焦的那个按钮；不带 text 时页面只收到一个 keydown，什么也不发
         生——A78 那条"回车跳得动"就是这么空转了半个版本）。"""
+        self.bring_to_front(session)
         for kind in ("keyDown", "keyUp"):
             event = {
                 "type": kind, "key": key, "code": code,
@@ -307,7 +453,7 @@ class Browser:
             if text is not None and kind == "keyDown":
                 event["text"] = text
             self.call("Input.dispatchKeyEvent", event, session=session)
-        time.sleep(0.2)
+        self.settle(session)
 
     def shot(self, path, session):
         data = self.call("Page.captureScreenshot", {"format": "png"}, session=session)["data"]
@@ -613,7 +759,6 @@ class Checker:
         self.js("(function(){i3pro.state.cursor=null;i3pro.renderAll();return true;})()")
         before = len(json.loads(self.js("JSON.stringify(i3pro.state.lapsConfig.beacons)")))
         self.browser.click(button["x"], button["y"], self.session)
-        time.sleep(0.4)
         after = len(json.loads(self.js("JSON.stringify(i3pro.state.lapsConfig.beacons)")))
         self.check("#5 没设光标就按＋穿越 -> 说清楚要先把鼠标移到图上，并且不加信标",
                    after == before and "鼠标" in self.toast(), "toast=%r" % self.toast())
@@ -623,7 +768,6 @@ class Checker:
         cursor = self.js("i3pro.exactCursorTime()")
         self.check("#5 真点在图上 -> 光标落在那一刻", cursor is not None, "%.3f s" % (cursor or 0))
         self.browser.click(button["x"], button["y"], self.session)
-        time.sleep(0.8)
         beacons = json.loads(self.js("JSON.stringify(i3pro.state.lapsConfig.beacons)"))
         added = beacons[-1] if len(beacons) > before else {}
         self.check("#5 有光标时按＋穿越 -> 多一次穿越，时刻就是光标处",
@@ -692,12 +836,10 @@ class Checker:
         # 1) 真鼠标勾上、真点应用 -> 侧车出现，页面重载
         box = rect("gpsEnabled")
         self.browser.click(box["x"], box["y"], self.session)
-        time.sleep(0.2)
         self.check("#14 真鼠标点得动「启用校正」",
                    self.js("document.getElementById('gpsEnabled').checked") is True)
         apply_box = rect("gpsApply")
         self.browser.click(apply_box["x"], apply_box["y"], self.session)
-        time.sleep(0.6)
         disk = on_disk()
         self.check("#14 点「应用」把配置写进侧车", bool(disk) and disk.get("enabled") is True,
                    disk)
@@ -719,7 +861,6 @@ class Checker:
                    str(self.js("document.getElementById('gpsOffset').value")) == "5")
         apply_box = rect("gpsApply")
         self.browser.click(apply_box["x"], apply_box["y"], self.session)
-        time.sleep(0.6)
         disk = on_disk() or {}
         self.check("#14 时间偏移存进了侧车", abs(float(disk.get("offset_s", 0)) - 5.0) < 1e-9,
                    disk)
@@ -795,7 +936,6 @@ class Checker:
         # 1) 先把光标清掉：没光标时说清"先把鼠标移到图上"，而不是默默加在 0 s
         self.js("(function(){i3pro.state.cursor=null;i3pro.renderAll();return true;})()")
         self.browser.click(button()["x"], button()["y"], self.session)
-        time.sleep(0.4)
         self.check("#15 没设光标就按＋注释 -> 说清楚先移鼠标，并且不落盘",
                    on_disk() is None and "鼠标" in self.toast(), self.toast())
 
@@ -805,7 +945,6 @@ class Checker:
         self.browser.click(x, y, self.session)
         cursor = self.js("i3pro.exactCursorTime()")
         self.browser.click(button()["x"], button()["y"], self.session)
-        time.sleep(1.0)
         disk = on_disk() or {}
         rows = disk.get("notes") or []
         self.check("#15 真点「＋ 注释」-> 侧车里多一条，时刻是光标处",
@@ -822,7 +961,6 @@ class Checker:
         self.browser.key_named("a", "KeyA", 65, self.session, modifiers=2)
         self.browser.insert_text("这里换了刹车点", self.session)
         self.browser.key_named("Enter", "Enter", 13, self.session)
-        time.sleep(1.0)
         rows = (on_disk() or {}).get("notes") or []
         self.check("#15 真键盘改字 + 回车 -> 侧车里的文字变了",
                    len(rows) == 1 and rows[0]["text"] == "这里换了刹车点",
@@ -840,7 +978,6 @@ class Checker:
         self.browser.key_named("a", "KeyA", 65, self.session, modifiers=2)
         self.browser.insert_text("改了但不算数", self.session)
         self.browser.key_named("Escape", "Escape", 27, self.session)
-        time.sleep(0.5)
         self.check("#15 Esc 取消 -> 侧车一个字节没动",
                    open(path, "rb").read() == before,
                    json.dumps((on_disk() or {}).get("notes"), ensure_ascii=False))
@@ -855,7 +992,6 @@ class Checker:
             "(function(){var a=document.querySelector('#notesList a[data-note-del]');"
             "return a?JSON.stringify(__center(a)):null;})()"))
         self.browser.click(delete["x"], delete["y"], self.session)
-        time.sleep(1.0)
         rows = (on_disk() or {}).get("notes") or []
         self.check("#15 真点 ✕ -> 侧车里的那条没了", rows == [],
                    json.dumps(rows, ensure_ascii=False))
@@ -954,7 +1090,6 @@ class Checker:
         y = self.js("__py(60)")
         before_view = self.view()
         self.browser.double_click(x, y, self.session)
-        time.sleep(1.0)
         calls = hist_calls()
         view = self.view()
         self.check("#9 真双击放大 -> 直方图跟着换了窗口（重新问了一次）",
@@ -1039,7 +1174,6 @@ class Checker:
             seen = len(hist_calls())
             self.browser.key_named("ArrowDown", "ArrowDown", 40, self.session)
             self.browser.key_named("ArrowDown", "ArrowDown", 40, self.session)
-            time.sleep(1.0)
             calls = hist_calls()
             head = self.js(
                 "(function(){var el=document.querySelector('.comp[data-id=\"%s\"] .graphhead');"
@@ -1141,7 +1275,6 @@ class Checker:
         y = self.js("__py(60)")
         before_view = self.view()
         self.browser.double_click(x, y, self.session)
-        time.sleep(1.0)
         calls = spec_calls()
         view = self.view()
         self.check("#10 真双击放大 -> 频谱跟着换了窗口（重新问了一次）",
@@ -1158,7 +1291,6 @@ class Checker:
         if axis_box == "ok":
             seen = len(spec_calls())
             self.browser.key_named("ArrowDown", "ArrowDown", 40, self.session)
-            time.sleep(1.2)
             calls = spec_calls()
             self.check("#10 切纵轴（dB/线性）不该重新问服务端：那是同一份功率谱的写法",
                        len(calls) == seen,
@@ -1187,7 +1319,6 @@ class Checker:
                 "(function(){var b=document.querySelectorAll('#presetRow button')[%d];"
                 "return b?JSON.stringify(__center(b)):null;})()" % index))
             self.browser.click(box["x"], box["y"], self.session)
-            time.sleep(0.8)
             return json.loads(self.js(
                 "JSON.stringify({preset:i3pro.state.preset,"
                 "comps:i3pro.state.components.length,"
@@ -1258,7 +1389,6 @@ class Checker:
             if not box:
                 return False
             self.browser.click(box["x"], box["y"], self.session)
-            time.sleep(0.7)
             return True
 
         def type_name(text):
@@ -1319,7 +1449,6 @@ class Checker:
         if not box:
             return
         self.browser.click(box["x"], box["y"], self.session)
-        time.sleep(0.8)
         self.check("#33 真点 ✕ 之后页面上少了一个组件",
                    self.js("i3pro.state.components.length") == page_before - 1,
                    "%s -> %s" % (page_before, self.js("i3pro.state.components.length")))
@@ -1347,7 +1476,6 @@ class Checker:
                 return False
             box = json.loads(raw)
             self.browser.click(box["x"], box["y"], self.session)
-            time.sleep(0.9)
             return True
 
         picked = json.loads(self.js(
@@ -1360,7 +1488,6 @@ class Checker:
         self.check("#74 侧边栏里找得到一条还没勾的通道（真鼠标要点的）", bool(picked), picked)
         if picked:
             self.browser.click(picked["x"], picked["y"], self.session)
-            time.sleep(0.7)
             live = json.loads(self.js("JSON.stringify(i3pro.selectedChannels())"))
             self.check("#74 真点勾选框 -> 这一条进了图上", picked["name"] in live, live)
             click("wsSave", "保存")
@@ -1537,7 +1664,6 @@ class Checker:
         if not point:
             return
         self.browser.click(point["x"], point["y"], self.session)
-        time.sleep(1.0)
         self.check("#34 切过去之后，本场没有的那条被判成 missing",
                    self.js("i3pro.channelState(%r)" % bogus) == "missing",
                    self.js("i3pro.channelState(%r)" % bogus))
@@ -1689,7 +1815,6 @@ class Checker:
         if not cog:
             return
         self.browser.click(cog["x"], cog["y"], self.session)
-        time.sleep(0.6)
         self.check("#75 点 ⚙ 之后面板落在这一条通道上",
                    self.js("i3pro.state.setupChannel") == name,
                    self.js("i3pro.state.setupChannel"))
@@ -1733,7 +1858,6 @@ class Checker:
         time.sleep(1.2)
         before = self.js("String(i3pro.cursorValueFor(%s))" % json.dumps(name))
         self.browser.key_named("Z", "KeyZ", 90, self.session, modifiers=10)   # 2|8 = Ctrl+Shift
-        time.sleep(0.8)
         self.check("#75 Ctrl+Shift+Z 打开的还是这条通道的面板",
                    self.js("i3pro.state.setupChannel") == name,
                    self.js("i3pro.state.setupChannel"))
@@ -1767,7 +1891,6 @@ class Checker:
                 return False
             point = json.loads(raw_box)
             self.browser.click(point["x"], point["y"], self.session)
-            time.sleep(1.2)
             return True
 
         others = [label for label in ("分析", "对比", "动力")
@@ -1787,7 +1910,6 @@ class Checker:
         cog = json.loads(raw) if raw and raw != "null" else None
         if cog and cog.get("w", 0) > 0:
             self.browser.click(cog["x"], cog["y"], self.session)
-            time.sleep(0.6)
         remove_box = rect_of("setupRemove")
         self.check("#75 「删除处理」在屏幕上点得到",
                    bool(remove_box) and remove_box.get("w", 0) > 0, remove_box)
@@ -1819,7 +1941,6 @@ class Checker:
             if not box:
                 return False
             self.browser.click(box["x"], box["y"], self.session)
-            time.sleep(0.5)
             return True
 
         def open_popmenu(selector, label):
@@ -1862,7 +1983,6 @@ class Checker:
             "(function(){var p=document.createElement('i');"
             "p.style.background=%r;return p.style.background;})()" % wanted)
         self.browser.click(seat["x"], seat["y"], self.session)
-        time.sleep(0.6)
         now = self.js(
             "(function(){var p=document.createElement('i');"
             "p.style.background=i3pro.channelColor(%r, i3pro.state.components[0]);"
@@ -1903,7 +2023,6 @@ class Checker:
             os.path.join(ROOT, "out", "shots", "verify-inspector-settings.png"), self.session)
         average = fields["boxes"][4]                       # 光标值 / Δ / Min / Max / Avg / 单位
         self.browser.click(average["x"], average["y"], self.session)
-        time.sleep(0.5)
         self.check("#35 真点一下之后只关掉了 Avg（Min/Max 还在）",
                    self.js("i3pro.headFields(i3pro.state.components[0]).avg") is False
                    and self.js("i3pro.headFields(i3pro.state.components[0]).min") is True
@@ -1920,7 +2039,6 @@ class Checker:
         self.check("#35 右栏里能真点到「色盲友好」", bool(chip), chip)
         if chip:
             self.browser.click(chip["x"], chip["y"], self.session)
-            time.sleep(0.6)
             self.check("#35 真点一下换成了色盲友好那一套",
                        self.js("i3pro.state.components[0].config.palette") == "colorblind",
                        self.js("i3pro.state.components[0].config.palette"))
@@ -2033,7 +2151,6 @@ class Checker:
             self.check("#36 「别名样例」在按钮栏里真的点得到", False, raw)
             return
         self.browser.click(point["x"], point["y"], self.session)
-        time.sleep(1.0)
 
         # 落点：高避这场没有 SpeedRL，所以必须落到 Gear Speed1。
         self.check("#36 引用被判成 present（落到了真通道）",
@@ -2078,7 +2195,6 @@ class Checker:
             "(function(){var b=document.getElementById('aliasAddAlias');"
             "return JSON.stringify(__center(b));})()"))
         self.browser.click(box["x"], box["y"], self.session)
-        time.sleep(0.5)
         self.check("#36 真点「＋ 别名」之后工作副本里多了一条",
                    self.js("i3pro.state.aliases.map(function(a){return a.name;})"
                            ".indexOf('验证别名')>=0"),
@@ -2095,7 +2211,6 @@ class Checker:
         self.check("#36 候选上的 ↑ 真的点得到", bool(move), move)
         if move:
             self.browser.click(move["x"], move["y"], self.session)
-            time.sleep(0.5)
             order = json.loads(self.js(
                 "JSON.stringify(i3pro.currentSheetAliases()[0].candidates)"))
             self.check("#36 真点一下之后候选顺序变了（往前挪了一位）",
@@ -2111,7 +2226,6 @@ class Checker:
             move = json.loads(move) if move and move != "null" else None
             if move:
                 self.browser.click(move["x"], move["y"], self.session)
-                time.sleep(0.5)
             order = json.loads(self.js(
                 "JSON.stringify(i3pro.currentSheetAliases()[0].candidates)"))
             self.check("#36 连点两下之后它排到了第一位",
@@ -2122,7 +2236,6 @@ class Checker:
             "(function(){return JSON.stringify(__center("
             "document.getElementById('wsSave')));})()"))
         self.browser.click(box["x"], box["y"], self.session)
-        time.sleep(0.9)
         stem = self.js("(i3pro.currentSheet()||{}).id")
         path = os.path.join(work_dir, "_worksheets_root", "worksheets",
                             str(stem) + ".json")
@@ -2520,7 +2633,6 @@ class Checker:
         self.check("#4 真键盘输入进得去", typed == "改名之后", repr(typed))
         self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-rename.png"), self.session)
         self.browser.key_named("Escape", "Escape", 27, self.session)
-        time.sleep(0.4)
         disk = json.load(open(sidecar, encoding="utf-8"))
         self.check("#4 Esc 取消 -> 输入框弹回原名，侧车一个字节没动",
                    open(sidecar, "rb").read() == before
@@ -2530,7 +2642,6 @@ class Checker:
 
         retype("改名之后")
         self.browser.key_named("Enter", "Enter", 13, self.session)
-        time.sleep(0.9)
         disk = json.load(open(sidecar, encoding="utf-8"))
         names = [b["name"] for b in disk["beacons"]]
         live = json.loads(self.js("JSON.stringify(i3pro.state.lapsConfig.beacons)"))
@@ -2547,7 +2658,6 @@ class Checker:
         undo = json.loads(self.js("JSON.stringify(__rectOf('undoLaps'))"))
         self.check("#6 改过一次后 ↶ 撤销 变成可点", not undo["disabled"])
         self.browser.click(undo["x"], undo["y"], self.session)
-        time.sleep(0.9)
         disk = json.load(open(sidecar, encoding="utf-8"))
         after_undo = [b["name"] for b in disk["beacons"]]
         self.check("#6 真点撤销 -> 名字退回上一步",
@@ -2753,7 +2863,6 @@ class Checker:
                 "return !!c && c.style.display !== 'none';})()", page, timeout=20):
             cancel = rect_of("#cardCancel")
             self.browser.click(cancel["x"], cancel["y"], page)
-            time.sleep(1.0)
             self.check("#32 点「取消」之后卡片关掉、场次列表里没有它",
                        not card_open() and not self.browser.js(listed(doomed), page))
             self.check("#32 取消也要把暂存文件删掉",
@@ -2876,7 +2985,6 @@ class Checker:
         if not cog:
             return
         self.browser.click(cog["x"], cog["y"], page)
-        time.sleep(0.6)
         self.check("#77 点 ⚙ 之后面板落在这一条通道上", js("i3pro.state.setupChannel") == name,
                    js("i3pro.state.setupChannel"))
 
@@ -3000,12 +3108,10 @@ class Checker:
         self.check("票⑧ 「高级工具」标题真的点得到", bool(toggle) and toggle["w"] > 0, toggle)
         if toggle:
             self.browser.click(toggle["x"], toggle["y"], self.session)
-            time.sleep(0.5)
             opened = dict((one, height_of(one)) for one in folded)
             self.check("票⑧ 真点一下「高级工具」，七个面板都露出来了",
                        all(value > 0 for value in opened.values()), opened)
             self.browser.click(toggle["x"], toggle["y"], self.session)
-            time.sleep(0.5)
             again = dict((one, height_of(one)) for one in folded)
             self.check("票⑧ 再点一下又收起来", all(value <= 0 for value in again.values()),
                        again)
@@ -3017,7 +3123,6 @@ class Checker:
                    self.js("!!document.getElementById('asideScroll').contains("
                            "document.getElementById('valuesGroup'))") is False)
         self.browser.key_named("v", "KeyV", 86, self.session, text="v")
-        time.sleep(0.5)
         values = rect_of("#valuesGroup")
         self.check("票⑧ 按 V 浮层真的出来了", bool(values) and values["h"] > 0, values)
         if values and aside:
@@ -3025,7 +3130,6 @@ class Checker:
                        values["left"] >= aside["right"] - 1,
                        "浮层 left=%.1f · 左栏 right=%.1f" % (values["left"], aside["right"]))
         self.browser.key_named("v", "KeyV", 86, self.session, text="v")
-        time.sleep(0.4)
         self.check("票⑧ 再按 V 收起来", self.js("i3pro.state.show.values") is False,
                    self.js("i3pro.state.show.values"))
         # 窄窗口：两排不叠、下拉不越界、左栏不把画布挤没（票⑧的"窄窗口下不遮挡"）
@@ -3161,7 +3265,6 @@ class Checker:
             if not box:
                 return False
             self.browser.click(box["x"], box["y"], self.session)
-            time.sleep(0.5)
             return True
 
         def canvas_sum(component_id):
@@ -3449,10 +3552,8 @@ class Checker:
         self.check("票⑪ 键盘进来也算「悬浮」：操作露出来（:focus-within）",
                    bool(by_key) and by_key["opacity"] == "1", by_key and by_key["opacity"])
         self.browser.key_named("Tab", "Tab", 9, self.session)
-        time.sleep(0.3)
         self.check("票⑪ 真按 Tab 从 ✕ 走到「…」", focused_text() == "…", focused_text())
         self.browser.key_named("Enter", "Enter", 13, self.session, text="\r")
-        time.sleep(0.5)
         opened = json.loads(self.js(
             "JSON.stringify((function(){var m=document.querySelector('.popmenu');"
             "if(!m)return null;var b=[].map.call(m.querySelectorAll('.popact'),function(x){"
@@ -3463,7 +3564,6 @@ class Checker:
         self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-component-menu.png"),
                           self.session)
         self.browser.key_named("Escape", "Escape", 27, self.session)
-        time.sleep(0.4)
         self.check("票⑪ 真按 Esc 关掉菜单，焦点还给「…」按钮",
                    self.js("!!document.querySelector('.popmenu')") is False
                    and focused_text() == "…",
@@ -3476,13 +3576,11 @@ class Checker:
         time.sleep(0.3)
         more = bar_of(gid)["btns"][1]
         self.browser.click(more["x"], more["y"], self.session)
-        time.sleep(0.4)
         item = rect_of('.popmenu .popact[data-comp-act="copy"]')
         self.check("票⑪ 真鼠标点得到菜单里的「复制」",
                    bool(item) and item.get("w", 0) > 0, item)
         if item:
             self.browser.click(item["x"], item["y"], self.session)
-            time.sleep(0.6)
             after = self.js("i3pro.state.components.length")
             self.check("票⑪ 菜单里点「复制」真的多了一块",
                        after == before + 1, "%s -> %s" % (before, after))
@@ -3500,7 +3598,6 @@ class Checker:
                            copy_bar and copy_bar["opacity"])
                 close = copy_bar["btns"][0]
                 self.browser.click(close["x"], close["y"], self.session)
-                time.sleep(0.5)
                 self.check("票⑪ 真点悬浮出来的「✕」把它收走",
                            self.js("i3pro.state.components.length") == before,
                            self.js("i3pro.state.components.length"))
@@ -3532,7 +3629,6 @@ class Checker:
             if not box:
                 return False
             self.browser.click(box["x"], box["y"], self.session)
-            time.sleep(0.8)
             return True
 
         def lap_colors_in_canvas():
@@ -3646,7 +3742,6 @@ class Checker:
             if not box or box.get("w", 0) <= 0:
                 return None
             self.browser.click(box["x"], box["y"], self.session)
-            time.sleep(0.6)
             return box
 
         first = click_chip("sessionGroup")
@@ -3723,7 +3818,6 @@ class Checker:
 
         # 真按 Ctrl+K（CDP 的 modifiers：2 = Ctrl），光标该落到那一排按钮上
         self.browser.key_named("k", "KeyK", 75, self.session, modifiers=2)
-        time.sleep(0.4)
         def focused_chip():
             return self.js(
                 "(document.activeElement&&document.activeElement.dataset||{}).jump || ''")
@@ -3736,7 +3830,6 @@ class Checker:
         # 把光标也挪了 0.01 s——评审时真浏览器量出来的第三条。
         cursor_before = self.js("String(i3pro.state.cursor)")
         self.browser.key_named("ArrowRight", "ArrowRight", 39, self.session)
-        time.sleep(0.4)
         moved = focused_chip()
         self.check("A78 这一排里按右方向键换的是选中项（通道 -> 高级工具）",
                    moved == "advancedGroup" and moved != here, "%s -> %s" % (here, moved))
@@ -3748,7 +3841,6 @@ class Checker:
         # （CDP 还得带 text，不然页面收不到按键默认动作，回车根本不会激活按钮。）
         landed = self.js("i3pro.jumpActive()")
         self.browser.key_named("Enter", "Enter", 13, self.session, text="\r")
-        time.sleep(0.6)
         self.check("A78 键盘回车真的跳到选中那一栏（高亮从「通道」换到「高级工具」）",
                    self.js("i3pro.jumpActive()") == "advancedGroup",
                    "回车前亮着 %s，回车后亮着 %s" % (landed, self.js("i3pro.jumpActive()")))
@@ -3869,7 +3961,6 @@ class Checker:
         # 单字母键要走 key_named：只给 text 的话页面收到的 event.key 不是 "r"，
         # 单键快捷键一条都不触发（A78 那条"回车跳不动"就是这么空转的）。
         self.browser.key_named("r", "KeyR", 82, self.session, text="r")
-        time.sleep(0.4)
         reset = attitude_of()
         self.check("#43 按 R 把视角复位",
                    bool(reset) and reset["camera"] == {"yaw": 26, "pitch": 18},
@@ -4050,7 +4141,6 @@ class Checker:
             if not bar:
                 return None
             self.browser.click(bar["x"], bar["y"], self.session)
-            time.sleep(0.4)
             raw = self.js(
                 "JSON.stringify((function(){var el=document.getElementById('insBody');"
                 "if(!el)return null;"
@@ -4096,7 +4186,6 @@ class Checker:
         if not copy_btn:
             return
         self.browser.click(copy_btn["x"], copy_btn["y"], self.session)
-        time.sleep(0.6)
         made_js = (
             "JSON.stringify((function(){var a=i3pro.state.components;"
             "var orig=a.filter(function(x){return x.id==="
@@ -4120,7 +4209,6 @@ class Checker:
         if not replace_btn:
             return
         self.browser.click(replace_btn["x"], replace_btn["y"], self.session)
-        time.sleep(0.4)
         chip = json.loads(
             self.js("JSON.stringify((function(){var b=[].filter.call("
                     "document.querySelectorAll('.popmenu .popchip'),function(x)"
@@ -4132,7 +4220,6 @@ class Checker:
             self.js("i3pro.closePopMenu(); true")
             return
         self.browser.click(chip["x"], chip["y"], self.session)
-        time.sleep(0.8)
         after = json.loads(
             self.js("JSON.stringify((function(){var c=i3pro.state.components.filter(function(x)"
                     "{return x.id===" + json.dumps(made["id"]) + ";})[0];"
@@ -4438,7 +4525,6 @@ class Checker:
         if not button:
             return
         self.browser.click(button["x"], button["y"], self.session)
-        time.sleep(0.4)
         self.check("#44 点过之后右栏显示的就是这一件",
                    self.js("(i3pro.inspectorComponent()||{}).id") == component_id,
                    self.js("(i3pro.inspectorComponent()||{}).id"))
@@ -4454,7 +4540,6 @@ class Checker:
         if not chip:
             return
         self.browser.click(chip["x"], chip["y"], self.session)
-        time.sleep(0.5)
         self.check("#44 真点「A–B」之后这一件组件换了统计范围",
                    (graph_of() or {}).get("range") == "ab",
                    json.dumps(graph_of(), ensure_ascii=False))
@@ -4484,7 +4569,6 @@ class Checker:
         time.sleep(0.4)
         at_left = self.js("i3pro.state.cursor")
         self.browser.key_named(" ", "Space", 32, self.session, text=" ")
-        time.sleep(0.4)
         self.check("#44 真按空格把基准光标 A 放在光标处",
                    self.js("i3pro.state.datumOn===true") is True
                    and abs(self.js("i3pro.state.datum") - at_left) < 1e-9,
@@ -4651,7 +4735,6 @@ class Checker:
             if not box:
                 return False
             self.browser.click(box["x"], box["y"], self.session)
-            time.sleep(0.5)
             return (self.js("(i3pro.inspectorComponent()||{}).id") or "") == graph_id
 
         def click_mode(mode):
@@ -4662,7 +4745,6 @@ class Checker:
             if not box:
                 return False
             self.browser.click(box["x"], box["y"], self.session)
-            time.sleep(1.4)
             return True
 
         self.check("A79 真点一下图的标题栏，右栏就是这一件（曲线连接在那儿）", select_graph())
@@ -4810,6 +4892,14 @@ def main(argv=None):
             errors = browser.page_errors()
             checker.check("整场没有页面级报错", not errors, errors[:3])
         bad = [name for name, ok in checker.results if not ok]
+        waits = browser.settle_times if browser else []
+        if waits:
+            spans = sorted(span for span, _note in waits)
+            print("  NOTE  #67 等页面安静：%d 次，共 %.1f s，中位 %.0f ms / 最慢 %.2f s"
+                  % (len(waits), sum(spans), spans[len(spans) // 2] * 1000, spans[-1]))
+            for span, note in sorted(waits, reverse=True)[:3]:
+                if note:
+                    print("        #67 撞到耐心上限的那次 %.2f s：%s" % (span, note))
         print("\n%d 项检查：%d 通过，%d 失败" % (len(checker.results),
                                               len(checker.results) - len(bad), len(bad)))
         return 1 if bad else 0

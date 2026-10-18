@@ -5533,3 +5533,73 @@ python tools\verify_clicks.py      # 需要 Edge；402 项通过、0 失败
 **这一票之后还剩什么**：`verify_clicks.py` 里仍有 102 处字面量 `sleep`（约 62 s），多数是
 "等一次 2 s+ 的导出/计算完成"，那本来就该由它自己的 `wait_for` 管；`settle` 那 67.5 s 里的
 大头是**页面真的在忙**（缩放后要为十几路组件重新取数），不是白等。
+
+## A107 · 缩放窗口可复现：救活 `/trace` 响应缓存（本次修法，ticket #68）
+
+**要解决的问题**：`TraceCache`（`tracecache.py` 开头那句"缩放来回"）在它自己声称要服务的
+用法上几乎从不命中。缩放的每一步是浮点乘法，放大再**原路**缩回得到的是"差 5e-14 秒的
+**另一个**窗口"（实测 `from` 一模一样、`to` 是 `...5432099998` 对 `...54321`），而服务端
+响应缓存的 key 用的是窗口的完整 `repr`（`server.py` 的 `_cache_key`）——所以那是两个 key。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 新原语 | `windowRange()` 把**发出去的** `from`/`to` 吸到"全场跨度的百亿分之一"的网格上（`requestGrid()` / `snapToGrid()`）。同一个窗口来回一趟就是同一个 key |
+| 唯一写入口 | `setView(from, to)`：`state.view` 的钳位、"全场"（`null`）语义只有一处。13 处旁路写入全部改走它，另一处 `state.view = defaultRange()` 也改了 |
+| 结构守卫 | `tests/test_i3pro.py` 新增：正则扫 `viewer.html`，直写 `state.view =` 只允许出现在 `setView` 里（**改前是红的**：旁路 25 处） |
+| 无头断言 | `smoke_viewer.js` 新一组 #68：真滚轮"放大 6 格 → 原路缩回 6 格"，`windowRange()` 前后**逐字相同**、且两端都在网格上 |
+| 量具 | 新增 `tools/measure_trace_cache.py`：真 Edge + CDP 走真滚轮，服务跑在**本进程**里给 `TraceCache.get` 打桩，数每一趟的命中率 |
+
+**关键的一条：吸的是请求，不是 `state.view`。** 工单里先提的方案是吸 `state.view`——实测
+**不行**：每吸一次，光标处的 pivot 就跟着挪一点（`zoomFactor` 的 pivot 由当前 lane 反算），
+误差沿轨迹累积。放大 6 格再缩回 6 格，两端差 **4.6e-8 s**（比不吸附时的 5e-14 还**大**三个
+数量级），返回那一趟 6 次只命中 **3** 次。改成"只吸请求"之后，轨迹自己的漂移还是 5e-14，
+一个 2e-8 的格子必然把它吸收掉。
+
+网格量级是**两头卡出来的**：下界是浮点漂移（5e-14），上界是验收里已经在用的容差
+（`smoke_viewer.js` 那几条"跳到某区段"用 `< 1e-6`，`verify_clicks.py` 比"取回来的数据 vs
+`state.view`"也用 1e-6）。工单原本写的 1e-6 × 全场 ≈ 0.46 ms 时误差最多半格 0.23 ms，**比
+容差大两个数量级**，实测当场红了 4 条；1e-10 × 全场 ≈ 20 ns，半格 10 ns，比容差小 100 倍、
+比一个 1 kHz 采样点小 5 个数量级。
+
+```powershell
+python tools\measure_trace_cache.py                       # 需要 Edge；判据见下
+python tools\measure_trace_cache.py --session "20260524-耐久正赛" --port 9339
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"       # PASS
+python -m unittest tests.test_i3pro.TestViewerScript -v          # 含那条结构守卫
+```
+
+**通过判据（本机实测，2026-10-19）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 返回那一趟命中率（高避 5 圈） | **6 次取数 6 命中**（改前 **1 命中**） |
+| 返回那一趟命中率（耐久正赛） | **6 次取数 6 命中** |
+| 第一次经过 | 6 次 0 命中——**这是对的**：没看过的窗口天然是新的、必然冷。判据只钉"返回" |
+| 去程与回程的窗口 | 逐字相同（`to=208.203529389438` 两边都是这个） |
+| 结构守卫 | 当前绿；拿 `git show HEAD:src/i3pro/web/viewer.html` 跑同一段逻辑，抓到 **25 处**旁路 |
+
+**怎么验的（判据自己先红过）**：把 `windowRange()` 的吸附临时撤掉（返回原值），两条 smoke
+断言当场变红，而且**正是工单里的签名**：
+
+```
+FAIL  the requested window is not on the grid: {"from":120.123456789,"to":200.987654321}
+FAIL  zooming back did not reproduce the same requested window:
+      {"from":120.123456789,"to":200.98765432099998} vs {"from":120.123456789,"to":200.987654321}
+```
+
+**判据看的是 `windowRange()`，不是 `state.view`**：key 由前者构成，而 `state.view` 是精确
+浮点、本来就差 5e-14——拿它当判据等于钉错了地方（这一条也是实测出来的：第一版量具直写
+`state.view` 当起点，返回趟最后一步永远"没命中"，看着像产品没修好，其实是量具自己造了
+一个应用里不存在的起点）。
+
+**量具踩过的坑（都写进 `measure_trace_cache.py` 了）**：
+
+1. **滚轮点要落在画布上**。工作台那些下拉框是浮在画布上面的，取"第一张 canvas 的中心"
+   实测 `elementFromPoint` 给的是 `SELECT`——事件照样冒泡到 `#charts`，但
+   `event.target.closest("canvas")` 是 null，滚轮处理函数当场返回。第一版就是这么量出一批
+   假数的。现在只在 `elementFromPoint(x, y) === 那张画布` 的点里挑。
+2. **预热要等到第一笔取数落地**，否则滚轮那一阶段一次取数都不触发，量具空转。起点还要走
+   `zoomTo`（应用里那条路），不能直写 `state.view`。
+
+**这一票不动产品行为**：吸的是请求参数，而 20 ns 比一个 1 kHz 采样点小 5 个数量级，取到的
+样本集不变，画出来的曲线逐点相同。

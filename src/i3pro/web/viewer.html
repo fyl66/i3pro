@@ -2876,7 +2876,9 @@ function traceKey() {
 function windowRange() {
   const full = fullRange();
   if (!state.view) return { from: full[0], to: full[1] };
-  return { from: state.view[0], to: state.view[1] };
+  const grid = requestGrid();
+  return { from: snapToGrid(state.view[0], grid),
+           to: snapToGrid(state.view[1], grid) };
 }
 
 /** 请求地址的唯一出处：路由 + 参数 → URL。空参数（undefined / null / ""）不写进去。 */
@@ -3064,6 +3066,66 @@ function fullRange() {
 
 function lane() { return state.view || fullRange(); }
 
+/**
+ * 取数窗口的吸附网格：全场跨度的百亿分之一（ticket #68）。
+ *
+ * 为什么需要它：缩放的每一步是浮点乘法，放大再原路缩回得到的是"差 5e-14 秒的**另一个**
+ * 窗口"（实测 from 一模一样、to 是 ...65470732 对 ...65470737），而服务端的响应缓存
+ * key 用的是窗口的完整 repr（server.py 的 _cache_key），于是"缩回刚才那个窗口"永远命中
+ * 不了——实测返回那 3 次 0 命中。把发出去的 from/to 吸到同一张网格上，这一趟和下一趟
+ * 就是同一个 key。
+ *
+ * **吸的是请求，不是 `state.view`**——这一条是量出来的，不是想出来的。先按"吸附
+ * state.view"做过一版：每吸一次，光标处的 pivot 就跟着挪一点（`zoomFactor` 的 pivot 由
+ * 当前 lane 反算），误差沿轨迹累积。实测放大 6 格再缩回 6 格，两端差 **4.6e-8 s**（比不
+ * 吸附时的 5e-14 还**大**三个数量级），返回那一趟 6 次只命中 3 次。不吸 `state.view`、
+ * 只吸请求时，轨迹自己的漂移只有 5e-14，一个 2e-8 的格子必然把它吸收掉。
+ *
+ * 为什么网格取**相对**值：state.view 在时间轴上是秒、在距离轴上是米，相对值两种单位都
+ * 成立（绝对定值就得按模式分两套）。约 200 s 的场次下 1e-10 × 全场 ≈ 20 ns。
+ *
+ * 这个数量级是**两头卡出来的**，不是随手挑的：
+ *
+ * * **下界**是浮点漂移。实测放大再缩回的差是 5e-14 s（相对 2e-13），要让它落回同一格，
+ *   格子得比它粗几个数量级——20 ns 是它的 40 万倍。
+ * * **上界**是验收里已经在用的容差。`smoke_viewer.js` 那几条"跳到某区段"用的是
+ *   `< 1e-6` 绝对容差，而 `tools/verify_clicks.py` 比"取回来的数据 vs state.view"也用
+ *   1e-6。格子取成全场跨度的 1e-6（≈0.46 ms）时，误差最多半格 = 0.23 ms，**比容差大两
+ *   个数量级**，实测当场红了 4 条（sections 那组）。20 ns 的半格是 10 ns，比容差小 100 倍。
+ *
+ * 顺带：20 ns 比一个 1 kHz 采样点（1 ms）还小 5 个数量级，所以**取到的样本集不变**，
+ * 画出来的曲线逐点相同。
+ */
+const VIEW_GRID_FRACTION = 1e-10;
+
+/** 请求窗口的吸附网格（相对全场跨度）。 */
+function requestGrid() {
+  const full = fullRange();
+  return Math.max(1e-12, (full[1] - full[0]) * VIEW_GRID_FRACTION);
+}
+
+function snapToGrid(value, grid) { return Math.round(value / grid) * grid; }
+
+/**
+ * ``state.view`` 的**唯一写入口**（ticket #68）。管钳位、管上下限、管"全场"。
+ *
+ * 以前 13 处各写各的 `[a, b]`；现在全部走这里。结构守卫（单测）会扫源码，直写
+ * `state.view =` 只允许出现在这个函数里——**一个系统里只能有一个窗口值**：它同时是画轴
+ * 的依据（lane()）、取数请求的依据（windowRange()）和验收比较的对象。
+ *
+ * 这里**不吸附**：吸了反而让"缩回刚才那个窗口"更不准（见上面那段实测）。
+ *
+ * ``from === null`` 表示"全场"，与原来的 `state.view = null` 等价。
+ */
+function setView(from, to) {
+  if (from === null || from === undefined) { state.view = null; return; }
+  const full = fullRange();
+  const lo = clamp(Math.min(from, to), full[0], full[1]);
+  const hi = clamp(Math.max(from, to), full[0], full[1]);
+  // 两端撞到一起（窗口窄到没有）：那是"全场"，不是"零宽的窗口"。
+  state.view = lo === hi ? null : [lo, hi];
+}
+
 /** Linear interpolation over a monotonic grid (binary search inside). */
 function interpAt(xs, ys, x) {
   if (!xs || !ys || xs.length < 2) return null;
@@ -3142,8 +3204,7 @@ function zoomTo(x0, x1) {
   const full = fullRange();
   const span = full[1] - full[0] || 1;
   if (Math.abs(x1 - x0) < span * 1e-4) return;
-  state.view = [clamp(Math.min(x0, x1), full[0], full[1]),
-                clamp(Math.max(x0, x1), full[0], full[1])];
+    setView(x0, x1);
   scheduleRefresh();
   renderAll();
 }
@@ -3154,10 +3215,10 @@ function zoomFactor(factor, at) {
   const pivot = (at === undefined || at === null) ? (x0 + x1) / 2 : at;
   const span = (x1 - x0) * factor;
   const full = fullRange();
-  if (span >= (full[1] - full[0]) * 0.999) state.view = null;
+    if (span >= (full[1] - full[0]) * 0.999) setView(null);
   else {
     const left = (pivot - x0) / (x1 - x0 || 1);
-    state.view = [pivot - span * left, pivot + span * (1 - left)];
+      setView(pivot - span * left, pivot + span * (1 - left));
   }
   scheduleRefresh();
   renderAll();
@@ -3166,7 +3227,7 @@ function zoomFactor(factor, at) {
 function panBy(fraction) {
   const r = lane();
   const shift = (r[1] - r[0]) * fraction;
-  state.view = [r[0] + shift, r[1] + shift];
+    setView(r[0] + shift, r[1] + shift);
   scheduleRefresh();
   renderAll();
 }
@@ -3174,7 +3235,7 @@ function panBy(fraction) {
 function zoomToLap(label) {
   const lap = (DATA.laps || []).find((l) => String(l.lap) === String(label));
   if (!lap) return;
-  state.view = [lap.start_time, lap.end_time];
+    setView(lap.start_time, lap.end_time);
   scheduleRefresh();
   renderAll();
 }
@@ -5139,7 +5200,7 @@ function attachOverviewInteractions(canvas) {
   };
   let drag = null;
   canvas.addEventListener("mousedown", (event) => {
-    if (event.detail >= 2) { state.view = null; scheduleRefresh(); renderAll(); return; }
+    if (event.detail >= 2) { setView(null); scheduleRefresh(); renderAll(); return; }
     const rect = canvas.getBoundingClientRect();
     const frac = clamp((event.clientX - rect.left - 6) / Math.max(1, rect.width - 12), 0, 1);
     const f = full();
@@ -5156,13 +5217,13 @@ function attachOverviewInteractions(canvas) {
     const f = full();
     const at = toValue(event);
     const view = state.view || f;
-    if (drag.kind === "left") state.view = [Math.min(at, view[1] - 0.1), view[1]];
-    else if (drag.kind === "right") state.view = [view[0], Math.max(at, view[0] + 0.1)];
+    if (drag.kind === "left") setView(Math.min(at, view[1] - 0.1), view[1]);
+    else if (drag.kind === "right") setView(view[0], Math.max(at, view[0] + 0.1));
     else {
       const span = drag.view[1] - drag.view[0];
       const shift = at - drag.at;
-      state.view = [clamp(drag.view[0] + shift, f[0], f[1] - span),
-                    clamp(drag.view[1] + shift, f[0] + span, f[1])];
+      setView(clamp(drag.view[0] + shift, f[0], f[1] - span),
+              clamp(drag.view[1] + shift, f[0] + span, f[1]));
     }
     scheduleRefresh();
     renderAll();
@@ -5189,7 +5250,7 @@ function renderScrollbar() {
     };
     let drag = null;
     canvas.addEventListener("mousedown", (event) => {
-      if (event.detail >= 2) { state.view = null; scheduleRefresh(); renderAll(); return; }
+      if (event.detail >= 2) { setView(null); scheduleRefresh(); renderAll(); return; }
       const at = toValue(event);
       const v = state.view || fullRange();
       drag = { grab: at - v[0], span: v[1] - v[0] };
@@ -5200,8 +5261,8 @@ function renderScrollbar() {
       const f = fullRange();
       if (drag.span >= (f[1] - f[0]) * 0.999) return;
       const at = toValue(event);
-      state.view = [clamp(at - drag.grab, f[0], f[1] - drag.span),
-                    clamp(at - drag.grab + drag.span, f[0] + drag.span, f[1])];
+      setView(clamp(at - drag.grab, f[0], f[1] - drag.span),
+              clamp(at - drag.grab + drag.span, f[0] + drag.span, f[1]));
       scheduleRefresh();
       renderAll();
     });
@@ -7480,12 +7541,12 @@ async function selectLap(label, asCompare) {
   if (state.cmp !== null) {
     if (state.mode !== "overlay") {
       state.mode = "overlay";
-      state.view = null;                  // 距离轴的窗口和圈的时间范围不是一回事
+        setView(null);                      // 距离轴的窗口和圈的时间范围不是一回事
     }
   } else {
     if (state.mode === "overlay") state.mode = "time";
     if (lap) {
-      state.view = [lap.start_time, lap.end_time];   // 选中哪一圈就跳到哪一圈
+        setView(lap.start_time, lap.end_time);   // 选中哪一圈就跳到哪一圈
       state.windowKey = "";
       scheduleRefresh();
     }
@@ -8535,7 +8596,7 @@ function zoomToSection(hit) {
   let switched = false;
   if (state.mode !== "time") {
     state.mode = "time";
-    state.view = null;
+      setView(null);
     state.panelZoom = {};
     switched = true;
   }
@@ -9118,7 +9179,7 @@ function attachInteractions() {
     const rect = dragPan.canvas.getBoundingClientRect();
     const span = dragPan.view[1] - dragPan.view[0];
     const shift = (-(event.clientX - dragPan.x) / Math.max(1, rect.width)) * span;
-    state.view = [dragPan.view[0] + shift, dragPan.view[1] + shift];
+    setView(dragPan.view[0] + shift, dragPan.view[1] + shift);
     scheduleRefresh();
     renderAll();
   });
@@ -9182,7 +9243,7 @@ function stepLap(direction) {
   const current = state.ref === null ? -1 : laps.findIndex((l) => String(l.lap) === String(state.ref));
   const next = clamp(current + direction, 0, laps.length - 1);
   state.ref = laps[next].lap;
-  state.view = [laps[next].start_time, laps[next].end_time];
+    setView(laps[next].start_time, laps[next].end_time);
   markLapRows();
   scheduleRefresh();
   renderAll();
@@ -9202,7 +9263,7 @@ function onKeyDown(event) {
   const stop = () => event.preventDefault();
   if (key === "Escape") { band = null; bandOverlay().style.display = "none"; stop(); return; }
   if (key === "F2" && event.altKey) { state.panelZoom = {}; renderAll(); stop(); return; }
-  if (key === "F2") { state.view = null; scheduleRefresh(); renderAll(); stop(); return; }
+  if (key === "F2") { setView(null); scheduleRefresh(); renderAll(); stop(); return; }
   if (key === "ArrowLeft") { moveCursor(-1, event.ctrlKey); stop(); return; }
   if (key === "ArrowRight") { moveCursor(1, event.ctrlKey); stop(); return; }
   if (key === "ArrowUp") {
@@ -9236,7 +9297,7 @@ function onKeyDown(event) {
       if (laps.length) {
         const best = laps.reduce((a, b) => (a.lap_time < b.lap_time ? a : b));
         state.ref = best.lap;
-        if (state.mode !== "overlay") { state.view = [best.start_time, best.end_time]; scheduleRefresh(); }
+        if (state.mode !== "overlay") { setView(best.start_time, best.end_time); scheduleRefresh(); }
         markLapRows();
         renderAll();
       }
@@ -9245,7 +9306,11 @@ function onKeyDown(event) {
     return;
   }
   switch (key) {
-    case "w": case "W": state.view = defaultRange(); scheduleRefresh(); renderAll(); stop(); return;
+      case "w": case "W": {
+        const whole = defaultRange();
+        setView(whole[0], whole[1]);
+        scheduleRefresh(); renderAll(); stop(); return;
+      }
     case "z": case "Z":
       if (state.datumOn && state.datum !== null && state.cursor !== null) zoomTo(state.datum, state.cursor);
       else toast("先按 D 打开基准光标，再用空格放置");
@@ -9254,7 +9319,7 @@ function onKeyDown(event) {
       const r = lane();
       const half = (r[1] - r[0]) / 2;
       if (state.cursor !== null) {
-        state.view = [state.cursor - half, state.cursor + half];
+          setView(state.cursor - half, state.cursor + half);
         scheduleRefresh();
         renderAll();
       }
@@ -10039,7 +10104,7 @@ function applyPreset(name) {
   state.resolution = resolutionKey(currentSheet() && currentSheet().resolution);
   loadSheetAliases();
   state.focusId = null;
-  state.view = null;
+    setView(null);
   state.panelZoom = {};
   state.windowKey = "";
   saveLayout();
@@ -10976,17 +11041,17 @@ function init() {
   $("insFold").addEventListener("click", toggleInspector);
   restoreInspector();
   $("modeTime").addEventListener("click", () => {
-    state.mode = "time"; state.view = null; state.panelZoom = {}; scheduleRefresh(); renderAll();
+    state.mode = "time"; setView(null); state.panelZoom = {}; scheduleRefresh(); renderAll();
   });
   $("modeDistance").addEventListener("click", () => {
-    state.mode = "distance"; state.view = null; state.panelZoom = {}; scheduleRefresh(); renderAll();
+    state.mode = "distance"; setView(null); state.panelZoom = {}; scheduleRefresh(); renderAll();
   });
   $("modeOverlay").addEventListener("click", () => {
     if (!state.overlay) return;
-    state.mode = "overlay"; state.view = null; renderAll();
+    state.mode = "overlay"; setView(null); renderAll();
   });
   $("resetView").addEventListener("click", () => {
-    state.view = null; state.panelZoom = {}; scheduleRefresh(); renderAll();
+    setView(null); state.panelZoom = {}; scheduleRefresh(); renderAll();
   });
   $("pngBtn").addEventListener("click", exportPNG);
   $("shareBtn").addEventListener("click", shareURL);
@@ -11025,7 +11090,7 @@ window.i3pro = {
   // 就淹掉了。新增一个名字前先看它有没有消费者（单测按源码守这一条）。
   state: state, data: DATA, renderAll: renderAll, lane: lane,
   channels: CHANNELS, renderChannelList: renderChannelList,
-  fullRange: fullRange, zoomTo: zoomTo,
+  fullRange: fullRange, zoomTo: zoomTo, windowRange: windowRange,
   groupsFor: groupsFor, selectedChannels: selectedChannels,
   addComponentOfType: addComponentOfType, applyPreset: applyPreset,
   componentAction: componentAction, refreshWindowTraces: refreshWindowTraces,

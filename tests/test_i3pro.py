@@ -3497,6 +3497,35 @@ class TestViewerScript(unittest.TestCase):
         self.assertIn("upsample: state.upsample", page)      # 取数请求里真的带着它
         self.assertEqual(render.DEFAULT_UPSAMPLE, derive.UPSAMPLE_MODES[0])
 
+    def test_视图窗口只有一个写入口(self):
+        """ticket #68：``state.view`` 只能由 ``setView`` 写，别处一律不许直写。
+
+        为什么值得一条守卫：缩放的每一步是浮点乘法，放大再原路缩回得到的是"差 5e-14 秒
+        的**另一个**窗口"，而服务端响应缓存的 key 用的是窗口的完整 repr——于是"缩回刚才
+        那个窗口"永远命中不了（实测返回那 3 次 0 命中）。修法是在**唯一写入口**里把窗口
+        吸附到网格上。旁路只要再长出来一处，那个 bug 就回来了，而且**看不见**：图还是那
+        张图，只是每次缩放都在重新算一遍 125 ms。
+
+        这条改前是红的：当时有 13 处旁路。
+        """
+        page = (ROOT / "src" / "i3pro" / "web" / "viewer.html").read_text(encoding="utf-8")
+        start = page.index("function setView(")
+        finish = page.index("\n}\n", start)          # setView 的收尾大括号顶格
+        inside = set(range(page.count("\n", 0, start) + 1,
+                           page.count("\n", 0, finish) + 2))
+        # 比得不是 ``==`` / ``!=``：``state.view === null`` 是读，不是写。
+        write = re.compile(r"(?<![\w.$])state\.view\s*=(?!=)")
+        bad = []
+        for number, line in enumerate(page.splitlines(), 1):
+            if number in inside:
+                continue
+            stripped = line.lstrip()
+            if stripped[:2] in ("//", "/*") or stripped.startswith("*"):
+                continue                              # 注释里举例不算旁路
+            if write.search(line):
+                bad.append((number, line.strip()))
+        self.assertEqual(bad, [], "state.view 有旁路写入，只能走 setView：%r" % (bad,))
+
     def test_侧边栏快速跳转的清单与那一栏一一对应(self):
         """A78：按钮清单里的每一栏都得真的存在，侧边栏里的每一栏也得进清单。
 

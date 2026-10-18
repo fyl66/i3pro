@@ -483,6 +483,41 @@ if (api) {
     key("F2");
   }
 
+  // ------------------------------------------------------------ #68 窗口可复现
+  // 为什么单列一组：缩放的每一步是浮点乘法，放大再**原路**缩回得到的是"差 5e-14 秒的
+  // 另一个窗口"，而服务端响应缓存的 key 用的是窗口的完整 repr（server.py 的 _cache_key）
+  // ——于是"缩回刚才那个窗口"永远命中不了（实测返回那 3 次 0 命中，ticket #68）。
+  // 真滚轮那一趟的命中率由 tools/measure_trace_cache.py 量；这里钉的是**根因**。
+  //
+  // 判据看的是 windowRange()（**发出去的那对数**），不是 state.view：key 由前者构成，
+  // 而 state.view 是精确浮点、本来就差 5e-14——拿它当判据等于钉错了地方。吸附恰恰只在
+  // windowRange() 这一层做（吸 state.view 反而更不准，见 viewer.html 里那段实测）。
+  {
+    const wheelAt = (dy) => charts.dispatch("wheel", {
+      deltaY: dy, clientX: 300, clientY: 40, target: chartCanvas,
+      altKey: false, preventDefault() {},
+    });
+    api.zoomTo(120.123456789, 200.987654321);        // 走唯一写入口
+    const start = api.windowRange();
+    const grid = (api.fullRange()[1] - api.fullRange()[0]) * 1e-10;
+    check(Math.abs(start.from / grid - Math.round(start.from / grid)) < 1e-6
+          && Math.abs(start.to / grid - Math.round(start.to / grid)) < 1e-6,
+      "the requested window is not on the grid: " + JSON.stringify(start));
+
+    for (let i = 0; i < 6; i += 1) wheelAt(-100);    // 放大 6 格
+    const zoomed = api.state.view.slice();
+    check(zoomed[1] - zoomed[0] < start.to - start.from, "six wheel steps did not zoom in");
+    check(zoomed[0] !== start.from || zoomed[1] !== start.to,
+      "six wheel steps did not move the window at all");
+
+    for (let i = 0; i < 6; i += 1) wheelAt(100);     // 原路缩回 6 格
+    const back = api.windowRange();
+    check(back.from === start.from && back.to === start.to,
+      "zooming back did not reproduce the same requested window: "
+        + JSON.stringify(back) + " vs " + JSON.stringify(start));
+    key("F2");
+  }
+
   const s0 = state.style;
   key("s");
   check(state.style !== s0, "S did not toggle the trace style");

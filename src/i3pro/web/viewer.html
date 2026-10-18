@@ -17,6 +17,9 @@
     /* 面板里那种"凹进去一行"的底（数学通道的定义行）。以前是写死的深色字面量，
        浅色主题一开就成了一条黑带子——和 A101 里图例底色同一个毛病。 */
     --rowbg:rgba(15,17,21,.58);
+    /* 双圈对比里那两条圈的语义色（A104）：蓝 = 基准圈，橙 = 对比圈。
+       画布上的线也走这两个变量，所以换主题时线也跟着换（与 A101 同一条纪律）。 */
+    --ref:#2f6bff; --cmp:#ff6a00;
   }
   /* 浅色（Marple 风）。面板白、底浅灰蓝、强调色收深一点；迹线颜色不在这儿——
      它跟每件组件的调色板走（`palette.py` 那三套里，Matplotlib tab10 就是
@@ -29,6 +32,7 @@
     --track:#e2e8f0; --rule:#e7ecf3; --toastbg:#0b3d5c; --dim:#9aa7b8; --chip:#b9c4d2;
     --legendbg:rgba(255,255,255,.78); --legendnote:rgba(255,255,255,.88);
     --rowbg:#eef2f8;
+    --ref:#1f4fd8; --cmp:#c2410c;
   }
   * { box-sizing:border-box; }
   /* 外壳：两排顶栏（第一排全局、第二排工作表），余下的高度给左栏 + 画布。
@@ -825,10 +829,12 @@ const THEME_STORE = "i3pro.theme.v1";
 const THEME_FALLBACK = {
   bg: "#0f1115", panel: "#171a21", panel2: "#1e232c", line: "#2b313c",
   grid: "#232833", fg: "#e6e9ef", muted: "#8b94a7", accent: "#4cc2ff",
+  ref: "#4cc2ff", cmp: "#ffa94d",
 };
 const UI_VARS = {
   bg: "--bg", panel: "--panel", panel2: "--panel2", line: "--line",
   grid: "--grid", fg: "--fg", muted: "--muted", accent: "--accent",
+  ref: "--ref", cmp: "--cmp",
 };
 const UI = Object.assign({}, THEME_FALLBACK);
 let themeKey = "dark";
@@ -1227,9 +1233,13 @@ function graphTitle(comp) {
     ? " · 曲线：" + (UPSAMPLE_LABELS[state.upsample] || state.upsample) : "";
   // 包络是这一屏真实发生过的抽稀，不是导出设置；标题里必须留痕（A91）。
   const envelope = names.some((name) => traceUsesEnvelope(traceOf(name)))
-    ? " · " + ENVELOPE_TITLE : "";
+    // 双圈对比画的是 `state.overlay` 里那两条圈，不是这一屏的迹线——包络那句话说不上。
+    && !overlaySeries(names[0]) ? " · " + ENVELOPE_TITLE : "";
+  // 双圈对比（A104）：标题里写清画的是哪两条圈，图上那两条线才有名字。
+  const pairLabel = overlayPairLabel();
   return typeTitle(comp, (n ? n + " 通道 · " : "")
-    + (gone ? "缺 " + gone + " 条 · " : "") + mode) + upsample + envelope;
+    + (gone ? "缺 " + gone + " 条 · " : "") + mode) + upsample + envelope
+    + (pairLabel ? " · " + pairLabel : "");
 }
 function graphNeeds(comp, add) { (comp.config.channels || []).forEach(add); }
 /** 刚加进来的图先看侧边栏勾着的那些通道，别给一张空图。 */
@@ -2751,6 +2761,73 @@ function traceX(trace) {
   return state.mode === "time" ? trace.time : (trace.distance || trace.time);
 }
 
+/**
+ * 双圈对比模式下，这一条通道要画的那两条线（A104）。
+ *
+ * 数据来自 `state.overlay`：两条圈已经落在**同一条距离网格**上（后端 `laps.overlay`），
+ * 所以这里一个插值都不做，一条一条画。返回 null = 不在双圈对比模式，照旧画这一屏的
+ * 迹线（`state.traces`）。
+ *
+ * 为什么必须专门一条路：双圈对比的横轴是"一圈的距离"（0…圈长），而 `state.traces` 是
+ * **整场 / 当前时间窗**的曲线——拿它去比，画出来的是"这一场开头那 800 米"，不是选中的
+ * 那两条圈。v1 里有这条画法，2026-09-13 的工作台重写（7f9c96e）把它丢了：图还在按
+ * 距离轴画，画的却是整场那一条，于是"双圈对比"看着像只有一条圈。
+ */
+function overlaySeries(name) {
+  const ov = state.overlay;
+  if (state.mode !== "overlay" || !ov || !ov.laps || ov.laps.length < 2) return null;
+  const dist = ov.distance || [];
+  if (dist.length < 2) return null;
+  const rows = ov.laps.slice(0, 2).map((lap) => ({
+    lap: lap.lap, lapTime: lap.lap_time, values: lap[name] || [],
+  }));
+  if (!rows[0].values.length && !rows[1].values.length) return null;
+  return { x: dist, rows: rows };
+}
+
+/** 两条圈的固定语义色：蓝 = 基准圈，橙 = 对比圈（跟着主题走，见 A104）。 */
+function overlayLapColors() { return [UI.ref || "#4cc2ff", UI.cmp || "#ffa94d"]; }
+
+/** 双圈对比时抬头 / 标题里那句"哪条圈是哪条"；不在对比模式给空串。 */
+function overlayPairLabel() {
+  const ov = state.overlay;
+  if (state.mode !== "overlay" || !ov || !ov.laps || ov.laps.length < 2) return "";
+  return "蓝=圈 " + ov.laps[0].lap + " · 橙=圈 " + ov.laps[1].lap;
+}
+
+/** 共同距离网格上的取值（左闭：落在哪一格就取哪一格，与 valueAt 同一个口径）。 */
+function pairValueAt(series, values, x) {
+  const xs = series.x;
+  if (!xs || !xs.length || !values || !values.length) return NaN;
+  if (x <= xs[0]) return values[0];
+  const last = Math.min(xs.length, values.length) - 1;
+  if (x >= xs[last]) return values[last];
+  let lo = 0, hi = last;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (xs[mid] <= x) lo = mid; else hi = mid;
+  }
+  return values[lo];
+}
+
+/** 共同距离网格上 [from, to] 里的 min / max / avg——与 rangeStats 同一个口径。 */
+function pairRangeStats(series, values, from, to) {
+  const xs = series.x;
+  const out = { min: Infinity, max: -Infinity, sum: 0, n: 0 };
+  for (let i = 0; i < xs.length && i < values.length; i++) {
+    if (xs[i] < from) continue;
+    if (xs[i] > to) break;
+    const v = values[i];
+    if (!Number.isFinite(v)) continue;
+    if (v < out.min) out.min = v;
+    if (v > out.max) out.max = v;
+    out.sum += v;
+    out.n += 1;
+  }
+  if (!out.n) return null;
+  return { min: out.min, max: out.max, avg: out.sum / out.n };
+}
+
 /** Same-unit groups for one graph component (i2 Pro's channel groups). */
 function groupsFor(comp) {
   const names = comp.config.channels.filter((n) => !STATUS.has(n));
@@ -3314,6 +3391,29 @@ function pixelColumnsFor(xs, spec, sx, x0, x1, columns) {
   return { x: outX, min: outMin, max: outMax, mean: outMean };
 }
 
+/**
+ * 这一条通道在这一屏要画几条线：双圈对比下是**两条**（蓝 = 基准圈、橙 = 对比圈，
+ * 落在同一条距离网格上），别的时候一条（这一屏的迹线）。
+ */
+function graphTraceSpecs(name, comp) {
+  const pair = overlaySeries(name);
+  if (pair) {
+    const colors = overlayLapColors();
+    return pair.rows.map((row, k) => ({
+      x: pair.x, values: row.values, color: colors[k], width: 1.5,
+    }));
+  }
+  const trace = traceOf(name);
+  return [{
+    x: traceX(trace),
+    values: (trace || {}).value,
+    min: (trace || {}).min,
+    max: (trace || {}).max,
+    envelope: traceUsesEnvelope(trace),
+    color: channelColor(name, comp),
+  }];
+}
+
 function drawTraces(ctx, pad, plotW, plotH, x0, x1, y0, y1, specs) {
   const sx = (v) => pad.l + ((v - x0) / (x1 - x0 || 1)) * plotW;
   const sy = (v) => pad.t + plotH - ((v - y0) / (y1 - y0 || 1)) * plotH;
@@ -3532,6 +3632,19 @@ function groupScaleFor(group, comp) {
   if (manual) return manual;
   const values = [];
   for (const name of group.channels) {
+    // 双圈对比：纵轴要装下**两条圈**的曲线（A104）。只按 `state.traces` 量的话，
+    // 量的是整场那一条，画出来的两条线会被裁掉一半。
+    const pair = overlaySeries(name);
+    if (pair) {
+      for (const row of pair.rows) {
+        for (let i = 0; i < pair.x.length && i < row.values.length; i++) {
+          if (pair.x[i] < x0) continue;
+          if (pair.x[i] > x1) break;
+          if (Number.isFinite(row.values[i])) values.push(row.values[i]);
+        }
+      }
+      continue;
+    }
     const trace = traceOf(name);
     if (!trace) continue;
     const xs = traceX(trace);
@@ -3585,8 +3698,10 @@ function componentKey(comp, b, w, h) {
   const r = lane();
   // themeKey 也在键里：网格 / 区段带子 / 包络都是画在**离屏画布**上的，换了主题
   // 不重画的话，切过去还是旧配色那一层（A101 真浏览器里量出来的）。
+  // 双圈对比（A104）同理：换一对圈，画布上那两条线必须重画——把这一对的名字放进键里。
+  const pair = overlayPairLabel();
   return [r[0].toFixed(3), r[1].toFixed(3), state.mode, state.style, state.groupMode,
-          themeKey,
+          themeKey, pair,
           state.show.measure ? 1 : 0, Math.round(w), Math.round(h),
           state.dataVersion, JSON.stringify(comp.config)].join("|");
 }
@@ -4428,15 +4543,11 @@ function renderGraphComponent(comp, b) {
       drawGrid(octx, pad, plotW, plotH,
                scale[0], scale[1], r[0], r[1], gi === groups.length - 1 ? axisUnit() : "",
                ticks, state.mode === "time");
-      drawTraces(octx, pad, plotW, plotH,
-                 r[0], r[1], scale[0], scale[1], group.channels.map((name) => ({
-        x: traceX(traceOf(name)),
-        values: (traceOf(name) || {}).value,
-        min: (traceOf(name) || {}).min,
-        max: (traceOf(name) || {}).max,
-        envelope: traceUsesEnvelope(traceOf(name)),
-        color: channelColor(name, comp),
-      })));
+      const specs = [];
+      for (const name of group.channels) {
+        for (const one of graphTraceSpecs(name, comp)) specs.push(one);
+      }
+      drawTraces(octx, pad, plotW, plotH, r[0], r[1], scale[0], scale[1], specs);
     });
     b.cacheKey = key;
   }
@@ -4481,6 +4592,8 @@ function renderGraphHead(comp, b, groups, panels, overlapped) {
   const signature = groups.map((g) => g.key + ":" + g.channels.join(",")).join(";")
     + "|" + (state.show.measure ? 1 : 0) + "|" + (state.show.legend ? 1 : 0)
     + "|" + (comp.config.mode || "tiled") + "|" + gone.join(",")
+    // 双圈对比（A104）：抬头里印的是两条圈的数，换一条圈就得重画这一行。
+    + "|" + state.mode + "|" + state.ref + "|" + state.cmp
     // 处理过的通道会多一个 ƒ 角标（A75）：这套处理的名单变了，抬头就得重画。
     + "|" + Object.keys(processedChannels()).join(",")
     // 统计范围（#44）也算进签名：标签里写着范围名，换范围就得重画抬头。
@@ -4500,15 +4613,23 @@ function renderGraphHead(comp, b, groups, panels, overlapped) {
       for (const name of group.channels) {
         const row = makeEl("div", "lrow", block);
         const sw = makeEl("i", "swatch", row);
-        sw.style.background = channelColor(name, comp);
-        // 点色块换这条通道的颜色（ticket #35）：手选色存进工作表，换调色板也不动它。
-        sw.title = "点一下换「" + name + "」的颜色（手选色存进这一套工作表）";
-        sw.style.cursor = "pointer";
-        sw.style.pointerEvents = "auto";
-        sw.addEventListener("click", (event) => {
-          if (event && event.stopPropagation) event.stopPropagation();
-          openColorMenu(comp, name, sw);
-        });
+        const colors = overlayLapColors();
+        if (overlaySeries(name)) {
+          // 双圈对比：这一行比的是两条圈，色块也就两半——左蓝右橙，与图上两条线一一对应。
+          sw.style.background = "linear-gradient(90deg," + colors[0] + " 50%,"
+            + colors[1] + " 50%)";
+          sw.title = overlayPairLabel() + "（这一行左数=蓝圈，右数=橙圈）";
+        } else {
+          sw.style.background = channelColor(name, comp);
+          // 点色块换这条通道的颜色（ticket #35）：手选色存进工作表，换调色板也不动它。
+          sw.title = "点一下换「" + name + "」的颜色（手选色存进这一套工作表）";
+          sw.style.cursor = "pointer";
+          sw.style.pointerEvents = "auto";
+          sw.addEventListener("click", (event) => {
+            if (event && event.stopPropagation) event.stopPropagation();
+            openColorMenu(comp, name, sw);
+          });
+        }
         makeEl("span", "lname", row).textContent = name;
         // 这条通道的值是「通道处理」算出来的（A75）：抬头也标一下，免得拿它当原始值用。
         if (isProcessed(name)) {
@@ -4560,6 +4681,32 @@ function renderGraphHead(comp, b, groups, panels, overlapped) {
   const ab = wantAB ? abSpan() : null;
   const statsOn = state.show.measure && !(ab && ab.error);   // M 总闸 + A–B 拿不拿得到
   for (const node of b.valueNodes) {
+    const pair = overlaySeries(node.name);
+    if (pair) {
+      // 双圈对比（A104）：这一行左边是基准圈（蓝）、右边是对比圈（橙），Δ值 是两者的差。
+      // 光标那一格给两条圈的当下值；min/max/avg 也是"蓝圈 / 橙圈"一对（看得见的那一段）。
+      const at = state.cursor === null
+        ? [NaN, NaN]
+        : pair.rows.map((row) => pairValueAt(pair, row.values, state.cursor));
+      node.cur.textContent = "蓝 " + fmt(at[0], 3) + " · 橙 " + fmt(at[1], 3);
+      const dv = at[1] - at[0];
+      node.delta.textContent = "Δ值 "
+        + (Number.isFinite(dv) ? (dv >= 0 ? "+" : "") + fmt(dv, 3) : "--");
+      node.delta.style.display = fields.delta ? "" : "none";
+      const from = wantAB && ab ? ab.from : r[0];
+      const to = wantAB && ab ? ab.to : r[1];
+      const stats = (statsOn)
+        ? pair.rows.map((row) => pairRangeStats(pair, row.values, from, to)) : null;
+      const cell = (key) => (stats
+        ? stats.map((one) => (one ? fmt(one[key]) : "--")).join(" / ") : "");
+      node.min.textContent = cell("min");
+      node.max.textContent = cell("max");
+      node.avg.textContent = cell("avg");
+      node.min.style.display = statsOn && fields.min ? "" : "none";
+      node.max.style.display = statsOn && fields.max ? "" : "none";
+      node.avg.style.display = statsOn && fields.avg ? "" : "none";
+      continue;
+    }
     const trace = traceOf(node.name);
     const at = state.cursor === null ? null : valueAt(trace, state.cursor);
     node.cur.textContent = fmt(at, 3);
@@ -7364,6 +7511,8 @@ async function ensureOverlay() {
     state.overlay = await apiGet(apiUrl("/overlay", {
       ref: state.ref, cmp: state.cmp, channels: channels.join(","),
     }));
+    // 换了一对圈 = 这一屏的数据变了：让各处缓存（画布那一层、抬头那一行）跟着失效。
+    state.dataVersion += 1;
   } catch (err) {
     toast("对比圈加载失败: " + err.message);
   }
@@ -10907,6 +11056,10 @@ window.i3pro = {
   exportMissingChannels: exportMissingChannels,
   palettes: PALETTE_SET, missingColor: MISSING_COLOR,
   headFields: headFields,
+  // 双圈对比（A104）：两条圈的数据源、图上那两条线的规格、共同网格上的取数与区间统计
+  overlaySeries: overlaySeries, graphTraceSpecs: graphTraceSpecs,
+  overlayPairLabel: overlayPairLabel, pairValueAt: pairValueAt,
+  pairRangeStats: pairRangeStats, overlayLapColors: overlayLapColors,
   // 光标 A–B 区间统计（#44）：两档范围、"没有 A–B"那句原文，以及与后端
   // cursorstats.py 同一份口径的两个函数（由 smoke 拿冻结常量对拍）。
   statsRangeOf: statsRangeOf, setStatsRange: setStatsRange, abSpan: abSpan,

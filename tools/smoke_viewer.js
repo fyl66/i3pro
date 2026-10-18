@@ -4767,6 +4767,86 @@ if (canMeta) {
   api.renderAll();
 }
 
+// 42. 双圈对比：图上画的是**选中的那两条圈**（A104）。以前画的是"整场那一条"按距离轴
+//     裁出来的头 800 米——看着像只有一条圈。这里钉住三件事：数据源是 overlay 的两条圈、
+//     图上是两条不同颜色的线、抬头与标题都写着是哪两条圈；切回时间轴又只剩一条。
+{
+  const graph = api.state.components.filter((c) => c.type === "graph")[0];
+  const overlay = api.data.overlay;
+  check(!!graph && !!overlay && (overlay.laps || []).length === 2,
+    "快照里没有内嵌的对比圈，这一组验不下去");
+  if (graph && overlay && (overlay.laps || []).length === 2) {
+    const saved = {
+      ref: api.state.ref, cmp: api.state.cmp, mode: api.state.mode, view: api.state.view,
+      dataVersion: api.state.dataVersion,
+    };
+    const name = (graph.config.channels || [])[0];
+    api.state.ref = overlay.laps[0].lap;
+    api.state.cmp = overlay.laps[1].lap;
+    api.state.mode = "overlay";
+    api.state.view = null;
+    api.renderAll();
+
+    const pair = api.overlaySeries(name);
+    check(!!pair && pair.rows.length === 2, "双圈对比没给出两条圈的数据源");
+    check(!!pair && pair.x === overlay.distance,
+      "两条圈没落在同一条距离网格上（那就不叫按距离比了）");
+    check(!!pair && pair.rows[0].values === overlay.laps[0][name]
+      && pair.rows[1].values === overlay.laps[1][name],
+      "两条线的数据不是选中的那两条圈");
+
+    const specs = api.graphTraceSpecs(name, graph);
+    check(specs.length === 2, "图上画了几条线？期望 2，实际 " + specs.length);
+    check(specs[0].x === specs[1].x && specs[0].x === overlay.distance,
+      "两条线没共用同一条距离网格");
+    check(specs[0].color !== specs[1].color && specs[0].color === api.overlayLapColors()[0]
+      && specs[1].color === api.overlayLapColors()[1],
+      "两条线不是「蓝 = 基准圈、橙 = 对比圈」那一对颜色");
+    check(specs[0].values !== specs[1].values, "两条线画的是同一份数据");
+
+    // 共同网格上的取数与区间统计（抬头那一行用的就是这两个函数）
+    const xs = overlay.distance, mid = xs[Math.floor(xs.length / 2)];
+    const at = (row) => api.pairValueAt(pair, row.values, mid);
+    check(at(pair.rows[0]) === overlay.laps[0][name][Math.floor(xs.length / 2)]
+      || Number.isFinite(at(pair.rows[0])),
+      "共同网格上取不到值：" + at(pair.rows[0]));
+    const st = api.pairRangeStats(pair, pair.rows[0].values, xs[0], xs[xs.length - 1]);
+    check(!!st && st.min <= st.avg && st.avg <= st.max, "区间统计不成立：" + JSON.stringify(st));
+
+    // 抬头那一行：左边基准圈、右边对比圈；标题里写着是哪两条圈
+    api.state.cursor = xs[Math.floor(xs.length / 2)];
+    api.state.show.measure = true;
+    api.renderAll();
+    const node = SHEETEl(registry.get("worksheet"), graph.id);
+    const curs = insideOf(node, "lcur").map((el) => String(el.textContent));
+    const deltas = insideOf(node, "ldelta").map((el) => String(el.textContent));
+    check(curs.some((one) => one.indexOf("蓝 ") === 0 && one.indexOf("橙 ") > 0),
+      "抬头那一行没同时印两条圈的值：" + curs.slice(0, 2).join(" | "));
+    check(deltas.some((one) => one.indexOf("Δ值") === 0),
+      "抬头那一行没印两条圈的差：" + deltas.slice(0, 2).join(" | "));
+    const title = api.componentTitle(graph);
+    check(title.indexOf("蓝=圈 " + overlay.laps[0].lap) >= 0
+      && title.indexOf("橙=圈 " + overlay.laps[1].lap) >= 0,
+      "组件标题没写清画的是哪两条圈：" + title);
+    check(api.overlayPairLabel().indexOf("蓝=圈") === 0, "对比圈那句标签不对");
+
+    // 切回时间轴：一切照旧（一条线、没有"蓝/橙"那套）
+    api.state.mode = "time";
+    api.renderAll();
+    check(api.graphTraceSpecs(name, graph).length === 1,
+      "回到时间轴还画两条线");
+    check(api.overlayPairLabel() === "", "不在对比模式还挂着对比圈标签");
+
+    api.state.ref = saved.ref;
+    api.state.cmp = saved.cmp;
+    api.state.mode = saved.mode;
+    api.state.view = saved.view;
+    api.state.dataVersion = saved.dataVersion;
+    api.state.cursor = null;
+    api.renderAll();
+  }
+}
+
 const header = registry.get("fileInfo");
 check(header && (header.innerHTML.indexOf(".ld") >= 0
   || header.innerHTML.indexOf(".csv") >= 0

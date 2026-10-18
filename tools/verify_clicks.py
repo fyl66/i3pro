@@ -3509,6 +3509,116 @@ class Checker:
         self.js("i3pro.state.focusId=null;i3pro.buildWorksheet();i3pro.renderAll();true")
         time.sleep(0.3)
 
+    # ------------------------------------------- A104 双圈对比真的画两条圈
+    def lap_overlay(self):
+        """A104：真点「基」「比」选中两条圈，画布上**真的出现两条圈**的曲线。
+
+        这一条是给"双圈对比只能切圈、看不到两条圈的数据"那个 bug 的：以前图上画的是
+        `state.traces`（整场那一条）按距离轴裁出来的一段，两条圈只剩下名字。判据不能只看
+        `state.mode==="overlay"`——那**本来就一直是绿的**，要看画布上有没有两种颜色的线。
+        """
+        def rect_of(selector):
+            self.reveal(selector, wait=0.35)
+            raw = self.js(
+                "(function(){var el=document.querySelector(%r);if(!el)return 'null';"
+                "var r=el.getBoundingClientRect();return JSON.stringify({x:r.left+r.width/2,"
+                "y:r.top+r.height/2,w:r.width,h:r.height});})()" % selector)
+            return json.loads(raw) if raw and raw != "null" else None
+
+        def click_at(selector, label):
+            box = rect_of(selector)
+            self.check("A104 「%s」点得到" % label,
+                       bool(box) and box.get("w", 0) > 0, box)
+            if not box:
+                return False
+            self.browser.click(box["x"], box["y"], self.session)
+            time.sleep(0.8)
+            return True
+
+        def lap_colors_in_canvas():
+            """图表画布上有多少像素落在两条圈的语义色上（蓝 = --ref、橙 = --cmp）。
+
+            两条语义色是**调色板里没有的两个色**（`--ref` / `--cmp`）：只有这两条圈会用它
+            们，所以"这两个色有没有出现"就能判"两条圈画没画出来"。第一版用了跟调色板里
+            第一条通道一模一样的蓝，判据在"画法被关掉"时照样绿——假翻。
+            """
+            return self.js(
+                "(function(){var ref=getComputedStyle(document.documentElement)"
+                ".getPropertyValue('--ref').trim();"
+                "var cmp=getComputedStyle(document.documentElement)"
+                ".getPropertyValue('--cmp').trim();"
+                "function rgb(h){var d=document.createElement('i');d.style.color=h;"
+                "document.body.appendChild(d);var s=getComputedStyle(d).color;d.remove();return s;}"
+                "var want=[rgb(ref),rgb(cmp)],out=[0,0];"
+                "var cs=document.querySelectorAll('#worksheet .comp[data-type=graph] canvas');"
+                "for(var k=0;k<cs.length;k++){var c=cs[k];"
+                "var d=c.getContext('2d').getImageData(0,0,c.width,c.height).data;"
+                "for(var i=0;i<d.length;i+=4){for(var w=0;w<2;w++){"
+                "var t=want[w].match(/\\d+/g);"
+                "if(t&&Math.abs(d[i]-t[0])<12&&Math.abs(d[i+1]-t[1])<12"
+                "&&Math.abs(d[i+2]-t[2])<12)out[w]++;}}}"
+                "return JSON.stringify({ref:want[0],cmp:want[1],refPx:out[0],cmpPx:out[1]});})()")
+
+        self.js("i3pro.applyPreset(i3pro.worksheetCatalogue().sheets[0].name); true")
+        time.sleep(0.9)
+        # 圈速表在「高级工具」折叠区里（票⑧），先展开——不展开量出来的 rect 全是 0
+        self.js("i3pro.setAdvanced(true); true")
+        time.sleep(0.5)
+        laps = json.loads(self.js(
+            "JSON.stringify([].map.call(document.querySelectorAll('#lapTable tr[data-lap]'),"
+            "function(t){return t.dataset.lap;}))") or "[]")
+        self.check("A104 圈速表里有至少两条圈可点", len(laps) >= 2, laps[:6])
+        if len(laps) < 2:
+            return
+        first, second = laps[0], laps[1]
+
+        if not click_at('#lapTable tr[data-lap="%s"] button[data-role=ref]' % first,
+                        "圈 %s 的「基」" % first):
+            return
+        if not click_at('#lapTable tr[data-lap="%s"] button[data-role=cmp]' % second,
+                        "圈 %s 的「比」" % second):
+            return
+        time.sleep(1.2)
+        pair = json.loads(self.js(
+            "JSON.stringify((i3pro.state.overlay&&i3pro.state.overlay.laps||[])"
+            ".map(function(l){return String(l.lap);}))") or "[]")
+        self.check("A104 真点过之后选中的就是这两条圈",
+                   self.js("String(i3pro.state.ref)") == first
+                   and self.js("String(i3pro.state.cmp)") == second
+                   and pair == [first, second],
+                   "ref=%s cmp=%s overlay=%s" % (self.js("String(i3pro.state.ref)"),
+                                                 self.js("String(i3pro.state.cmp)"), pair))
+        self.check("A104 界面切到了双圈对比模式",
+                   self.js("i3pro.state.mode") == "overlay",
+                   self.js("i3pro.state.mode"))
+        title = self.js(
+            "(i3pro.componentTitle(i3pro.state.components.filter(function(c){"
+            "return c.type==='graph';})[0])||'')")
+        self.check("A104 组件标题写清画的是哪两条圈",
+                   ("蓝=圈 " + first) in title and ("橙=圈 " + second) in title, title)
+        pixels = json.loads(lap_colors_in_canvas() or "null")
+        self.check("A104 画布上真的画出了两条圈（蓝 + 橙两种颜色的线都在）",
+                   bool(pixels) and pixels.get("refPx", 0) > 300 and pixels.get("cmpPx", 0) > 300,
+                   pixels)
+        self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-lap-overlay.png"),
+                          self.session)
+        # 换一条对比圈：画的也必须跟着换（不是一次性画好就冻住）
+        if len(laps) >= 3:
+            before = pixels
+            if click_at('#lapTable tr[data-lap="%s"] button[data-role=cmp]' % laps[2],
+                        "圈 %s 的「比」" % laps[2]):
+                time.sleep(1.0)
+                after = json.loads(lap_colors_in_canvas() or "null")
+                self.check("A104 换一条对比圈，画布跟着重画",
+                           bool(after) and (after != before)
+                           and self.js("String(i3pro.state.cmp)") == laps[2],
+                           "%s -> %s" % (before, after))
+        # 收尾：切回时间轴、清掉选择，后面的验收从原来那一屏继续
+        self.js("(function(){i3pro.state.cmp=null;i3pro.state.mode='time';"
+                "i3pro.state.view=null;i3pro.state.cursor=null;"
+                "i3pro.renderAll();return true;})()")
+        time.sleep(0.4)
+
     # ------------------------------------------------ A78 侧边栏快速跳转
     def sidebar_jump(self):
         """A78：左边那一栏比屏幕长得多，"跳到哪一栏"要**真的滚过去**、光标放对地方。
@@ -4661,6 +4771,8 @@ def main(argv=None):
             checker.inspector_panel()
             # 票⑪ 组件标题栏：悬浮 / 选中才出操作，… 菜单开合与键盘路径
             checker.component_menu()
+            # A104 双圈对比：真选两条圈，画布上真的画出两条（这次修的 bug）
+            checker.lap_overlay()
             checker.sections()
             checker.crossings(sidecar)
             checker.rename(sidecar)

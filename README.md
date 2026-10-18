@@ -22,6 +22,10 @@ i2pro_data/*.ld ──► 原生解析(mmap) ──► Parquet + 元数据 ─�
                                                                        双击即开、无 CDN、无 npm
 ```
 
+**目录** · [一键启动](#一键启动) · [已验证的能力](#已验证的能力有数据支撑不是接口声明) ·
+[架构与目录](#架构与目录) · [命令](#命令) · [快捷键](#快捷键对齐-motec-i2-pro-的键位) ·
+[数据里必须知道的坑](#数据里必须知道的坑) · [开发](#开发) · [常见问题](#常见问题)
+
 ---
 
 ## 一键启动
@@ -95,12 +99,13 @@ cd E:\桌面\i3pro
 
 ## 已验证的能力（有数据支撑，不是接口声明）
 
-全部结论来自 `i2pro_data/` 里 **8 个真实 C125 日志**（36.6–118.8 MB）和
-MoTeC 自己导出的两个 CSV（182 MB / 425 MB）。
+全部结论来自 `i2pro_data/` 里的真实 C125 日志和 MoTeC 自己导出的 CSV。**口径跟着数据走**，
+本机 2026-10-19 这一份是 **17 份 `.ld`**（20.1–122.7 MB、259–451 通道，**全部解析成功**），
+加上 `tools\verify_ld_vs_csv.py` 认的那两对 `.ld` + `.csv`（173.7 MB / 406.1 MB）。
 
 | 能力 | 证据 |
 | --- | --- |
-| **原生解析 `.ld`**（不需要 i2 Pro，也不需要任何转换工具） | 8 个日志全部解析成功，342–437 通道，int16/int32 与 100/50/25/20/10/5/2/1 Hz 混采 |
+| **原生解析 `.ld`**（不需要 i2 Pro，也不需要任何转换工具） | 17 份日志全部解析成功，259–451 通道；int16/int32 与多档采样率混采（高避那份实测 100/50/25/20/10/5/2/1 Hz，共 437 条通道） |
 | **数值正确性** | 与 MoTeC 导出的 CSV 逐样本比对：两个场次各 **213/213 个可比通道全部落在显示精度内**，最大偏差 0.005 G / 0.4 deg/s（都是半个显示位）。见 `tools/verify_ld_vs_csv.py` |
 | **独立实现交叉验证** | 与另一套独立逆向的解析器 `gotzl/ldparser` 对比：通道数、通道名、单位、采样点数完全一致，抽样通道数值 `rtol=1e-9` |
 | **`.ld` → Parquet** | `耐久正赛` 118.8 MB → 19.0 MB（压掉 84%），**1.3 s**；`高避5圈` 36.6 MB → 5.3 MB，0.4 s |
@@ -136,7 +141,7 @@ MoTeC 自己导出的两个 CSV（182 MB / 425 MB）。
 | **导入别人的表（CSV / Excel / TXT）** | 队友发来的不是 `.ld` 也能用：`.csv`（i2 Pro 导出、别的队/别的设备的表）与 **`.xlsx`** 都读成与 `.ld` **同一种场次**——进侧边栏、能画图/切圈/比圈/报表/导出。列名走 **原名 → 别名 → 手工覆盖** 三级回落，单位参与判断与补齐，选择存在 `<场次>.map.json` 侧车（`.ld` 永远只读）。Excel 多张 sheet 时**默认挑第一张能当通道表读的**（自己的导出把「元数据」放第一张），`--sheet` 可以指定；日期单元格 / ISO 文本的时间列折成相对秒；**宏 / 图表 / 外部链接 / 公式没有缓存值**这四种读不了的形态会明确报错并说下一步。分隔文本（`.txt` / `.tsv` / 分隔符不是逗号的 `.csv`）在**导入前给预览**：前 20 行 + 认出来的分隔符与编码，分隔符 / 编码 / 表头行 / 单位行都能在下拉框里改，"没有时间列"默认拒绝、可以显式选**按固定采样率生成时间列**——预览与导入是**同一条代码路径**，改了下拉框立刻看得见结果。硬判据是 **round-trip**：同一次导出的 CSV / xlsx / TXT 读回来逐点相同 |
 | **CAN 记录仪 ↔ `.ld` 对齐与合并** | C125 与记录仪记的东西**不在同一份文件里**：`.ld` 有电机 / AMK / MTI / GPS 共 459–474 条通道但没有 IVT，帧表有 `I_Data` / `U1_Data` 但没有电机通道，所以母线电流与电机电流从来不同框。`i3pro pair` 按墙钟挑候选（`.ld` 头的 `log_time` 是**结束**时刻；而头里的绝对时间**不可靠**，实测一天里差 19–505 s 还会跳，所以候选按钟差上限放宽）、用两边都有的速度互相关求偏移、**再用加速度把偏移钉准并复核**（三条轴取中位数；速度太平，短窗口上会在错偏移上给出 `r=1.0000`，实测多例），然后把两边的通道合到一个场次：时间轴以 `.ld` 为准、CAN 通道零阶保持、同名只留一份、**C125 里那些整段为 0 的 IVT 模板通道会被真值替换**；**一个 `.ld` 对上不止一次记录时全部并进同一场**（各自只补自己的那一段），而同一场里几次记录推出的钟差差出好几圈的当重复动作撞出来的剔掉。实测 `10.5湾区` 配出 9 对、`10.4湾区测试` 3 对（其中一场并进两次记录）、`10.7湾区` 15 对（另有两场各并进两次记录）、`10.6中庭` 2 对，合并后的 `底马八字` 是 **127,600 行 × 555 列**（其中 287 条真的有数，其余是 `.ld` 里整段为 0 的空模板），`I Data`（−84.1 A）与 `MCU1 FR TorqueCurrent` 同框（见 [A76](docs/ACCEPTANCE.md)） |
 | **由电机电流推算母线电流** | 合并场次让这两个量第一次同框之后量出来的换算关系：母线电流量的是**功率**（`I = P/U`），所以公式必须带转速——`I_bus = -(1/η)·Σ(T·ω)/U + b`，实测 **1/η = 1.312（η = 0.762）、R² = 0.9813、RMS = 2.25 A**（17 场 / 139 万样本）；只有电机电流那条退化成 `I_bus = -0.5521·Σi_q - 0.523`（R² 0.8673、RMS 6.01 A）。电机常数实测 `kt = 0.2416 Nm/A`（四个轮一致，R² ≥ 0.99）；`I Data` 的符号约定是**放电为负、回充为正**。两条式子都能直接贴进「数学通道」（见 [docs/bus-current.md](docs/bus-current.md)） |
-| **工程化** | **596 项单测全绿**（真实数据回归 + HTTP 端到端 + 无头驱动前端 **688 个断言点**），另有 **真浏览器真鼠标验收 283 项全过**（`tools\verify_clicks.py`，Edge 的 DevTools 协议发真事件，跑在两份金标准上）；侧边栏那份"每场圈数/最快圈"**一场一把钥匙**地缓存：导入一份日志后的第一次首屏 **4.25 s**（110 场），不再是整份重算的 **69 s**（[A87](docs/ACCEPTANCE.md)）；运行期依赖只有 numpy/pandas/pyarrow，**唯一的例外是 `openpyxl`（只用于读 Excel，见 [ADR-0003](docs/adr/0003-openpyxl-for-reading-excel.md)）**，清单钉在 `requirements.txt` 上（与 `pyproject.toml` 同一份，有单测盯着别漂移）；改这个仓库的硬性规则见 [AGENTS.md](AGENTS.md) |
+| **工程化** | **634 项单测**（真实数据回归 + HTTP 端到端 + 无头驱动前端 **880 个断言点**），另有 **真浏览器真鼠标验收 402 项全过**（`tools\verify_clicks.py`，Edge 的 DevTools 协议发真事件，跑在两份金标准上）；**四条回归走一遍约 4.5 分钟**（单测 71 s + 真鼠标 170 s + 两次 smoke 22 s + 解析对照 7 s，[AGENTS.md](AGENTS.md) 第 7 条有分档的短回路）；侧边栏那份"每场圈数/最快圈"**一场一把钥匙**地缓存：导入一份日志后的第一次首屏 **4.25 s**（110 场），不再是整份重算的 **69 s**（[A87](docs/ACCEPTANCE.md)）；运行期依赖只有 numpy/pandas/pyarrow，**唯一的例外是 `openpyxl`（只用于读 Excel，见 [ADR-0003](docs/adr/0003-openpyxl-for-reading-excel.md)）**，清单钉在 `requirements.txt` 上（与 `pyproject.toml` 同一份，有单测盯着别漂移）；改这个仓库的硬性规则见 [AGENTS.md](AGENTS.md) |
 
 完整验收清单与复现命令见 **[`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md)**；
 规划、里程碑与风险见 **[`docs/PLAN.md`](docs/PLAN.md)**。
@@ -194,7 +199,41 @@ MoTeC 自己导出的两个 CSV（182 MB / 425 MB）。
 
 ---
 
-## 目录结构
+## 架构与目录
+
+**层号是仓库里现成的说法**（`TestStructureOfTheSplit` 那组守卫用的就是它），不是文档里新造的：
+
+| 层 | 职责 | 住哪 |
+| --- | --- | --- |
+| **L1 读取层** | 六种输入格式读成**同一种场次**：一个时间基、通道、单位、采样率 | `ld` · `motec_csv` · `csvlog` · `txtlog` · `xlslog` · `canlog` + `dbc` |
+| **L2 领域层** | 算的都在这里，基本是**不依赖框架的纯函数** | `derive` · `laps` · `sections` · `maths` · `gpsfix` · `report` · `cursorstats` · `attitude` · `heatmap` · `histogram` · `spectrum` · `pairing` · `sidecar` · `timebase` · `cache` |
+| **L3 载荷层** | 组装"要发出去的东西" | `render`（快照 payload）· `library`（场次库 + 缓存）· `api`（动作）· `server`（HTTP）· `indexpage` · `export` · `xlsx` · `store` |
+| **前端** | 手写 Canvas 的工作台 | `web/viewer.html`——**一个文件、双击即开、无 CDN、无 npm**（[ADR-0002](docs/adr/0002-single-file-frontend-no-build.md)） |
+
+**三条硬边界**，每条都有单测盯着：
+
+1. **L1 不许 import L3。** `csvlog` 当年为了三张"哪几类通道名"的表 import 了整个 `render`——
+   全包唯一一处反向依赖；表搬进 `channelpick` 之后两边都只 import 它
+   （`test_读取层不再反向依赖载荷层`）。
+2. **`library` 不许 import `api` / `server`。** 那两个都 import 它，反过来就是环
+   （`test_库不反向依赖服务`）。好处是 HTTP 那一层可以**不起 socket** 直接调
+   `Api.handle(parts, query, method, body)` 验动作——"这个动作算什么"与"HTTP 怎么回"因此能分开测。
+3. **`server.py` 只收字节、发字节。** 动作分派与请求体都在 `api.py`
+   （`test_server_只剩_HTTP_管道`：拆之前 1274 行，拆完 367 行，今天 418 行、守卫卡在 420）。
+
+数据怎么流：
+
+```
+L1 解析 ──► L2 领域（切圈 / 区段 / 数学通道 / GPS / 报表 / 聚合）──► L3 组装
+                                                              ├──► render.py ──► 自包含 HTML 快照
+                                                              └──► server.py + api.py ──► 浏览器工作台
+```
+
+侧车（信标 / 区段 / GPS / 注释 / 数学通道 / CSV 列映射）只有 `sidecar.py` 一个读写口；
+指纹与磁盘缓存只有 `cache.py` 一处实现——"**同一个概念只留一个答案**"是这批守卫的共同口径，
+四条回归也是为了钉它：解析正确性只认 MoTeC 自己导出的 CSV，交互只认真浏览器真鼠标。
+
+下面这份**不是全部**（`src/i3pro/` 现在 45 个 `.py`），是"你大概率会去改的那些"：
 
 ```
 启动.bat            一键起服务 + 开浏览器（给队友用这个）
@@ -205,7 +244,7 @@ i3pro.cmd           命令行入口（探测 Python + 查依赖），上面几�
 requirements.txt    运行期依赖清单（与 pyproject.toml 同一份，有单测盯着）
 docs/               PLAN.md 规划 · ACCEPTANCE.md 验收清单 · ld-format.md 格式逆向记录
 tools/              verify_ld_vs_csv.py 解析对照 · smoke_viewer.js 无头驱动前端
-tests/              596 项单测
+tests/              634 项单测
 maths/              全局数学通道定义（global.json，跨场次复用）
 out/                生成物（快照 HTML / Parquet），已在 .gitignore 里
 i2pro_data/         试车数据（.ld/.ldx/.csv/.txt/.tsv），不进仓库；只有 dbc/ 跟着仓库走
@@ -252,10 +291,10 @@ src/i3pro/
 ## 开发
 
 ```powershell
-python -m unittest discover -s tests -v      # 596 项，无数据文件时自动 skip
+python -m unittest discover -s tests -v      # 634 项，无数据文件时自动 skip
 python tools\verify_ld_vs_csv.py             # 与 i2 Pro CSV 逐通道对照
-node tools\smoke_viewer.js out\demo.html     # 无头驱动前端：缩放/光标/分组/信标编辑/数学通道/区段/报表/直方图/频谱/热力图/注释/GPS 校正/导出/工作表/CAN 报告/快速跳转/曲线连接/姿态等 688 个断言点
-python tools\verify_clicks.py                # 真 Edge 发真鼠标/键盘：283 项交互验收（需要 Edge + 金标准数据）
+node tools\smoke_viewer.js out\demo.html     # 无头驱动前端：缩放/光标/分组/信标编辑/数学通道/区段/报表/直方图/频谱/热力图/注释/GPS 校正/导出/工作表/CAN 报告/快速跳转/曲线连接/姿态等 880 个断言点
+python tools\verify_clicks.py                # 真 Edge 发真鼠标/键盘：402 项交互验收（需要 Edge + 金标准数据）
 ```
 
 这四条里有三条会在缺东西时**自动跳过，而跳过不算通过**（[AGENTS.md](AGENTS.md) 第 7 条）。

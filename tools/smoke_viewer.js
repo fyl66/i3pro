@@ -320,7 +320,10 @@ function run(hash) {
 
 /* ------------------------------------------------------------------- drive */
 const problems = [];
-const check = (ok, message) => { if (!ok) problems.push(message); };
+//: 跑过的断言条数：收尾那行 PASS 要把它念出来——README 里的"多少个断言点"因此是
+//: **这条命令跑出来的数**，不是数源码里 `check(` 出现几次（分支不同，实际跑到的会少）。
+let checks = 0;
+const check = (ok, message) => { checks += 1; if (!ok) problems.push(message); };
 const expectTemplate = process.argv.indexOf("--expect-template") >= 0;
 const httpCalls = [];
 
@@ -4937,5 +4940,6 @@ console.log(
   "PASS - workbench ran headless (" + calls.lineTo + " line segments, "
   + calls.fillRect + " point rects, " + calls.fillText + " labels, "
   + (lapTable._rows || []).length + " lap rows, "
-  + channelList._children.length + " channel rows, interactions verified)"
+    + channelList._children.length + " channel rows, "
+    + checks + " checks, interactions verified)"
 );

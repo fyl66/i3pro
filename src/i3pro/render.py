@@ -577,36 +577,36 @@ def downsample(
             out["distance"] = np.round(_finite(distance)[picked], 3).tolist()
         return out
 
+    # 分桶一律走 `reduceat`：逐桶调 numpy 是每桶三次调用，8000 桶 × 12 通道就是
+    # 将近 29 万次——实测那一版 8000 桶一个通道要 72 ms（ticket #53），换成
+    # `reduceat` 后 0.6 ms，**逐位相同**（有单测拿上面那版循环当裁判对拍）。
     edges = _bucket_edges(n, buckets)
-    bucket_time: list[float] = []
-    bucket_distance: list[float] = []
-    bucket_mean: list[float] = []
-    bucket_min: list[float] = []
-    bucket_max: list[float] = []
-    bucket_count: list[int] = []
+    starts, ends = edges[:-1], edges[1:]
+    counts = ends - starts
+    # `reduceat` 遇到空桶不会报错，它会拿起点那个样本当结果（静默给错数）。
+    # 包络分支保证 `n > 2 × buckets`，所以边界一定严格递增；真出现空桶说明调用方
+    # 绕过 `envelope_needed` 改了分桶规则，这里明确拒绝而不是继续算。
+    if counts.size and int(counts.min()) <= 0:
+        raise ValueError(
+            f"抽稀分桶出现了空桶（{n} 个样本切 {buckets} 桶）。这是 i3pro 的 bug，"
+            f"不是你的数据的问题：请把这句话报给维护者，并说明是在哪张图上遇到的。"
+        )
     distances = (
         _finite(distance)
         if distance is not None and distance.size == n
         else None
     )
-    for a, b in zip(edges, edges[1:]):
-        if b <= a:
-            continue
-        chunk = values[a:b]
-        bucket_time.append(float((time[a] + time[b - 1]) / 2.0))
-        if distances is not None:
-            bucket_distance.append(float((distances[a] + distances[b - 1]) / 2.0))
-        bucket_mean.append(float(np.mean(chunk)))
-        bucket_min.append(float(np.min(chunk)))
-        bucket_max.append(float(np.max(chunk)))
-        bucket_count.append(int(b - a))
+    bucket_time = (time[starts] + time[ends - 1]) / 2.0
+    bucket_mean = np.add.reduceat(values, starts) / counts
+    bucket_min = np.minimum.reduceat(values, starts)
+    bucket_max = np.maximum.reduceat(values, starts)
 
     out = {
-        "time": np.round(np.asarray(bucket_time), 4).tolist(),
-        "value": np.round(np.asarray(bucket_mean), 5).tolist(),
-        "min": np.round(np.asarray(bucket_min), 5).tolist(),
-        "max": np.round(np.asarray(bucket_max), 5).tolist(),
-        "count": bucket_count,
+        "time": np.round(bucket_time, 4).tolist(),
+        "value": np.round(bucket_mean, 5).tolist(),
+        "min": np.round(bucket_min, 5).tolist(),
+        "max": np.round(bucket_max, 5).tolist(),
+        "count": counts.tolist(),
         "envelope": True,
         "samples": int(n),
         "buckets": buckets,
@@ -616,7 +616,8 @@ def downsample(
         "span": [round(float(time[0]), 4), round(float(time[-1]), 4)],
     }
     if distances is not None:
-        out["distance"] = np.round(np.asarray(bucket_distance), 3).tolist()
+        out["distance"] = np.round(
+            (distances[starts] + distances[ends - 1]) / 2.0, 3).tolist()
         out["distance_span"] = [
             round(float(distances[0]), 3),
             round(float(distances[-1]), 3),

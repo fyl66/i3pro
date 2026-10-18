@@ -798,6 +798,105 @@ class TestTraceEnvelope(unittest.TestCase):
         self.assertTrue(render.envelope_needed(int(estimated) + 1, buckets))
         self.assertFalse(render.envelope_needed(int(2 * buckets), buckets))
 
+    @staticmethod
+    def _reference_envelope(time, values, distance, buckets):
+        """票 #53 的裁判：**票 #47 那一版逐桶循环**，原样留在这里。
+
+        向量化最容易出的错是"看起来一样"——所以这条不跟着改成 numpy 写法，
+        它就是被替换掉的那段代码本身。两边必须逐位相同（连四舍五入后的末位都算）。
+        """
+        n = time.size
+        buckets = max(1, int(buckets))
+        values = render._finite(values)
+        edges = render._bucket_edges(n, buckets)
+        distances = (render._finite(distance)
+                     if distance is not None and distance.size == n else None)
+        bucket_time: list[float] = []
+        bucket_distance: list[float] = []
+        bucket_mean: list[float] = []
+        bucket_min: list[float] = []
+        bucket_max: list[float] = []
+        bucket_count: list[int] = []
+        for a, b in zip(edges, edges[1:]):
+            if b <= a:
+                continue
+            chunk = values[a:b]
+            bucket_time.append(float((time[a] + time[b - 1]) / 2.0))
+            if distances is not None:
+                bucket_distance.append(float((distances[a] + distances[b - 1]) / 2.0))
+            bucket_mean.append(float(np.mean(chunk)))
+            bucket_min.append(float(np.min(chunk)))
+            bucket_max.append(float(np.max(chunk)))
+            bucket_count.append(int(b - a))
+        out = {
+            "time": np.round(np.asarray(bucket_time), 4).tolist(),
+            "value": np.round(np.asarray(bucket_mean), 5).tolist(),
+            "min": np.round(np.asarray(bucket_min), 5).tolist(),
+            "max": np.round(np.asarray(bucket_max), 5).tolist(),
+            "count": bucket_count,
+            "envelope": True,
+            "samples": int(n),
+            "buckets": buckets,
+            "span": [round(float(time[0]), 4), round(float(time[-1]), 4)],
+        }
+        if distances is not None:
+            out["distance"] = np.round(np.asarray(bucket_distance), 3).tolist()
+            out["distance_span"] = [round(float(distances[0]), 3),
+                                    round(float(distances[-1]), 3)]
+        return out
+
+    def test_向量化版本与逐桶循环逐位一致(self):
+        rng = np.random.default_rng(53)
+        cases = []
+        # 真实形状：100 Hz × 464 s 的主时间基
+        n = 46400
+        axis = np.arange(n) / 100.0
+        cases.append((axis, np.sin(axis) + 3.0))
+        # 桶宽远大于 1 的尖峰表：桶内 min/max 不能靠"隔点取样"糊过去
+        n = 24013
+        spikes = np.zeros(n)
+        spikes[::791] = 400.0
+        spikes[1::991] = -250.0
+        cases.append((np.linspace(5.0, 900.0, n), spikes))
+        # 随机漫步 + 重复值 + NaN（NaN 在两条路上都先变 0）
+        n = 33333
+        walk = np.cumsum(rng.normal(size=n))
+        walk[::500] = walk[0]
+        walk[::777] = np.nan
+        cases.append((np.linspace(0.0, 300.0, n), walk))
+
+        for time, values in cases:
+            distance = np.cumsum(np.abs(np.gradient(values)))
+            for buckets in (500, 997, 2000, 8000):
+                want = self._reference_envelope(time, values, distance, buckets)
+                got = render.downsample(time, values, distance, buckets)
+                self.assertEqual(got, want,
+                                 f"{time.size} 点切 {buckets} 桶与逐桶循环对不上")
+
+    @_needs(HILL)
+    def test_金标准上向量化与逐桶循环逐位一致(self):
+        with ld.LogFile.read(HILL) as log:
+            time = timebase.axis(log)
+            distance = derive.distance_series(log)[: time.size]
+            for name in render.pick_channels(log, 4):
+                values = derive.upsample_to_master(log, name, "linear")[: time.size]
+                for buckets in (500, 2000, 8000):
+                    want = self._reference_envelope(time, values, distance, buckets)
+                    got = render.downsample(time, values, distance, buckets)
+                    self.assertEqual(got, want, f"{name} / {buckets} 桶对不上")
+
+    def test_空桶会被明确拒绝(self):
+        """``reduceat`` 遇到空桶不报错，它会拿起点那个样本当结果——所以要先挡住。
+
+        包络分支的判据（``n > 2 × buckets``）本来保证边界严格递增；这条用打桩
+        造出一个不可能的边界，钉住"宁可报错也不给错数"。
+        """
+        with mock.patch.object(render, "_bucket_edges",
+                               return_value=np.asarray([0, 0, 40])):
+            with self.assertRaises(ValueError) as caught:
+                render.downsample(np.arange(40.0), np.arange(40.0), buckets=2)
+        self.assertIn("空桶", str(caught.exception))
+
     @_needs(HILL)
     def test_snapshot_payload_uses_envelope(self):
         with ld.LogFile.read(HILL) as log:

@@ -175,6 +175,9 @@
   .popmenu .popchip.on { border-color:var(--accent); color:var(--accent); }
   .popmenu .poprow { display:flex; align-items:center; gap:7px; margin-bottom:6px; }
   .popmenu .poplabel { color:var(--muted); }
+  /* … 菜单里的一行动作：整行可点（配色那几排是"选一个"，才用小片片） */
+  .popmenu .popact { display:block; width:100%; text-align:left; margin-bottom:3px;
+                     padding:3px 8px; font-size:12px; }
   .popmenu .pophint { color:var(--muted); font-size:11px; line-height:1.5;
                       margin-top:7px; border-top:1px solid var(--line); padding-top:6px; }
   .swatch { width:9px; height:9px; border-radius:2px; flex:0 0 auto; }
@@ -268,8 +271,14 @@
              border-bottom:1px solid var(--line); font-size:11px; color:var(--muted);
              user-select:none; flex:0 0 auto; }
   .compbar .ctitle { font-weight:600; }
-  .compbar .ctools { margin-left:auto; display:flex; gap:3px; opacity:.3; }
-  .comp:hover .compbar .ctools { opacity:1; }
+  /* 组件标题栏平时安静（票⑪）：默认只有标题与拖拽把手；鼠标悬浮、这一块被选中
+     （.focus）或键盘 Tab 进来（:focus-within）才出操作。用 opacity + pointer-events
+     而不是 display:none —— 看不见的时候按钮还在 Tab 顺序里，键盘用户不会因为
+     "操作要悬浮才出"这件事退化。栏上只有「✕」与「…」两个，低频的在 … 菜单里。 */
+  .compbar .ctools { margin-left:auto; display:flex; gap:3px; opacity:0;
+                     pointer-events:none; transition:opacity .12s; }
+  .comp:hover .compbar .ctools, .comp.focus .compbar .ctools,
+  .compbar .ctools:focus-within { opacity:1; pointer-events:auto; }
   .compbar .ctools button { padding:0 5px; font-size:11px; line-height:16px; border-radius:4px; }
   .compbody { position:relative; flex:1 1 auto; min-height:0; }
   .compbody canvas { display:block; width:100%; }
@@ -3600,21 +3609,32 @@ function buildWorksheet() {
     titleSpan.textContent = componentTitle(comp);
     const sizeSpan = makeEl("span", "csize", bar);
     const tools = makeEl("span", "ctools", bar);
-    const btn = (act, label, title) => {
-      const b = makeEl("button", "", tools);
-      b.textContent = label;
-      b.title = title;
-      b.addEventListener("click", (event) => {
-        event.stopPropagation();
-        componentAction(comp, act);
+    // 票⑪：标题栏上只留两个按钮——「✕」（关掉这一块）与「…」（更多）。两个都由
+    // componentActions 那一张表说了算；平时都看不见，悬浮 / 选中 / Tab 进来才出来
+    // （CSS 那三条），低频动作（上移 / 下移 / 复制 / 换成… / 报表的导出 CSV）在 … 里。
+    for (const row of componentActions(comp)) {
+      if (!row.bar) continue;
+      const button = makeEl("button", "", tools);
+      button.textContent = row.bar.label;
+      button.title = row.bar.title;
+      button.dataset.compAct = row.key;
+      button.addEventListener("click", (event) => {
+        if (event && event.stopPropagation) event.stopPropagation();
+        runComponentAction(comp, row.key, button);
       });
-      return b;
-    };
-    // 票⑨之后标题栏只留高频动作：上移 / 下移 / 复制 / 换成… 与「显示」（配色 / 抬头 /
-    // 统计范围）全部搬进右栏 inspector。报表的 CSV 留下——导出一张表是天天要做的事；
-    // ✕ 也留下（关掉一块不该先点两下）。
-    if (tabular) btn("csv", "CSV", "把这张表导出成 CSV（列序与界面上看到的一致）");
-    btn("close", "✕", "移除这个组件");
+    }
+    const more = makeEl("button", "", tools);
+    more.textContent = "…";
+    more.title = "更多：上移 / 下移 / 复制 / 换成…（报表还能导出 CSV）";
+    more.dataset.compAct = "menu";
+    if (more.setAttribute) {
+      more.setAttribute("aria-haspopup", "true");
+      more.setAttribute("aria-expanded", "false");
+    }
+    more.addEventListener("click", (event) => {
+      if (event && event.stopPropagation) event.stopPropagation();
+      openComponentMenu(comp, more);
+    });
     const body = makeEl("div", "compbody" + (tabular ? " tabular" : ""), el);
     const bundle = { comp: comp, el: el, body: body, canvas: null, head: null,
                      sizeSpan: sizeSpan, titleSpan: titleSpan,
@@ -3909,6 +3929,61 @@ function replaceComponentType(comp, type) {
   return next;
 }
 
+/**
+ * 一件组件能做的动作（票⑪：**一处定义、两处入口**）。
+ *   · 右栏 inspector 的「组件」那一格渲染**全部**——那是完整面板；
+ *   · 标题栏上的 `…` 菜单渲染除 `bar` 以外的——`bar` 那一项已经就摆在标题栏上，
+ *     同一件事不摆两遍（票面要的"避免两处重复"说的就是它）；
+ *   · 标题栏上那个 ✕ 也从这张表来（`bar.label` / `bar.title`），所以"哪个动作在栏上"
+ *     只有这一处写。
+ * 两处各写一份清单的话，加一个动作时必漏一个入口——那才是要避免的那件事。
+ */
+function componentActions(comp) {
+  const spec = specOf(comp) || {};
+  const idx = state.components.indexOf(comp);
+  const rows = [
+    { key: "up", label: "上移", title: "往前挪一块", disabled: idx <= 0 },
+    { key: "down", label: "下移", title: "往后挪一块",
+      disabled: idx < 0 || idx >= state.components.length - 1 },
+    { key: "copy", label: "复制", title: "复制一份，并往右下错开一格" },
+    { key: "replace", label: "换成…", title: "换一种显示形式：尽量保留通道、位置与尺寸" },
+  ];
+  if (spec.tabular) {
+    rows.push({ key: "csv", label: "导出 CSV",
+                title: "把这张表导出成 CSV（列序与界面上看到的一致）" });
+  }
+  rows.push({ key: "close", label: "删除", cls: "danger",
+              title: "从这一套工作表里去掉这一件（点「保存」才写回文件）",
+              bar: { label: "✕", title: "移除这个组件" } });
+  return rows;
+}
+
+/** 一个动作真的做下去：`replace` 要先弹一个选类型的菜单，别的都交给 componentAction。 */
+function runComponentAction(comp, key, anchor) {
+  if (key === "replace") { openReplaceMenu(comp, anchor); return; }
+  componentAction(comp, key);
+}
+
+/** 卡片标题栏上的「…」：低频动作从这儿走（票⑪）。 */
+function openComponentMenu(comp, anchor) {
+  openPopMenu(anchor, "这一块能做的事", (menu) => {
+    for (const row of componentActions(comp)) {
+      if (row.bar) continue;             // 已经摆在标题栏上的那个不进菜单
+      const item = makeEl("button", "popact", menu);
+      item.textContent = row.label;
+      item.title = row.title;
+      item.disabled = !!row.disabled;
+      item.dataset.compAct = row.key;
+      item.addEventListener("click", () => {
+        closePopMenu();
+        runComponentAction(comp, row.key, anchor);
+      });
+    }
+    const hint = makeEl("div", "pophint", menu);
+    hint.textContent = "这一块的全部设置与动作也在右栏的「组件设置」里。";
+  });
+}
+
 function componentAction(comp, act) {
   const idx = state.components.indexOf(comp);
   if (act === "csv") {
@@ -3941,8 +4016,9 @@ function markFocused() {
 }
 
 /* --------------------------------------------- 右侧组件 inspector（票⑨）
- * 组件标题栏从这一票起只留高频动作（关闭 + 报表的 CSV），其余搬到这里：
- * 上移 / 下移 / 复制 / 换成… / 删除、通道槽位、调色板、抬头与统计、轴范围。
+ * 组件标题栏从这一票起只留高频动作，其余搬到这里：上移 / 下移 / 复制 / 换成… / 删除、
+ * 通道槽位、调色板、抬头与统计、轴范围。（票⑪ 又把标题栏上那两个按钮的清单收进
+ * `componentActions`：一处定义、两处入口，标题栏只剩 ✕ 与 …。）
  *
  * 两条口径（ADR-0008 的"搬家时的三条规矩"）：
  *   · 组件级的（`config.*`）只写这一件组件，跟工作表走；
@@ -4230,31 +4306,16 @@ function insZoomGroup(host, comp) {
 
 function insActionsGroup(host, comp) {
   const box = insGroup(host, "组件",
-    "标题栏上留的是高频动作；上移 / 下移 / 复制 / 换成… / 删除都在这儿。");
-  const idx = state.components.indexOf(comp);
+    "标题栏上只留「✕」与「…」；这一格是同一份动作清单的完整版（一处定义、两处入口）。");
   const row = makeEl("div", "row", box);
-  const action = (act, label, title, disabled) => {
-    const button = makeEl("button", "", row);
-    button.textContent = label;
-    button.title = title;
-    button.dataset.insAct = act;
-    button.disabled = !!disabled;
-    button.addEventListener("click", () => componentAction(comp, act));
-    return button;
-  };
-  action("up", "↑ 上移", "往前挪一块", idx <= 0);
-  action("down", "↓ 下移", "往后挪一块", idx < 0 || idx >= state.components.length - 1);
-  action("copy", "复制", "复制一份，并往右下错开一格");
-  const replace = makeEl("button", "", row);
-  replace.textContent = "换成…";
-  replace.title = "换一种显示形式：尽量保留通道、位置与尺寸";
-  replace.dataset.insAct = "replace";
-  replace.addEventListener("click", () => openReplaceMenu(comp, replace));
-  const remove = makeEl("button", "danger", row);
-  remove.textContent = "删除";
-  remove.title = "从这一套工作表里去掉这一件（点「保存」才写回文件）";
-  remove.dataset.insAct = "close";
-  remove.addEventListener("click", () => componentAction(comp, "close"));
+  for (const one of componentActions(comp)) {
+    const button = makeEl("button", one.cls || "", row);
+    button.textContent = one.label;
+    button.title = one.title;
+    button.dataset.insAct = one.key;
+    button.disabled = !!one.disabled;
+    button.addEventListener("click", () => runComponentAction(comp, one.key, button));
+  }
   return box;
 }
 
@@ -4544,15 +4605,33 @@ function renderGraphHead(comp, b, groups, panels, overlapped) {
  * "点开菜单选一个色"这件事在真浏览器验收里要能一步一步点出来。
  */
 let popMenu = null;
+//: 打开这个菜单的那个按钮——Esc 关掉之后焦点要还给它（票⑪）。
+let popMenuAnchor = null;
 
 function closePopMenu() {
   if (popMenu && popMenu.parentNode) popMenu.parentNode.removeChild(popMenu);
   popMenu = null;
   document.removeEventListener("mousedown", popMenuOutside, true);
+  document.removeEventListener("keydown", popMenuEscape, true);
+  // "菜单正开着"这件事也要从按钮上撤掉：读屏与键盘用户靠它知道状态。
+  if (popMenuAnchor && popMenuAnchor.setAttribute) {
+    popMenuAnchor.setAttribute("aria-expanded", "false");
+  }
+  popMenuAnchor = null;
 }
 
 function popMenuOutside(event) {
   if (popMenu && !popMenu.contains(event.target)) closePopMenu();
+}
+
+/** Esc 关菜单，并把焦点还给打开它的那个按钮（票⑪：键盘不能因为"悬浮"这件事退化）。 */
+function popMenuEscape(event) {
+  if (!popMenu || event.key !== "Escape") return;
+  if (event.preventDefault) event.preventDefault();
+  if (event.stopPropagation) event.stopPropagation();
+  const back = popMenuAnchor;
+  closePopMenu();
+  if (back && back.focus) back.focus();
 }
 
 /** 在某个元素旁边开一个小弹窗；`build(menu)` 往里面填内容。 */
@@ -4574,7 +4653,16 @@ function openPopMenu(anchor, title, build) {
   menu.style.left = left + "px";
   menu.style.top = top + "px";
   popMenu = menu;
+  popMenuAnchor = anchor || null;
+  if (anchor && anchor.setAttribute) anchor.setAttribute("aria-expanded", "true");
   document.addEventListener("mousedown", popMenuOutside, true);
+  document.addEventListener("keydown", popMenuEscape, true);
+  // 键盘打开的那一次，焦点直接落到第一个点得动的项上：不然"回车开了菜单"之后，
+  // 焦点还留在按钮上，得再 Tab 一圈才够得着里面的东西。
+  let first = null;
+  try { first = menu.querySelector ? menu.querySelector("button:not([disabled])") : null; }
+  catch (err) { first = null; }
+  if (first && first.focus) first.focus();
   return menu;
 }
 
@@ -10797,6 +10885,9 @@ window.i3pro = {
   inspectorComponent: inspectorComponent, renderInspector: renderInspector,
   inspectorOpen: inspectorOpen, setInspector: setInspector,
   setTraceStyle: setTraceStyle, inspectorZoomKeys: inspectorZoomKeys,
+  // 组件动作清单与标题栏上的 … 菜单（票⑪）：一处定义、两处入口
+  componentActions: componentActions,
+  openComponentMenu: openComponentMenu, popMenuEscape: popMenuEscape,
   renderAddTypeNote: renderAddTypeNote, addTypeReason: addTypeReason,
   emptyComponentHint: () => EMPTY_COMPONENT_HINT,
   encodeLayout: encodeLayout, decodeLayout: decodeLayout, saveLayout: saveLayout,

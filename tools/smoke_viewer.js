@@ -4654,6 +4654,119 @@ if (canMeta) {
   api.renderAll();
 }
 
+// 41. 组件标题栏：平时安静 + `…` 菜单（票⑪）。假 DOM 没有样式，量不了 opacity——
+//     "悬浮 / 选中真的出操作、真点得到"由 verify_clicks 那条真鼠标的管；这里证明的是
+//     接线：标题栏上只有 ✕ 与 …、两个都从 componentActions 那张表来、`…` 菜单里是
+//     表里除 bar 以外的那些、点一项真的做下去、Esc 关菜单并把状态撤回去。
+{
+  const savedComponents = JSON.parse(JSON.stringify(api.state.components));
+  const savedFocus = api.state.focusId;
+
+  const graph = api.state.components.filter((c) => c.type === "graph")[0];
+  check(!!graph, "工作表里没有图，标题栏这一组验不下去");
+  const barOf = (comp) => insideOf(SHEETEl(registry.get("worksheet"), comp.id), "ctools")[0];
+  const popmenuIn = () => (ctx.document.body._children || [])
+    .filter((c) => String(c.className).indexOf("popmenu") >= 0)[0] || null;
+
+  if (graph) {
+    api.state.focusId = graph.id;
+    api.buildWorksheet();
+    api.renderAll();
+    const tools = barOf(graph);
+    check(!!tools, "组件标题栏上那一排按钮不见了");
+    const buttons = (tools && tools._children) || [];
+    const labels = buttons.map((b) => String(b.textContent));
+    check(labels.join(",") === "✕,…",
+      "标题栏上应当只有「✕」与「…」两个：" + labels.join(","));
+
+    // ✕ 的文案与提示来自 componentActions（一处定义），不是标题栏里另写一遍
+    const rows = api.componentActions(graph);
+    const closeRow = rows.filter((r) => r.bar)[0];
+    check(!!closeRow && closeRow.key === "close"
+      && buttons[0] && buttons[0].textContent === closeRow.bar.label
+      && buttons[0].title === closeRow.bar.title,
+      "标题栏上的 ✕ 不是从 componentActions 那张表来的");
+
+    // 一处定义两处入口：表 = 右栏那一格；… 菜单 = 表里除 bar 以外的那些
+    check(rows.map((r) => r.key).join(",") === "up,down,copy,replace,close",
+      "动作表的顺序或内容变了：" + rows.map((r) => r.key).join(","));
+    api.renderInspector();
+    const insNodes = [];
+    (function walk(el) {
+      for (const child of (el && el._children) || []) { insNodes.push(child); walk(child); }
+    })(registry.get("insBody"));
+    const insActs = insNodes.filter((c) => c.dataset && c.dataset.insAct)
+      .map((c) => c.dataset.insAct);
+    check(insActs.join(",") === rows.map((r) => r.key).join(","),
+      "右栏那一格与动作表对不上：" + insActs.join(","));
+
+    // 键鼠两条路都能开：这里走的是"点 …"（Tab 与回车由真浏览器那条验）
+    const more = buttons[1];
+    more.dispatch("click", { target: more });
+    const menu = popmenuIn();
+    check(!!menu, "点「…」没有开出菜单");
+    const items = menu ? insideOf(menu, "popact") : [];
+    check(items.map((b) => b.dataset.compAct).join(",") === "up,down,copy,replace",
+      "… 菜单里应当是表里除 bar 以外的那些：" + items.map((b) => b.dataset.compAct).join(","));
+    check(items.map((b) => b.textContent).join(",") === "上移,下移,复制,换成…",
+      "… 菜单的文案不对：" + items.map((b) => b.textContent).join(","));
+    check(more.getAttribute("aria-expanded") === "true",
+      "菜单开着，按钮上却没写 aria-expanded");
+
+    // 点菜单里的一项：真的做了（复制 → 多一块，而且焦点跟到新的那一块）
+    const before = api.state.components.length;
+    const copyItem = items.filter((b) => b.dataset.compAct === "copy")[0];
+    copyItem.dispatch("click", { target: copyItem });
+    check(api.state.components.length === before + 1,
+      "… 菜单里点「复制」没有多出一块：" + api.state.components.length);
+    check(!popmenuIn(), "点了菜单里的一项，菜单没收起来");
+
+    // Esc 关菜单：非 Esc 不关，Esc 关，并把按钮上的状态撤回去
+    const keeps = { key: "a", preventDefault() {}, stopPropagation() {} };
+    more.dispatch("click", { target: more });
+    api.popMenuEscape(keeps);
+    check(!!popmenuIn(), "按了个普通键就把菜单关了");
+    api.popMenuEscape({ key: "Escape", preventDefault() {}, stopPropagation() {} });
+    check(!popmenuIn(), "按 Esc 没把菜单关掉");
+    check(!!more && more.getAttribute("aria-expanded") === "false",
+      "菜单关了，按钮上的 aria-expanded 还写着 true");
+
+    // 菜单里的「换成…」不直接换：它把"选类型"的那个菜单再开出来（同一条执行函数的岔路，
+    // 组件与位置保留那套逻辑仍然只有 openReplaceMenu 一处）。这里只验它真开出来了。
+    more.dispatch("click", { target: more });
+    const again = popmenuIn();
+    const replaceItem = again ? insideOf(again, "popact")
+      .filter((b) => b.dataset.compAct === "replace")[0] : null;
+    if (replaceItem) replaceItem.dispatch("click", { target: replaceItem });
+    const replaceMenu = popmenuIn();
+    const chips = replaceMenu ? insideOf(replaceMenu, "popchip") : [];
+    check(chips.some((b) => String(b.textContent) === "直方图"),
+      "… 菜单里的「换成…」没把选类型的菜单开出来：" + chips.map((b) => b.textContent).join(","));
+    api.closePopMenu();
+
+    // 表格类多一条「导出 CSV」：拿一件"报表"（不改工作表，只问那张表与菜单）
+    const report = { id: "虚的报表", type: "chreport", config: { channels: [] } };
+    check(api.componentActions(report).map((r) => r.key).join(",")
+      === "up,down,copy,replace,csv,close",
+      "表格类的动作表里应当多一条导出 CSV："
+      + api.componentActions(report).map((r) => r.key).join(","));
+    api.openComponentMenu(report, more);
+    const reportMenu = popmenuIn();
+    const reportItems = reportMenu ? insideOf(reportMenu, "popact")
+      .map((b) => b.dataset.compAct) : [];
+    check(reportItems.join(",") === "up,down,copy,replace,csv",
+      "表格类的 … 菜单里应当有导出 CSV：" + reportItems.join(","));
+    api.closePopMenu();
+  }
+
+  // 收尾：把工作表、焦点与原工作表名还原（后面那些断言看的还是原来那一屏）
+  api.state.components = savedComponents;
+  api.state.focusId = savedFocus;
+  api.closePopMenu();
+  api.buildWorksheet();
+  api.renderAll();
+}
+
 const header = registry.get("fileInfo");
 check(header && (header.innerHTML.indexOf(".ld") >= 0
   || header.innerHTML.indexOf(".csv") >= 0

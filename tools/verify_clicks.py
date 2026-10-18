@@ -3343,6 +3343,172 @@ class Checker:
                            and self.js("localStorage.getItem('i3pro.inspector.v1')") == "1",
                            again)
 
+    # ------------------------------------------- 票⑪ 组件标题栏：悬浮出操作 + … 菜单
+    def component_menu(self):
+        """票⑪：标题栏平时只有标题与拖拽把手，悬浮 / 选中 / Tab 才出 ✕ 与 …；… 收低频动作。
+
+        假 DOM（smoke 第 41 组）证明得了"清单与接线"，这一节补它证明不了的四件：
+        ① 默认**真的看不见**（computed opacity 是 0，不是靠"没有面积"混过去）；
+        ② 真鼠标悬浮才出、挪开（且没选中）又收起来；选中之后一直出；
+        ③ 真键盘：Tab 走到 …、回车开菜单、Esc 关掉并把焦点还给按钮；
+        ④ 菜单里那几项真点得动（复制多一块、✕ 再把它收走）。
+        """
+        def bar_of(component_id):
+            """标题栏那一排现在什么样：透明度、按钮（文案 + rect 中心）。"""
+            selector = '[data-id="%s"] .compbar .ctools' % component_id
+            raw = self.js(
+                "(function(){var t=document.querySelector(" + json.dumps(selector) + ");"
+                "if(!t)return 'null';var st=getComputedStyle(t);"
+                "var bs=[].map.call(t.querySelectorAll('button'),function(b){"
+                "var r=b.getBoundingClientRect();"
+                "return {label:b.textContent,w:r.width,h:r.height,"
+                "x:r.left+r.width/2,y:r.top+r.height/2};});"
+                "return JSON.stringify({opacity:st.opacity,pointer:st.pointerEvents,"
+                "btns:bs});})()")
+            return json.loads(raw) if raw and raw != "null" else None
+
+        def rect_of(selector):
+            raw = self.js(
+                "(function(){var el=document.querySelector(%r);if(!el)return 'null';"
+                "var r=el.getBoundingClientRect();return JSON.stringify({x:r.left+r.width/2,"
+                "y:r.top+r.height/2,w:r.width,h:r.height});})()" % selector)
+            return json.loads(raw) if raw and raw != "null" else None
+
+        def focused_text():
+            return self.js(
+                "(function(){var a=document.activeElement;"
+                "return a?String(a.textContent):'';})()")
+
+        self.js("i3pro.applyPreset(i3pro.worksheetCatalogue().sheets[0].name); true")
+        time.sleep(0.9)
+        # 从"一块都没选中"这一头开始：选中会让操作一直露着，那是下面单独一条
+        self.js("i3pro.state.focusId=null;i3pro.buildWorksheet();i3pro.renderAll();true")
+        time.sleep(0.4)
+        graph = json.loads(self.js(
+            "JSON.stringify((function(){var c=i3pro.state.components.filter(function(x)"
+            "{return x.type==='graph';})[0];return c?{id:c.id}:null;})())") or "null")
+        self.check("票⑪ 工作表里有一件图（没它验不下去）", bool(graph), graph)
+        if not graph:
+            return
+        gid = graph["id"]
+        bar = rect_of('[data-id="%s"] .compbar' % gid)
+        self.check("票⑪ 组件标题栏点得到（也要拿它当悬浮的靶子）",
+                   bool(bar) and bar.get("w", 0) > 0, bar)
+        if not bar:
+            return
+
+        # ① 默认：看不见（opacity 0），但按钮还在 Tab 顺序里（有面积、不是 display:none）
+        self.browser.mouse("mouseMoved", 30, 200, self.session, buttons=0)   # 挪到左栏那边
+        time.sleep(0.4)
+        idle = bar_of(gid)
+        self.check("票⑪ 默认（没悬浮、没选中）标题栏上的操作是收着的",
+                   bool(idle) and idle["opacity"] == "0", idle and idle["opacity"])
+        self.check("票⑪ 收着的时候按钮仍在 Tab 顺序里（有面积、没被 display:none 掉）",
+                   bool(idle) and len(idle["btns"]) == 2
+                   and all(b["w"] > 0 and b["h"] > 0 for b in idle["btns"]),
+                   idle and idle["btns"])
+        self.check("票⑪ 标题栏上只有「✕」与「…」（判据 ≤ 2）",
+                   bool(idle) and [b["label"] for b in idle["btns"]] == ["✕", "…"],
+                   idle and [b["label"] for b in idle["btns"]])
+        self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-component-bar-idle.png"),
+                          self.session)
+
+        # ② 真鼠标悬浮在这一块上 -> 出操作；挪开（没选中）-> 又收起来
+        self.browser.mouse("mouseMoved", bar["x"], bar["y"], self.session, buttons=0)
+        time.sleep(0.4)
+        hovered = bar_of(gid)
+        self.check("票⑪ 真鼠标悬浮到这一块上，操作露出来了（而且真的能点：pointer-events 开了）",
+                   bool(hovered) and hovered["opacity"] == "1"
+                   and hovered["pointer"] == "auto",
+                   hovered and "%s / %s" % (hovered["opacity"], hovered["pointer"]))
+        self.browser.mouse("mouseMoved", 30, 200, self.session, buttons=0)
+        time.sleep(0.4)
+        away = bar_of(gid)
+        self.check("票⑪ 鼠标挪开、又没选中：操作收回去",
+                   bool(away) and away["opacity"] == "0", away and away["opacity"])
+
+        # 选中之后（.focus）一直露着：鼠标挪开了也不收
+        self.browser.click(bar["x"], bar["y"], self.session)
+        self.browser.mouse("mouseMoved", 30, 200, self.session, buttons=0)
+        time.sleep(0.4)
+        selected = bar_of(gid)
+        self.check("票⑪ 这一块被选中之后，操作一直露着（鼠标挪开也不收）",
+                   bool(selected) and selected["opacity"] == "1",
+                   selected and selected["opacity"])
+        self.check("票⑪ 点标题栏真的把这一块选上了",
+                   self.js("(i3pro.inspectorComponent()||{}).id") == gid,
+                   self.js("(i3pro.inspectorComponent()||{}).id"))
+
+        # ③ 键盘：Tab 走到 …、回车开菜单、Esc 关掉并把焦点还给按钮
+        self.js("(function(){var b=document.querySelector("
+                + json.dumps('[data-id="%s"] .compbar .ctools button' % gid)
+                + ");if(b&&b.focus)b.focus();return true;})()")
+        time.sleep(0.3)
+        self.check("票⑪ 焦点落进标题栏（第一个是 ✕）", focused_text() == "✕", focused_text())
+        by_key = bar_of(gid)
+        self.check("票⑪ 键盘进来也算「悬浮」：操作露出来（:focus-within）",
+                   bool(by_key) and by_key["opacity"] == "1", by_key and by_key["opacity"])
+        self.browser.key_named("Tab", "Tab", 9, self.session)
+        time.sleep(0.3)
+        self.check("票⑪ 真按 Tab 从 ✕ 走到「…」", focused_text() == "…", focused_text())
+        self.browser.key_named("Enter", "Enter", 13, self.session, text="\r")
+        time.sleep(0.5)
+        opened = json.loads(self.js(
+            "JSON.stringify((function(){var m=document.querySelector('.popmenu');"
+            "if(!m)return null;var b=[].map.call(m.querySelectorAll('.popact'),function(x){"
+            "return x.textContent;});return {items:b};})())") or "null")
+        self.check("票⑪ 键盘回车真开出 … 菜单，里面是那几件低频动作",
+                   bool(opened) and opened.get("items") == ["上移", "下移", "复制", "换成…"],
+                   opened)
+        self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-component-menu.png"),
+                          self.session)
+        self.browser.key_named("Escape", "Escape", 27, self.session)
+        time.sleep(0.4)
+        self.check("票⑪ 真按 Esc 关掉菜单，焦点还给「…」按钮",
+                   self.js("!!document.querySelector('.popmenu')") is False
+                   and focused_text() == "…",
+                   "%s / %s" % (self.js("!!document.querySelector('.popmenu')"),
+                                focused_text()))
+
+        # ④ 真鼠标那条路：悬浮 -> 点 … -> 点「复制」-> 多一块；再把新那一块的 ✕ 点掉
+        before = self.js("i3pro.state.components.length")
+        self.browser.mouse("mouseMoved", bar["x"], bar["y"], self.session, buttons=0)
+        time.sleep(0.3)
+        more = bar_of(gid)["btns"][1]
+        self.browser.click(more["x"], more["y"], self.session)
+        time.sleep(0.4)
+        item = rect_of('.popmenu .popact[data-comp-act="copy"]')
+        self.check("票⑪ 真鼠标点得到菜单里的「复制」",
+                   bool(item) and item.get("w", 0) > 0, item)
+        if item:
+            self.browser.click(item["x"], item["y"], self.session)
+            time.sleep(0.6)
+            after = self.js("i3pro.state.components.length")
+            self.check("票⑪ 菜单里点「复制」真的多了一块",
+                       after == before + 1, "%s -> %s" % (before, after))
+            copy_id = self.js("(i3pro.inspectorComponent()||{}).id")
+            if after == before + 1 and copy_id and copy_id != gid:
+                # 复制出来那一块在下面一行：先滚到看得见，再悬浮、再点 ✕
+                self.reveal('[data-id="%s"] .compbar' % copy_id)
+                cbar = rect_of('[data-id="%s"] .compbar' % copy_id)
+                self.browser.mouse("mouseMoved", cbar["x"], cbar["y"],
+                                   self.session, buttons=0)
+                time.sleep(0.4)
+                copy_bar = bar_of(copy_id)
+                self.check("票⑪ 复制出来那一块悬浮之后也出 ✕",
+                           bool(copy_bar) and copy_bar["opacity"] == "1",
+                           copy_bar and copy_bar["opacity"])
+                close = copy_bar["btns"][0]
+                self.browser.click(close["x"], close["y"], self.session)
+                time.sleep(0.5)
+                self.check("票⑪ 真点悬浮出来的「✕」把它收走",
+                           self.js("i3pro.state.components.length") == before,
+                           self.js("i3pro.state.components.length"))
+
+        # 收尾：回到"没选中"那一屏，后面的验收从原来那个样子继续
+        self.js("i3pro.state.focusId=null;i3pro.buildWorksheet();i3pro.renderAll();true")
+        time.sleep(0.3)
+
     # ------------------------------------------------ A78 侧边栏快速跳转
     def sidebar_jump(self):
         """A78：左边那一栏比屏幕长得多，"跳到哪一栏"要**真的滚过去**、光标放对地方。
@@ -4493,6 +4659,8 @@ def main(argv=None):
             checker.theme_switch()
             # 票⑨ 右栏 inspector：真选中一件、改设置画布真的变、标题栏只剩高频动作
             checker.inspector_panel()
+            # 票⑪ 组件标题栏：悬浮 / 选中才出操作，… 菜单开合与键盘路径
+            checker.component_menu()
             checker.sections()
             checker.crossings(sidecar)
             checker.rename(sidecar)

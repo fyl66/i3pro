@@ -199,6 +199,9 @@ class SessionLibrary:
         #: 按 ticket #6 的约定**只留一版**（一个槽），而且只在内存里：服务一重启
         #: 就没了，撤的是"这个进程里刚才那一步"，不是历史。
         self._laps_undo: dict[str, beaconsmod.LapConfig] = {}
+        #: 路径 -> (文件指纹, 这份 CSV 是不是 CAN 帧表)。见 :meth:`_is_frame_table`：
+        #: 判定一次要开文件读表头，而发现场次这件事每条请求都要走一遍（ticket #54）。
+        self._frames_memo: dict[str, tuple[tuple, bool]] = {}
 
     # ------------------------------------------------------------- discovery
     def _groups(self, frames: list[Path]) -> list[dict]:
@@ -233,7 +236,7 @@ class SessionLibrary:
             # 导入进来的场次与 .ld / CSV 是同一种东西，发现逻辑也只有这一处。
             for pattern in ("*.ld", "*.csv", "*.xlsx", "*.txt", "*.tsv"):
                 for path in sorted(root.rglob(pattern)):
-                    if path.suffix.lower() == ".csv" and canlog.looks_like_frames(path):
+                    if path.suffix.lower() == ".csv" and self._is_frame_table(path):
                         frames.append(path)
                         continue
                     name = path.stem
@@ -252,6 +255,28 @@ class SessionLibrary:
             found.setdefault(name, (items[0], items))
         return found
 
+    def _is_frame_table(self, path: Path) -> bool:
+        """这份 CSV 是 CAN 帧表还是通道表——按**文件指纹**记住上一次的答案。
+
+        ``canlog.looks_like_frames`` 要开文件读表头，而"这场次在不在"每条请求都要问
+        一次（``_entries``）。实测 98 个场次的目录里那一趟要 18 ms，其中 14 ms 花在
+        逐份读表头上（ticket #54：缓存命中省下来的时间，不该又在这里花掉）。
+
+        表头是文件内容的事实，所以按 :func:`i3pro.cache.file_stamp` 那三样
+        （名字 + 字节数 + mtime）记住它——和仓库里其它缓存同一条约定。改过内容的
+        CSV 指纹会变，答案立刻重算；文件消失时这条记录留着不碍事（键是路径）。
+        """
+        stamp = tuple(_file_stamp(path))
+        key = str(path)
+        with self._lock:
+            remembered = self._frames_memo.get(key)
+        if remembered is not None and remembered[0] == stamp:
+            return remembered[1]
+        answer = canlog.looks_like_frames(path)
+        with self._lock:
+            self._frames_memo[key] = (stamp, answer)
+        return answer
+
     def _paths(self) -> dict[str, Path]:
         return {name: first for name, (first, _members) in self._entries().items()}
 
@@ -259,6 +284,31 @@ class SessionLibrary:
         """这场次由哪几份文件组成（``.ld`` 这类单文件场次就是它自己）。"""
         entry = self._entries().get(name)
         return None if entry is None else list(entry[1])
+
+    def data_stamp(self, name: str) -> list | None:
+        """这场次**取数**依赖的全部文件指纹；名字不在库里给 ``None``（ticket #54）。
+
+        取数结果会不会变，只看这些文件：场次自己的文件（CAN 那种分卷是**每一份**）、
+        本地与全局数学定义、圈侧车、GPS 侧车。指纹怎么算在 :mod:`i3pro.cache`，
+        这里只负责"取数是靠哪几份文件算出来的"这一个答案。
+
+        形状是 ``list``（要能进 JSON 再比回来，见 :mod:`i3pro.cache`）；每份前面缀一个
+        标签，是为了"这个文件不在"和"这个文件是空的"不混成同一个值。
+        """
+        entry = self._entries().get(name)
+        if entry is None:
+            return None
+        path, members = entry
+        out: list = []
+        for index, item in enumerate(members):
+            out += [f"source{index}", *_file_stamp(item)]
+        out += ["maths", *_file_stamp(maths.config_path(path))]
+        out += ["global", *_file_stamp(maths.global_path(self.maths_root))]
+        # 圈侧车其实不影响一次按时间窗口的取数，但它是"同一个 URL 结果会不会变"的
+        # 一份证据，多算一次 stat 不值得为它开个例外。
+        for kind in ("laps", "gps"):
+            out += [kind, *_file_stamp(sidecar.path_of(kind, path))]
+        return out
 
     def names(self) -> list[str]:
         return list(self._paths())

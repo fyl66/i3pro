@@ -71,6 +71,11 @@ class Response:
     #: 边读边发；发完、出错、客户端断开三种情况都会把这个临时文件删掉，
     #: 所以 200 MB 的导出既不会整份进内存，也不会在磁盘上留垃圾。
     path: Path | None = None
+    #: 传输层算出来的两样东西（ticket #54）：内容的强校验码，与这份内容的 gzip 版本。
+    #: 只有"这一条会被缓存"的响应才带着它们回来（见 :mod:`i3pro.tracecache`）——
+    #: 命中时直接拿来用，不再算一遍哈希与压缩。
+    etag: str | None = None
+    gzip_body: bytes | None = None
 
 
 class ClientGone(Exception):

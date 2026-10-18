@@ -24,15 +24,17 @@ import select
 import socket
 import threading
 import webbrowser
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 from . import library as librarymod
 from . import render
 from .api import Api, Body, ClientGone, Response, csv_arg, float_arg, int_arg
 from .indexpage import index_page, unknown_session_page
 from .library import SessionLibrary, dumps, json_safe
+from .tracecache import TraceCache
 
 #: 到这个大小才值得压：几 KB 的响应压完可能更大，还要白付一次 CPU。
 GZIP_MIN_BYTES = 64 * 1024
@@ -67,6 +69,8 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
     用的类，不是函数返回值意义上的对象）。
     """
     api = Api(library, buckets)
+    #: 取数响应缓存：一个服务进程一份（handler 类随 ``bind`` 活多久它就活多久）。
+    trace_cache = TraceCache()
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "i3pro"
@@ -117,6 +121,15 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
             parsed = urlparse(self.path)
             query = parse_qs(parsed.query)
             parts = [unquote(p) for p in parsed.path.split("/") if p]
+            cache_key = self._cache_key(parts, query) if method == "GET" else None
+            if cache_key is not None:
+                cached = trace_cache.get(cache_key)
+                if cached is not None:
+                    try:
+                        self.send(cached, cache_key)
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    return
             try:
                 response = self.route(parts, query, method)
             except ClientGone:
@@ -145,9 +158,28 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                     }).encode("utf-8"),
                 )
             try:
-                self.send(response)
+                self.send(response, cache_key)
             except (BrokenPipeError, ConnectionResetError):
                 pass  # 发到一半客户端走了；临时文件在 send 的 finally 里已经删了
+
+        def _cache_key(self, parts: list[str], query: dict) -> str | None:
+            """这条请求能不能进响应缓存；能就给它的 key（ticket #54）。
+
+            只认 ``GET /api/session/<名>/trace``——全站最贵、也最常被同一组参数重复问的
+            就是它。key 里除了参数还带着**这场数据会不会变的全部指纹**，所以不存在
+            "主动失效"这件事：文件一变，key 就不一样，旧的那条再也命中不了，等着被
+            LRU 挤出去。
+            """
+            if len(parts) != 4 or parts[:2] != ["api", "session"] or parts[3] != "trace":
+                return None
+            stamp = library.data_stamp(parts[2])
+            if stamp is None:                 # 未知场次：交给路由回 404
+                return None
+            # 参数按名字排序再拼：同一条请求，浏览器与脚本的书写顺序可能不同，
+            # 顺序不该算成两个 key。
+            canonical = urlencode(sorted(
+                (name, value) for name, values in query.items() for value in values))
+            return f"{parts[2]}\x00{canonical}\x00{stamp!r}"
 
         def route(self, parts: list[str], query: dict, method: str) -> Response:
             if not parts:
@@ -174,25 +206,31 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
             ``headers`` 是已经算好的响应头，**只能往上加，不能换掉**——工作表「导出」
             就靠 ``Content-Disposition`` 才变成下载而不是跳转（ticket #33，
             2026-10-18 真浏览器验收抓到的就是这个）。
-            返回 ``(要发的字节, 头, 是不是 304)``。
+
+            返回 ``(要发的字节, 头, ETag, gzip 字节, 是不是 304)``。``response`` 上
+            已经带着 ETag / gzip 时（缓存命中）直接拿来用——不再算哈希、不再压缩，
+            这正是缓存的意义（ticket #54）。
             """
             body = response.body
-            tag = _etag(body)
+            tag = response.etag or _etag(body)
             headers = list(headers) + [("ETag", tag), ("Vary", "Accept-Encoding")]
             if (self.headers.get("If-None-Match") or "").strip() == tag:
-                return b"", headers, True
+                return b"", headers, tag, response.gzip_body, True
             accepted = (self.headers.get("Accept-Encoding") or "").lower()
             if len(body) >= GZIP_MIN_BYTES and "gzip" in accepted:
+                packed = response.gzip_body or gzip.compress(body, GZIP_LEVEL)
                 headers = headers + [("Content-Encoding", "gzip")]
-                return gzip.compress(body, GZIP_LEVEL), headers, False
-            return body, headers, False
+                return packed, headers, tag, packed, False
+            return body, headers, tag, response.gzip_body, False
 
-        def send(self, response: Response) -> None:
+        def send(self, response: Response, cache_key: str | None = None) -> None:
             """把 ``Response`` 发出去。
 
             ``response.path`` 有值时**流式**发那个文件（导出走这条）：200 MB 的 CSV
             不整份进内存，``Content-Length`` 是文件长度，界面据此画真实进度；
             发完、出错、连接中断三种情况都在 ``finally`` 里删掉它，磁盘不留垃圾。
+
+            ``cache_key`` 给了就把"算好的那一份"（含 ETag 与 gzip 字节）放进响应缓存。
             """
             path = response.path
             body = response.body
@@ -202,12 +240,16 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
             # 只有 200 的 JSON 走这条路：报错体都很小，压了反而亏。
             if (path is None and response.status == 200
                     and response.ctype.startswith("application/json")):
-                body, headers, not_modified = self._json_transport(response, headers)
+                body, headers, tag, packed, not_modified = self._json_transport(
+                    response, headers)
                 if not_modified:
                     status = 304
                 # 有 ETag 才谈得上"存下来、回来问一句"。``no-cache`` 不是"别存"，
                 # 是"每次都得先问"：数据一变字节就变、ETag 就变，304 只在真没变时出现。
                 cache_control = "no-cache"
+                if cache_key is not None:
+                    trace_cache.put(cache_key, replace(
+                        response, etag=tag, gzip_body=packed))
             try:
                 size = path.stat().st_size if path is not None else len(body)
                 self.send_response(status)

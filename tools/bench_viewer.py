@@ -132,10 +132,14 @@ def measure_compute(api, name: str, channels: list[str], buckets: int,
 
 def measure_http(library, name: str, channels: list[str], buckets: int,
                  repeat: int, accept_encoding: str | None = None) -> dict:
-    """量真 HTTP 往返：临时起服务、真发一次请求（**不开浏览器**）。
+    """量真 HTTP 往返：临时起服务、真发请求（**不开浏览器**）。
 
     ``accept_encoding="gzip"`` 量的是浏览器那条路（多一层压缩的 CPU，少一大截字节）；
     不给就是同一台机器上的纯往返，用来和 ticket #51 / #53 / #63 的数字对读。
+
+    每次都在**干净的**服务上打第一炮——那一下是冷的（要真算、真压）；后面同一条请求
+    是热的（响应缓存命中，ticket #54）。两个数分开报：只说一个会把"缓存命中"当成
+    "这台机器算得快"。
     """
     handler = server.make_handler(library, render.DEFAULT_BUCKETS)
     httpd = server.bind("127.0.0.1", 0, handler)
@@ -153,15 +157,19 @@ def measure_http(library, name: str, channels: list[str], buckets: int,
         request = urllib.request.Request(
             url, headers={"Accept-Encoding": accept_encoding} if accept_encoding else {})
         body = b""
-        with urllib.request.urlopen(request) as reply:      # 热身
-            reply.read()
+        cold_ms = 0.0
         times: list[float] = []
-        for _ in range(max(1, int(repeat))):
+        for index in range(max(1, int(repeat)) + 1):
             started = time.perf_counter()
             with urllib.request.urlopen(request) as reply:
                 body = reply.read()
-            times.append((time.perf_counter() - started) * 1000.0)
-        return {"ms": statistics.median(times), "bytes": len(body)}
+            elapsed = (time.perf_counter() - started) * 1000.0
+            if index == 0:
+                cold_ms = elapsed
+            else:
+                times.append(elapsed)
+        return {"cold_ms": cold_ms, "ms": statistics.median(times),
+                "bytes": len(body)}
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -181,16 +189,20 @@ def bench_session(path: Path, channels: int, repeat: int, with_http: bool) -> di
             row = {"buckets": buckets}
             row.update(measure_compute(api, name, names, buckets, repeat))
             if with_http:
-                row["http_ms"] = measure_http(library, name, names, buckets, repeat)["ms"]
+                plain = measure_http(library, name, names, buckets, repeat)
+                row["http_cold_ms"] = plain["cold_ms"]
+                row["http_ms"] = plain["ms"]
                 browser = measure_http(library, name, names, buckets, repeat,
                                        accept_encoding="gzip")
+                row["gzip_cold_ms"] = browser["cold_ms"]
                 row["gzip_ms"] = browser["ms"]
                 row["wire_bytes"] = browser["bytes"]
             rows.append(row)
             print(f"  {buckets:>6d} 桶   {row['ms']:>8.1f} ms   "
                   f"{row['json_bytes'] / 1024:>8.1f} KB   "
                   f"{row['gzip_bytes'] / 1024:>7.1f} KB"
-                  + (f"   {row['http_ms']:>8.1f} ms   {row['gzip_ms']:>8.1f} ms"
+                  + (f"   {row['http_cold_ms']:>7.1f}/{row['http_ms']:>6.1f} ms"
+                     f"   {row['gzip_cold_ms']:>7.1f}/{row['gzip_ms']:>6.1f} ms"
                      f"   {row['wire_bytes'] / 1024:>8.1f} KB" if with_http else ""))
         return {
             "path": str(path),
@@ -209,7 +221,8 @@ def _fmt_header(with_http: bool) -> str:
     head = f"  {'桶':>6s}   {'计算 ms':>8s}   {'JSON KB':>8s}   {'gzip KB':>7s}"
     if not with_http:
         return head
-    return head + f"   {'HTTP ms':>8s}   {'gzip ms':>8s}   {'上线 KB':>8s}"
+    return (head + f"   {'HTTP 冷/热 ms':>13s}   {'gzip 冷/热 ms':>13s}"
+                   f"   {'上线 KB':>8s}")
 
 
 def main(argv: list[str] | None = None) -> int:

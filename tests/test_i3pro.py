@@ -3299,6 +3299,150 @@ class TestHttpCompression(unittest.TestCase):
         self.assertEqual(json.loads(body)["name"], "导出")
 
 
+class TestTraceCache(unittest.TestCase):
+    """ticket #54：``/trace`` 的响应缓存（key 驱动、只在内存、两种编码都存）。
+
+    端到端那几条走真 HTTP，计数的是 ``render.trace`` 被调了几次——"第二次没重算"
+    这句话只有拿调用次数才钉得住；"回复一样"两条路都满足，证明不了缓存起了作用。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="i3pro-tracecache-")
+        self.dir = Path(self.tmp.name)
+        body = "".join(f"{i / 100.0:.2f};{i % 300};{i % 7}\n" for i in range(3000))
+        (self.dir / "取样.csv").write_text(
+            "Time;Vx KF;TH\ns;km/h;\n" + body, encoding="utf-8")
+        self.library = server.SessionLibrary([self.dir], cache_size=1)
+        self.httpd = server.bind("127.0.0.1", 0,
+                                 server.make_handler(self.library))
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        self.big = "/api/session/" + urllib.parse.quote("取样") + \
+            "/trace?channels=Vx%20KF&buckets=2000"
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=5)
+        self.library.close()
+        self.tmp.cleanup()
+
+    def _get(self, path: str, headers: dict | None = None):
+        request = urllib.request.Request(self.base + path, headers=headers or {})
+        try:
+            with urllib.request.urlopen(request) as reply:
+                return reply.status, dict(reply.headers), reply.read()
+        except urllib.error.HTTPError as exc:
+            return exc.status, dict(exc.headers), exc.read()
+
+    def _counting_trace(self):
+        """把 ``render.trace`` 包一层数调用次数；返回计数器与那个 patch。"""
+        original = render.trace
+        counter = {"calls": 0}
+
+        def counting(*args, **kwargs):
+            counter["calls"] += 1
+            return original(*args, **kwargs)
+
+        return counter, mock.patch.object(render, "trace", side_effect=counting)
+
+    def test_同一个请求第二次不重算(self):
+        counter, patched = self._counting_trace()
+        with patched:
+            _status, _headers, first = self._get(self.big)
+            _status, _headers, second = self._get(self.big)
+        self.assertEqual(first, second, "命中的回复必须与第一次逐字节相同")
+        self.assertEqual(counter["calls"], 1, "第二次又算了一遍，缓存没接上")
+
+    def test_换了参数就不命中(self):
+        counter, patched = self._counting_trace()
+        with patched:
+            self._get(self.big)
+            self._get(self.big.replace("buckets=2000", "buckets=500"))
+            self._get(self.big + "&upsample=previous")
+        self.assertEqual(counter["calls"], 3)
+
+    def test_数学定义变了就不命中(self):
+        counter, patched = self._counting_trace()
+        with patched:
+            self._get(self.big)
+            self._get(self.big)
+            self.assertEqual(counter["calls"], 1)
+            # 本地数学定义是这个场次旁边那份 .maths.json；它进 key。
+            (self.dir / "取样.maths.json").write_text(
+                json.dumps({"definitions": []}), encoding="utf-8")
+            self._get(self.big)
+        self.assertEqual(counter["calls"], 2, "定义变了还在发旧的结果")
+
+    def test_命中时不再重新压缩(self):
+        with mock.patch.object(server.gzip, "compress",
+                               wraps=server.gzip.compress) as spy:
+            _status, first_headers, first = self._get(
+                self.big, {"Accept-Encoding": "gzip"})
+            after_first = spy.call_count
+            _status, second_headers, second = self._get(
+                self.big, {"Accept-Encoding": "gzip"})
+        self.assertEqual(after_first, 1)
+        self.assertEqual(spy.call_count, 1, "命中还在重新压一遍")
+        self.assertEqual(first_headers.get("Content-Encoding"), "gzip")
+        self.assertEqual(second_headers.get("Content-Encoding"), "gzip")
+        self.assertEqual(first, second)
+        self.assertEqual(gzip.decompress(first),
+                         self._get(self.big)[2], "解压回来要等于明文那一份")
+
+    def test_项数到顶淘汰最旧的(self):
+        from i3pro import api as apimod, tracecache as tracecachemod
+
+        cache = tracecachemod.TraceCache(max_entries=2, max_bytes=1 << 20)
+        for key in ("a", "b", "c"):
+            cache.put(key, apimod.Response(200, key.encode(), "application/json"))
+        self.assertIsNone(cache.get("a"), "最早那条该被挤掉")
+        self.assertIsNotNone(cache.get("b"))
+        self.assertIsNotNone(cache.get("c"))
+
+    def test_字节到顶也只淘汰到刚好放得下(self):
+        from i3pro import api as apimod, tracecache as tracecachemod
+
+        # 一条 1000 字节：两条正好塞得进 2100 的上限，第三条必须挤掉最旧的。
+        entry = apimod.Response(200, b"x" * 500, "application/json",
+                                gzip_body=b"y" * 500)
+        cache = tracecachemod.TraceCache(max_entries=8, max_bytes=2100)
+        cache.put("a", entry)
+        cache.put("b", entry)
+        self.assertEqual(cache.stats()["entries"], 2)
+        cache.put("c", entry)
+        self.assertIsNone(cache.get("a"))
+        self.assertEqual(cache.stats()["entries"], 2)
+        self.assertLessEqual(cache.stats()["bytes"], 2100)
+
+    def test_一条自己就超上限的不存(self):
+        from i3pro import api as apimod, tracecache as tracecachemod
+
+        cache = tracecachemod.TraceCache(max_entries=8, max_bytes=1000)
+        cache.put("big", apimod.Response(200, b"x" * 2000, "application/json"))
+        self.assertEqual(cache.stats()["entries"], 0)
+
+    def test_帧表嗅探按指纹重算(self):
+        """发现场次要"打开 CSV 读表头"，那一趟按指纹记住了——但**不能记旧**。
+
+        同一个路径从帧表换成普通通道表时，指纹（字节数/mtime）变了，答案必须跟着变；
+        记旧了就会出现"导入一份新表，侧边栏还按老规矩认"这种最难查的问题。
+        """
+        header = [canlog.DEFAULT_ROLES["time"], canlog.DEFAULT_ROLES["id"],
+                  canlog.DEFAULT_ROLES["data"], "CAN通道", "帧类型", "帧格式",
+                  "CAN类型", "长度"]
+        changed = self.dir / "换过.csv"
+        changed.write_text(
+            ",".join(header) + "\n"
+            '0.001,="0001",="01 02",1,1,Rx,8,标准帧,数据帧,1\n',
+            encoding="gbk")
+        self.assertTrue(self.library._is_frame_table(changed))
+        changed.write_text("Time;Vx KF\ns;km/h;\n0.00;1\n0.01;2\n", encoding="utf-8")
+        self.assertFalse(self.library._is_frame_table(changed),
+                         "换成通道表之后还按帧表认，说明嗅探记旧了")
+
+
 class TestViewerScript(unittest.TestCase):
     """The generated workbench must execute without throwing (needs node)."""
 

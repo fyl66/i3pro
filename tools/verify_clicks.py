@@ -3040,6 +3040,78 @@ class Checker:
         self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-layout.png"),
                           self.session)
 
+    # ------------------------------------------- A101 主题切换
+    def theme_switch(self):
+        """A101：两套配色真能切、画布跟着重画、选过的记得住。
+
+        `--bg` 那组 CSS 变量是颜色的**唯一来源**：DOM 认它们，画布的颜色也是每次
+        从同一批变量里取（`refreshUI`）。所以"换了主题"要两头都变才算数——这里量
+        变量、量画布像素的指纹，再真重载一次看记不记得住。
+        """
+        def css_var(name):
+            return str(self.js(
+                "(getComputedStyle(document.documentElement).getPropertyValue(%r)||'').trim()"
+                % name))
+
+        def canvas_sum():
+            # 逐像素取（画布大部分是透明的，隔几个像素采一次会全采到 0 号像素——
+            # 第一版就是这样，两套主题算出来一模一样，白过）
+            return self.js(
+                "(function(){var c=document.querySelector('#worksheet canvas');"
+                "if(!c)return null;"
+                "var d=c.getContext('2d').getImageData(0,0,c.width,c.height).data;"
+                "var s=0;for(var i=0;i<d.length;i+=4){"
+                "s=(s*31+d[i]+d[i+1]*3+d[i+2]*7+d[i+3]*11)%1000000007;}return s;})()")
+
+        def label_now():
+            return self.js(
+                "(function(){var s=document.getElementById('themeSel');"
+                "return s&&s.options[s.selectedIndex]?s.options[s.selectedIndex].textContent:'';})()")
+
+        self.check("A101 头部有主题下拉", bool(self.js("!!document.getElementById('themeSel')")))
+        dark_bg, dark_panel = css_var("--bg"), css_var("--panel")
+        dark_sum = canvas_sum()
+        self.check("A101 默认是深色",
+                   dark_bg.lower() == "#0f1115" and self.js("i3pro.theme()") == "dark",
+                   "%s / %s" % (dark_bg, self.js("i3pro.theme()")))
+        self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-theme-dark.png"),
+                          self.session)
+        picked = self.js(
+            "(function(){var s=document.getElementById('themeSel');s.value='marple';"
+            "s.dispatchEvent(new Event('change'));return s.value;})()")
+        time.sleep(0.7)
+        light_bg, light_panel = css_var("--bg"), css_var("--panel")
+        light_sum = canvas_sum()
+        self.check("A101 切到浅色（Marple 风）之后变量真的换了",
+                   picked == "marple" and light_bg != dark_bg and light_panel != dark_panel,
+                   "%s → %s · %s → %s" % (dark_bg, light_bg, dark_panel, light_panel))
+        self.check("A101 画布跟着换色（不是只有外壳动了）",
+                   dark_sum is not None and light_sum is not None and dark_sum != light_sum,
+                   "%s vs %s" % (dark_sum, light_sum))
+        self.check("A101 下拉上写着中文名", "Marple" in label_now(), label_now())
+        self.check("A101 选过的那一套记在本机",
+                   self.js("localStorage.getItem('i3pro.theme.v1')") == "marple",
+                   self.js("localStorage.getItem('i3pro.theme.v1')"))
+        self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-theme-marple.png"),
+                          self.session)
+        # 真重载一次：主题该跟着回来（跟"选过的工作表"同一个机制）
+        self.js("setTimeout(function(){location.reload();},20);true")
+        time.sleep(1.2)
+        ready = self.browser.wait_for(
+            "!!(window.i3pro && i3pro.state && i3pro.data && i3pro.data.channels"
+            " && document.querySelector('#worksheet canvas'))", self.session, timeout=30)
+        self.browser.js(HELPERS, self.session)
+        self.check("A101 重载之后还是浅色",
+                   ready and self.js("i3pro.theme()") == "marple"
+                   and css_var("--bg") == light_bg,
+                   "%s / %s" % (self.js("i3pro.theme()"), css_var("--bg")))
+        # 收尾：切回深色，后面的验收还在深色上跑
+        self.js("i3pro.setTheme('dark');true")
+        time.sleep(0.6)
+        self.check("A101 切回深色（收尾）",
+                   self.js("i3pro.theme()") == "dark" and css_var("--bg") == dark_bg,
+                   "%s / %s" % (self.js("i3pro.theme()"), css_var("--bg")))
+
     # ------------------------------------------------ A78 侧边栏快速跳转
     def sidebar_jump(self):
         """A78：左边那一栏比屏幕长得多，"跳到哪一栏"要**真的滚过去**、光标放对地方。
@@ -4145,6 +4217,8 @@ def main(argv=None):
             # 票⑧ 的布局：先量"默认长什么样"（左栏只剩三块、高级工具收着），
             # 再把它展开留给后面那些要点面板里控件的验收。
             checker.layout_sheet_bar()
+            # A101 主题切换：变量 + 画布像素 + 重载之后记不记得住
+            checker.theme_switch()
             checker.sections()
             checker.crossings(sidecar)
             checker.rename(sidecar)

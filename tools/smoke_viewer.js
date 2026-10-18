@@ -4364,8 +4364,10 @@ if (canMeta) {
     api.renderAll();
   }
   const rec = {
-    fills: 0, strokes: 0, lines: 0,
-    fillRect() { this.fills += 1; },
+    rects: 0, fills: 0, strokes: 0, lines: 0, closes: 0,
+    fillRect() { this.rects += 1; },
+    fill() { this.fills += 1; },
+    closePath() { this.closes += 1; },
     beginPath() {}, moveTo() {},
     lineTo() { this.lines += 1; },
     stroke() { this.strokes += 1; },
@@ -4376,15 +4378,17 @@ if (canMeta) {
     x: [1, 2, 3], values: [1, 2, 3], min: [0, 1, 2], max: [2, 3, 4],
     envelope: true, color: "#fff",
   }]);
-  check(rec.fills === 0 && rec.strokes >= 3,
-    "包络生效时点样式没有回退成线：" + JSON.stringify(rec));
+  // A100 之后包络只有一种画法：一条闭合的带子 + 中间那条均值线。点样式在这里
+  // 仍然不适用（一个点代表一整桶），所以不许出现 fillRect。
+  check(rec.rects === 0 && rec.fills === 1 && rec.closes === 1 && rec.strokes === 1,
+    "包络没有画成「一条带子 + 一条均值线」：" + JSON.stringify(rec));
   api.drawTraces(rec, { l: 0, t: 0 }, 100, 100, 0, 10, 0, 10, [{
     x: [1, 2, 3], values: [1, 2, 3], color: "#fff",
   }]);
-  check(rec.fills === 3, "非包络曲线在点样式下没有画点：" + JSON.stringify(rec));
+  check(rec.rects === 3, "非包络曲线在点样式下没有画点：" + JSON.stringify(rec));
   const lineShape = (mode) => {
     const one = { lines: 0, beginPath() {}, moveTo() {}, lineTo() { this.lines += 1; },
-                  stroke() {} };
+                  stroke() {}, fill() {}, closePath() {} };
     api.state.upsample = mode;
     api.drawTraces(one, { l: 0, t: 0 }, 100, 100, 0, 10, 0, 10, [{
       x: [1, 2, 3], values: [1, 2, 3], min: [0, 1, 2], max: [2, 3, 4],
@@ -4416,29 +4420,63 @@ if (canMeta) {
              envelope: true, color: "#fff" };
   };
   const linesFor = (spec, plotW) => {
-    const rec = { lines: 0, beginPath() {}, moveTo() {},
-                  lineTo() { this.lines += 1; }, stroke() {} };
+    const rec = {
+      lines: 0, fills: 0, strokes: 0, closes: 0,
+      beginPath() {}, moveTo() {},
+      lineTo() { this.lines += 1; },
+      stroke() { this.strokes += 1; },
+      fill() { this.fills += 1; },
+      closePath() { this.closes += 1; },
+    };
     api.drawTraces(rec, { l: 0, t: 0 }, plotW, 100, 0, spec.x.length - 1,
                    -1e6, 1e6, [spec]);
-    return rec.lines;
+    return rec;
   };
   const denseSpec = dense(2000);
   const before = { x: denseSpec.x.slice(), min: denseSpec.min.slice(),
                    max: denseSpec.max.slice(), values: denseSpec.values.slice() };
-  const merged = linesFor(denseSpec, 100);
+  const mergedRec = linesFor(denseSpec, 100);
+  const merged = mergedRec.lines;
   check(merged <= 3 * 110,
     "2000 个桶挤进 100 像素列，画了 " + merged + " 段——该按像素列封顶");
   check(merged >= 100, "合并过头了，连竖线都没画出来：" + merged);
+  // 包络的形状（A100）：**一条闭合的带子 + 一条均值线**。
+  // 以前是"每列一根竖线 + 上下两条外轮廓"——叠出竖纹，而且曲线本身没画。
+  check(mergedRec.closes === 1 && mergedRec.fills === 1,
+    "包络不是一条闭合的带子：fill=" + mergedRec.fills + " closePath=" + mergedRec.closes);
+  check(mergedRec.strokes === 1,
+    "包络里描边的应该只有中间那条均值线，实际描了 " + mergedRec.strokes + " 次");
   check(JSON.stringify(before.x) === JSON.stringify(denseSpec.x)
         && JSON.stringify(before.min) === JSON.stringify(denseSpec.min)
         && JSON.stringify(before.max) === JSON.stringify(denseSpec.max)
         && JSON.stringify(before.values) === JSON.stringify(denseSpec.values),
     "合并就地改了后端给的桶数组——抬头统计与量程会跟着错");
-  const untouched = linesFor(dense(50), 100);
+  const untouched = linesFor(dense(50), 100).lines;
   check(untouched === 3 * 50 - 2,
     "桶不比像素列多时不该合并：画了 " + untouched + " 段，期望 " + (3 * 50 - 2));
   api.state.style = savedStyle;
   api.state.upsample = savedUpsample;
+}
+
+// 39b. 主题（A101）：两套配色，切换改的是 `:root` 上的标记 + 画布色，选过的记住。
+{
+  const themes = api.themes || {};
+  check(Object.keys(themes).length === 2 && !!themes.dark && !!themes.marple,
+    "主题表不对（要么两张，要么少了名字）：" + JSON.stringify(themes));
+  // 浅色那一套的 CSS 变量必须在页面上（不然换了标记也没东西跟着变）
+  const page = html.split("<script>")[0];
+  check(page.indexOf(':root[data-theme="marple"]') >= 0,
+    "「浅色（Marple 风）」那组 CSS 变量没写在页面上");
+  check(api.theme() === "dark", "开机默认不是深色：" + api.theme());
+  const sel = registry.get("themeSel");
+  check(!!sel && sel._children.length === Object.keys(themes).length,
+    "主题下拉的选项不是从 THEME_LABELS 生成的：" + (sel && sel._children.length));
+  api.setTheme("marple");
+  check(api.theme() === "marple", "切到浅色没生效：" + api.theme());
+  check(ctx.storage.getItem("i3pro.theme.v1") === "marple", "选过的主题没记住");
+  api.setTheme("dark");
+  check(api.theme() === "dark" && ctx.storage.getItem("i3pro.theme.v1") === "dark",
+    "切回深色没生效或没记住");
 }
 
 const header = registry.get("fileInfo");

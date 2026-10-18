@@ -8,6 +8,23 @@
   :root {
     --bg:#0f1115; --panel:#171a21; --panel2:#1e232c; --line:#2b313c; --grid:#232833;
     --fg:#e6e9ef; --muted:#8b94a7; --accent:#4cc2ff; --good:#35d07f; --bad:#ff5d6c; --warn:#ffb454;
+    /* 面上那几层：悬停 / 选中 / 对比 / 浮起 / 更深一层 / 进度条底 / 表内分隔线。
+       它们以前是散在规则里的深色字面量，浅色主题一开就"深底配深字"——收到这儿来。 */
+    --raise:#161a21; --deep:#12151b; --hover:#1d2430; --sel:#1d3b52; --cmp:#4a3a1d;
+    --track:#222833; --rule:#232935; --toastbg:#1d3b52; --dim:#4b5364; --chip:#46505f;
+    /* 图上那几行文字压在曲线上面，得给一层底才读得清：深色主题是半透明黑（A101） */
+    --legendbg:rgba(15,17,21,.58); --legendnote:rgba(15,17,21,.72);
+  }
+  /* 浅色（Marple 风）。面板白、底浅灰蓝、强调色收深一点；迹线颜色不在这儿——
+     它跟每件组件的调色板走（`palette.py` 那三套里，Matplotlib tab10 就是
+     Marple 那套配色方案里的一套）。 */
+  :root[data-theme="marple"] {
+    --bg:#f2f5f9; --panel:#ffffff; --panel2:#eaeff6; --line:#cfd8e3; --grid:#e3e9f1;
+    --fg:#1e2630; --muted:#67758a; --accent:#0b74c4; --good:#178a56; --bad:#c62828;
+    --warn:#a86a00;
+    --raise:#ffffff; --deep:#f5f7fb; --hover:#eef3fa; --sel:#d6e8fb; --cmp:#fdeecd;
+    --track:#e2e8f0; --rule:#e7ecf3; --toastbg:#0b3d5c; --dim:#9aa7b8; --chip:#b9c4d2;
+    --legendbg:rgba(255,255,255,.78); --legendnote:rgba(255,255,255,.88);
   }
   * { box-sizing:border-box; }
   /* 外壳：两排顶栏（第一排全局、第二排工作表），余下的高度给左栏 + 画布。
@@ -94,10 +111,10 @@
      在暗色主题里和"没勾选"几乎分不出来。 */
   .ch.missing { opacity:.55; }
   .ch.missing:hover { opacity:.8; }
-  .ch.missing .nm { text-decoration:line-through solid rgba(255,255,255,.35); }
-  .ch.missing .unit { color:#c9a227; }
-  .ch .unit.dead { color:#c9a227; }
-  .missnote { color:#c9a227; font-size:12px; line-height:1.5; }
+  .ch.missing .nm { text-decoration:line-through solid currentColor; }
+  .ch.missing .unit { color:var(--warn); }
+  .ch .unit.dead { color:var(--warn); }
+  .missnote { color:var(--warn); font-size:12px; line-height:1.5; }
   /* 配色与抬头的小弹窗（ticket #35）：浮在画布上，所以给它实心底与阴影，
      免得半透明地在波形上看得费劲。 */
   .popmenu { position:fixed; z-index:40; width:250px; background:var(--panel2);
@@ -130,9 +147,9 @@
   th:first-child, td:first-child { text-align:left; }
   th { color:var(--muted); font-weight:600; }
   tr[data-lap] { cursor:pointer; }
-  tr[data-lap]:hover td { background:#1d2430; }
-  tr.ref td { background:#1d3b52; }
-  tr.cmp td { background:#4a3a1d; }
+  tr[data-lap]:hover td { background:var(--hover); }
+  tr.ref td { background:var(--sel); }
+  tr.cmp td { background:var(--cmp); }
   tr.incomplete td { color:var(--muted); }
   tr.best td:nth-child(2) { color:var(--good); }
   .lapsel { white-space:nowrap; }
@@ -140,7 +157,7 @@
   button { background:var(--panel2); color:var(--fg); border:1px solid var(--line);
            border-radius:5px; padding:4px 9px; cursor:pointer; font-size:12px; }
   button:hover { border-color:var(--accent); }
-  button.on { background:#1d3b52; border-color:var(--accent); }
+  button.on { background:var(--sel); border-color:var(--accent); }
   button:disabled { opacity:.4; cursor:default; }
   button.danger { background:#4a1f26; border-color:#a04452; color:#ffd9dd; }
   #sheetManage button { padding:3px 7px; font-size:11px; }
@@ -164,7 +181,7 @@
   .hint { color:var(--muted); font-size:11px; margin-top:5px; line-height:1.7; }
   .warn { color:var(--warn); }
   .dim { opacity:.6; }
-  #toast { position:fixed; right:14px; bottom:14px; background:#1d3b52; color:var(--fg);
+  #toast { position:fixed; right:14px; bottom:14px; background:var(--toastbg); color:var(--fg);
            border:1px solid var(--accent); border-radius:6px; padding:7px 12px; font-size:12px;
            opacity:0; transition:opacity .25s; pointer-events:none; z-index:90; }
   #toast.show { opacity:1; }
@@ -183,19 +200,19 @@
   .pill input.bname:hover { background:#ffffff12; }
   .pill input.bname:focus { background:var(--panel); border-color:var(--accent); outline:none; }
   .pill .btime { color:var(--muted); font-size:10px; font-style:normal; }
-  .pill a.del { color:#ff5d6c; text-decoration:none; font-size:11px; }
+  .pill a.del { color:var(--bad); text-decoration:none; font-size:11px; }
   /* notes: one row per note - the moment, the line of text, and a delete link */
   .notes { display:flex; flex-direction:column; gap:3px; margin-top:4px; }
   .note { display:flex; align-items:center; gap:5px; background:var(--panel2);
           border:1px solid var(--line); border-radius:5px; padding:1px 6px 1px 5px; }
-  .note .ntime { color:#ffd166; font-size:10px; font-variant-numeric:tabular-nums;
+  .note .ntime { color:var(--warn); font-size:10px; font-variant-numeric:tabular-nums;
                  min-width:7ch; }
   .note input.ntext { flex:1; min-width:6ch; background:transparent; border:1px solid transparent;
                       color:var(--fg); font-size:11px; font-family:inherit; padding:1px 3px;
                       border-radius:4px; }
   .note input.ntext:hover { background:#ffffff12; }
   .note input.ntext:focus { background:var(--panel); border-color:var(--accent); outline:none; }
-  .note a.del { color:#ff5d6c; text-decoration:none; font-size:11px; }
+  .note a.del { color:var(--bad); text-decoration:none; font-size:11px; }
   .scattercfg { display:flex; gap:5px; align-items:center; flex-wrap:wrap; font-size:11px;
                 padding:2px 9px 0; color:var(--muted); }
   .scattercfg select { font-size:11px; padding:2px 5px; max-width:150px; }
@@ -222,24 +239,24 @@
                        color:var(--muted); pointer-events:auto; }
   .glegend { position:absolute; left:70px; display:flex; flex-direction:column; }
   .lrow { display:flex; align-items:baseline; gap:7px; font-size:11px; line-height:15px;
-          background:rgba(15,17,21,.58); padding:0 4px; border-radius:3px; }
+          background:var(--legendbg); padding:0 4px; border-radius:3px; }
   .lrow .lname { color:var(--fg); min-width:118px; }
-  .lrow .lcur { color:#fff; font-weight:600; min-width:58px; text-align:right;
+  .lrow .lcur { color:var(--fg); font-weight:600; min-width:58px; text-align:right;
                 font-variant-numeric:tabular-nums; }
   .lrow .ldelta { color:var(--warn); min-width:66px; text-align:right;
                   font-variant-numeric:tabular-nums; }
   .lrow .lmm { color:var(--muted); min-width:52px; text-align:right;
                font-variant-numeric:tabular-nums; }
   .lrow .lunit { color:var(--muted); }
-  .lrow .ldead { color:#c9a227; }
+  .lrow .ldead { color:var(--warn); }
   /* 图上"本场次没有"的那一行：贴在最后一个分栏的底部，灰色调里带一点黄，
      和"真实通道"那几行的配色区分开（调色板里没有这个色，ticket #34）。 */
-  .lrow.lmissing { position:absolute; left:70px; right:8px; color:#c9a227;
+  .lrow.lmissing { position:absolute; left:70px; right:8px; color:var(--warn);
                    background:rgba(201,162,39,.12); }
   /* 选 A–B 又没放基准光标时那一行（ticket #44）：同样是贴底的一句话，
      但它是"怎么把范围放出来"的指路，不是错误，所以用普通的灰。 */
   .lrow.labnote { position:absolute; left:70px; right:8px; color:var(--muted);
-                  background:rgba(15,17,21,.72); }
+                  background:var(--legendnote); }
   /* Three resize affordances: drag the right edge, the bottom edge, or the
      corner (both). The old single 6 px strip at the very bottom was almost
      impossible to hit because the canvas usually does not fill the body. */
@@ -247,7 +264,7 @@
   .rzright { top:0; right:0; bottom:10px; width:7px; cursor:ew-resize; }
   .rzbottom { left:0; right:10px; bottom:0; height:7px; cursor:ns-resize; }
   .rzcorner { right:0; bottom:0; width:16px; height:16px; cursor:nwse-resize;
-              background:linear-gradient(135deg, transparent 46%, #46505f 46%, #46505f 54%, transparent 54%); }
+              background:linear-gradient(135deg, transparent 46%, var(--chip) 46%, var(--chip) 54%, transparent 54%); }
   .comp:hover .rzright, .comp:hover .rzbottom { background:rgba(76,194,255,.16); }
   /* 报表组件（时间报告 / 通道报告）：表格是 DOM 不是 canvas——要能横向滚动、
      选中、复制，用 canvas 画一张几百行的表只会让人没法复制一个数字。 */
@@ -261,15 +278,15 @@
                color:var(--muted); font-weight:600; }
   .rtable th.l, .rtable td.l { text-align:left; }
   .rtable tr:hover td { background:rgba(76,194,255,.07); }
-  .rtable td.best { color:#35d07f; font-weight:600; }
-  .rtable td.close { color:#ffb454; }
-  .rtable td.fair { color:#8b94a7; }
-  .rtable td.none { color:#4b5364; }
+  .rtable td.best { color:var(--good); font-weight:600; }
+  .rtable td.close { color:var(--warn); }
+  .rtable td.fair { color:var(--muted); }
+  .rtable td.none { color:var(--dim); }
   .rnote { flex:0 0 auto; padding:3px 8px 5px; font-size:11px; color:var(--muted); }
   .rnote b { color:var(--fg); }
   .comp:hover .rzcorner {
       background:linear-gradient(135deg, transparent 46%, var(--accent) 46%, var(--accent) 54%, transparent 54%); }
-  .compbar .csize { color:#5d6575; font-variant-numeric:tabular-nums; }
+  .compbar .csize { color:var(--muted); font-variant-numeric:tabular-nums; }
   .guide { position:absolute; background:#4cc2ff; pointer-events:none; z-index:20; display:none; }
   .guide { top:0; bottom:0; width:1px; }
   .guide.h { left:0; right:0; top:auto; height:1px; width:auto; }
@@ -284,7 +301,7 @@
   .alias .aname { color:var(--fg); font-weight:600; }
   .alias .aland { color:var(--muted); font-size:11px; margin-left:auto; }
   .alias .aland.hit { color:var(--good); }
-  .alias .aland.miss { color:#c9a227; }
+  .alias .aland.miss { color:var(--warn); }
   .alias .acands { display:flex; flex-wrap:wrap; gap:3px; margin-top:3px; }
   .alias .cand { display:inline-flex; align-items:center; gap:2px; font-size:11px;
                  background:var(--panel); border:1px solid var(--line);
@@ -298,7 +315,7 @@
   .mdef .mname { color:var(--fg); font-weight:600; }
   .mdef .mex { color:var(--muted); font-size:11px; overflow:hidden; text-overflow:ellipsis;
                white-space:nowrap; flex:1; }
-  .mdef .msc { font-size:10px; padding:0 4px; border-radius:3px; border:1px solid #46505f; }
+  .mdef .msc { font-size:10px; padding:0 4px; border-radius:3px; border:1px solid var(--chip); }
   .mdef .msc.global { color:var(--warn); border-color:var(--warn); }
   .mdef.bad { border:1px solid var(--bad); }
   .mdef .merr { color:var(--bad); font-size:11px; }
@@ -312,10 +329,10 @@
   .medit .mops button { min-width:24px; padding:2px 5px; font-size:12px; }
   .mfind { font-size:11px; }
   .mfuncs { max-height:190px; overflow:auto; margin-top:4px; font-size:11px; }
-  .mfuncs .mfunc { padding:2px 4px; border-bottom:1px solid #1d222b; }
+  .mfuncs .mfunc { padding:2px 4px; border-bottom:1px solid var(--rule); }
   .mfuncs .mfunc b { color:var(--accent); }
   .srow { display:flex; align-items:center; gap:4px; font-size:11px; padding:2px 0; }
-  .srow .skind { cursor:pointer; border:1px solid #46505f; border-radius:3px; padding:0 4px; }
+  .srow .skind { cursor:pointer; border:1px solid var(--chip); border-radius:3px; padding:0 4px; }
   .srow .skind.corner { color:var(--warn); border-color:var(--warn); }
   .srow .sname { flex:1; min-width:0; }
   .srow .sedge { width:62px; }
@@ -329,7 +346,7 @@
                justify-content:center; background:rgba(8,10,13,.62); }
   #exportDlg[hidden] { display:none; }
   #exportDlg .box { width:600px; max-width:94vw; max-height:88vh; overflow:auto;
-                    background:#161a21; border:1px solid #2b313c; border-radius:10px;
+                    background:var(--raise); border:1px solid var(--line); border-radius:10px;
                     padding:14px 16px 12px; box-shadow:0 18px 60px #0008; }
   #exportDlg h3 { margin:0 0 4px; font-size:14px; }
   #exportDlg .sub { color:var(--muted); font-size:11px; margin-bottom:10px; }
@@ -338,7 +355,7 @@
   #exportDlg .frow select, #exportDlg .frow input { flex:1; min-width:0; }
   #exportDlg input[type=checkbox] { flex:none; }
   #exportDlg .chk { display:flex; align-items:center; gap:5px; color:#cfd6e4; font-size:12px; }
-  #exportDlg .plan { background:#12151b; border:1px solid #2b313c; border-radius:6px;
+  #exportDlg .plan { background:var(--deep); border:1px solid var(--line); border-radius:6px;
                      padding:8px 10px; font-size:12px; margin:10px 0 8px; line-height:1.6; }
   #exportDlg .plan b { color:var(--accent); font-weight:600; }
   #exportDlg .warn { color:var(--warn); }
@@ -347,7 +364,7 @@
   #exportDlg .foot { display:flex; align-items:center; gap:8px; justify-content:flex-end;
                      margin-top:10px; }
   #exportDlg .foot .grow { flex:1; }
-  #exportDlg .bar { height:6px; background:#222833; border-radius:3px; overflow:hidden;
+  #exportDlg .bar { height:6px; background:var(--track); border-radius:3px; overflow:hidden;
                     margin:8px 0 0; }
   #exportDlg .bar > i { display:block; height:100%; width:0; background:var(--accent);
                         transition:width .12s linear; }
@@ -359,11 +376,11 @@
             justify-content:center; background:rgba(8,10,13,.62); }
   #canDlg[hidden] { display:none; }
   #canDlg .box { width:760px; max-width:94vw; max-height:88vh; overflow:auto;
-                 background:#161a21; border:1px solid #2b313c; border-radius:10px;
+                 background:var(--raise); border:1px solid var(--line); border-radius:10px;
                  padding:14px 16px 12px; box-shadow:0 18px 60px #0008; }
   #canDlg h3 { margin:0 0 4px; font-size:14px; }
   #canDlg .sub { color:var(--muted); font-size:11px; margin-bottom:10px; }
-  #canDlg .plan { background:#12151b; border:1px solid #2b313c; border-radius:6px;
+  #canDlg .plan { background:var(--deep); border:1px solid var(--line); border-radius:6px;
                   padding:8px 10px; font-size:12px; margin:10px 0 8px; line-height:1.6; }
   #canDlg .plan b { color:var(--accent); font-weight:600; }
   #canDlg .warn { color:var(--warn); }
@@ -371,11 +388,11 @@
                   margin-top:10px; }
   #canDlg .foot .grow { flex:1; }
   #canDlg table { width:100%; border-collapse:collapse; font-size:11px; }
-  #canDlg th, #canDlg td { text-align:left; padding:3px 6px; border-bottom:1px solid #232935; }
+  #canDlg th, #canDlg td { text-align:left; padding:3px 6px; border-bottom:1px solid var(--rule); }
   #canDlg th { color:var(--muted); font-weight:500; }
   #canDlg td.num, #canDlg th.num { text-align:right; font-variant-numeric:tabular-nums; }
   #canDlg tr.diag td { color:var(--warn); }
-  #canDlg code { color:#cfe3ff; }
+  #canDlg code { color:var(--accent); }
 </style>
 </head>
 <body>
@@ -390,6 +407,7 @@
   <button id="shareBtn">分享链接</button>
   <button id="pngBtn">导出 PNG</button>
   <button id="dataBtn" title="把这一段、这几条通道按原始或统一采样率导出成 CSV / Excel">导出数据</button>
+  <select id="themeSel" title="界面主题：只影响外观（背景 / 网格 / 文字），不动数据与迹线颜色"></select>
 </header>
 <!-- 第二排：工作表（票⑧）。tabs 管"切到哪一套"，旁边那排管"这一套本身"，
      绘图分辨率也在这一排——它是**每套具名工作表一份**的（ADR-0008 的口径一）。
@@ -738,7 +756,80 @@
 </div>
 <script>
 const DATA = /*__I3PRO_DATA__*/null;
-const GRID = "#232833";
+/* ------------------------------------------------------------ 主题配色（A101）
+ * 两套：深色（默认）与浅色（Marple 风）。CSS 那边用 `:root[data-theme="marple"]`
+ * 覆盖一组变量；画布这边每次从变量里取一遍——DOM 的颜色与画布的颜色只有一个来源。
+ * 迹线颜色不在这儿：它跟每件组件的调色板走（`palette.py` 那几套里，
+ * Matplotlib tab10 就是 Marple 配色方案里的那一套）。
+ */
+const THEME_STORE = "i3pro.theme.v1";
+//: 取不到 CSS 变量时用的那份（无头假 DOM 没有 getComputedStyle）
+const THEME_FALLBACK = {
+  bg: "#0f1115", panel: "#171a21", panel2: "#1e232c", line: "#2b313c",
+  grid: "#232833", fg: "#e6e9ef", muted: "#8b94a7", accent: "#4cc2ff",
+};
+const UI_VARS = {
+  bg: "--bg", panel: "--panel", panel2: "--panel2", line: "--line",
+  grid: "--grid", fg: "--fg", muted: "--muted", accent: "--accent",
+};
+const UI = Object.assign({}, THEME_FALLBACK);
+let themeKey = "dark";
+
+function refreshUI() {
+  let css = null;
+  try {
+    if (window.getComputedStyle && document.documentElement) {
+      css = window.getComputedStyle(document.documentElement);
+    }
+  } catch (err) { css = null; }
+  for (const key of Object.keys(UI_VARS)) {
+    let got = "";
+    try {
+      got = css && css.getPropertyValue ? String(css.getPropertyValue(UI_VARS[key]) || "") : "";
+    } catch (err) { got = ""; }
+    UI[key] = got.trim() || THEME_FALLBACK[key];
+  }
+}
+
+/** 换主题：在 `:root` 上打标记（CSS 那边认它）、重取画布色、记住、重画。 */
+function setTheme(key) {
+  themeKey = key === "marple" ? "marple" : "dark";
+  try {
+    const root = document.documentElement;
+    if (root && root.dataset) root.dataset.theme = themeKey;
+  } catch (err) { /* 无头假 DOM 没有 documentElement：下面的逻辑照走 */ }
+  refreshUI();
+  try { localStorage.setItem(THEME_STORE, themeKey); } catch (err) { /* 私密模式：记不住就算了 */ }
+  if (typeof renderAll === "function") renderAll();
+}
+
+//: 下拉里那两个字（真浏览器那条验收按它读选项）
+const THEME_LABELS = { dark: "深色", marple: "浅色（Marple 风）" };
+
+/** 开机按记住的那一套摆；没记过就是深色。 */
+function restoreTheme() {
+  let key = "dark";
+  try {
+    if (localStorage.getItem(THEME_STORE) === "marple") key = "marple";
+  } catch (err) { key = "dark"; }
+  setTheme(key);
+  const sel = $("themeSel");
+  if (sel) sel.value = key;
+}
+
+/** 下拉里的选项由 THEME_LABELS 一处生成（跟其它下拉同一个规矩，不手抄一份）。 */
+function renderThemeControl() {
+  const sel = $("themeSel");
+  if (!sel) return;
+  sel.innerHTML = "";
+  for (const key of Object.keys(THEME_LABELS)) {
+    const option = document.createElement("option");
+    option.value = key;
+    option.textContent = THEME_LABELS[key];
+    sel.appendChild(option);
+  }
+  sel.value = themeKey;
+}
 
 const $ = (id) => document.getElementById(id);
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -1938,7 +2029,7 @@ if (typeof window !== "undefined" && window.__I3PRO_SELFTEST__) {
       const c = sizeCanvas(b.canvas, b.canvas.clientWidth || 320, Math.max(44, comp.h * ROW_PX - 24));
       const ctx = c.ctx;
       ctx.clearRect(0, 0, c.w, c.h);
-      ctx.fillStyle = "#8b94a7";
+      ctx.fillStyle = UI.muted;
       ctx.font = "12px Segoe UI";
       ctx.textAlign = "left";
       ctx.fillText(comp.config.text || "自检", 12, 24);
@@ -3033,7 +3124,7 @@ function tickTarget(plotW) {
 }
 
 function drawGrid(ctx, pad, plotW, plotH, y0, y1, x0, x1, xLabel, ticks, onTimeAxis) {
-  ctx.strokeStyle = GRID;
+  ctx.strokeStyle = UI.grid;
   ctx.lineWidth = 1;
   ctx.beginPath();
   for (let i = 0; i <= 4; i++) {
@@ -3042,7 +3133,7 @@ function drawGrid(ctx, pad, plotW, plotH, y0, y1, x0, x1, xLabel, ticks, onTimeA
     ctx.lineTo(pad.l + plotW, gy);
   }
   ctx.stroke();
-  ctx.fillStyle = "#8b94a7";
+  ctx.fillStyle = UI.muted;
   ctx.font = "11px Segoe UI";
   ctx.textAlign = "right";
   for (let i = 0; i <= 4; i++) {
@@ -3053,7 +3144,7 @@ function drawGrid(ctx, pad, plotW, plotH, y0, y1, x0, x1, xLabel, ticks, onTimeA
   // 是不是时间轴由**调用方明说**，不从 xLabel 猜——距离轴的标签是 "m"，可是往
   // 横向通道名（"Speed ..."）里塞个 s 就会猜错，到时候横轴会印出 0:50 这种钟点。
   const ladder = niceTicks(x0, x1, tickTarget(plotW), onTimeAxis === true);
-  ctx.strokeStyle = GRID;
+  ctx.strokeStyle = UI.grid;
   ctx.beginPath();
   for (const value of ladder.values) {
     const px = pad.l + ((value - x0) / (x1 - x0 || 1)) * plotW;
@@ -3061,7 +3152,7 @@ function drawGrid(ctx, pad, plotW, plotH, y0, y1, x0, x1, xLabel, ticks, onTimeA
     ctx.lineTo(px, pad.t + plotH);
   }
   ctx.stroke();
-  ctx.fillStyle = "#8b94a7";
+  ctx.fillStyle = UI.muted;
   for (const value of ladder.values) {
     const px = pad.l + ((value - x0) / (x1 - x0 || 1)) * plotW;
     ctx.fillText(axisTickLabel(value, ladder.step, ladder.digits, onTimeAxis), px, pad.t + plotH + 12);
@@ -3071,7 +3162,7 @@ function drawGrid(ctx, pad, plotW, plotH, y0, y1, x0, x1, xLabel, ticks, onTimeA
     ctx.fillText(xLabel, pad.l + plotW + 3, pad.t + plotH + 12);
   }
   if (ticks && ticks.length) {
-    ctx.strokeStyle = "#2f3742";
+    ctx.strokeStyle = UI.line;
     ctx.beginPath();
     for (const t of ticks) {
       if (t < x0 || t > x1) continue;
@@ -3132,9 +3223,12 @@ function drawSectionBands(ctx, pad, plotW, plotH, x0, x1, strip) {
  */
 function pixelColumnsFor(xs, spec, sx, x0, x1, columns) {
   if (!columns || xs.length <= columns) {
-    return { x: xs, min: spec.min, max: spec.max };
+    return { x: xs, min: spec.min, max: spec.max, mean: spec.values };
   }
   const outX = [], outMin = [], outMax = [];
+  // 同一根竖线上的桶也要给出一条"中间那条线"用的均值——包络画成带子之后，
+  // 带子里那条真实的曲线就是它（以前只画外轮廓，曲线本身没画，看着像一团糊）。
+  const outSum = [], outN = [];
   let lastPx = null;
   for (let i = 0; i < xs.length; i++) {
     const xv = xs[i], mn = spec.min[i], mx = spec.max[i];
@@ -3142,18 +3236,24 @@ function pixelColumnsFor(xs, spec, sx, x0, x1, columns) {
     if (xv < x0) continue;
     if (xv > x1) break;
     const px = Math.round(sx(xv));
+    const vv = spec.values ? spec.values[i] : NaN;
+    const ok = Number.isFinite(vv);
     if (px === lastPx && outMin.length) {
       const last = outMin.length - 1;
       if (mn < outMin[last]) outMin[last] = mn;
       if (mx > outMax[last]) outMax[last] = mx;
+      if (ok) { outSum[last] += vv; outN[last] += 1; }
       continue;
     }
     outX.push(xv);
     outMin.push(mn);
     outMax.push(mx);
+    outSum.push(ok ? vv : 0);
+    outN.push(ok ? 1 : 0);
     lastPx = px;
   }
-  return { x: outX, min: outMin, max: outMax };
+  const outMean = outSum.map((sum, i) => (outN[i] ? sum / outN[i] : NaN));
+  return { x: outX, min: outMin, max: outMax, mean: outMean };
 }
 
 function drawTraces(ctx, pad, plotW, plotH, x0, x1, y0, y1, specs) {
@@ -3169,64 +3269,69 @@ function drawTraces(ctx, pad, plotW, plotH, x0, x1, y0, y1, specs) {
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
     if (spec.envelope && spec.min && spec.max) {
-      // 每个桶一条竖线保真地盖住桶内极值；相邻桶的上界连上界、下界连下界，
-      // 就是外轮廓。点样式在这里没有意义（一个点代表一整桶），按线画。
+      // 包络 = **一条带子 + 中间那条真实的曲线**（A100 改的画法）：
+      //   · 带子：上界从左到右、下界从右往左，一次闭合成面积——半透明铺一层；
+      //   · 中间那条：每个桶的均值（后端给的 `values`），画在带子上面。
+      // 以前是"每列一根竖线 + 上下两条外轮廓"：竖线互相重叠，同一处要画好几遍，
+      // 叠出来深浅不一的竖纹；而**曲线本身根本没画**，整块看着像一团糊。
       //
-      // 桶比画布还密时（8000 桶 × 约 800 像素列）先按像素列并一遍：同一根竖线上的
-      // 桶合成一根，画的次数按像素列封顶（ticket #55）。**这只是画法**——抬头统计、
-      // 纵轴量程、A–B 统计仍然用后端给的桶。
+      // 桶比画布还密时（8000 桶 × 约 800 像素列）先按像素列并一遍，画的次数按像素列
+      // 封顶（ticket #55 的规矩照旧）。**这只是画法**——抬头统计、纵轴量程、A–B 统计
+      // 仍然用后端给的桶。
       const cols = pixelColumnsFor(
         xs, spec, sx, x0, x1,
         Math.round(plotW * (window.devicePixelRatio || 1)));
       const cxs = cols.x, cmins = cols.min, cmaxs = cols.max;
-      ctx.globalAlpha = 0.48;
-      ctx.beginPath();
+      const cmeans = cols.mean || vs;
+      const px = [], pyMax = [], pyMin = [], pyMean = [];
       for (let i = 0; i < cxs.length; i++) {
         const xv = cxs[i];
         if (!Number.isFinite(xv) || !Number.isFinite(cmins[i])
             || !Number.isFinite(cmaxs[i])) continue;
         if (xv < x0) continue;
         if (xv > x1) break;
-        const px = sx(xv);
-        ctx.moveTo(px, sy(cmaxs[i]));
-        ctx.lineTo(px, sy(cmins[i]));
+        px.push(sx(xv));
+        pyMax.push(sy(cmaxs[i]));
+        pyMin.push(sy(cmins[i]));
+        pyMean.push(Number.isFinite(cmeans[i]) ? sy(cmeans[i]) : NaN);
       }
-      ctx.stroke();
-      ctx.globalAlpha = 1;
-      const outline = (values) => {
+      if (px.length) {
+        ctx.globalAlpha = 0.22;
         ctx.beginPath();
-        let started = false;
-        let prevX = 0, prevY = 0;
-        for (let i = 0; i < cxs.length; i++) {
-          const xv = cxs[i], yv = values[i];
+        ctx.moveTo(px[0], pyMax[0]);
+        for (let i = 1; i < px.length; i++) ctx.lineTo(px[i], pyMax[i]);
+        for (let i = px.length - 1; i >= 0; i--) ctx.lineTo(px[i], pyMin[i]);
+        ctx.closePath();
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        // 带子里那条曲线：取值方式（曲线连接）跟普通折线同一套。
+        ctx.beginPath();
+        let started = false, prevX = 0, prevY = 0;
+        for (let i = 0; i < px.length; i++) {
+          const xv = px[i], yv = pyMean[i];
           if (!Number.isFinite(xv) || !Number.isFinite(yv)) continue;
-          if (xv < x0) continue;
-          if (xv > x1) break;
-          const px = sx(xv), py = sy(yv);
           if (!started) {
-            ctx.moveTo(px, py);
+            ctx.moveTo(xv, yv);
             started = true;
           } else if (state.upsample === "previous") {
-            ctx.lineTo(px, prevY);
-            ctx.lineTo(px, py);
+            ctx.lineTo(xv, prevY);
+            ctx.lineTo(xv, yv);
           } else if (state.upsample === "next") {
-            ctx.lineTo(prevX, py);
-            ctx.lineTo(px, py);
+            ctx.lineTo(prevX, yv);
+            ctx.lineTo(xv, yv);
           } else if (state.upsample === "closest") {
-            const mid = (prevX + px) / 2;
+            const mid = (prevX + xv) / 2;
             ctx.lineTo(mid, prevY);
-            ctx.lineTo(mid, py);
-            ctx.lineTo(px, py);
+            ctx.lineTo(mid, yv);
+            ctx.lineTo(xv, yv);
           } else {
-            ctx.lineTo(px, py);
+            ctx.lineTo(xv, yv);
           }
-          prevX = px;
-          prevY = py;
+          prevX = xv;
+          prevY = yv;
         }
         ctx.stroke();
-      };
-      outline(cmaxs);
-      outline(cmins);
+      }
       continue;
     }
     if (state.style === "points" && !spec.forceLine && resolutionDrawsPoints()) {
@@ -3420,7 +3525,10 @@ function sizeCanvas(canvas, w, h) {
 /** Everything that invalidates a component's cached trace layer. */
 function componentKey(comp, b, w, h) {
   const r = lane();
+  // themeKey 也在键里：网格 / 区段带子 / 包络都是画在**离屏画布**上的，换了主题
+  // 不重画的话，切过去还是旧配色那一层（A101 真浏览器里量出来的）。
   return [r[0].toFixed(3), r[1].toFixed(3), state.mode, state.style, state.groupMode,
+          themeKey,
           state.show.measure ? 1 : 0, Math.round(w), Math.round(h),
           state.dataVersion, JSON.stringify(comp.config)].join("|");
 }
@@ -3819,7 +3927,7 @@ function renderGraphComponent(comp, b) {
   if (!groups.length) {
     const c = sizeCanvas(canvas, width, height);
     c.ctx.clearRect(0, 0, c.w, c.h);
-    c.ctx.fillStyle = "#8b94a7";
+    c.ctx.fillStyle = UI.muted;
     c.ctx.font = "12px Segoe UI";
     c.ctx.textAlign = "left";
     c.ctx.fillText(EMPTY_COMPONENT_HINT, 12, 24);
@@ -4437,7 +4545,7 @@ function renderOverview() {
   const full = [overview.time[0], overview.time[overview.time.length - 1] || 1];
   const sx = (v) => pad.l + ((v - full[0]) / (full[1] - full[0] || 1)) * plotW;
   const sy = (v) => pad.t + plotH - ((v - lo) / (hi - lo)) * plotH;
-  ctx.strokeStyle = "#3a4350";
+  ctx.strokeStyle = UI.muted;
   ctx.lineWidth = 1;
   ctx.beginPath();
   let started = false;
@@ -4446,7 +4554,7 @@ function renderOverview() {
     if (!started) { ctx.moveTo(px, py); started = true; } else ctx.lineTo(px, py);
   }
   ctx.stroke();
-  ctx.strokeStyle = "#2f3742";
+  ctx.strokeStyle = UI.line;
   for (const lap of DATA.laps || []) {
     const px = sx(lap.start_time);
     ctx.beginPath();
@@ -4459,9 +4567,9 @@ function renderOverview() {
   const vx1 = clamp(sx(view[1]), pad.l, pad.l + plotW);
   ctx.fillStyle = "rgba(76,194,255,.13)";
   ctx.fillRect(vx0, pad.t, Math.max(2, vx1 - vx0), plotH);
-  ctx.strokeStyle = "#4cc2ff";
+  ctx.strokeStyle = UI.accent;
   ctx.strokeRect(vx0 + .5, pad.t + .5, Math.max(2, vx1 - vx0) - 1, plotH - 1);
-  ctx.fillStyle = "#4cc2ff";
+  ctx.fillStyle = UI.accent;
   ctx.fillRect(vx0 - 1, pad.t, 3, plotH);
   ctx.fillRect(vx1 - 2, pad.t, 3, plotH);
 }
@@ -4556,16 +4664,18 @@ function renderScrollbar() {
   const c = setupCanvas(canvas, 14);
   const ctx = c.ctx;
   ctx.clearRect(0, 0, c.w, c.h);
-  ctx.fillStyle = "#1b2029";
+  ctx.fillStyle = UI.panel;
   ctx.fillRect(0, 0, c.w, c.h);
   const full = fullRange();
   const view = state.view || full;
   const span = full[1] - full[0] || 1;
   const x0 = ((view[0] - full[0]) / span) * c.w;
   const x1 = ((view[1] - full[0]) / span) * c.w;
-  ctx.fillStyle = "#33404f";
+  ctx.globalAlpha = 0.3;
+  ctx.fillStyle = UI.accent;
   ctx.fillRect(x0, 2, Math.max(4, x1 - x0), c.h - 4);
-  ctx.strokeStyle = "#4cc2ff";
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = UI.accent;
   ctx.strokeRect(x0 + .5, 2.5, Math.max(4, x1 - x0) - 1, c.h - 5);
 }
 /** Static layer of a scatter component; returns the mapping for the cursor.
@@ -4589,7 +4699,7 @@ function paintScatter(cfg, ctx, cw, ch, src) {
   if (yhi - ylo < 1e-9) yhi = ylo + 1;
   const px = (v) => pad.l + ((v - xlo) / (xhi - xlo)) * plotW;
   const py = (v) => pad.t + plotH - ((v - ylo) / (yhi - ylo)) * plotH;
-  ctx.strokeStyle = GRID;
+  ctx.strokeStyle = UI.grid;
   ctx.beginPath();
   for (let i = 0; i <= 4; i++) {
     const gy = pad.t + (plotH * i) / 4;
@@ -4597,7 +4707,7 @@ function paintScatter(cfg, ctx, cw, ch, src) {
     ctx.lineTo(pad.l + plotW, gy);
   }
   ctx.stroke();
-  ctx.fillStyle = "#8b94a7";
+  ctx.fillStyle = UI.muted;
   ctx.font = "10px Segoe UI";
   ctx.textAlign = "right";
   for (let i = 0; i <= 4; i++) ctx.fillText(fmt(yhi - ((yhi - ylo) * i) / 4), pad.l - 4, pad.t + (plotH * i) / 4 + 3);
@@ -4645,7 +4755,7 @@ function paintScatter(cfg, ctx, cw, ch, src) {
     }
   }
   const xUnit = (CHANNELS.get(cfg.x) || {}).unit || "";
-  ctx.fillStyle = "#8b94a7";
+  ctx.fillStyle = UI.muted;
   ctx.textAlign = "left";
   ctx.font = "10px Segoe UI";
   ctx.fillText(cfg.x + " [" + xUnit + "]", pad.l, 9);
@@ -4658,7 +4768,7 @@ function renderScatterComponent(comp, b) {
   const ctx = c.ctx;
   ctx.clearRect(0, 0, c.w, c.h);
   if (!cfg.x || !cfg.y.length) {
-    ctx.fillStyle = "#8b94a7";
+    ctx.fillStyle = UI.muted;
     ctx.font = "12px Segoe UI";
     ctx.textAlign = "left";
     ctx.fillText(emptyHint("选 X / Y 通道"), 12, 24);
@@ -4675,7 +4785,7 @@ function renderScatterComponent(comp, b) {
     b.cacheKey = b.mapping ? key : "";
   }
   if (!b.mapping) {
-    ctx.fillStyle = "#8b94a7";
+    ctx.fillStyle = UI.muted;
     ctx.font = "12px Segoe UI";
     ctx.textAlign = "left";
     ctx.fillText(DATA.api ? "载入散点…" : "散点需要 serve 模式（快照只内嵌折线）", 12, 24);
@@ -4691,7 +4801,7 @@ function renderScatterComponent(comp, b) {
       if (d < bestD) { bestD = d; best = i; }
     }
     if (best >= 0) {
-      ctx.fillStyle = "#fff";
+      ctx.fillStyle = UI.fg;
       for (const name of m.ys) {
         const v = m.src[name][best];
         if (!Number.isFinite(v)) continue;
@@ -4846,7 +4956,7 @@ function renderHistogramComponent(comp, b) {
   const ctx = c.ctx;
   ctx.clearRect(0, 0, c.w, c.h);
   const hint = (text) => {
-    ctx.fillStyle = "#8b94a7";
+    ctx.fillStyle = UI.muted;
     ctx.font = "12px Segoe UI";
     ctx.textAlign = "left";
     ctx.fillText(text, 12, 24);
@@ -4870,14 +4980,14 @@ function renderHistogramComponent(comp, b) {
   const x0 = hist.range[0], x1 = hist.range[1];
   const px = (v) => pad.l + ((v - x0) / (x1 - x0 || 1)) * plotW;
   const py = (v) => pad.t + plotH - (v / top) * plotH;
-  ctx.strokeStyle = GRID;
+  ctx.strokeStyle = UI.grid;
   ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.moveTo(pad.l, pad.t);
   ctx.lineTo(pad.l, pad.t + plotH);
   ctx.lineTo(pad.l + plotW, pad.t + plotH);
   ctx.stroke();
-  ctx.fillStyle = "#8b94a7";
+  ctx.fillStyle = UI.muted;
   ctx.font = "10px Segoe UI";
   ctx.textAlign = "right";
   for (let i = 0; i <= 2; i++) {
@@ -4915,12 +5025,12 @@ function renderHistogramComponent(comp, b) {
     ctx.textAlign = "left";
     ctx.font = "11px Segoe UI";
     rows.forEach((box, i) => {
-      ctx.fillStyle = "#c9d1e2";
+      ctx.fillStyle = UI.fg;
       ctx.fillText(fmt(box.lo, 2) + " – " + fmt(box.hi, 2) + "   " + box.count,
                    10, 16 + i * 13);
     });
     if (bins.filter((box) => box.count > 0).length > rows.length) {
-      ctx.fillStyle = "#8b94a7";
+      ctx.fillStyle = UI.muted;
       ctx.fillText("……共 " + bins.length + " 格", 10, 16 + rows.length * 13);
     }
   } else {
@@ -4941,7 +5051,7 @@ function renderHistogramComponent(comp, b) {
       ctx.fillStyle = ramp(1 - i / 23);
       ctx.fillRect(barX, pad.t + (plotH * i) / 24, barW, plotH / 24 + 1);
     }
-    ctx.fillStyle = "#8b94a7";
+    ctx.fillStyle = UI.muted;
     ctx.font = "9px Segoe UI";
     ctx.textAlign = "left";
     ctx.fillText(fmt(cHi, 1), barX + barW + 2, pad.t + 7);
@@ -5225,7 +5335,7 @@ function renderHeatmapComponent(comp, b) {
   ctx.clearRect(0, 0, c.w, c.h);
   b.heatMap = null;
   const hint = (text) => {
-    ctx.fillStyle = "#8b94a7";
+    ctx.fillStyle = UI.muted;
     ctx.font = "12px Segoe UI";
     ctx.textAlign = "left";
     ctx.fillText(text, 12, 24);
@@ -5279,10 +5389,10 @@ function renderHeatmapComponent(comp, b) {
                    Math.max(1, cw + 0.5), Math.max(1, chh + 0.5));
     }
   }
-  ctx.strokeStyle = GRID;
+  ctx.strokeStyle = UI.grid;
   ctx.lineWidth = 1;
   ctx.strokeRect(pad.l + 0.5, pad.t + 0.5, plotW, plotH);
-  ctx.fillStyle = "#8b94a7";
+  ctx.fillStyle = UI.muted;
   ctx.font = "10px Segoe UI";
   ctx.textAlign = "center";
   for (let i = 0; i <= 4; i++) {
@@ -5304,7 +5414,7 @@ function renderHeatmapComponent(comp, b) {
   const unit = (grid.scheme === "z-mean" && grid.z_unit) ? " [" + grid.z_unit + "]" : "";
   const colourName = grid.scheme === "z-mean"
     ? ("色=" + (grid.z || "") + " 均值") : "样本数";
-  ctx.fillStyle = "#8b94a7";
+  ctx.fillStyle = UI.muted;
   ctx.textAlign = "left";
   ctx.fillText(fmt(scale.hi, 1), barX + barW + 3, pad.t + 8);
   ctx.fillText(fmt(scale.lo, 1), barX + barW + 3, pad.t + plotH);
@@ -5313,7 +5423,7 @@ function renderHeatmapComponent(comp, b) {
   const hover = b.hover;
   let hoverText = "";
   if (hover && hover.ix >= 0 && hover.ix < nbx && hover.iy >= 0 && hover.iy < nby) {
-    ctx.strokeStyle = "#ffffff";
+    ctx.strokeStyle = UI.fg;
     ctx.lineWidth = 1.4;
     ctx.strokeRect(pad.l + hover.ix * cw + 0.5,
                    pad.t + (nby - 1 - hover.iy) * chh + 0.5,
@@ -5464,7 +5574,7 @@ function renderSpectrumComponent(comp, b) {
   const ctx = c.ctx;
   ctx.clearRect(0, 0, c.w, c.h);
   const hint = (text) => {
-    ctx.fillStyle = "#8b94a7";
+    ctx.fillStyle = UI.muted;
     ctx.font = "12px Segoe UI";
     ctx.textAlign = "left";
     ctx.fillText(text, 12, 24);
@@ -5504,10 +5614,10 @@ function renderSpectrumComponent(comp, b) {
   }
   const py = (v) => pad.t + plotH
     - ((Math.max(lo, Math.min(hi, v)) - lo) / (hi - lo || 1)) * plotH;
-  ctx.strokeStyle = GRID;
+  ctx.strokeStyle = UI.grid;
   ctx.lineWidth = 1;
   ctx.font = "10px Segoe UI";
-  ctx.fillStyle = "#8b94a7";
+  ctx.fillStyle = UI.muted;
   ctx.textAlign = "center";
   for (const f of [0, nyquist / 4, nyquist / 2, nyquist * 3 / 4, nyquist]) {
     const x = px(f);
@@ -5635,7 +5745,7 @@ function renderDeltaComponent(comp, b) {
   const ctx = c.ctx;
   ctx.clearRect(0, 0, c.w, c.h);
   if (!overlay || state.mode !== "overlay") {
-    ctx.fillStyle = "#8b94a7";
+    ctx.fillStyle = UI.muted;
     ctx.font = "12px Segoe UI";
     ctx.textAlign = "left";
     ctx.fillText("在左侧圈速表里点两行（基准圈 + 对比圈），再切到「双圈对比」", 12, 26);
@@ -5661,7 +5771,7 @@ function renderDeltaComponent(comp, b) {
              Math.max(1, sx(dist[i]) - sx(dist[i - 1])), Math.abs(sy(delta[i]) - zero));
     ctx.fill();
   }
-  ctx.strokeStyle = "#e6e9ef";
+  ctx.strokeStyle = UI.fg;
   ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.moveTo(pad.l, zero);
@@ -5691,7 +5801,7 @@ function renderStatusComponent(comp, b) {
   const ctx = c.ctx;
   ctx.clearRect(0, 0, c.w, c.h);
   if (!shown.length) {
-    ctx.fillStyle = "#8b94a7";
+    ctx.fillStyle = UI.muted;
     ctx.font = "12px Segoe UI";
     ctx.textAlign = "left";
     ctx.fillText("这场记录里没有状态通道", 12, 26);
@@ -5706,7 +5816,7 @@ function renderStatusComponent(comp, b) {
   shown.forEach((name, row) => {
     const trace = traceOf(name);
     const y = pad.t + row * rowH;
-    ctx.fillStyle = "#8b94a7";
+    ctx.fillStyle = UI.muted;
     ctx.textAlign = "right";
     ctx.fillText(name.length > 22 ? name.slice(0, 21) + "…" : name, pad.l - 5, y + 9);
     if (!trace || !trace.value) return;
@@ -5761,7 +5871,7 @@ function renderAttitudeComponent(comp, b) {
   const perAxis = axes.map((axis) => attitudeAxis(comp, axis));
   const lacking = perAxis.filter((one) => one.state !== "ok");
   if (lacking.length) {
-    ctx.fillStyle = "#8b94a7";
+    ctx.fillStyle = UI.muted;
     ctx.font = "12px Segoe UI";
     ctx.textAlign = "left";
     ctx.fillText(emptyHint("给这个组件选 roll / pitch / yaw 三条通道"), 12, 24);
@@ -5790,7 +5900,7 @@ function renderAttitudeComponent(comp, b) {
   const live = anglesAt(when);
   const ghost = cfg.ghost === false ? null : anglesAt(state.datumOn ? state.datum : null);
   if (!live) {
-    ctx.fillStyle = "#8b94a7";
+    ctx.fillStyle = UI.muted;
     ctx.font = "12px Segoe UI";
     ctx.textAlign = "left";
     ctx.fillText("光标这一帧没有有效姿态（NaN 不补零）", 12, 24);
@@ -5812,7 +5922,7 @@ function renderAttitudeComponent(comp, b) {
     return stats && stats.max - stats.min < 1e-9;
   });
   if (flat) {
-    ctx.fillStyle = "#8b94a7";
+    ctx.fillStyle = UI.muted;
     ctx.font = "11px Segoe UI";
     ctx.textAlign = "left";
     ctx.fillText("这三条这一屏没有变化（可能是空模板通道）——从上面换成有数据的", 12, c.h - 8);
@@ -5828,7 +5938,7 @@ function drawAttitudeModel(ctx, c, comp, live, ghost) {
     .map((point) => [ox + point[0] * scale, oy + point[1] * scale]);
   const identity = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
   if (comp.config.grid !== false) {
-    ctx.strokeStyle = "#2b313c";
+    ctx.strokeStyle = UI.line;
     ctx.lineWidth = 1;
     for (let step = -3; step <= 3; step++) {
       const segments = [
@@ -5866,7 +5976,7 @@ function drawAttitudeModel(ctx, c, comp, live, ghost) {
     ctx.globalAlpha = 1;
   };
   if (ghost) paint(ghost, 0.3, "#ffb454");
-  paint(live, 1, "#4cc2ff");
+  paint(live, 1, UI.accent);
 }
 
 /** PFD：天地线 + 俯仰刻度 + 滚转弧 + 航向带（每 10° 一格）。 */
@@ -5890,7 +6000,7 @@ function drawAttitudePfd(ctx, c, angles) {
   ctx.fillRect(-radius * 2, -radius * 2, radius * 4, radius * 2 + shift);
   ctx.fillStyle = "#3a2f22";
   ctx.fillRect(-radius * 2, shift, radius * 4, radius * 2);
-  ctx.strokeStyle = "#e6e9ef";
+  ctx.strokeStyle = UI.fg;
   ctx.lineWidth = 1.6;
   ctx.beginPath();
   ctx.moveTo(-radius * 2, shift);
@@ -5901,13 +6011,13 @@ function drawAttitudePfd(ctx, c, angles) {
     if (tick === 0) continue;
     const y = shift - tick * perDegree;
     const half = tick % 20 === 0 ? radius * 0.34 : radius * 0.17;
-    ctx.strokeStyle = "#9aa4b6";
+    ctx.strokeStyle = UI.muted;
     ctx.beginPath();
     ctx.moveTo(-half, y);
     ctx.lineTo(half, y);
     ctx.stroke();
     if (tick % 20 === 0) {
-      ctx.fillStyle = "#9aa4b6";
+      ctx.fillStyle = UI.muted;
       ctx.textAlign = "right";
       ctx.fillText(String(tick), -half - 3, y + 3);
       ctx.textAlign = "left";
@@ -5922,20 +6032,20 @@ function drawAttitudePfd(ctx, c, angles) {
     if (Math.abs(tick) > 60) continue;
     const at = (tick - 90) * Math.PI / 180;      // 0° 在正上方
     const inner = tick % 30 === 0 ? radius * 0.84 : radius * 0.9;
-    ctx.strokeStyle = "#9aa4b6";
+    ctx.strokeStyle = UI.muted;
     ctx.beginPath();
     ctx.moveTo(Math.cos(at) * inner, Math.sin(at) * inner);
     ctx.lineTo(Math.cos(at) * radius, Math.sin(at) * radius);
     ctx.stroke();
     if (tick % 30 === 0) {
-      ctx.fillStyle = "#9aa4b6";
+      ctx.fillStyle = UI.muted;
       ctx.textAlign = "center";
       ctx.fillText(String(tick), Math.cos(at) * radius * 0.76,
                    Math.sin(at) * radius * 0.76 + 3);
     }
   }
   ctx.rotate(-roll * Math.PI / 180);
-  ctx.fillStyle = "#4cc2ff";
+  ctx.fillStyle = UI.accent;
   ctx.beginPath();
   ctx.moveTo(0, -radius);
   ctx.lineTo(-6, -radius + 12);
@@ -5949,9 +6059,9 @@ function drawAttitudePfd(ctx, c, angles) {
   const tapeX = ox - tapeW / 2;
   const tapeY = 6;
   ctx.save();
-  ctx.fillStyle = "#171a21";
+  ctx.fillStyle = UI.panel;
   ctx.fillRect(tapeX, tapeY, tapeW, tapeH);
-  ctx.strokeStyle = "#2b313c";
+  ctx.strokeStyle = UI.line;
   ctx.strokeRect(tapeX, tapeY, tapeW, tapeH);
   ctx.beginPath();
   ctx.rect(tapeX, tapeY, tapeW, tapeH);
@@ -5965,16 +6075,16 @@ function drawAttitudePfd(ctx, c, angles) {
     while (delta < -180) delta += 360;
     if (Math.abs(delta) > 45) continue;
     const x = ox + delta * perHeading;
-    ctx.strokeStyle = "#2b313c";
+    ctx.strokeStyle = UI.line;
     ctx.beginPath();
     ctx.moveTo(x, tapeY + tapeH - 5);
     ctx.lineTo(x, tapeY + tapeH);
     ctx.stroke();
-    ctx.fillStyle = "#9aa4b6";
+    ctx.fillStyle = UI.muted;
     ctx.fillText(value === 0 ? "N" : String(value), x, tapeY + 11);
   }
   ctx.restore();
-  ctx.fillStyle = "#4cc2ff";
+  ctx.fillStyle = UI.accent;
   ctx.beginPath();
   ctx.moveTo(ox, tapeY + tapeH + 2);
   ctx.lineTo(ox - 5, tapeY + tapeH + 9);
@@ -5992,7 +6102,7 @@ function renderGaugeComponent(comp, b) {
   const names = chosen.length ? chosen
     : (subtype === "list" ? allGraphChannels().slice(0, 8) : []);
   if (!names.length) {
-    ctx.fillStyle = "#8b94a7";
+    ctx.fillStyle = UI.muted;
     ctx.font = "12px Segoe UI";
     ctx.textAlign = "center";
     ctx.fillText("先在左边的图里勾几个通道", c.w / 2, c.h / 2);
@@ -6020,13 +6130,13 @@ function renderGaugeComponent(comp, b) {
       if (y > c.h) return;
       ctx.fillStyle = channelColor(name, null);
       ctx.fillRect(8, y - font + 2, 6, 6);
-      ctx.fillStyle = "#e6e9ef";
+      ctx.fillStyle = UI.fg;
       ctx.textAlign = "left";
       ctx.fillText(name.length > 22 ? name.slice(0, 21) + "…" : name, 20, y);
       ctx.textAlign = "right";
-      ctx.fillStyle = "#fff";
+      ctx.fillStyle = UI.fg;
       ctx.fillText(valueText(name, 2), c.w - 46, y);
-      ctx.fillStyle = "#8b94a7";
+      ctx.fillStyle = UI.muted;
       ctx.fillText(unitOf(name), c.w - 8, y);
     });
     b.head.textContent = names.length + " 个通道 · 显示光标处的值";
@@ -6043,13 +6153,13 @@ function renderGaugeComponent(comp, b) {
   ctx.textAlign = "center";
 
   if (subtype === "numeric") {
-    ctx.fillStyle = "#8b94a7";
+    ctx.fillStyle = UI.muted;
     ctx.font = "11px Segoe UI";
     ctx.fillText(label, c.w / 2, 16);
-    ctx.fillStyle = "#fff";
+    ctx.fillStyle = UI.fg;
     ctx.font = "600 " + Math.max(24, Math.min(56, c.h * 0.34)) + "px Segoe UI";
     ctx.fillText(valueText(name, 1), c.w / 2, c.h / 2 + 8);
-    ctx.fillStyle = "#8b94a7";
+    ctx.fillStyle = UI.muted;
     ctx.font = "12px Segoe UI";
     ctx.fillText(deltaText(name), c.w / 2, c.h - 10);
     b.head.textContent = label;
@@ -6061,19 +6171,19 @@ function renderGaugeComponent(comp, b) {
     const barH = Math.min(30, c.h * 0.22);
     const top = c.h / 2 - barH / 2 - 6;
     const width = c.w - pad * 2;
-    ctx.fillStyle = "#8b94a7";
+    ctx.fillStyle = UI.muted;
     ctx.font = "11px Segoe UI";
     ctx.textAlign = "left";
     ctx.fillText(label, pad, top - 8);
     ctx.textAlign = "right";
     ctx.fillText(fmt(hi, 1), c.w - pad, top - 8);
-    ctx.fillStyle = "#1e232c";
+    ctx.fillStyle = UI.panel2;
     ctx.fillRect(pad, top, width, barH);
     ctx.fillStyle = accent;
     ctx.fillRect(pad, top, width * frac, barH);
-    ctx.strokeStyle = "#2b313c";
+    ctx.strokeStyle = UI.line;
     ctx.strokeRect(pad + .5, top + .5, width - 1, barH - 1);
-    ctx.fillStyle = "#fff";
+    ctx.fillStyle = UI.fg;
     ctx.font = "600 15px Segoe UI";
     ctx.textAlign = "center";
     ctx.fillText(valueText(name, 1) + " " + unitOf(name), c.w / 2, top + barH + 18);
@@ -6088,7 +6198,7 @@ function renderGaugeComponent(comp, b) {
     const cx = c.w / 2, cy = c.h * 0.56;
     const radius = Math.min(c.w, c.h * 1.5) * 0.34;
     const start = Math.PI * 0.75, end = Math.PI * 2.25;
-    ctx.strokeStyle = "#1e232c";
+    ctx.strokeStyle = UI.panel2;
     ctx.lineWidth = 8;
     ctx.beginPath();
     ctx.arc(cx, cy, radius, start, end);
@@ -6097,7 +6207,7 @@ function renderGaugeComponent(comp, b) {
     ctx.beginPath();
     ctx.arc(cx, cy, radius, start, start + (end - start) * frac);
     ctx.stroke();
-    ctx.strokeStyle = "#8b94a7";
+    ctx.strokeStyle = UI.muted;
     ctx.lineWidth = 1;
     for (let i = 0; i <= 10; i++) {
       const a = start + (end - start) * (i / 10);
@@ -6113,11 +6223,11 @@ function renderGaugeComponent(comp, b) {
     ctx.moveTo(cx, cy);
     ctx.lineTo(cx + Math.cos(angle) * (radius - 10), cy + Math.sin(angle) * (radius - 10));
     ctx.stroke();
-    ctx.fillStyle = "#e6e9ef";
+    ctx.fillStyle = UI.fg;
     ctx.font = "600 16px Segoe UI";
     ctx.textAlign = "center";
     ctx.fillText(valueText(name, 0), cx, cy + radius * 0.62);
-    ctx.fillStyle = "#8b94a7";
+    ctx.fillStyle = UI.muted;
     ctx.font = "11px Segoe UI";
     ctx.fillText(label, cx, cy + radius * 0.62 + 16);
     ctx.fillStyle = "#ffb454";
@@ -6130,12 +6240,12 @@ function renderGaugeComponent(comp, b) {
     const cx = c.w / 2, cy = c.h * 0.52;
     const radius = Math.min(c.w, c.h * 1.4) * 0.36;
     const angle = clamp(Number.isFinite(raw) ? raw : 0, -540, 540) * Math.PI / 180;
-    ctx.strokeStyle = "#2b313c";
+    ctx.strokeStyle = UI.line;
     ctx.lineWidth = 10;
     ctx.beginPath();
     ctx.arc(cx, cy, radius, 0, Math.PI * 2);
     ctx.stroke();
-    ctx.fillStyle = "#8b94a7";
+    ctx.fillStyle = UI.muted;
     ctx.font = "10px Segoe UI";
     ctx.textAlign = "center";
     ctx.fillText("0", cx, cy - radius - 6);
@@ -6147,12 +6257,12 @@ function renderGaugeComponent(comp, b) {
     ctx.stroke();
     ctx.beginPath();
     ctx.arc(cx, cy, 6, 0, Math.PI * 2);
-    ctx.fillStyle = "#4cc2ff";
+    ctx.fillStyle = UI.accent;
     ctx.fill();
-    ctx.fillStyle = "#e6e9ef";
+    ctx.fillStyle = UI.fg;
     ctx.font = "600 15px Segoe UI";
     ctx.fillText(valueText(name, 0) + " " + unitOf(name), cx, cy + radius + 20);
-    ctx.fillStyle = "#8b94a7";
+    ctx.fillStyle = UI.muted;
     ctx.font = "11px Segoe UI";
     ctx.fillText(label, cx, cy + radius + 36);
     b.head.textContent = "方向盘角度（±540°）";
@@ -6184,7 +6294,7 @@ function renderTrackComponent(comp, b) {
   const ctx = c.ctx;
   ctx.clearRect(0, 0, c.w, c.h);
   if (!track) {
-    ctx.fillStyle = "#8b94a7";
+    ctx.fillStyle = UI.muted;
     ctx.font = "12px Segoe UI";
     ctx.textAlign = "left";
     ctx.fillText("这场记录没有可用的 GPS 轨迹", 12, 26);
@@ -6229,7 +6339,7 @@ function renderTrackComponent(comp, b) {
     ctx.fill();
   };
   if (state.datumOn && state.datum !== null) mark(state.datum, "#ffb454", 3.6);
-  if (state.cursor !== null) mark(state.cursor, "#fff", 4.2);
+  if (state.cursor !== null) mark(state.cursor, UI.fg, 4.2);
   // 跳点画成红点：断线告诉用户"这里不连"，红点告诉用户"这里跳过"。
   for (const when of (track.jump_times || [])) mark(when, "#ff6b6b", 3.4);
   // 注释：轨迹图上画成琥珀色的点 + 一行字。位置来自服务端算好的 x/y（局部米坐标，
@@ -8352,7 +8462,7 @@ function bandOverlay() {
   if (!node) {
     node = document.createElement("div");
     node.id = "bandOverlay";
-    node.style.cssText = "position:fixed;border:1px solid #4cc2ff;"
+    node.style.cssText = "position:fixed;border:1px solid " + UI.accent + ";";
       + "background:rgba(76,194,255,.14);pointer-events:none;z-index:85;display:none";
     document.body.appendChild(node);
   }
@@ -8703,14 +8813,14 @@ function exportPNG() {
   out.height = Math.max(1, total * dpr);
   const ctx = out.getContext("2d");
   ctx.scale(dpr, dpr);
-  ctx.fillStyle = "#0f1115";
+  ctx.fillStyle = UI.bg;
   ctx.fillRect(0, 0, width, total);
-  ctx.fillStyle = "#e6e9ef";
+  ctx.fillStyle = UI.fg;
   ctx.font = "600 14px Segoe UI";
   ctx.textAlign = "left";
   ctx.fillText(DATA.meta.file + "  ·  " + DATA.meta.device + " " + DATA.meta.log_date
     + " " + DATA.meta.log_time, 12, 24);
-  ctx.fillStyle = "#8b94a7";
+  ctx.fillStyle = UI.muted;
   ctx.font = "12px Segoe UI";
   const r = lane();
   ctx.fillText((state.mode === "time" ? "时间轴" : "距离轴") + " " + r[0].toFixed(2) + "–"
@@ -8721,7 +8831,7 @@ function exportPNG() {
   panels.forEach((src) => {
     const size = canvasCssSize(src);
     const h = size.h;
-    ctx.fillStyle = "#171a21";
+    ctx.fillStyle = UI.panel;
     ctx.fillRect(0, y, width, h);
     ctx.drawImage(src, 0, y, width, h);
     y += h + gap;
@@ -10301,6 +10411,10 @@ function init() {
   // 高级工具折叠区（票⑧）：默认收起，点标题展开/收起。
   $("advancedToggle").addEventListener("click", toggleAdvanced);
   restoreAdvanced();
+  // 主题（A101）：下拉由 THEME_LABELS 一处生成，选过的记在本机。
+  renderThemeControl();
+  $("themeSel").addEventListener("change", () => setTheme($("themeSel").value));
+  restoreTheme();
   $("modeTime").addEventListener("click", () => {
     state.mode = "time"; state.view = null; state.panelZoom = {}; scheduleRefresh(); renderAll();
   });
@@ -10396,6 +10510,8 @@ window.i3pro = {
   jumpButtons: () => jumpButtons.map((e) => e.button),
   // 高级工具折叠区（票⑧）：外壳的折叠，不在 state 里（ADR-0008）
   advancedOpen: advancedOpen, setAdvanced: setAdvanced,
+  // 主题（A101）：外壳的配色，也不在 state 里；画布色由 UI 那一份供
+  theme: () => themeKey, setTheme: setTheme, themes: THEME_LABELS,
   // 取数缓存键（A79）：windowKey 只说"看的是哪一段"，traceKey 另外带上曲线连接方式
   windowKey: windowKey, traceKey: traceKey,
   jumpActive: () => {

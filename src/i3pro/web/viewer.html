@@ -58,9 +58,22 @@
   #sheetBar #sheetName::before { content:"当前："; }
   /* 三栏（票⑨）：左=能看什么（场次/通道/高级工具）· 中=正在看什么（工作表）
      · 右=选中那一件的 inspector。右栏可收成一条 34 px 的窄边，收起状态记在本机。 */
-  main { flex:1 1 auto; min-height:0; display:grid;
-         grid-template-columns:312px minmax(0,1fr) 272px; }
-  main.insfold { grid-template-columns:312px minmax(0,1fr) 34px; }
+  main { --aside-w:312px; flex:1 1 auto; min-height:0; display:grid; position:relative;
+         grid-template-columns:var(--aside-w) minmax(0,1fr) 272px; }
+  main.insfold { grid-template-columns:var(--aside-w) minmax(0,1fr) 34px; }
+  /* 左栏折叠（票⑫）：留一条 34 px 的窄边，宽度记在本机；展开时回到记住的宽度。 */
+  main.asidefold { grid-template-columns:34px minmax(0,1fr) 272px; }
+  main.asidefold.insfold { grid-template-columns:34px minmax(0,1fr) 34px; }
+  main.asidefold #asideScroll { padding:4px 2px; overflow:hidden; }
+  main.asidefold #asideScroll > *:not(.jump) { display:none; }
+  main.asidefold .jump { margin:0; padding:4px 0; border-bottom:none; }
+  main.asidefold .jump .jrow, main.asidefold .jump .jhint { display:none; }
+  main.asidefold .jump #asideFold { margin:0 auto; }
+  /* 左栏右缘的拖宽把手：绝对定位在中间那栏的左边，不跟着左栏内容滚。 */
+  #asideGrip { position:absolute; left:calc(var(--aside-w) - 3px); top:0; bottom:0;
+               width:6px; z-index:20; cursor:col-resize; }
+  #asideGrip:hover { background:var(--accent); opacity:.35; }
+  main.asidefold #asideGrip { display:none; }
   aside { background:var(--panel); border-right:1px solid var(--line); overflow:auto; padding:9px 11px 40px; }
   /* 中间那栏（票⑩）：上面是滚动的工作表，底部 dock 固定段。dock 不进滚动容器，
      否则概览与状态会跟着波形滚走——"缩回刚才那个窗口"时它们正好是你最想看见的。 */
@@ -121,11 +134,10 @@
                        max-height:62vh; overflow:auto; background:var(--panel);
                        border:1px solid var(--line); border-radius:7px; padding:9px 11px;
                        box-shadow:0 6px 20px rgba(0,0,0,.35); }
-  /* 笔记本那一档：右栏与左栏各收一点，把中间那栏留住 */
-  @media (max-width:1460px) { main { grid-template-columns:288px minmax(0,1fr) 240px; }
-                              main.insfold { grid-template-columns:288px minmax(0,1fr) 34px; } }
-  @media (max-width:1180px) { main { grid-template-columns:264px minmax(0,1fr) 220px; }
-                              main.insfold { grid-template-columns:264px minmax(0,1fr) 34px; } }
+  /* 笔记本那一档：左栏默认收一点，把中间那栏留住。用户拖过宽度之后
+     （.asideSized）窄窗口不再改他的值——拖出来的宽度是他选的。 */
+  @media (max-width:1460px) { main:not(.asideSized) { --aside-w:288px; } }
+  @media (max-width:1180px) { main:not(.asideSized) { --aside-w:264px; } }
   .group { margin-bottom:13px; }
   .group h2 { font-size:11px; text-transform:uppercase; letter-spacing:.09em;
               color:var(--muted); margin:0 0 6px; font-weight:600;
@@ -142,6 +154,8 @@
   .jump button .jn { color:var(--muted); margin-left:4px; font-size:10px; }
   .jump button.on .jn { color:inherit; }
   .jump .jhint { color:var(--muted); font-size:10px; margin-top:5px; }
+  #asideFold { display:block; margin:5px 0 0 auto; padding:1px 7px;
+               font-size:11px; line-height:16px; }
   /* 跳过去的那一栏闪一下标题：滚过去了但不知道落在哪，等于没跳 */
   .group.flash > h2 { color:var(--accent); }
   input[type=search], input[type=text], select {
@@ -199,6 +213,13 @@
   .popmenu .pophint { color:var(--muted); font-size:11px; line-height:1.5;
                       margin-top:7px; border-top:1px solid var(--line); padding-top:6px; }
   .swatch { width:9px; height:9px; border-radius:2px; flex:0 0 auto; }
+  .ch .pin { padding:0 4px; font-size:11px; line-height:16px; border-radius:4px;
+             color:var(--muted); }
+  .ch .pin.on { color:var(--accent); border-color:var(--accent); }
+  /* 通道列表四档（票⑫）：固定 / 最近 / 当前 / 全量 */
+  .chviews { gap:3px; margin-top:5px; }
+  .chviews button { padding:1px 8px; font-size:11px; line-height:17px; border-radius:999px; }
+  .chviews button.on { border-color:var(--accent); color:var(--accent); }
   #channelList { max-height:38vh; overflow:auto; }
   .grphead { color:var(--muted); font-size:11px; padding:5px 5px 2px; display:flex; gap:6px; align-items:center; }
   .grphead .addall { margin-left:auto; cursor:pointer; color:var(--accent); font-size:11px; }
@@ -514,6 +535,8 @@
          title="点一下跳到那一栏；Ctrl+K 把光标放到这里，方向键换一个，回车跳过去">
       <div class="jrow" id="jumpRow"></div>
       <div class="jhint" id="jumpHint">Ctrl+K 快速跳转 · 左右方向键换一栏</div>
+      <button type="button" id="asideFold"
+              title="收起左栏（收起后留一条窄边，再点一下展开）">收起左栏 «</button>
     </div>
     <!-- 场次信息（票⑧）：这一场是哪一台车、哪天、多久、多少通道。#fileInfo 还是
          那一处（initHeader 写它），只是从抬头搬到了左栏——不另抄一份。 -->
@@ -524,6 +547,7 @@
     <div class="group" id="channelGroup">
       <h2>通道 <span class="count" id="chCount"></span></h2>
       <input type="search" id="chSearch" placeholder="搜索通道 / 单位">
+      <div class="row chviews" id="chViews"></div>
       <div class="row" style="margin-top:5px">
         <button id="chClear">清空</button>
         <button id="chDefault">默认</button>
@@ -708,6 +732,8 @@
       </div><!-- /#advancedBody：七个面板到此为止 -->
     </div><!-- /#advancedGroup -->
   </aside>
+  <!-- 左栏拖宽把手（票⑫）：绝对定位在左栏右缘；双击恢复默认宽度。 -->
+  <div id="asideGrip" title="拖动调整左栏宽度；双击恢复默认"></div>
   <section id="charts">
     <div id="chartScroll">
       <div id="worksheet"></div>
@@ -8920,8 +8946,185 @@ function selectChannel(name) {
   if (!comp || comp.type !== "graph") return false;
   if (comp.config.channels.indexOf(name) >= 0) return false;
   comp.config.channels.push(name);
+  noteChannelUse(name);
   state.dataVersion += 1;
   return true;
+}
+
+/* ------------------------------------------------ 左栏宽度 / 折叠 / 通道四档（票⑫）
+ * 这些是"这台机器上的我"的偏好：宽度、收起、固定通道、最近用过、看哪一档。
+ * 不进 state、不进工作表文件——工作表是发给队友的，别人打开不该被我的左栏
+ * 宽度影响（ADR-0008：外壳状态归外壳）。 */
+const ASIDE_STORE = "i3pro.aside.v1";
+const ASIDE_MIN = 220;
+const ASIDE_MAX = 560;
+const ASIDE_DEFAULT = 312;
+const ASIDE_RECENT_MAX = 12;
+const CHANNEL_VIEWS = [
+  { key: "pinned", label: "固定", title: "我在通道行点 ★ 固定下来的通道" },
+  { key: "recent", label: "最近", title: "这台机器上最近用过（勾选 / 点过）的通道" },
+  { key: "current", label: "当前", title: "当前组件已选的通道" },
+  { key: "all", label: "全量", title: "本场次所有通道，按数据里的分组" },
+];
+
+function loadAsidePrefs() {
+  const out = { w: ASIDE_DEFAULT, sized: false, folded: false, view: "all",
+                pinned: [], recent: [] };
+  try {
+    const raw = JSON.parse(localStorage.getItem(ASIDE_STORE) || "null");
+    if (raw && typeof raw === "object") {
+      if (Number.isFinite(raw.w)) out.w = clamp(Math.round(raw.w), ASIDE_MIN, ASIDE_MAX);
+      out.sized = !!raw.sized;
+      out.folded = !!raw.folded;
+      if (CHANNEL_VIEWS.some((one) => one.key === raw.view)) out.view = raw.view;
+      if (Array.isArray(raw.pinned)) {
+        out.pinned = raw.pinned.filter((n) => typeof n === "string").slice(0, 60);
+      }
+      if (Array.isArray(raw.recent)) {
+        out.recent = raw.recent.filter((n) => typeof n === "string").slice(0, ASIDE_RECENT_MAX);
+      }
+    }
+  } catch (err) { /* 私密模式 / 坏记录：回默认，别因为一条坏 JSON 打不开 */ }
+  return out;
+}
+
+const asidePrefs = loadAsidePrefs();
+let channelView = asidePrefs.view;
+let asideShownW = asidePrefs.w;
+
+function saveAsidePrefs() {
+  try { localStorage.setItem(ASIDE_STORE, JSON.stringify(asidePrefs)); }
+  catch (err) { /* 私密模式：记不住就算了 */ }
+}
+
+function asideWidth() { return asideShownW; }
+function asideLimits() { return [ASIDE_MIN, ASIDE_MAX]; }
+
+function setAsideWidth(w, remember) {
+  const want = clamp(Math.round(Number(w) || ASIDE_DEFAULT), ASIDE_MIN, ASIDE_MAX);
+  asidePrefs.w = want;
+  // 走到这儿就是"明确设一个宽度"（拖把手 / 双击回默认 / 恢复记住的值），
+  // 从此窄窗口不再替用户改宽度。
+  asidePrefs.sized = true;
+  // 窄窗口上把"显示宽度"再夹一次，别把中间那栏挤没；记住的仍是用户要的值。
+  const room = Math.max(ASIDE_MIN, (window.innerWidth || 1600) - 520);
+  asideShownW = Math.round(Math.min(want, room));
+  const main = $("workbench");
+  if (main && main.style) main.style.setProperty("--aside-w", asideShownW + "px");
+  if (main && main.classList && asidePrefs.sized) main.classList.add("asideSized");
+  if (remember !== false) saveAsidePrefs();
+}
+
+/** 没拖过宽度时，左栏宽度由 CSS 那两档媒体查询说了算（本函数只把数值记下来）。 */
+function defaultAsideWidth() {
+  const width = window.innerWidth || 1600;
+  return width <= 1180 ? 264 : (width <= 1460 ? 288 : ASIDE_DEFAULT);
+}
+
+function asideOpen() {
+  const main = $("workbench");
+  return !!main && main.classList && !main.classList.contains("asidefold");
+}
+
+function setAside(open, remember) {
+  const main = $("workbench");
+  if (!main || !main.classList) return;
+  asidePrefs.folded = !open;
+  main.classList.toggle("asidefold", !open);
+  const button = $("asideFold");
+  if (button) {
+    button.textContent = open ? "收起左栏 «" : "»";
+    button.title = open
+      ? "收起左栏（收起后留一条窄边，再点一下展开）"
+      : "展开左栏";
+    if (button.setAttribute) button.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  if (remember !== false) saveAsidePrefs();
+}
+
+function toggleAside() { setAside(!asideOpen()); }
+
+function restoreAside() {
+  if (asidePrefs.sized) setAsideWidth(asidePrefs.w, false);
+  else asideShownW = defaultAsideWidth();
+  setAside(!asidePrefs.folded, false);
+  setChannelView(asidePrefs.view, false);
+}
+
+/** 左栏右缘那条把手（票⑫）：拖宽、双击回默认；窄窗口上只夹显示宽度。 */
+function wireAsideGrip() {
+  const grip = $("asideGrip");
+  if (!grip || !grip.addEventListener) return;
+  let drag = null;
+  grip.addEventListener("mousedown", (event) => {
+    if (event.button !== undefined && event.button !== 0) return;
+    drag = { x: event.clientX, w: asideShownW };
+    event.preventDefault();
+  });
+  window.addEventListener("mousemove", (event) => {
+    if (!drag) return;
+    setAsideWidth(drag.w + (event.clientX - drag.x), false);
+  });
+  window.addEventListener("mouseup", () => {
+    if (!drag) return;
+    drag = null;
+    saveAsidePrefs();
+  });
+  grip.addEventListener("dblclick", () => setAsideWidth(ASIDE_DEFAULT));
+  window.addEventListener("resize", () => {
+    if (asidePrefs.sized) {
+      setAsideWidth(asidePrefs.w, false);
+    } else {
+      asideShownW = defaultAsideWidth();
+      const main = $("workbench");
+      if (main && main.style && main.style.removeProperty) {
+        main.style.removeProperty("--aside-w");
+      }
+      if (main && main.classList) main.classList.remove("asideSized");
+    }
+  });
+}
+
+function isPinned(name) { return asidePrefs.pinned.indexOf(name) >= 0; }
+
+function togglePinned(name) {
+  const at = asidePrefs.pinned.indexOf(name);
+  if (at >= 0) asidePrefs.pinned.splice(at, 1);
+  else asidePrefs.pinned.unshift(name);
+  saveAsidePrefs();
+  renderChannelList();
+}
+
+function recentChannels() { return asidePrefs.recent.slice(); }
+
+function noteChannelUse(name) {
+  const rest = asidePrefs.recent.filter((n) => n !== name);
+  rest.unshift(name);
+  asidePrefs.recent = rest.slice(0, ASIDE_RECENT_MAX);
+  saveAsidePrefs();
+}
+
+function channelViewName() { return channelView; }
+
+function setChannelView(key, remember) {
+  if (!CHANNEL_VIEWS.some((one) => one.key === key)) key = "all";
+  channelView = key;
+  asidePrefs.view = key;
+  if (remember !== false) saveAsidePrefs();
+  renderChannelViews();
+  renderChannelList();
+}
+
+function renderChannelViews() {
+  const row = $("chViews");
+  if (!row) return;
+  row.innerHTML = CHANNEL_VIEWS.map((one) =>
+    '<button type="button" data-view="' + one.key + '"'
+    + (one.key === channelView ? ' class="on"' : "")
+    + ' title="' + esc(one.title) + '">' + one.label + "</button>").join("");
+  row.querySelectorAll("button").forEach((button) => {
+    button.addEventListener("click", () => setChannelView(button.dataset.view));
+  });
 }
 
 function renderChannelList() {
@@ -8931,6 +9134,7 @@ function renderChannelList() {
   const frag = document.createDocumentFragment();
   const chosen = selectedChannels();
   const comp = focusedComponent();
+  const missingAll = workbenchMissing();
   let shown = 0;
   const match = (name) => {
     if (!term) return true;
@@ -8938,25 +9142,20 @@ function renderChannelList() {
     return name.toLowerCase().indexOf(term) >= 0
       || String(ch.unit || "").toLowerCase().indexOf(term) >= 0;
   };
-  for (const group of GROUPS) {
-    const names = group.channels.filter(match);
-    if (!names.length) continue;
-    const head = document.createElement("div");
-    head.className = "grphead";
-    head.innerHTML = "<span>" + group.label + '</span><span class="addall">全选</span>';
-    head.querySelector(".addall").addEventListener("click", () => {
-      const merged = {};
-      chosen.concat(names).forEach((n) => { merged[n] = 1; });
-      setSelectedChannels(Object.keys(merged));
-      renderChannelList();
-      refreshWindowTraces(true).then(renderAll);
-      renderAll();
-    });
-    frag.appendChild(head);
-    for (const name of names) {
-      const ch = CHANNELS.get(name) || {};
-      const on = chosen.indexOf(name) >= 0;
-      const row = document.createElement("label");
+
+  const appendRow = (name) => {
+    const ch = CHANNELS.get(name) || {};
+    const on = chosen.indexOf(name) >= 0;
+    const row = document.createElement("label");
+    if (missingAll.indexOf(name) >= 0) {
+      row.className = "ch missing";
+      row.title = name + " · 本场次没有这条通道"
+        + "（工作表里还留着，换回原来的场次就还在）";
+      row.innerHTML = '<input type="checkbox" ' + (on ? "checked" : "") + ">"
+        + '<span class="swatch" style="background:' + MISSING_COLOR + '"></span>'
+        + '<span class="nm">' + esc(name) + "</span>"
+        + '<span class="unit">本场次没有</span>';
+    } else {
       row.className = "ch";
       row.title = name + " · " + (ch.unit || "无单位") + " · " + ch.rate + " Hz · " + ch.samples + " 点";
       // 通道在、但整段没有有效样本：与"本场次没有"分开说明（ticket #34）。
@@ -8971,60 +9170,102 @@ function renderChannelList() {
           ? '<span class="proc" title="' + esc(processedTitle(name)) + '">ƒ</span>' : "")
         + '<span class="unit' + (dead ? " dead" : "") + '">'
         + (dead ? "全程无有效" : (ch.unit || "")) + "</span>"
+        // 固定（票⑫）：★ 把常用通道钉到「固定」那一档，存在本机、不写工作表。
+        + '<button type="button" class="pin' + (isPinned(name) ? " on" : "")
+        + '" title="' + (isPinned(name) ? "取消固定" : "固定到「固定」那一档") + '">★</button>'
         + '<button type="button" class="cog" title="通道处理：滤波 / 增益 / 偏置 / 用光标处归零">⚙</button>';
-      row.querySelector("input").addEventListener("change", (event) => {
-        toggleChannel(name, event.target.checked);
-      });
+    }
+    row.querySelector("input").addEventListener("change", (event) => {
+      toggleChannel(name, event.target.checked);
+    });
+    if (row.className.indexOf("missing") < 0) {
       // 点这一行 = 把"当前通道"定在它身上（快捷键与面板的落点）
-      row.addEventListener("mousedown", () => { state.channelFocus = name; });
+      row.addEventListener("mousedown", () => {
+        state.channelFocus = name;
+        noteChannelUse(name);
+      });
+      row.querySelector(".pin").addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        togglePinned(name);
+      });
       row.querySelector(".cog").addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
         openChannelSetup(name);
       });
-      frag.appendChild(row);
-      shown += 1;
     }
-  }
-  // 工作表引用了、本场次没有的通道（ticket #34）：**列出来、灰着、说清原因**。
-  // 以前它们在这儿根本不出现，用户只能看到"图少了一条线"。
-  // 绝不自动剔除：它们还在组件配置里（勾是勾着的），换回原来的场次原样还在。
-  const missing = workbenchMissing().filter(match);
-  if (missing.length) {
+    frag.appendChild(row);
+    shown += 1;
+  };
+
+  const appendGroup = (label, names, addall) => {
+    const usable = names.filter(match);
+    if (!usable.length) return;
     const head = document.createElement("div");
     head.className = "grphead";
-    head.innerHTML = "<span>本场次没有</span>"
-      + '<span class="addall">为什么</span>';
-    head.querySelector(".addall").addEventListener("click", () => {
-      toast("这 " + missing.length + " 条通道是工作表里留着的，本场次的数据里没有。"
-        + "它们不会被自动删掉——换回原来的场次，勾选和配置原样还在。");
-    });
-    frag.appendChild(head);
-    for (const name of missing) {
-      const on = chosen.indexOf(name) >= 0;
-      const row = document.createElement("label");
-      row.className = "ch missing";
-      row.title = name + " · 本场次没有这条通道"
-        + "（工作表里还留着，换回原来的场次就还在）";
-      row.innerHTML = '<input type="checkbox" ' + (on ? "checked" : "") + ">"
-        + '<span class="swatch" style="background:' + MISSING_COLOR + '"></span>'
-        + '<span class="nm">' + esc(name) + "</span>"
-        + '<span class="unit">本场次没有</span>';
-      row.querySelector("input").addEventListener("change", (event) => {
-        toggleChannel(name, event.target.checked);
+    if (addall) {
+      head.innerHTML = "<span>" + label + '</span><span class="addall">全选</span>';
+      head.querySelector(".addall").addEventListener("click", () => {
+        const merged = {};
+        chosen.concat(usable).forEach((n) => { merged[n] = 1; });
+        usable.forEach(noteChannelUse);
+        setSelectedChannels(Object.keys(merged));
+        renderChannelList();
+        refreshWindowTraces(true).then(renderAll);
+        renderAll();
       });
-      frag.appendChild(row);
-      shown += 1;
+    } else {
+      head.innerHTML = "<span>" + label + "</span>";
     }
+    frag.appendChild(head);
+    for (const name of usable) appendRow(name);
+  };
+
+  if (channelView === "all") {
+    for (const group of GROUPS) appendGroup(group.label, group.channels, true);
+    // 工作表引用了、本场次没有的通道（ticket #34）：**列出来、灰着、说清原因**。
+    // 绝不自动剔除：它们还在组件配置里（勾是勾着的），换回原来的场次原样还在。
+    const missing = missingAll.filter(match);
+    if (missing.length) {
+      const head = document.createElement("div");
+      head.className = "grphead";
+      head.innerHTML = "<span>本场次没有</span>"
+        + '<span class="addall">为什么</span>';
+      head.querySelector(".addall").addEventListener("click", () => {
+        toast("这 " + missing.length + " 条通道是工作表里留着的，本场次的数据里没有。"
+          + "它们不会被自动删掉——换回原来的场次，勾选和配置原样还在。");
+      });
+      frag.appendChild(head);
+      for (const name of missing) appendRow(name);
+    }
+  } else {
+    const spec = CHANNEL_VIEWS.find((one) => one.key === channelView) || CHANNEL_VIEWS[3];
+    let names = [];
+    if (channelView === "pinned") names = asidePrefs.pinned.slice();
+    else if (channelView === "recent") names = asidePrefs.recent.slice();
+    else names = selectedChannels().slice();
+    appendGroup(spec.label, names, false);
   }
-  if (!shown) list.innerHTML = "<p class='hint'>没有匹配的通道</p>";
-  else list.appendChild(frag);
+
+  if (!shown) {
+    const empty = {
+      pinned: "还没有固定通道：把鼠标移到通道行，点右边的 ★ 固定常用通道。",
+      recent: "这一台机器还没记下用过的通道：勾一条通道或点一下通道行就记上了。",
+      current: "当前组件没有选通道：先点一下工作表里的组件，或在上面的通道里勾一条。",
+      all: "没有匹配的通道。",
+    };
+    list.innerHTML = "<p class='hint'>" + (empty[channelView] || empty.all) + "</p>";
+  } else {
+    list.appendChild(frag);
+  }
   $("chCount").textContent = chosen.length + " / " + DATA.channels.length
     + (comp && comp.type === "graph" ? "" : "（未选中图）")
-    + (missing.length ? "，缺 " + missing.length + " 条" : "");
+    + (missingAll.length ? "，缺 " + missingAll.length + " 条" : "");
 }
 
 function toggleChannel(name, on) {
+  if (on) noteChannelUse(name);
   const set = new Set(selectedChannels());
   if (on) set.add(name); else set.delete(name);
   setSelectedChannels(Array.from(set));
@@ -11110,6 +11351,10 @@ function init() {
   // 底部 dock（票⑩）：概览与状态从滚动内容里拿出来，折叠状态同样记在本机。
   $("dockFold").addEventListener("click", toggleDock);
   restoreDock();
+  // 左栏（票⑫）：拖宽 / 折叠 / 通道四档视图，状态同样记在本机。
+  $("asideFold").addEventListener("click", toggleAside);
+  wireAsideGrip();
+  restoreAside();
   $("modeTime").addEventListener("click", () => {
     state.mode = "time"; setView(null); state.panelZoom = {}; scheduleRefresh(); renderAll();
   });
@@ -11218,6 +11463,12 @@ window.i3pro = {
   advancedOpen: advancedOpen, setAdvanced: setAdvanced,
   // 底部 dock（票⑩）：概览 + 状态的折叠，同样是外壳状态
   dockOpen: dockOpen, setDock: setDock,
+  // 左栏（票⑫）：拖宽 / 折叠 / 通道四档视图，也是外壳状态
+  asideOpen: asideOpen, setAside: setAside,
+  asideWidth: asideWidth, setAsideWidth: setAsideWidth, asideLimits: asideLimits,
+  channelView: channelViewName, setChannelView: setChannelView,
+  channelViews: CHANNEL_VIEWS,
+  isPinned: isPinned, togglePinned: togglePinned, recentChannels: recentChannels,
   // 主题（A101）：外壳的配色，也不在 state 里；画布色由 UI 那一份供
   theme: () => themeKey, setTheme: setTheme, themes: THEME_LABELS,
   // 取数缓存键（A79）：windowKey 只说"看的是哪一段"，traceKey 另外带上曲线连接方式

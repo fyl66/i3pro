@@ -65,7 +65,14 @@ class Element {
     this._attrs = {};
     this._handlers = {};
     this._chart = null;
-    this.style = {};
+    // 真 DOM 的 CSSStyleDeclaration 有 setProperty/getPropertyValue；假 DOM 也得有，
+    // 否则 `--aside-w`（票⑫）这类自定义属性一写就抛。
+    this.style = {
+      _v: {},
+      setProperty(name, value) { this._v[name] = String(value); },
+      getPropertyValue(name) { return this._v[name] || ""; },
+      removeProperty(name) { delete this._v[name]; },
+    };
     this.dataset = {};
     this._classes = new Set();
     this.classList = {
@@ -277,6 +284,8 @@ function run(hash) {
   const { registry, document } = buildDom(html.split("<script>")[0]);
   const window = {
     devicePixelRatio: 1,
+    innerWidth: 1600,
+    innerHeight: 900,
     // ticket #17：注册表里那条"只有标题"的自检形式只在无头驱动里注册——
     // 浏览器里没人设这个标记，所以队员永远看不到它。设在这里是为了让
     // "加一种显示形式只要一条声明"这句话每次回归都被真的走一遍。
@@ -4973,6 +4982,53 @@ check(status && String(status.innerHTML).indexOf("窗口") >= 0, "status line wa
       check(false, "没有概览画布，票⑩这一组验不下去");
     }
   }
+}
+
+// 票⑫ 左栏：拖宽 / 折叠 / 通道四档（固定 / 最近 / 当前 / 全量）
+{
+  check(api.channelViews.length === 4
+    && api.channelViews.map((one) => one.key).join(",") === "pinned,recent,current,all",
+    "通道四档不全：" + JSON.stringify(api.channelViews));
+  const rowsOf = () => (registry.get("channelList")._children || [])
+    .filter((r) => String(r.tagName) === "LABEL").length;
+  api.setChannelView("all");
+  check(api.channelView() === "all", "切回「全量」之后当前档不是 all");
+  const allRows = rowsOf();
+  api.setChannelView("current");
+  const currentRows = rowsOf();
+  check(allRows > currentRows && currentRows > 0,
+    "切到「当前」之后行数没变（all=" + allRows + " current=" + currentRows + "）");
+  api.setChannelView("pinned");
+  check(rowsOf() === 0, "还没固定通道时「固定」那一档应当是空的");
+  const firstName = api.data.channels[0].name;
+  api.togglePinned(firstName);
+  check(api.isPinned(firstName) === true && rowsOf() === 1,
+    "固定一条通道之后「固定」那一档没跟着变");
+  api.setChannelView("all");
+  const row = (registry.get("channelList")._children || []).filter(
+    (r) => r._html && r._html.indexOf('class="nm">' + firstName + "</span>") >= 0)[0];
+  if (row) row.dispatch("mousedown", {});
+  check(api.recentChannels().indexOf(firstName) >= 0,
+    "点过通道行之后没进「最近」：" + JSON.stringify(api.recentChannels()));
+  api.setChannelView("recent");
+  check(rowsOf() >= 1, "「最近」那一档没有把用过的通道列出来");
+  api.setChannelView("all");
+
+  // 拖宽：上下限夹取；折叠再展开宽度不变
+  const limits = api.asideLimits();
+  api.setAsideWidth(9999);
+  check(api.asideWidth() === limits[1], "拖宽没有夹到上限：" + api.asideWidth());
+  api.setAsideWidth(1);
+  check(api.asideWidth() === limits[0], "拖宽没有夹到下限：" + api.asideWidth());
+  api.setAsideWidth(380);
+  const kept = api.asideWidth();
+  check(kept === 380, "拖到合法宽度没生效：" + kept);
+  api.setAside(false);
+  check(api.asideOpen() === false, "左栏折叠没生效");
+  api.setAside(true);
+  check(api.asideOpen() === true && api.asideWidth() === kept,
+    "折叠再展开宽度变了：" + kept + " -> " + api.asideWidth());
+  check(ctx.storage.getItem("i3pro.aside.v1") !== null, "左栏偏好没写进本机");
 }
 
 check(calls.fillText > 0, "no canvas text was drawn");

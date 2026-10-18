@@ -69,7 +69,7 @@
 python -m unittest discover -s tests -v      # 全部通过
 python tools\verify_ld_vs_csv.py             # PASS，0 channel(s) outside tolerance
 node tools\smoke_viewer.js out\<场次>.html   # 交互断言全过
-python tools\verify_clicks.py                # 真浏览器真鼠标：256 项全过（需要 Edge）
+python tools\verify_clicks.py                # 真浏览器真鼠标：428 项全过（需要 Edge）
 ```
 
 四条全绿才算改完。缺数据的机器上相关用例会自动 skip，这不算通过——要在有数据的机器上跑。
@@ -84,7 +84,7 @@ python tools\verify_clicks.py                # 真浏览器真鼠标：256 项�
 | --- | --- |
 | 只动前端（`src/i3pro/web/viewer.html`、`tools/*.js`） | `node tools\smoke_viewer.js <金标准快照>`（约 12 s）；读了 viewer 的那 9 个测试类一条命令跑完 **130 项 / 约 12 s**（`TestViewerScript TestPlotResolution TestComponentRegistry TestExportPanelSendsTheRightRequest TestMaths TestWorksheets TestCursorStats TestAttitude TestBenchViewer`）——整份单测里其余 500 项根本不读 viewer，跑它们只花时间不给信号 |
 | 动解析 / 统计 / 导出（`src/i3pro/*.py`） | `python tools\verify_ld_vs_csv.py`（约 8 s）+ 相关测试类 |
-| 动"点了才出现"的交互 | 只有 `tools\verify_clicks.py` 能答（约 2.8 分钟），所以留到收尾；它有 414 项，中途改一点跑一点反而更慢 |
+| 动"点了才出现"的交互 | 只有 `tools\verify_clicks.py` 能答（约 2.8 分钟），所以留到收尾；它有 428 项，中途改一点跑一点反而更慢 |
 
 第四条是给"点了才出现"的界面状态准备的：无头驱动跑在假 DOM 上，元素没有面积、没有
 遮挡、没有 `pointer-events`，disabled 的控件照样派发 click——它能证明"代码调用了它该

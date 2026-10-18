@@ -166,7 +166,7 @@ i2 Pro 的结构是 `Project → Workbook → Worksheet → Component`。我们�
 单测（真实数据回归 + HTTP 端到端 + 无头 JS 冒烟）从当时的 21 项一路加上来，现在 **635 项**
 （`python -m unittest discover -s tests`）、零第三方运行期依赖、git 仓库。
 
-**验收从"三条"变"四条"**：无头冒烟（`tools/smoke_viewer.js`，**888 项检查**——它自己
+**验收从"三条"变"四条"**：无头冒烟（`tools/smoke_viewer.js`，**901 项检查**——它自己
 在收尾那行念出来，所以这个数跟着命令复跑）跑在
 假 DOM 上——元素没有面积、没有遮挡，disabled 的控件照样派发 `click`。它能证明"代码
 调用了它该调用的函数"，证明不了**用户点得到**。所以补了第四条

@@ -3312,6 +3312,170 @@ class Checker:
             "i3pro.state.view=l[1]?[l[1].start_time,l[1].end_time]:null;i3pro.renderAll();"
             "return true;})()")
 
+    # ------------------------------------------- 票⑫ 左栏拖宽/折叠 + 通道四档
+    def left_panel(self):
+        """票⑫：真鼠标拖宽（有上下限）、折叠再展开宽度不变、通道四档切得动。
+
+        假 DOM 只能证明"调用了 setAsideWidth"；这里量真 rect——把手真的在左栏
+        右缘、拖完宽度真的变、折叠后窄边仍在、重载之后记的还是收起。
+        """
+        def rect_of(selector):
+            raw = self.js(
+                "(function(){var el=document.querySelector(%r);if(!el)return 'null';"
+                "var r=el.getBoundingClientRect();return JSON.stringify({x:r.left+r.width/2,"
+                "y:r.top+r.height/2,w:r.width,h:r.height,left:r.left,top:r.top,"
+                "right:r.right,bottom:r.bottom});})()" % selector)
+            return json.loads(raw) if raw and raw != "null" else None
+
+        def row_count():
+            return int(self.js(
+                "document.querySelectorAll('#channelList label.ch').length") or 0)
+
+        def row_rect(name, part):
+            raw = self.js(
+                "(function(){var rows=document.querySelectorAll('#channelList label.ch');"
+                "for(var i=0;i<rows.length;i++){var nm=rows[i].querySelector('.nm');"
+                "if(nm&&nm.textContent===%s){var b=rows[i].querySelector(%s);"
+                "if(!b)return 'null';"
+                # 通道列表有 400+ 行：不先滚进视野，rect 可能在屏幕外，真鼠标点不到。
+                "if(b.scrollIntoView)b.scrollIntoView({block:'center'});"
+                "var r=b.getBoundingClientRect();"
+                "return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2,"
+                "w:r.width,h:r.height,left:r.left,right:r.right,"
+                "top:r.top,bottom:r.bottom});}}return 'null';})()"
+                % (json.dumps(name), json.dumps(part)))
+            return json.loads(raw) if raw and raw != "null" else None
+
+        # 把手在左栏右缘，拖一下真的改变宽度
+        aside = rect_of("#asideScroll")
+        grip = rect_of("#asideGrip")
+        self.check("票⑫ 左栏右缘有拖宽把手",
+                   bool(aside and grip) and grip["w"] > 0
+                   and grip["left"] >= aside["right"] - 6,
+                   "aside=%s · grip=%s" % (aside, grip))
+        before_w = float(self.js("i3pro.asideWidth()") or 0)
+        aside_before = rect_of("#asideScroll")
+        if grip:
+            self.browser.mouse("mousePressed", grip["x"], grip["y"], self.session)
+            self.browser.mouse("mouseMoved", grip["x"] + 70, grip["y"], self.session, buttons=1)
+            self.browser.mouse("mouseReleased", grip["x"] + 70, grip["y"], self.session,
+                               buttons=0)
+            time.sleep(0.3)
+        after_w = float(self.js("i3pro.asideWidth()") or 0)
+        aside_after = rect_of("#asideScroll")
+        self.check("票⑫ 真拖把手，左栏真的变宽（量 rect，不只看 JS 值）",
+                   bool(grip and aside_before and aside_after)
+                   and after_w > before_w + 40
+                   and aside_after["w"] > aside_before["w"] + 40,
+                   "JS %.0f -> %.0f · rect %.0f -> %.0f"
+                   % (before_w, after_w,
+                      aside_before["w"] if aside_before else -1,
+                      aside_after["w"] if aside_after else -1))
+        limits = self.js("i3pro.asideLimits()")
+        self.js("i3pro.setAsideWidth(9999);true")
+        hi = float(self.js("i3pro.asideWidth()") or 0)
+        self.js("i3pro.setAsideWidth(1);true")
+        lo = float(self.js("i3pro.asideWidth()") or 0)
+        self.check("票⑫ 拖宽有上下限（拖到天边也夹回来）",
+                   float(limits[0]) == lo and float(limits[1]) == hi,
+                   "lo=%.0f hi=%.0f limits=%s" % (lo, hi, limits))
+        self.js("i3pro.setAsideWidth(360);true")
+        kept = float(self.js("i3pro.asideWidth()") or 0)
+
+        # 折叠：只剩窄边，折叠按钮还在；重载之后还是收起的；展开回到记住的宽度
+        fold = rect_of("#asideFold")
+        self.check("票⑫ 「收起左栏」点得到", bool(fold) and fold["w"] > 0, fold)
+        if fold:
+            self.browser.click(fold["x"], fold["y"], self.session)
+            time.sleep(0.3)
+        folded = rect_of("#asideScroll")
+        folded_fold = rect_of("#asideFold")
+        self.check("票⑫ 折叠之后左栏只剩窄边，展开按钮还在",
+                   self.js("i3pro.asideOpen()") is False
+                   and bool(folded) and folded["w"] <= 40
+                   and bool(folded_fold) and folded_fold["w"] > 0,
+                   "aside=%s · fold=%s" % (folded, folded_fold))
+        self.check("票⑫ 折叠状态记在本机",
+                   "true" in str(self.js("localStorage.getItem('i3pro.aside.v1')")),
+                   self.js("localStorage.getItem('i3pro.aside.v1')"))
+        self.js("setTimeout(function(){location.reload();},20);true")
+        time.sleep(1.2)
+        ready = self.browser.wait_for(
+            "!!(window.i3pro && i3pro.state && document.getElementById('asideScroll'))",
+            self.session, timeout=30)
+        self.browser.js(HELPERS, self.session)
+        reloaded = rect_of("#asideScroll")
+        self.check("票⑫ 重载之后左栏还是收起的",
+                   ready and self.js("i3pro.asideOpen()") is False
+                   and bool(reloaded) and reloaded["w"] <= 40,
+                   "open=%s · aside=%s" % (self.js("i3pro.asideOpen()"), reloaded))
+        fold2 = rect_of("#asideFold")
+        if fold2:
+            self.browser.click(fold2["x"], fold2["y"], self.session)
+            time.sleep(0.3)
+        unfolded = rect_of("#asideScroll")
+        self.check("票⑫ 展开之后回到记住的宽度",
+                   self.js("i3pro.asideOpen()") is True
+                   and abs(float(self.js("i3pro.asideWidth()") or 0) - kept) < 3
+                   and bool(unfolded) and abs(unfolded["w"] - kept) < 3,
+                   "JS %s · rect %s（记住 %.0f）"
+                   % (self.js("i3pro.asideWidth()"), unfolded, kept))
+
+        # 通道四档：全量 / 当前 / 固定 / 最近，切一档行数真的换
+        all_btn = rect_of('#chViews button[data-view="all"]')
+        if all_btn:
+            self.browser.click(all_btn["x"], all_btn["y"], self.session)
+            time.sleep(0.2)
+        all_rows = row_count()
+        cur_btn = rect_of('#chViews button[data-view="current"]')
+        if cur_btn:
+            self.browser.click(cur_btn["x"], cur_btn["y"], self.session)
+            time.sleep(0.2)
+        current_rows = row_count()
+        self.check("票⑫ 切到「当前」之后行数真的变了",
+                   self.js("i3pro.channelView()") == "current"
+                   and 0 < current_rows < all_rows,
+                   "all=%d current=%d" % (all_rows, current_rows))
+        name = str(self.js("i3pro.data.channels[0].name"))
+        self.js("i3pro.setChannelView('all');true")
+        pin = row_rect(name, ".pin")
+        self.check("票⑫ 通道行右边的 ★ 点得到", bool(pin) and pin["w"] > 0,
+                   "%s · %s" % (name, pin))
+        if pin:
+            self.browser.click(pin["x"], pin["y"], self.session)
+            time.sleep(0.2)
+        self.check("票⑫ 点 ★ 之后「固定」那一档列出它",
+                   self.js("i3pro.isPinned(%s)" % json.dumps(name)) is True,
+                   "%s pinned=%s" % (name, self.js("i3pro.isPinned(%s)" % json.dumps(name))))
+        pin_btn = rect_of('#chViews button[data-view="pinned"]')
+        if pin_btn:
+            self.browser.click(pin_btn["x"], pin_btn["y"], self.session)
+            time.sleep(0.2)
+        self.check("票⑫ 「固定」那一档只有固定下来的通道",
+                   self.js("i3pro.channelView()") == "pinned" and row_count() == 1,
+                   "rows=%d" % row_count())
+        # 点一下通道行 = 记进「最近」
+        self.js("i3pro.setChannelView('all');true")
+        row = row_rect(name, ".nm")
+        if row:
+            self.browser.mouse("mousePressed", row["x"], row["y"], self.session)
+            self.browser.mouse("mouseReleased", row["x"], row["y"], self.session, buttons=0)
+            time.sleep(0.2)
+        recent = json.loads(self.js("JSON.stringify(i3pro.recentChannels())") or "[]")
+        self.check("票⑫ 点过的通道进了「最近」",
+                   name in recent, json.dumps(recent, ensure_ascii=False))
+        recent_btn = rect_of('#chViews button[data-view="recent"]')
+        if recent_btn:
+            self.browser.click(recent_btn["x"], recent_btn["y"], self.session)
+            time.sleep(0.2)
+        self.check("票⑫ 「最近」那一档点得到，行数跟着变",
+                   self.js("i3pro.channelView()") == "recent" and row_count() >= 1,
+                   "view=%s rows=%d" % (self.js("i3pro.channelView()"), row_count()))
+        # 收尾：全量、展开、宽度回默认附近，后面的验收还在同一屏上继续
+        self.js("i3pro.setChannelView('all');i3pro.setAside(true);"
+                "i3pro.setAsideWidth(312);true")
+        time.sleep(0.2)
+
     # ------------------------------------------- A101 主题切换
     def theme_switch(self):
         """A101：两套配色真能切、画布跟着重画、选过的记得住。
@@ -4997,6 +5161,8 @@ def main(argv=None):
             checker.layout_sheet_bar()
             # 票⑩ 底部 dock：概览 + 状态固定在画布底边，折叠可记住
             checker.bottom_dock()
+            # 票⑫ 左栏：拖宽 / 折叠 / 通道四档
+            checker.left_panel()
             # A101 主题切换：变量 + 画布像素 + 重载之后记不记得住
             checker.theme_switch()
             # 票⑨ 右栏 inspector：真选中一件、改设置画布真的变、标题栏只剩高频动作

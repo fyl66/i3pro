@@ -500,6 +500,18 @@ class Checker:
     def set_view(self, a, b):
         self.js("(function(){i3pro.state.view=[%r,%r];i3pro.renderAll();return true;})()" % (a, b))
 
+    def reveal(self, selector, wait=0.3):
+        """把一个元素滚进它自己的滚动容器，然后再量 rect。
+
+        右栏 inspector（票⑨）是滚动的一栏：通道多的时候，配色 / 统计范围 / 动作都在
+        视口下面——不滚过去，真鼠标点到的就是窗口外面的空气（这一条第一版红了 4 项）。
+        """
+        self.js(
+            "(function(){var el=document.querySelector(%r);"
+            "if(el&&el.scrollIntoView)el.scrollIntoView({block:'center',inline:'nearest'});"
+            "return true;})()" % selector)
+        time.sleep(wait)
+
     # ---------------------------------------------------------------- 各项
     def sections(self):
         """#8：真双击色条缩到那一段；双击绘图区照旧原地放大；表里点得到。"""
@@ -1866,22 +1878,29 @@ class Checker:
             ".backgroundColor")
 
         # ------------------------------------------------- 抬头字段 / 调色板
-        if not open_popmenu("#worksheet .comp .compbar button[title*='配色与抬头']",
-                            "组件栏上的「显示」"):
+        # 票⑨之后这两样都在右栏 inspector：真点一下这一件的标题栏选中它，右栏才显示它的
+        # 设置（组件标题栏上的「显示」按钮已经撤了——低频设置不再占着标题栏）。
+        if not click_at('#worksheet .comp .compbar', "第一块组件的标题栏（选中它）"):
             return
+        self.check("#35 点过之后右栏显示的就是这一件",
+                   self.js("(i3pro.inspectorComponent()||{}).id")
+                   == self.js("i3pro.state.components[0].id"),
+                   self.js("(i3pro.inspectorComponent()||{}).id"))
+        # 右栏是滚动的一栏：先把「抬头与统计」那一格滚进来，再量那几个开关的 rect
+        self.reveal("#insBody .inschecks")
         fields = self.js(
-            "(function(){var ls=document.querySelectorAll('.popmenu .popcheck input');"
+            "(function(){var ls=document.querySelectorAll('#insBody .inschecks input');"
             "var out={n:ls.length,boxes:[]};for(var i=0;i<ls.length;i++){"
             "var r=ls[i].getBoundingClientRect();"
             "out.boxes.push({x:r.left+r.width/2,y:r.top+r.height/2,on:ls[i].checked});}"
             "return JSON.stringify(out);})()")
         fields = json.loads(fields) if fields else None
-        self.check("#35 「显示」菜单里有抬头字段的开关", bool(fields) and fields.get("n", 0) >= 4,
+        self.check("#35 右栏里有抬头字段的开关", bool(fields) and fields.get("n", 0) >= 4,
                    fields)
         if not fields:
             return
         self.browser.shot(
-            os.path.join(ROOT, "out", "shots", "verify-display-menu.png"), self.session)
+            os.path.join(ROOT, "out", "shots", "verify-inspector-settings.png"), self.session)
         average = fields["boxes"][4]                       # 光标值 / Δ / Min / Max / Avg / 单位
         self.browser.click(average["x"], average["y"], self.session)
         time.sleep(0.5)
@@ -1891,13 +1910,14 @@ class Checker:
                    and self.js("i3pro.headFields(i3pro.state.components[0]).max") is True,
                    self.js("JSON.stringify(i3pro.headFields(i3pro.state.components[0]))"))
 
+        self.reveal("#insBody .inschips")
         chips = self.js(
-            "(function(){var cs=document.querySelectorAll('.popmenu .popchip');"
+            "(function(){var cs=document.querySelectorAll('#insBody .inschips button');"
             "for(var i=0;i<cs.length;i++){if(cs[i].textContent==='色盲友好'){"
             "var r=cs[i].getBoundingClientRect();"
             "return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2});}}return null;})()")
         chip = json.loads(chips) if chips and chips != "null" else None
-        self.check("#35 「显示」菜单里能真点到「色盲友好」", bool(chip), chip)
+        self.check("#35 右栏里能真点到「色盲友好」", bool(chip), chip)
         if chip:
             self.browser.click(chip["x"], chip["y"], self.session)
             time.sleep(0.6)
@@ -3112,6 +3132,217 @@ class Checker:
                    self.js("i3pro.theme()") == "dark" and css_var("--bg") == dark_bg,
                    "%s / %s" % (self.js("i3pro.theme()"), css_var("--bg")))
 
+    # ------------------------------------------- 票⑨ 右栏组件 inspector
+    def inspector_panel(self):
+        """票⑨：真鼠标选中组件 → 右栏是这一件的设置；改设置**画布真的变**；标题栏只剩高频。
+
+        假 DOM（smoke 第 40 组）证明得了"内容与接线跟着动"；这一节补它证明不了的三件：
+        ① 点得到（右栏真在画布右边、有自己的宽度，控件真有面积）；
+        ② 改一下设置，画布像素真的变（不是只改了内存里一个键）；
+        ③ 每一块组件标题栏上的可见按钮 ≤ 4，而且搬走的低频按钮不在上面了。
+        """
+        def rect_of(selector, scroll=False):
+            # `scroll=True` 先把它滚进右栏的可见区：右栏里那几格是**滚动**的（通道多的时候
+            # 配色/统计/动作都在下面），不滚过去量出来的 rect 会落在窗口外面——真鼠标
+            # 点在那里等于点在空气上（这一条第一版就是这么红了 4 项）。
+            if scroll:
+                self.reveal(selector, wait=0.25)
+            raw = self.js(
+                "(function(){var el=document.querySelector(%r);if(!el)return 'null';"
+                "var r=el.getBoundingClientRect();return JSON.stringify({x:r.left+r.width/2,"
+                "y:r.top+r.height/2,w:r.width,h:r.height,left:r.left,top:r.top,"
+                "right:r.right,bottom:r.bottom});})()" % selector)
+            return json.loads(raw) if raw and raw != "null" else None
+
+        def click_at(selector, label):
+            box = rect_of(selector, scroll=True)
+            self.check("票⑨ 「%s」点得到" % label,
+                       bool(box) and box.get("w", 0) > 0, box)
+            if not box:
+                return False
+            self.browser.click(box["x"], box["y"], self.session)
+            time.sleep(0.5)
+            return True
+
+        def canvas_sum(component_id):
+            # 逐像素取：画布大部分是透明的，隔几个像素采一次会全采到同一批像素
+            # （A101 的第一版就是这么白过的）。
+            selector = '[data-id="%s"] canvas' % component_id
+            return self.js(
+                "(function(){var c=document.querySelector(" + json.dumps(selector) + ");"
+                "if(!c)return null;"
+                "var d=c.getContext('2d').getImageData(0,0,c.width,c.height).data;"
+                "var s=0;for(var i=0;i<d.length;i+=4){"
+                "s=(s*31+d[i]+d[i+1]*3+d[i+2]*7+d[i+3]*11)%1000000007;}return s;})()")
+
+        def avg_cell_shown(component_id):
+            """抬头里 Avg 那一格现在还印着吗（图例那三格是 min / max / avg）。"""
+            selector = '[data-id="%s"] .graphhead' % component_id
+            return self.js(
+                "(function(){var el=document.querySelector(" + json.dumps(selector) + ");"
+                "if(!el)return null;var rows=el.querySelectorAll('.lrow');"
+                "for(var i=0;i<rows.length;i++){var cls=String(rows[i].className);"
+                "if(cls.indexOf('lmissing')>=0||cls.indexOf('labnote')>=0)continue;"
+                "var mm=rows[i].querySelectorAll('.lmm');if(mm.length<3)continue;"
+                "return mm[2].style.display!=='none';}return null;})()")
+
+        self.js("i3pro.applyPreset(i3pro.worksheetCatalogue().sheets[0].name); true")
+        time.sleep(0.9)
+        graphs = json.loads(self.js(
+            "JSON.stringify(i3pro.state.components.filter(function(c){"
+            "return c.type==='graph';}).map(function(c){return c.id;}))") or "[]")
+        self.check("票⑨ 工作表里有一件图（没它这一节验不下去）", bool(graphs), graphs)
+        if not graphs:
+            return
+        gid = graphs[0]
+
+        # ① 没选中 = 空状态写清下一步；右栏真在画布右边（不是浮在图上）
+        empty = self.js("(document.getElementById('insEmpty')||{}).textContent || ''")
+        self.check("票⑨ 没选中组件时右栏写清下一步",
+                   "点一下工作表里的任意一块" in str(empty), empty)
+        inspector = rect_of("#inspector")
+        charts = rect_of("#charts")
+        self.check("票⑨ 右栏在画布右边、有自己的宽度",
+                   bool(inspector and charts) and inspector["left"] >= charts["right"] - 1
+                   and inspector["w"] > 200,
+                   "右栏 %s · 画布 %s" % (inspector, charts))
+        if not inspector:
+            return
+
+        # ② 真点一下标题栏：右栏换成这一件的设置
+        if not click_at('[data-id="%s"] .compbar' % gid, "第一块图的标题栏"):
+            return
+        self.check("票⑨ 点过之后右栏显示的就是这一件",
+                   self.js("(i3pro.inspectorComponent()||{}).id") == gid,
+                   self.js("(i3pro.inspectorComponent()||{}).id"))
+        title = self.js("(document.getElementById('insTitle')||{}).textContent || ''")
+        wanted = self.js("i3pro.componentTitle(i3pro.inspectorComponent())")
+        self.check("票⑨ 右栏抬头写着这一件的标题", str(title) == str(wanted),
+                   "%s / %s" % (title, wanted))
+        for selector, label in (("#insBody .insch", "通道槽位"),
+                                ("#insBody .inschips button", "配色与统计范围那几排"),
+                                ("#insBody .inschecks input", "抬头字段"),
+                                ("#insBody button[data-ins-act='close']", "删除")):
+            box = rect_of(selector, scroll=True)
+            self.check("票⑨ 右栏里有「%s」而且有面积" % label,
+                       bool(box) and box.get("w", 0) > 0, box)
+        self.js("(function(){var b=document.getElementById('insBody');"
+                "if(b)b.scrollTop=0;return true;})()")
+        self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-inspector.png"),
+                          self.session)
+
+        # ③ 改设置 → 画布像素真的变：换一整套调色板（迹线颜色跟着换）。
+        # **不拿「点样式」验这一条**：这一段曲线是包络，包络按线画（A100），点样式对它
+        # 本来就不该变——拿它当"画布变了"的判据会是一条假红。
+        palettes = json.loads(self.js("JSON.stringify(Object.keys(i3pro.palettes||{}))") or "[]")
+        self.check("票⑨ 至少有两套调色板（不然搬设置这一条验不下去）",
+                   len(palettes) >= 2, palettes)
+        if len(palettes) >= 2:
+            before = canvas_sum(gid)
+            label = self.js("(i3pro.palettes[%s]||{}).label" % json.dumps(palettes[1]))
+            if click_at('#insBody .inschips button[data-ins-chip="%s"]' % palettes[1],
+                        "右栏里的调色板「%s」" % label):
+                after = canvas_sum(gid)
+                self.check("票⑨ 换一套调色板之后画布像素真的变了（不是只改了一个键）",
+                           before is not None and after is not None and before != after,
+                           "%s -> %s" % (before, after))
+                self.check("票⑨ 调色板真的写在组件配置里",
+                           self.js("(i3pro.inspectorComponent()||{}).config.palette")
+                           == palettes[1],
+                           self.js("(i3pro.inspectorComponent()||{}).config.palette"))
+                self.js("(function(){var c=i3pro.inspectorComponent();"
+                        "if(c)delete c.config.palette;i3pro.renderAll();return true;})()")
+                time.sleep(0.4)
+
+        # ③b 点样式也在右栏（改的是这一屏的 state.style，S 键那一个键），改完再改回来
+        self.check("票⑨ 点样式默认是线", self.js("i3pro.state.style") == "line",
+                   self.js("i3pro.state.style"))
+        if click_at("#insBody .inschips button[data-ins-chip='points']", "右栏里的「点」"):
+            self.check("票⑨ 点样式真的写在 state 上（S 键那一个键）",
+                       self.js("i3pro.state.style") == "points",
+                       self.js("i3pro.state.style"))
+            click_at("#insBody .inschips button[data-ins-chip='line']", "右栏里的「线」")
+            self.check("票⑨ 再点回「线」也生效", self.js("i3pro.state.style") == "line",
+                       self.js("i3pro.state.style"))
+
+        # ④ 统计范围：组件级，右栏改，再改回来（不是一次性的闩）
+        if click_at("#insBody .inschips button[data-ins-chip='ab']", "右栏里的「光标 A–B」"):
+            self.check("票⑨ 真点「光标 A–B」之后这一件换了统计范围",
+                       self.js("i3pro.statsRangeOf(i3pro.inspectorComponent())") == "ab",
+                       self.js("i3pro.statsRangeOf(i3pro.inspectorComponent())"))
+            click_at("#insBody .inschips button[data-ins-chip='view']", "右栏里的「可见区间」")
+            self.check("票⑨ 再点回「可见区间」也生效",
+                       self.js("i3pro.statsRangeOf(i3pro.inspectorComponent())") == "view",
+                       self.js("i3pro.statsRangeOf(i3pro.inspectorComponent())"))
+
+        # ⑤ 抬头字段：真点一下 Avg，抬头那一格跟着收起来，再点回来
+        if click_at("#insBody .inschecks input[data-ins-field='avg']", "抬头字段里的 Avg"):
+            self.check("票⑨ 关掉 Avg 之后抬头那一格真的收起来了",
+                       avg_cell_shown(gid) is False
+                       and self.js("i3pro.headFields(i3pro.inspectorComponent()).avg") is False,
+                       "%s / %s" % (avg_cell_shown(gid),
+                                    self.js("i3pro.headFields(i3pro.inspectorComponent()).avg")))
+            click_at("#insBody .inschecks input[data-ins-field='avg']", "抬头字段里的 Avg（点回来）")
+            self.check("票⑨ 再点一下 Avg 又印出来了", avg_cell_shown(gid) is True,
+                       avg_cell_shown(gid))
+
+        # ⑥ 复制 / 删除也在右栏：真点一下复制出一块，再真点删除把它收走
+        before_count = self.js("i3pro.state.components.length")
+        if click_at("#insBody button[data-ins-act='copy']", "右栏里的「复制」"):
+            after_count = self.js("i3pro.state.components.length")
+            copied = self.js("(i3pro.inspectorComponent()||{}).id")
+            self.check("票⑨ 真点「复制」多了一块，右栏跟到了新那一块",
+                       after_count == before_count + 1 and copied != gid,
+                       "%s -> %s / %s" % (before_count, after_count, copied))
+            if click_at("#insBody button[data-ins-act='close']", "右栏里的「删除」"):
+                self.check("票⑨ 真点「删除」之后组件没了、右栏回空状态",
+                           self.js("i3pro.state.components.length") == before_count
+                           and self.js("i3pro.inspectorComponent()") is None,
+                           self.js("i3pro.state.components.length"))
+
+        # ⑦ 曲线连接：服务模式下不是灰的（值的对比由 A79 那条负责）。
+        # 上一步把复制出来的那一块删掉了，右栏回到空状态——先重新选中原来那一件。
+        click_at('[data-id="%s"] .compbar' % gid, "第一块图的标题栏（重新选中）")
+        self.reveal("#insBody .inschips")
+        disabled = self.js(
+            "(function(){var b=document.querySelector("
+            + json.dumps("#insBody .inschips button[data-ins-chip='previous']")
+            + ");return b?b.disabled:null;})()")
+        self.check("票⑨ 服务模式下右栏里的「曲线连接」不是灰的", disabled is False, disabled)
+
+        # ⑧ 组件标题栏：可见按钮 ≤ 4，低频那几个一件都不许留
+        bars = json.loads(self.js(
+            "JSON.stringify([].map.call(document.querySelectorAll('#worksheet .comp'),"
+            "function(c){var bar=c.querySelector('.compbar');if(!bar)return null;"
+            "var bs=[].filter.call(bar.querySelectorAll('button'),function(b){"
+            "var r=b.getBoundingClientRect();return r.width>0&&r.height>0;});"
+            "return {id:c.dataset.id,labels:[].map.call(bs,function(b){"
+            "return b.textContent;})};}).filter(Boolean))") or "[]")
+        self.check("票⑨ 每一块组件都有标题栏", bool(bars), bars)
+        too_many = [one for one in bars if len(one["labels"]) > 4]
+        self.check("票⑨ 组件标题栏上的可见按钮 ≤ 4", not too_many, too_many)
+        moved = [one for one in bars
+                 if any(text in ("上移", "下移", "复制", "换成…", "显示")
+                        for text in one["labels"])]
+        self.check("票⑨ 低频按钮不再挂在组件标题栏上（它们在右栏）", not moved, moved)
+
+        # ⑨ 右栏可收起：收起只剩一条窄边、设置那半截收掉，展开宽度回来，状态记在本机
+        if click_at("#insFold", "右栏的收起按钮"):
+            folded = rect_of("#inspector")
+            body = rect_of("#insBody")
+            self.check("票⑨ 收起之后右栏只剩一条窄边、设置那半截收掉了",
+                       bool(folded) and folded["w"] < 60 and (not body or body["h"] <= 0),
+                       "%s / %s" % (folded, body))
+            self.check("票⑨ 收起状态记在本机",
+                       self.js("localStorage.getItem('i3pro.inspector.v1')") == "0",
+                       self.js("localStorage.getItem('i3pro.inspector.v1')"))
+            if click_at("#insFold", "右栏的展开按钮"):
+                again = rect_of("#inspector")
+                self.check("票⑨ 再点一下展开，宽度回来了、状态也记回本机",
+                           bool(again) and again["w"] > 200
+                           and self.js("localStorage.getItem('i3pro.inspector.v1')") == "1",
+                           again)
+
     # ------------------------------------------------ A78 侧边栏快速跳转
     def sidebar_jump(self):
         """A78：左边那一栏比屏幕长得多，"跳到哪一栏"要**真的滚过去**、光标放对地方。
@@ -3320,16 +3551,34 @@ class Checker:
                    switched == "Vx KF|G Force Lat|G Force Long", switched)
 
         # 1) 真拖拽：相机跟着转，画布像素也真的变
+        # 拖之前**重量一次**画布的 rect，并且把起点放在"真正看得见的那一段"里：
+        #   ① 换过通道之后下拉变宽会多折一行，画布跟着往下挪——旧坐标会落到下面的
+        #      resize 条上（票⑨ 把中间那栏收窄之后就是这么红的）；
+        #   ② 画布本身比它上面控件条剩下的地方高，下沿被 .comp 裁掉（老毛病），
+        #      拿被裁掉的位置去按，命中的是别的元素。所以往上拖，稳在可见带子里。
+        box = rect_of(component_id)
+        band = json.loads(self.js(
+            "(function(){var c=document.querySelector('[data-id=\"" + component_id
+            + "\"] canvas');if(!c)return 'null';"
+            "var r=c.getBoundingClientRect();var comp=c.closest('.comp').getBoundingClientRect();"
+            "var host=document.getElementById('charts').getBoundingClientRect();"
+            "var top=Math.max(r.top,comp.top,host.top),bot=Math.min(r.bottom,comp.bottom,host.bottom);"
+            "return JSON.stringify({top:top,bottom:bot,h:bot-top});})()") or "null")
+        self.check("#43 换通道之后画布还在，而且有一段是看得见的",
+                   bool(box) and bool(band) and band.get("h", 0) > 40,
+                   "%s / %s" % (box, band))
+        if not box or not band or band.get("h", 0) <= 40:
+            return
         start_camera = made.get("camera")
         start_pixels = pixels(component_id)
         x0 = box["x"] - box["w"] * 0.2
-        y0 = box["y"]
+        y0 = (band["top"] + band["bottom"]) / 2
         self.browser.mouse("mouseMoved", x0, y0, self.session, buttons=0)
         self.browser.mouse("mousePressed", x0, y0, self.session)
         for step in range(1, 7):
-            self.browser.mouse("mouseMoved", x0 + step * 11, y0 + step * 4, self.session)
+            self.browser.mouse("mouseMoved", x0 + step * 11, y0 - step * 4, self.session)
             time.sleep(0.05)
-        self.browser.mouse("mouseReleased", x0 + 66, y0 + 24, self.session, buttons=0)
+        self.browser.mouse("mouseReleased", x0 + 66, y0 - 24, self.session, buttons=0)
         time.sleep(0.4)
         dragged = attitude_of()
         self.check("#43 真拖一下画布，相机跟着转",
@@ -3514,14 +3763,25 @@ class Checker:
         还在。
         """
         def button_at(component_id, label):
+            """右栏 inspector 里这一件的某个动作按钮（票⑨：复制 / 换成… 都搬过来了）。
+
+            要先用真鼠标把这一件点成"选中的那一件"——右栏显示的永远是选中的组件。
+            """
+            bar = json.loads(self.js(
+                "JSON.stringify((function(){var el=document.querySelector("
+                + json.dumps('[data-id="%s"] .compbar' % component_id) + ");"
+                "return el?__center(el):null;})())") or "null")
+            if not bar:
+                return None
+            self.browser.click(bar["x"], bar["y"], self.session)
+            time.sleep(0.4)
             raw = self.js(
-                "JSON.stringify((function(){var el=document.querySelector('[data-id=\""
-                + component_id + "\"] .ctools');if(!el)return null;"
+                "JSON.stringify((function(){var el=document.getElementById('insBody');"
+                "if(!el)return null;"
                 "var b=[].filter.call(el.querySelectorAll('button'),function(x)"
                 "{return x.textContent===" + json.dumps(label, ensure_ascii=False) + ";})[0];"
                 "return b?__center(b):null;})())") or "null"
             return json.loads(raw)
-
         self.js("i3pro.applyPreset(i3pro.worksheetCatalogue().sheets[0].name); true")
         time.sleep(0.8)
         groups = json.loads(
@@ -3554,7 +3814,7 @@ class Checker:
         if not graph:
             return
         copy_btn = button_at(graph["id"], "复制")
-        self.check("#48 真点得到组件栏上的「复制」",
+        self.check("#48 真点得到右栏 inspector 里的「复制」",
                    bool(copy_btn) and copy_btn.get("w", 0) > 0,
                    json.dumps(copy_btn, ensure_ascii=False))
         if not copy_btn:
@@ -3578,7 +3838,7 @@ class Checker:
             return
 
         replace_btn = button_at(made["id"], "换成…")
-        self.check("#48 真点得到组件栏上的「换成…」",
+        self.check("#48 真点得到右栏 inspector 里的「换成…」",
                    bool(replace_btn) and replace_btn.get("w", 0) > 0,
                    json.dumps(replace_btn, ensure_ascii=False))
         if not replace_btn:
@@ -3891,36 +4151,37 @@ class Checker:
             return
         component_id = made["id"]
 
-        # 1) 真点标题栏上的「显示」：菜单真的开出来（这一件组件的按钮里按文案找）
+        # 1) 真点这一件的标题栏：右栏 inspector 显示的就是它的设置（票⑨之后「显示」菜单
+        #    整块搬进右栏，"统计范围"跟着抬头字段一起在那儿）
         button = json.loads(self.js(
-            "JSON.stringify((function(){var el=document.querySelector('[data-id=\"" + component_id
-            + "\"] .ctools');if(!el)return null;"
-            "var b=[].filter.call(el.querySelectorAll('button'),function(x)"
-            "{return x.textContent==='显示';})[0];"
-            "return b?__center(b):null;})())") or "null")
-        self.check("#44 「显示」按钮点得到", bool(button) and button.get("w", 0) > 0,
-                   json.dumps(button, ensure_ascii=False))
+            "JSON.stringify((function(){var el=document.querySelector("
+            + json.dumps('[data-id="%s"] .compbar' % component_id) + ");"
+            "return el?__center(el):null;})())") or "null")
+        self.check("#44 组件标题栏点得到（点一下 = 选中这一件）",
+                   bool(button) and button.get("w", 0) > 0, json.dumps(button))
         if not button:
             return
         self.browser.click(button["x"], button["y"], self.session)
         time.sleep(0.4)
+        self.check("#44 点过之后右栏显示的就是这一件",
+                   self.js("(i3pro.inspectorComponent()||{}).id") == component_id,
+                   self.js("(i3pro.inspectorComponent()||{}).id"))
 
-        # 2) 菜单里真点「A–B」
+        # 2) 右栏里真点「A–B」
+        self.reveal('#insBody [data-ins-chip="ab"]')
         chip = json.loads(self.js(
             "JSON.stringify((function(){"
-            "var c=document.querySelector('.popmenu [data-stats-range=\"ab\"]');"
+            "var c=document.querySelector('#insBody [data-ins-chip=\"ab\"]');"
             "return c?__center(c):null;})())") or "null")
-        self.check("#44 菜单里有一枚点得到的「A–B」按钮",
+        self.check("#44 右栏里有一枚点得到的「A–B」按钮",
                    bool(chip) and chip.get("w", 0) > 0, json.dumps(chip, ensure_ascii=False))
         if not chip:
-            self.js("i3pro.closePopMenu(); true")
             return
         self.browser.click(chip["x"], chip["y"], self.session)
         time.sleep(0.5)
         self.check("#44 真点「A–B」之后这一件组件换了统计范围",
                    (graph_of() or {}).get("range") == "ab",
                    json.dumps(graph_of(), ensure_ascii=False))
-        self.js("i3pro.closePopMenu(); true")
         time.sleep(0.2)
 
         # 3) 没有基准光标：抬头不印数字，改说那句现成的下一步（与导出面板同一句）
@@ -4069,13 +4330,17 @@ class Checker:
 
             直接改 `state.view` 不会触发取数（那条防抖只在缩放/平移那条路上），
             所以这里显式强制一次——不强制的话读到的永远是上一次那几条通道。
+            取之前先把这条通道的缓存 **删掉**：不删的话下面那个 wait_for 看到的是
+            上一段窗口留下的旧曲线，第一条断言就会拿旧窗口的值去比新窗口的接口值
+            （票⑨ 之后时序一变就露出来了——它一直是靠"恰好没变"过着的）。
             """
             self.js(
                 "(function(){var g=i3pro.state.components.filter(function(c){"
                 "return c.type==='graph';})[0];g.config.channels=[%s];"
                 "i3pro.state.view=[0,2];i3pro.state.windowKey='';"
+                "delete i3pro.state.traces[%s];"
                 "i3pro.refreshWindowTraces(true);i3pro.renderAll();return true;})()"
-                % json.dumps(name))
+                % (json.dumps(name), json.dumps(name)))
             self.browser.wait_for(
                 "((i3pro.state.traces[%s]||{}).value||[]).length>0" % json.dumps(name),
                 self.session, timeout=15)
@@ -4101,27 +4366,34 @@ class Checker:
                 "y:r.top+r.height/2,w:r.width,h:r.height});})()" % selector)
             return json.loads(raw) if raw and raw != "null" else None
 
-        def open_display_menu():
-            box = rect_of_local("#worksheet .comp .compbar button[title*='配色与抬头']")
+        graph_id = self.js(
+            "(i3pro.state.components.filter(function(c){return c.type==='graph';})[0]||{}).id")
+
+        def select_graph():
+            """票⑨：曲线连接搬到右栏了——先把那一件图点成"选中的那一件"。"""
+            box = rect_of_local("[data-id=%s] .compbar" % json.dumps(graph_id))
             if not box:
                 return False
             self.browser.click(box["x"], box["y"], self.session)
             time.sleep(0.5)
-            return bool(self.js("!!document.querySelector('.popmenu')"))
+            return (self.js("(i3pro.inspectorComponent()||{}).id") or "") == graph_id
 
         def click_mode(mode):
-            box = rect_of_local(".popmenu .popchip[data-upsample='%s']" % mode)
+            selector = "#insBody .inschips button[data-ins-chip='%s']" % mode
+            # 右栏是滚动的一栏：曲线连接在通道 / 配色 / 抬头下面，不滚过去点不到
+            self.reveal(selector, wait=0.3)
+            box = rect_of_local(selector)
             if not box:
                 return False
             self.browser.click(box["x"], box["y"], self.session)
             time.sleep(1.4)
             return True
 
-        self.check("A79 「显示」菜单真的弹得出来", open_display_menu())
-        self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-curve-join-menu.png"),
+        self.check("A79 真点一下图的标题栏，右栏就是这一件（曲线连接在那儿）", select_graph())
+        self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-curve-join-panel.png"),
                           self.session)
-        self.check("A79 菜单里有「曲线连接」这一排，而且点得到「阶梯保持」",
-                   open_display_menu() and click_mode("previous"))
+        self.check("A79 右栏里有「曲线连接」这一排，而且点得到「阶梯保持」",
+                   select_graph() and click_mode("previous"))
         self.browser.wait_for(
             "(i3pro.state.traces[%s]||{}).upsample==='previous'" % json.dumps(name),
             self.session, timeout=20)
@@ -4139,7 +4411,7 @@ class Checker:
         self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-curve-join-step.png"),
                           self.session)
         self.check("A79 再点回「线性」，值也变回去（不是一次性的闩）",
-                   open_display_menu() and click_mode("linear"))
+                   select_graph() and click_mode("linear"))
         self.browser.wait_for(
             "(i3pro.state.traces[%s]||{}).upsample==='linear'" % json.dumps(name),
             self.session, timeout=20)
@@ -4219,6 +4491,8 @@ def main(argv=None):
             checker.layout_sheet_bar()
             # A101 主题切换：变量 + 画布像素 + 重载之后记不记得住
             checker.theme_switch()
+            # 票⑨ 右栏 inspector：真选中一件、改设置画布真的变、标题栏只剩高频动作
+            checker.inspector_panel()
             checker.sections()
             checker.crossings(sidecar)
             checker.rename(sidecar)

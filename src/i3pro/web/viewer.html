@@ -14,6 +14,9 @@
     --track:#222833; --rule:#232935; --toastbg:#1d3b52; --dim:#4b5364; --chip:#46505f;
     /* 图上那几行文字压在曲线上面，得给一层底才读得清：深色主题是半透明黑（A101） */
     --legendbg:rgba(15,17,21,.58); --legendnote:rgba(15,17,21,.72);
+    /* 面板里那种"凹进去一行"的底（数学通道的定义行）。以前是写死的深色字面量，
+       浅色主题一开就成了一条黑带子——和 A101 里图例底色同一个毛病。 */
+    --rowbg:rgba(15,17,21,.58);
   }
   /* 浅色（Marple 风）。面板白、底浅灰蓝、强调色收深一点；迹线颜色不在这儿——
      它跟每件组件的调色板走（`palette.py` 那三套里，Matplotlib tab10 就是
@@ -25,6 +28,7 @@
     --raise:#ffffff; --deep:#f5f7fb; --hover:#eef3fa; --sel:#d6e8fb; --cmp:#fdeecd;
     --track:#e2e8f0; --rule:#e7ecf3; --toastbg:#0b3d5c; --dim:#9aa7b8; --chip:#b9c4d2;
     --legendbg:rgba(255,255,255,.78); --legendnote:rgba(255,255,255,.88);
+    --rowbg:#eef2f8;
   }
   * { box-sizing:border-box; }
   /* 外壳：两排顶栏（第一排全局、第二排工作表），余下的高度给左栏 + 画布。
@@ -48,9 +52,44 @@
   /* 管理按钮跟 tabs 不是一回事（一套 vs 这一套），给它们一条分隔线 */
   #sheetBar #sheetManage { border-left:1px solid var(--line); padding-left:8px; }
   #sheetBar #sheetName::before { content:"当前："; }
-  main { flex:1 1 auto; min-height:0; display:grid; grid-template-columns:312px 1fr; }
+  /* 三栏（票⑨）：左=能看什么（场次/通道/高级工具）· 中=正在看什么（工作表）
+     · 右=选中那一件的 inspector。右栏可收成一条 34 px 的窄边，收起状态记在本机。 */
+  main { flex:1 1 auto; min-height:0; display:grid;
+         grid-template-columns:312px minmax(0,1fr) 272px; }
+  main.insfold { grid-template-columns:312px minmax(0,1fr) 34px; }
   aside { background:var(--panel); border-right:1px solid var(--line); overflow:auto; padding:9px 11px 40px; }
   section#charts { overflow:auto; padding:9px 11px 70px; }
+  /* 右侧组件 inspector（票⑨）：低频设置从组件标题栏搬到这里。 */
+  #inspector { background:var(--panel); border-right:none; border-left:1px solid var(--line);
+               display:flex; flex-direction:column; min-height:0; overflow:hidden;
+               padding:0; }
+  #insHead { display:flex; align-items:center; gap:6px; padding:5px 8px;
+             border-bottom:1px solid var(--line); flex:0 0 auto; }
+  #insHead .institle { font-size:11px; text-transform:uppercase; letter-spacing:.09em;
+                       color:var(--muted); font-weight:600; }
+  #insFold { margin-left:auto; padding:1px 6px; font-size:11px; line-height:16px; }
+  #insBody { flex:1 1 auto; min-height:0; overflow:auto; padding:9px 11px 40px; }
+  main.insfold #insBody { display:none; }
+  main.insfold #insHead { border-bottom:none; padding:4px 2px; justify-content:center; }
+  main.insfold #insHead .institle { display:none; }
+  main.insfold #insFold { margin-left:0; padding:1px 4px; }
+  /* 一行通道：色块可点（换手选色），右边是"本场次没有 / 空"与移除。 */
+  .insch { display:flex; align-items:center; gap:6px; padding:2px 4px; border-radius:4px; }
+  .insch:hover { background:var(--panel2); }
+  .insch .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .insch .unit { color:var(--muted); margin-left:auto; font-size:11px; flex:0 0 auto; }
+  .insch .rm { flex:0 0 auto; padding:0 4px; font-size:11px; line-height:16px;
+               border-radius:4px; }
+  .insch .swatch { cursor:pointer; }
+  /* inspector 里的小片按钮与色块排（.popmenu 那几条约定了同一种观感，这里是它的平面版） */
+  .inschips { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:5px; }
+  .inschips button { padding:1px 8px; font-size:11px; line-height:17px; border-radius:999px; }
+  .insdots { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:2px; }
+  .insdots i { width:12px; height:12px; border-radius:3px; }
+  .inschecks { display:flex; flex-direction:column; gap:2px; }
+  .inschecks label { display:flex; align-items:center; gap:5px; font-size:11px;
+                     color:var(--muted); cursor:pointer; }
+  .inschecks input { accent-color:var(--accent); margin:0; }
   #sessionGroup .meta { color:var(--muted); font-size:12px; line-height:1.7; }
   #sessionGroup .meta b { color:var(--fg); }
   /* 高级工具：左栏默认只留「场次信息 + 通道」，其余七个面板收进这个折叠区。 */
@@ -64,7 +103,11 @@
                        max-height:62vh; overflow:auto; background:var(--panel);
                        border:1px solid var(--line); border-radius:7px; padding:9px 11px;
                        box-shadow:0 6px 20px rgba(0,0,0,.35); }
-  @media (max-width:1180px) { main { grid-template-columns:264px 1fr; } }
+  /* 笔记本那一档：右栏与左栏各收一点，把中间那栏留住 */
+  @media (max-width:1460px) { main { grid-template-columns:288px minmax(0,1fr) 240px; }
+                              main.insfold { grid-template-columns:288px minmax(0,1fr) 34px; } }
+  @media (max-width:1180px) { main { grid-template-columns:264px minmax(0,1fr) 220px; }
+                              main.insfold { grid-template-columns:264px minmax(0,1fr) 34px; } }
   .group { margin-bottom:13px; }
   .group h2 { font-size:11px; text-transform:uppercase; letter-spacing:.09em;
               color:var(--muted); margin:0 0 6px; font-weight:600;
@@ -130,12 +173,8 @@
   .popmenu .popauto.on { border-color:var(--accent); color:var(--accent); }
   .popmenu .popchip { padding:1px 8px; font-size:11px; border-radius:5px; }
   .popmenu .popchip.on { border-color:var(--accent); color:var(--accent); }
-  .popmenu .popdot { width:12px; height:12px; border-radius:3px; display:inline-block; }
   .popmenu .poprow { display:flex; align-items:center; gap:7px; margin-bottom:6px; }
   .popmenu .poplabel { color:var(--muted); }
-  .popmenu .popcheck { display:flex; align-items:center; gap:6px; padding:2px 0;
-                       cursor:pointer; }
-  .popmenu .popcheck input { accent-color:var(--accent); margin:0; }
   .popmenu .pophint { color:var(--muted); font-size:11px; line-height:1.5;
                       margin-top:7px; border-top:1px solid var(--line); padding-top:6px; }
   .swatch { width:9px; height:9px; border-radius:2px; flex:0 0 auto; }
@@ -311,7 +350,7 @@
   .alias .cand a:hover { color:var(--accent); }
   .alias .aacts { margin-left:auto; }
   .mdef { display:flex; align-items:baseline; gap:6px; padding:3px 5px; border-radius:4px;
-          background:rgba(15,17,21,.58); cursor:pointer; }
+          background:var(--rowbg); cursor:pointer; }
   .mdef .mname { color:var(--fg); font-weight:600; }
   .mdef .mex { color:var(--muted); font-size:11px; overflow:hidden; text-overflow:ellipsis;
                white-space:nowrap; flex:1; }
@@ -441,7 +480,7 @@
   <div class="hint warn" id="sheetNote"></div>
   <div class="hint" id="addTypeNote"></div>
 </div>
-<main>
+<main id="workbench">
   <aside id="asideScroll">
     <!-- 侧边栏快速跳转（A78）：按钮由 JUMP_TARGETS 一处生成，不在这里手写第二份清单。 -->
     <div class="jump" id="jumpRail"
@@ -655,6 +694,16 @@
       <kbd>N</kbd>/<kbd>P</kbd> 上下圈 · <kbd>Ctrl</kbd>+<kbd>F</kbd> 最快圈 · <kbd>Q</kbd> 交换主/对比圈 · 散点双击切换趋势线
     </div>
   </section>
+  <!-- 右栏：选中那一件的 inspector（票⑨）。低频设置（通道槽位 / 调色板 / 统计范围 /
+       抬头字段 / 轴范围 / 复制 / 换成… / 删除）都在这里，组件标题栏只留高频动作。
+       收起时留一条窄边——收了还要找得到怎么打开。 -->
+  <aside id="inspector">
+    <div id="insHead">
+      <span class="institle">组件设置</span>
+      <button id="insFold" title="收起右栏（收起后留一条窄边，再点一下展开）">收起 »</button>
+    </div>
+    <div id="insBody"></div>
+  </aside>
 </main>
 <!-- 光标值（V 键）：浮层——不进左栏，也不进右栏（票⑧）。默认收着，按 V 才出来。 -->
 <div class="group float" id="valuesGroup" hidden style="display:none">
@@ -3561,27 +3610,9 @@ function buildWorksheet() {
       });
       return b;
     };
-    btn("up", "↑", "上移");
-    btn("down", "↓", "下移");
-    // 「显示」：这一件组件的调色板与抬头字段（ticket #35）。放在组件自己的标题栏上，
-    // 因为这两样都是**按组件**的——放到全局面板里就不是"这一张图想怎么看"了。
-    if (!tabular) {
-      const cfgBtn = makeEl("button", "", tools);
-      cfgBtn.textContent = "显示";
-      cfgBtn.title = "这一件组件的配色与抬头字段（存进工作表）";
-      cfgBtn.addEventListener("click", (event) => {
-        event.stopPropagation();
-        openDisplayMenu(comp, cfgBtn);
-      });
-    }
-    const replaceBtn = makeEl("button", "", tools);
-    replaceBtn.textContent = "换成…";
-    replaceBtn.title = "换一种显示形式：尽量保留通道、位置与尺寸";
-    replaceBtn.addEventListener("click", (event) => {
-      event.stopPropagation();
-      openReplaceMenu(comp, replaceBtn);
-    });
-    btn("copy", "复制", "复制一份，并往右下错开一格");
+    // 票⑨之后标题栏只留高频动作：上移 / 下移 / 复制 / 换成… 与「显示」（配色 / 抬头 /
+    // 统计范围）全部搬进右栏 inspector。报表的 CSV 留下——导出一张表是天天要做的事；
+    // ✕ 也留下（关掉一块不该先点两下）。
     if (tabular) btn("csv", "CSV", "把这张表导出成 CSV（列序与界面上看到的一致）");
     btn("close", "✕", "移除这个组件");
     const body = makeEl("div", "compbody" + (tabular ? " tabular" : ""), el);
@@ -3616,7 +3647,13 @@ function buildWorksheet() {
     handle("rzcorner", "xy", "拖右下角同时改宽高（吸附）");
     bar.style.cursor = "move";
     bar.title = "拖拽移动（自动吸附）";
-    bar.addEventListener("mousedown", (event) => beginMove(event, comp, el));
+    // 点标题栏 = 选中这一件（票⑨）：右栏的 inspector 认的就是它。
+    // 必须先设焦点再 beginMove——那一头会 stopPropagation，冒不到下面那个监听上。
+    bar.addEventListener("mousedown", (event) => {
+      state.focusId = comp.id;
+      markFocused();
+      beginMove(event, comp, el);
+    });
     el.addEventListener("mousedown", () => {
       state.focusId = comp.id;
       markFocused();
@@ -3643,6 +3680,8 @@ function positionComponent(el, comp) {
   if (bundle && bundle.sizeSpan) {
     bundle.sizeSpan.textContent = comp.w.toFixed(2) + "×" + comp.h.toFixed(2) + " 格";
   }
+  // 拖边 / 拖角的时候尺寸跟着手指走，但右栏不整块重建（见 inspectorKey）。
+  renderInspectorSize();
 }
 
 function xTargets(comp) {
@@ -3898,6 +3937,372 @@ function markFocused() {
     bundle.el.classList.toggle("focus", bundle.comp.id === state.focusId);
   }
   renderChannelList();
+  renderInspector();
+}
+
+/* --------------------------------------------- 右侧组件 inspector（票⑨）
+ * 组件标题栏从这一票起只留高频动作（关闭 + 报表的 CSV），其余搬到这里：
+ * 上移 / 下移 / 复制 / 换成… / 删除、通道槽位、调色板、抬头与统计、轴范围。
+ *
+ * 两条口径（ADR-0008 的"搬家时的三条规矩"）：
+ *   · 组件级的（`config.*`）只写这一件组件，跟工作表走；
+ *   · `state.upsample`（曲线连接）与 `state.style`（点样式）是**这一屏**的，不是这一件的
+ *     ——它们在 inspector 里单独一格、标题上写明"全局"，改的仍然是原来那个键
+ *     （取数只有一条路 #21，两件图各要一种连接方式就得取两遍数）。
+ *
+ * 认哪一件组件只看 `state.focusId`，**不兜底**：没选中就是空状态，写清下一步。
+ * 兜底（像 `focusedComponent()` 那样给第一张图）会让"没选中"这个状态不存在，
+ * 而票⑨要的正好是"点一个组件，这里改它的设置"。
+ */
+const INSPECTOR_STORE = "i3pro.inspector.v1";
+
+function inspectorComponent() { return componentById(state.focusId); }
+
+function inspectorOpen() {
+  const wrap = $("workbench");
+  return !!wrap && wrap.classList && !wrap.classList.contains("insfold");
+}
+
+function setInspector(open, remember) {
+  const wrap = $("workbench");
+  if (!wrap || !wrap.classList) return;
+  wrap.classList.toggle("insfold", !open);
+  const button = $("insFold");
+  if (button) {
+    button.textContent = open ? "收起 »" : "«";
+    button.title = open
+      ? "收起右栏（收起后留一条窄边，再点一下展开）"
+      : "展开右栏：选中组件后在这里改它的设置";
+    if (button.setAttribute) button.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  if (remember !== false) {
+    try { localStorage.setItem(INSPECTOR_STORE, open ? "1" : "0"); } catch (err) { /* 私密模式 */ }
+  }
+}
+
+function toggleInspector() { setInspector(!inspectorOpen()); }
+
+/** 开机按记住的那一格摆；没记过就是展开（不展开的话"点一个组件"没人知道去哪看）。 */
+function restoreInspector() {
+  let open = true;
+  try { open = localStorage.getItem(INSPECTOR_STORE) !== "0"; } catch (err) { open = true; }
+  setInspector(open, false);
+}
+
+/** 这一件组件的手动量程（`state.panelZoom` 的键是 `组件 id|分组`）。 */
+function inspectorZoomKeys(comp) {
+  const prefix = (comp ? comp.id : "") + "|";
+  return Object.keys(state.panelZoom).filter((key) => key.indexOf(prefix) === 0);
+}
+
+/** 纵轴回到自动：把这一件组件的手动量程全清掉。 */
+function clearComponentZoom(comp) {
+  for (const key of inspectorZoomKeys(comp)) delete state.panelZoom[key];
+  renderAll();
+}
+
+/** 点样式（S 键与 inspector 那一排共用这一处）：线 / 点。 */
+function setTraceStyle(mode) {
+  state.style = mode === "points" ? "points" : "line";
+  renderAll();
+}
+
+/** 把这一件组件滚到看得见的地方（它的控件条在组件自己身上，不在 inspector 里）。 */
+function revealComponent(comp) {
+  const bundle = SHEET.get(comp.id);
+  const el = bundle && bundle.el;
+  if (el && el.scrollIntoView) el.scrollIntoView({ block: "center", inline: "nearest" });
+}
+
+/** inspector 里的一格：跟左栏 `.group` 同一个观感，标题下可以先来一句说明。 */
+function insGroup(host, title, hint) {
+  const box = makeEl("div", "group", host);
+  const head = makeEl("h2", "", box);
+  head.textContent = title;
+  if (hint) makeEl("p", "hint", box).textContent = hint;
+  return box;
+}
+
+/** 一排小片按钮：`rows` 是 { key, label, title, disabled }，`isOn(key)` 决定谁亮着。 */
+function insChips(host, rows, isOn, onPick) {
+  const box = makeEl("div", "inschips", host);
+  for (const row of rows) {
+    const chip = makeEl("button", "", box);
+    chip.textContent = row.label;
+    chip.title = row.title || "";
+    chip.disabled = !!row.disabled;
+    chip.dataset.insChip = row.key;
+    if (isOn(row.key)) chip.classList.add("on");
+    chip.addEventListener("click", () => onPick(row.key));
+  }
+  return box;
+}
+
+function insHeadGroup(host, comp) {
+  const box = insGroup(host, (specOf(comp) || {}).label || comp.type, null);
+  const title = makeEl("p", "hint", box);
+  title.id = "insTitle";
+  title.textContent = componentTitle(comp);
+  title.style.color = "var(--fg)";
+  const size = makeEl("p", "hint", box);
+  size.id = "insSize";
+  size.textContent = inspectorSizeText(comp);
+  insSizeEl = size;
+  return box;
+}
+
+function inspectorSizeText(comp) {
+  const idx = state.components.indexOf(comp);
+  return comp.w.toFixed(2) + "×" + comp.h.toFixed(2) + " 格"
+    + (idx >= 0 ? " · 第 " + (idx + 1) + " 块" : "");
+}
+
+/** 拖 / 缩放时只重写这一行：尺寸跟着手指走，但整栏不重建（见 inspectorKey）。 */
+function renderInspectorSize() {
+  if (!insSizeEl || !insSizeEl.parentNode) return;
+  const comp = inspectorComponent();
+  if (!comp) return;
+  const text = inspectorSizeText(comp);
+  if (insSizeEl.textContent !== text) insSizeEl.textContent = text;
+}
+
+function insChannelsGroup(host, comp) {
+  const spec = specOf(comp) || {};
+  const names = componentChannels(comp);
+  const box = insGroup(host, "通道", null);
+  if (!names.length) {
+    makeEl("p", "hint", box).textContent = spec.sidebar
+      ? "这件组件还没有通道：在左边「通道」里勾一条。"
+      : (spec.needs
+        ? "这件组件还没有通道：在它自己的控件条上选一条。"
+        : "这一类不用选通道：它画的就是这一场的数据本身（状态 / 圈差）。");
+  }
+  for (const name of names) {
+    const row = makeEl("div", "insch", box);
+    const swatch = makeEl("i", "swatch", row);
+    swatch.style.background = channelColor(name, comp);
+    swatch.title = "点一下换「" + name + "」的颜色（手选色存进这一套工作表）";
+    swatch.addEventListener("click", () => openColorMenu(comp, name, swatch));
+    makeEl("span", "nm", row).textContent = name;
+    const where = channelState(name);
+    if (where !== "present") {
+      const tag = makeEl("span", "unit", row);
+      tag.textContent = where === "missing" ? "本场次没有" : "全程无有效";
+      if (where === "missing") tag.classList.add("dead");
+    }
+    // 谁能按清单吃通道由显示形式自己声明（注册表 #20 的 sidebar）：图与通道报告是清单，
+    // 别的类型是各自的槽位（X / Y / 色…），那些槽位不给"删一条"——它们不是一个集合。
+    if (spec.sidebar) {
+      const rm = makeEl("button", "rm", row);
+      rm.textContent = "✕";
+      rm.title = "把「" + name + "」从这件组件里去掉（其它组件不动）";
+      rm.dataset.insRemove = name;
+      rm.addEventListener("click", () => toggleChannel(name, false));
+    }
+  }
+  if (names.length) {
+    const foot = makeEl("p", "hint", box);
+    if (spec.sidebar) {
+      foot.textContent = "在左边「通道」里勾选 = 给这一件组件加减通道。";
+      const go = makeEl("button", "", box);
+      go.id = "insGoChannels";
+      go.textContent = "去左栏勾通道";
+      go.title = "跳到左边「通道」那一栏（搜框会拿到光标）";
+      go.addEventListener("click", () => jumpTo("channelGroup"));
+    } else {
+      foot.textContent = "这件组件的通道在它自己的控件条上改（组件里那排下拉）。";
+      const go = makeEl("button", "", box);
+      go.id = "insGoComp";
+      go.textContent = "去组件上改";
+      go.title = "把这一件滚到看得见的地方";
+      go.addEventListener("click", () => revealComponent(comp));
+    }
+  }
+  return box;
+}
+
+function insPaletteGroup(host, comp) {
+  // 表格类没有迹线：调色板对它没有意义，别摆一排点了没反应的色片。
+  if ((specOf(comp) || {}).tabular) return null;
+  const box = insGroup(host, "配色", "调色板按这一件组件存；手选过颜色的通道不跟着变。");
+  const chosen = comp.config.palette && PALETTE_SET[comp.config.palette]
+    ? comp.config.palette : PALETTE_ORDER[0];
+  insChips(box, PALETTE_ORDER.map((key) => ({
+    key: key,
+    label: (PALETTE_SET[key] || {}).label || key,
+    title: "换成这一套颜色",
+  })), (key) => key === chosen, (key) => setComponentPalette(comp, key));
+  const shelf = makeEl("div", "insdots", box);
+  for (const color of paletteColors(comp)) {
+    const dot = makeEl("i", "", shelf);
+    dot.style.background = color;
+  }
+  return box;
+}
+
+function insStatsGroup(host, comp) {
+  const spec = specOf(comp) || {};
+  const box = insGroup(host, "抬头与统计", null);
+  if (spec.tabular) {
+    makeEl("p", "hint", box).textContent =
+      "这是一张表：没有图上的抬头统计，也没有配色——表头就是列名。";
+    return box;
+  }
+  const mode = statsRangeOf(comp);
+  const where = STATS_RANGE_LABELS[mode];
+  makeEl("p", "hint", box).textContent = "统计范围";
+  insChips(box, STATS_RANGES.map((key) => ({
+    key: key,
+    label: STATS_RANGE_LABELS[key],
+    title: key === "ab"
+      ? "只算基准光标 A 到主光标 B 这一段（左闭右闭，和导出那条范围一个口径）"
+      : "跟着缩放走：这一屏能看到多少就算多少（默认）",
+  })), (key) => key === mode, (key) => setStatsRange(comp, key));
+  makeEl("p", "hint", box).textContent = "抬头字段（" + where + "）";
+  const checks = makeEl("div", "inschecks", box);
+  const fields = headFields(comp);
+  const rows = [
+    ["cursor", "光标值"],
+    ["delta", "Δ（与基准光标之差）"],
+    ["min", "Min（" + where + "最小）"],
+    ["max", "Max（" + where + "最大）"],
+    ["avg", "Avg（" + where + "平均）"],
+    ["unit", "单位"],
+  ];
+  for (const [key, label] of rows) {
+    const wrap = makeEl("label", "", checks);
+    const input = makeEl("input", "", wrap);
+    input.type = "checkbox";
+    input.checked = !!fields[key];
+    input.dataset.insField = key;
+    makeEl("span", "", wrap).textContent = label;
+    input.addEventListener("change", () => setHeadField(comp, key, input.checked));
+  }
+  const hint = makeEl("p", "hint", box);
+  hint.textContent = (mode === "ab"
+    ? "选 A–B 而没放基准光标时，抬头不印数字，只说下一步（按 D 或空格）。"
+    : "") + "这几项跟着工作表存 / 还原；全局的「L 图例」「M 测量」仍然管所有组件。";
+  return box;
+}
+
+function insScreenGroup(host) {
+  const box = insGroup(host, "这一屏怎么看（全局）",
+    "这两项不跟单件组件走：换一件组件，取值还是这个。");
+  makeEl("p", "hint", box).textContent = "曲线连接";
+  insChips(box, UPSAMPLE_MODES.map((mode) => ({
+    key: mode,
+    label: UPSAMPLE_LABELS[mode],
+    title: UPSAMPLE_HINT[mode],
+    disabled: !DATA.api,
+  })), (key) => key === state.upsample, (key) => setUpsample(key));
+  if (!DATA.api) {
+    makeEl("p", "hint", box).textContent =
+      "快照文件里的曲线是导出时烘进去的，改不了；要切换就在服务里打开（双击 启动.bat）。";
+  }
+  makeEl("p", "hint", box).textContent = "点样式";
+  insChips(box, [
+    { key: "line", label: "线", title: "相邻两个采样之间连成线（S 键）" },
+    { key: "points", label: "点", title: "每个采样画一个方点（S 键）" },
+  ], (key) => key === state.style, (key) => setTraceStyle(key));
+  if (state.style === "points" && !resolutionDrawsPoints()) {
+    makeEl("p", "hint", box).textContent =
+      "当前绘图分辨率下点样式按线画：点会密到糊成一团（把分辨率调低才画点）。";
+  }
+  return box;
+}
+
+function insZoomGroup(host, comp) {
+  const box = insGroup(host, "轴范围", null);
+  const keys = inspectorZoomKeys(comp);
+  const hint = makeEl("p", "hint", box);
+  if (!keys.length) {
+    hint.textContent = "纵轴现在是自动的。要手动量一栏：在图上按住 Alt 拖，或者 Alt+方向键。";
+    return box;
+  }
+  hint.textContent = "这件组件有 " + keys.length + " 栏手动量程（Alt+拖 / Alt+方向键改的）。";
+  const reset = makeEl("button", "", box);
+  reset.id = "insZoomReset";
+  reset.textContent = "恢复自动量程";
+  reset.title = "清掉这一件组件的手动量程：纵轴回到按可见区间自动";
+  reset.addEventListener("click", () => clearComponentZoom(comp));
+  return box;
+}
+
+function insActionsGroup(host, comp) {
+  const box = insGroup(host, "组件",
+    "标题栏上留的是高频动作；上移 / 下移 / 复制 / 换成… / 删除都在这儿。");
+  const idx = state.components.indexOf(comp);
+  const row = makeEl("div", "row", box);
+  const action = (act, label, title, disabled) => {
+    const button = makeEl("button", "", row);
+    button.textContent = label;
+    button.title = title;
+    button.dataset.insAct = act;
+    button.disabled = !!disabled;
+    button.addEventListener("click", () => componentAction(comp, act));
+    return button;
+  };
+  action("up", "↑ 上移", "往前挪一块", idx <= 0);
+  action("down", "↓ 下移", "往后挪一块", idx < 0 || idx >= state.components.length - 1);
+  action("copy", "复制", "复制一份，并往右下错开一格");
+  const replace = makeEl("button", "", row);
+  replace.textContent = "换成…";
+  replace.title = "换一种显示形式：尽量保留通道、位置与尺寸";
+  replace.dataset.insAct = "replace";
+  replace.addEventListener("click", () => openReplaceMenu(comp, replace));
+  const remove = makeEl("button", "danger", row);
+  remove.textContent = "删除";
+  remove.title = "从这一套工作表里去掉这一件（点「保存」才写回文件）";
+  remove.dataset.insAct = "close";
+  remove.addEventListener("click", () => componentAction(comp, "close"));
+  return box;
+}
+
+function renderInspectorEmpty(host) {
+  const box = insGroup(host, "还没选中组件", null);
+  const hint = makeEl("p", "hint", box);
+  hint.id = "insEmpty";
+  hint.textContent = state.components.length
+    ? "点一下工作表里的任意一块（标题栏或图里都行），这里就会显示它的通道、配色、"
+      + "抬头统计与轴范围；上移 / 下移 / 复制 / 换成… / 删除 也在那里面。"
+    : "这一套工作表是空的：用上面那排的「＋ 添加组件」放一块进来，再点它一下。";
+  return box;
+}
+
+/**
+ * 变了才重建：`renderAll` 会被拖拽 / 缩放带着每帧跑（A96 量过帧时间），
+ * 每帧把这一栏重建一遍是白费——和组件抬头那个 legendKey 是同一个道理。
+ * **尺寸与位置不进这个键**：拖边改的是它们，那一半由 `renderInspectorSize()` 单独写。
+ */
+function inspectorKey(comp) {
+  return [state.focusId || "-", state.components.length, state.dataVersion,
+          DATA && DATA.api ? "api" : "snap", state.upsample, state.style,
+          comp ? JSON.stringify(comp.config) : "",
+          inspectorZoomKeys(comp).join(","),
+          comp ? componentChannels(comp).join("\u0001") : ""].join("|");
+}
+
+let insKey = null;
+let insSizeEl = null;
+
+function renderInspector() {
+  const host = $("insBody");
+  if (!host) return;
+  const comp = inspectorComponent();
+  const key = inspectorKey(comp);
+  if (key === insKey) return;
+  insKey = key;
+  insSizeEl = null;
+  host.innerHTML = "";
+  if (!comp) { renderInspectorEmpty(host); return; }
+  insHeadGroup(host, comp);
+  // 组件动作紧跟着标题：两块 / 换类型 / 删掉都是天天要用的，不该先往下滚才看得见。
+  insActionsGroup(host, comp);
+  insChannelsGroup(host, comp);
+  insPaletteGroup(host, comp);
+  insStatsGroup(host, comp);
+  insScreenGroup(host);
+  if (!(specOf(comp) || {}).tabular) insZoomGroup(host, comp);
 }
 
 function renderComponents() {
@@ -4173,17 +4578,6 @@ function openPopMenu(anchor, title, build) {
   return menu;
 }
 
-/** 小弹窗里的一行复选框（配色与抬头都用它）。 */
-function popCheck(menu, label, on, onToggle) {
-  const box = makeEl("label", "popcheck", menu);
-  const input = makeEl("input", "", box);
-  input.type = "checkbox";
-  input.checked = !!on;
-  makeEl("span", "", box).textContent = label;
-  input.addEventListener("change", () => onToggle(input.checked));
-  return input;
-}
-
 /** 改一条通道的手选色；`color` 为空 = 取消手选（跟调色板走）。 */
 function setChannelColor(comp, name, color) {
   const colors = Object.assign({}, comp.config.colors || {});
@@ -4281,83 +4675,6 @@ function openColorMenu(comp, name, anchor) {
     }
     const hint = makeEl("div", "pophint", menu);
     hint.textContent = "手选色跟着这一套工作表走；「本场次没有」的灰是语义色，不在可选范围内。";
-  });
-}
-
-function openDisplayMenu(comp, anchor) {
-  openPopMenu(anchor, "这一件组件怎么看", (menu) => {
-    const line = makeEl("div", "poprow", menu);
-    makeEl("span", "poplabel", line).textContent = "调色板";
-    // 用按钮而不是 <select>：原生下拉在强浏览器验收里点不开（那是系统弹层），
-    // 而"真点一下换调色板"正是这一票要验的事。
-    const chosen = comp.config.palette && PALETTE_SET[comp.config.palette]
-      ? comp.config.palette : PALETTE_ORDER[0];
-    for (const key of PALETTE_ORDER) {
-      const chip = makeEl("button", "popchip", line);
-      chip.textContent = (PALETTE_SET[key] || {}).label || key;
-      chip.title = "换成这一套颜色";
-      if (key === chosen) chip.classList.add("on");
-      chip.addEventListener("click", () => {
-        setComponentPalette(comp, key);
-        openDisplayMenu(comp, anchor);      // 重开一次，让按钮上的选中状态跟着走
-      });
-    }
-    const shelf = makeEl("div", "popshelf", menu);
-    for (const color of paletteColors(comp)) {
-      const spot = makeEl("i", "popdot", shelf);
-      spot.style.background = color;
-    }
-    // 曲线连接（A79）：i2 Pro 的 Channel Up-sampling 四个取值，取数请求里就带它。
-    const ups = makeEl("div", "poprow", menu);
-    makeEl("span", "poplabel", ups).textContent = "曲线连接";
-    for (const mode of UPSAMPLE_MODES) {
-      const chip = makeEl("button", "popchip", ups);
-      chip.textContent = UPSAMPLE_LABELS[mode];
-      chip.title = UPSAMPLE_HINT[mode];
-      chip.dataset.upsample = mode;
-      if (mode === state.upsample) chip.classList.add("on");
-      if (!DATA.api) {
-        // 快照（无服务端）里曲线是导出时算好的，切了也不会变——灰掉并说清为什么。
-        chip.disabled = true;
-        chip.title = "快照文件里的曲线是导出时烘进去的，改不了；要切换就在服务里打开";
-      }
-      chip.addEventListener("click", () => {
-        setUpsample(mode);
-        openDisplayMenu(comp, anchor);   // 重开一次，让选中状态跟着走
-      });
-    }
-    // 统计范围（ticket #44）：下面那三项统计量到底算哪一段——可见区间（现状）/
-    // 光标 A–B。放在这三项**旁边**（而不是全局面板里），因为它就是"这一张图的
-    // 抬头怎么算"，与调色板、抬头字段同一档。
-    const scope = makeEl("div", "poprow", menu);
-    makeEl("span", "poplabel", scope).textContent = "统计范围";
-    const mode = statsRangeOf(comp);
-    for (const key of STATS_RANGES) {
-      const chip = makeEl("button", "popchip", scope);
-      chip.textContent = STATS_RANGE_LABELS[key];
-      chip.title = key === "ab"
-        ? "只算基准光标 A 到主光标 B 这一段（左闭右闭，和导出那条范围一个口径）"
-        : "跟着缩放走：这一屏能看到多少就算多少（默认）";
-      chip.dataset.statsRange = key;
-      if (key === mode) chip.classList.add("on");
-      chip.addEventListener("click", () => {
-        setStatsRange(comp, key);
-        openDisplayMenu(comp, anchor);   // 重开一次，让按钮上的选中状态跟着走
-      });
-    }
-    const fields = headFields(comp);
-    // 标签跟着范围走：选 A–B 时还写"可见区间最小"就是在骗人。
-    const where = STATS_RANGE_LABELS[mode];
-    popCheck(menu, "光标值", fields.cursor, (on) => setHeadField(comp, "cursor", on));
-    popCheck(menu, "Δ（与基准光标之差）", fields.delta, (on) => setHeadField(comp, "delta", on));
-    popCheck(menu, "Min（" + where + "最小）", fields.min, (on) => setHeadField(comp, "min", on));
-    popCheck(menu, "Max（" + where + "最大）", fields.max, (on) => setHeadField(comp, "max", on));
-    popCheck(menu, "Avg（" + where + "平均）", fields.avg, (on) => setHeadField(comp, "avg", on));
-    popCheck(menu, "单位", fields.unit, (on) => setHeadField(comp, "unit", on));
-    const hint = makeEl("div", "pophint", menu);
-    hint.textContent = (mode === "ab"
-      ? "选 A–B 而没放基准光标时，抬头不印数字，只说下一步（按 D 或空格）。"
-      : "") + "这几项跟着工作表存/还原；全局的「L 图例」「M 测量」仍然管所有组件。";
   });
 }
 
@@ -8708,7 +9025,8 @@ function onKeyDown(event) {
     }
     case "f": case "F": panBy(0.5); stop(); return;
     case "b": case "B": panBy(-0.5); stop(); return;
-    case "s": case "S": state.style = state.style === "line" ? "points" : "line"; renderAll(); stop(); return;
+    // 点样式只有一处实现（S 键与右栏那一排共用 setTraceStyle）
+    case "s": case "S": setTraceStyle(state.style === "line" ? "points" : "line"); stop(); return;
     case "g": case "G": {
       // Tiled / overlapped is a per-component setting (i2 Pro: Component menu),
       // so two graphs on one sheet can be laid out differently.
@@ -10190,6 +10508,8 @@ function renderAll() {
   setStatus();
   renderMissingNotice();
   renderJumpCounts();
+  // 右栏（票⑨）跟着 + 变；变了才重建，每帧跑到的那些调用是空转。
+  renderInspector();
 }
 
 /* ------------------------------------------------------------------- init */
@@ -10415,6 +10735,9 @@ function init() {
   renderThemeControl();
   $("themeSel").addEventListener("change", () => setTheme($("themeSel").value));
   restoreTheme();
+  // 右栏 inspector（票⑨）：可收起，收起状态也记在本机（外壳的折叠，不进 state）。
+  $("insFold").addEventListener("click", toggleInspector);
+  restoreInspector();
   $("modeTime").addEventListener("click", () => {
     state.mode = "time"; state.view = null; state.panelZoom = {}; scheduleRefresh(); renderAll();
   });
@@ -10470,6 +10793,10 @@ window.i3pro = {
   addComponentOfType: addComponentOfType, applyPreset: applyPreset,
   componentAction: componentAction, refreshWindowTraces: refreshWindowTraces,
   copyComponent: copyComponent, replaceComponentType: replaceComponentType,
+  // 右栏组件 inspector（票⑨）：选中哪一件、栏里显示什么、收起状态
+  inspectorComponent: inspectorComponent, renderInspector: renderInspector,
+  inspectorOpen: inspectorOpen, setInspector: setInspector,
+  setTraceStyle: setTraceStyle, inspectorZoomKeys: inspectorZoomKeys,
   renderAddTypeNote: renderAddTypeNote, addTypeReason: addTypeReason,
   emptyComponentHint: () => EMPTY_COMPONENT_HINT,
   encodeLayout: encodeLayout, decodeLayout: decodeLayout, saveLayout: saveLayout,

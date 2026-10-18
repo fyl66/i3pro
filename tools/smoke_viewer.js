@@ -4479,6 +4479,181 @@ if (canMeta) {
     "切回深色没生效或没记住");
 }
 
+// 40. 右栏组件 inspector（票⑨）：没选中 = 空状态；选中后是这一件的设置；换一件跟着换；
+//     删掉回空状态；标题栏上只剩高频动作。假 DOM 量得到的是"内容与接线跟着动"，
+//     "点得到、画布真的变"由 verify_clicks 那条真鼠标的管。
+{
+  const nodesIn = (id) => {
+    const out = [];
+    (function walk(el) {
+      for (const child of (el && el._children) || []) { out.push(child); walk(child); }
+    })(registry.get(id));
+    return out;
+  };
+  const nodesWith = (key, value) => nodesIn("insBody")
+    .filter((c) => c.dataset && c.dataset[key] === value);
+  const textIn = (id) => nodesIn(id).map((c) => String(c.textContent || "")).join(" \u0001 ");
+
+  const savedComponents = JSON.parse(JSON.stringify(api.state.components));
+  const savedFocus = api.state.focusId;
+  const savedStyle = api.state.style;
+  const savedZoom = JSON.parse(JSON.stringify(api.state.panelZoom));
+
+  const graphs = api.state.components.filter((c) => c.type === "graph");
+  check(graphs.length >= 1, "工作表里没有图组件，inspector 这一组验不下去");
+  const first = graphs[0];
+
+  // ① 没选中：空状态 + 下一步（规则 6）。**不许兜底挑一件**——兜底会让这个状态不存在。
+  api.state.focusId = null;
+  api.renderInspector();
+  check(api.inspectorComponent() === null,
+    "没选中组件时 inspector 兜底挑了一件：" + JSON.stringify(api.inspectorComponent()));
+  const emptyText = textIn("insBody");
+  check(emptyText.indexOf("点一下工作表里的任意一块") >= 0
+    || emptyText.indexOf("工作表是空的") >= 0,
+    "空状态没说下一步：" + emptyText.slice(0, 120));
+
+  // ② 选中一件：通道 / 配色 / 抬头统计 / 这一屏怎么看 / 组件动作都得在栏里
+  api.state.focusId = first.id;
+  api.renderInspector();
+  check(api.inspectorComponent() === first, "选中之后 inspector 认的不是这一件");
+  const title = nodesIn("insBody").filter((c) => String(c.id) === "insTitle")[0];
+  check(!!title && String(title.textContent) === api.componentTitle(first),
+    "inspector 抬头不是这一件的标题：" + (title && title.textContent));
+  const fields = nodesIn("insBody").filter((c) => c.dataset && c.dataset.insField);
+  check(fields.length === 6, "抬头字段的开关不是 6 个：" + fields.length);
+  const acts = nodesIn("insBody").filter((c) => c.dataset && c.dataset.insAct)
+    .map((c) => c.dataset.insAct);
+  check(acts.join(",") === "up,down,copy,replace,close",
+    "组件动作不齐（上移/下移/复制/换成…/删除）：" + acts.join(","));
+  const charts = first.config.channels || [];
+  const rows = nodesIn("insBody")
+    .filter((c) => String(c.className).split(/\s+/).indexOf("insch") >= 0);
+  check(rows.length === charts.length,
+    "通道槽位的行数与组件引用的通道对不上：" + rows.length + " / " + charts.length);
+
+  // ③ 改设置真的落到**这一件组件**上（统计范围与抬头字段都是组件级）
+  const avg = nodesWith("insField", "avg")[0];
+  check(!!avg && avg.checked === true, "抬头字段的开关没按当前值摆");
+  avg.checked = false;
+  avg.dispatch("change", { target: avg });
+  check(api.headFields(first).avg === false, "inspector 里关掉 Avg 没落到组件配置上");
+  const ab = nodesWith("insChip", "ab")[0];
+  check(!!ab && !ab.classList.contains("on"), "A–B 那一档不该默认亮着");
+  ab.dispatch("click", { target: ab });
+  check(api.statsRangeOf(first) === "ab", "inspector 里点 A–B 没落到这一件组件上");
+
+  // ④ 调色板也是组件级（换一套颜色写进 config.palette）
+  const palKeys = Object.keys(api.palettes || {});
+  check(palKeys.length >= 2, "调色板少于两套，配色那一格验不下去：" + palKeys.join(","));
+  const chip = nodesWith("insChip", palKeys[1])[0];
+  check(!!chip, "配色那一格里没有 " + palKeys[1]);
+  if (chip) {
+    chip.dispatch("click", { target: chip });
+    check(first.config.palette === palKeys[1],
+      "inspector 里换调色板没落到这一件组件上：" + first.config.palette);
+  }
+
+  // ⑤ 曲线连接 / 点样式是**这一屏**的：单独一格、快照里灰着并说清为什么
+  const ups = nodesWith("insChip", "previous")[0];
+  check(!!ups && ups.disabled === true,
+    "快照里「曲线连接」那几片没灰掉（切了也不会变，得说清）");
+  check(textIn("insBody").indexOf("快照文件里的曲线是导出时烘进去的") >= 0,
+    "快照里曲线连接改不了，但没写清为什么");
+  const points = nodesWith("insChip", "points")[0];
+  check(!!points, "点样式那一排没有「点」");
+  if (points) {
+    points.dispatch("click", { target: points });
+    check(api.state.style === "points", "inspector 里点「点」没换成点样式：" + api.state.style);
+  }
+
+  // ⑥ 轴范围：有手动量程才给"恢复自动量程"，点了真清掉
+  api.state.panelZoom[first.id + "|测试组"] = [0, 1];
+  api.renderInspector();
+  check(api.inspectorZoomKeys(first).length === 1, "手动量程没记到这一件组件名下");
+  const reset = nodesIn("insBody").filter((c) => String(c.id) === "insZoomReset")[0];
+  check(!!reset, "有手动量程，却没给「恢复自动量程」");
+  if (reset) {
+    reset.dispatch("click", { target: reset });
+    check(api.inspectorZoomKeys(first).length === 0, "「恢复自动量程」没清掉这一件的手动量程");
+  }
+
+  // ⑦ 通道槽位：图有 sidebar（清单型），✕ 真的把这条通道从这一件组件里去掉
+  const beforeChannels = (first.config.channels || []).length;
+  const rm = nodesIn("insBody").filter((c) => c.dataset && c.dataset.insRemove)[0];
+  check(!!rm && beforeChannels >= 1, "图上没有可移除的通道行");
+  if (rm && beforeChannels >= 1) {
+    rm.dispatch("click", { target: rm });
+    check((first.config.channels || []).length === beforeChannels - 1,
+      "inspector 里的 ✕ 没把通道去掉：" + (first.config.channels || []).length);
+  }
+
+  // ⑧ 换一件组件：标题与那几档的选择跟着换
+  const other = api.copyComponent(first);
+  check(!!other && api.inspectorComponent() === other, "复制之后 inspector 没跟到新那一件");
+  if (other) {
+    api.state.focusId = other.id;
+    other.config.palette = palKeys[0];
+    other.config.statsRange = "view";
+    api.renderInspector();
+    const title2 = nodesIn("insBody").filter((c) => String(c.id) === "insTitle")[0];
+    check(!!title2 && String(title2.textContent) === api.componentTitle(other),
+      "换一件组件之后 inspector 抬头没跟着换："
+      + (title2 && title2.textContent) + " / " + api.componentTitle(other));
+    const ab2 = nodesWith("insChip", "ab")[0];
+    check(!!ab2 && !ab2.classList.contains("on"),
+      "换组件之后 A–B 那一档还亮着上一件的选择");
+    const chip2 = nodesWith("insChip", palKeys[0])[0];
+    check(!!chip2 && chip2.classList.contains("on"),
+      "换组件之后调色板没跟着摆");
+
+    // ⑨ 删掉选中的那一件：组件没了，栏回空状态
+    const before = api.state.components.length;
+    const close = nodesWith("insAct", "close")[0];
+    check(!!close, "组件那格没有「删除」");
+    if (close) {
+      close.dispatch("click", { target: close });
+      check(api.state.components.length === before - 1
+        && api.state.components.indexOf(other) < 0,
+        "inspector 的「删除」没把这一件去掉");
+      check(api.inspectorComponent() === null,
+        "删掉之后 inspector 还指着那一件（应当回空状态）");
+      check(textIn("insBody").indexOf("点一下工作表里的任意一块") >= 0,
+        "删掉之后没回到空状态");
+    }
+  }
+
+  // ⑩ 右栏可收起、状态记在本机（外壳的折叠，不进 state）
+  api.setInspector(false);
+  check(api.inspectorOpen() === false
+    && registry.get("workbench").classList.contains("insfold"),
+    "右栏收起没生效");
+  check(ctx.storage.getItem("i3pro.inspector.v1") === "0", "右栏收起没记住");
+  api.setInspector(true);
+  check(api.inspectorOpen() === true
+    && !registry.get("workbench").classList.contains("insfold")
+    && ctx.storage.getItem("i3pro.inspector.v1") === "1", "右栏展开没生效或没记住");
+
+  // ⑪ 组件标题栏：低频动作一件都不许留（票⑨的判据：可见按钮 ≤ 4）
+  const bars = nodesIn("worksheet").filter((c) => String(c.className).indexOf("ctools") >= 0);
+  check(bars.length === api.state.components.length,
+    "组件标题栏的数量与组件对不上：" + bars.length);
+  const labels = bars.map((bar) => (bar._children || []).map((b) => String(b.textContent)).join(","));
+  const moved = labels.filter((one) => /上移|下移|复制|换成|显示/.test(one));
+  check(moved.length === 0,
+    "组件标题栏上还留着搬进 inspector 的低频按钮：" + moved.join(" ;; "));
+  const crowded = labels.filter((one) => one.split(",").length > 4);
+  check(crowded.length === 0, "组件标题栏上的按钮超过 4 个：" + crowded.join(" ;; "));
+
+  // 收尾：把工作表与这一屏的选择还原，后面的断言看的还是原来那一屏
+  api.state.components = savedComponents;
+  api.state.focusId = savedFocus;
+  api.state.panelZoom = savedZoom;
+  api.setTraceStyle(savedStyle);
+  api.buildWorksheet();
+  api.renderAll();
+}
+
 const header = registry.get("fileInfo");
 check(header && (header.innerHTML.indexOf(".ld") >= 0
   || header.innerHTML.indexOf(".csv") >= 0

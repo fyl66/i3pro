@@ -18,6 +18,8 @@ the same session twice costs nothing.
 
 from __future__ import annotations
 
+import gzip
+import hashlib
 import select
 import socket
 import threading
@@ -31,6 +33,21 @@ from . import render
 from .api import Api, Body, ClientGone, Response, csv_arg, float_arg, int_arg
 from .indexpage import index_page, unknown_session_page
 from .library import SessionLibrary, dumps, json_safe
+
+#: 到这个大小才值得压：几 KB 的响应压完可能更大，还要白付一次 CPU。
+GZIP_MIN_BYTES = 64 * 1024
+
+#: 压缩级别。**1 不是 6**：实测高避金标准 8000 桶那份 3.6 MB 载荷，
+#: 级别 1 用 29 ms 压到 830 KB（4.3×），级别 6 要用 140 ms 才压到 694 KB（5.2×）
+#: ——多花 110 ms 换 20% 的体积，在局域网里不值。这是给人用的交互工具，
+#: 迟到的曲线比多传几百 KB 更烦。
+GZIP_LEVEL = 1
+
+
+def _etag(body: bytes) -> str:
+    """响应体的强校验码。blake2b 在 Python 里够快：3.6 MB 实测 6 ms。"""
+    return '"' + hashlib.blake2b(body, digest_size=16).hexdigest() + '"'
+
 
 __all__ = [
     "SessionLibrary",
@@ -149,6 +166,27 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
         def _html(self, text: str, status: int = 200) -> Response:
             return Response(status, text.encode("utf-8"), "text/html; charset=utf-8")
 
+        def _json_transport(self, response: Response, headers: list):
+            """JSON 响应的传输层：ETag + 条件请求 + gzip。
+
+            只碰 JSON。两张 HTML 页面与导出那条流式文件一个字节都不动——它们各有各的
+            缓存语义（``Cache-Control: no-store`` 那一条不能顺手改掉）。
+            ``headers`` 是已经算好的响应头，**只能往上加，不能换掉**——工作表「导出」
+            就靠 ``Content-Disposition`` 才变成下载而不是跳转（ticket #33，
+            2026-10-18 真浏览器验收抓到的就是这个）。
+            返回 ``(要发的字节, 头, 是不是 304)``。
+            """
+            body = response.body
+            tag = _etag(body)
+            headers = list(headers) + [("ETag", tag), ("Vary", "Accept-Encoding")]
+            if (self.headers.get("If-None-Match") or "").strip() == tag:
+                return b"", headers, True
+            accepted = (self.headers.get("Accept-Encoding") or "").lower()
+            if len(body) >= GZIP_MIN_BYTES and "gzip" in accepted:
+                headers = headers + [("Content-Encoding", "gzip")]
+                return gzip.compress(body, GZIP_LEVEL), headers, False
+            return body, headers, False
+
         def send(self, response: Response) -> None:
             """把 ``Response`` 发出去。
 
@@ -157,13 +195,26 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
             发完、出错、连接中断三种情况都在 ``finally`` 里删掉它，磁盘不留垃圾。
             """
             path = response.path
+            body = response.body
+            headers = list(response.headers)
+            status = response.status
+            cache_control = "no-store"
+            # 只有 200 的 JSON 走这条路：报错体都很小，压了反而亏。
+            if (path is None and response.status == 200
+                    and response.ctype.startswith("application/json")):
+                body, headers, not_modified = self._json_transport(response, headers)
+                if not_modified:
+                    status = 304
+                # 有 ETag 才谈得上"存下来、回来问一句"。``no-cache`` 不是"别存"，
+                # 是"每次都得先问"：数据一变字节就变、ETag 就变，304 只在真没变时出现。
+                cache_control = "no-cache"
             try:
-                size = path.stat().st_size if path is not None else len(response.body)
-                self.send_response(response.status)
+                size = path.stat().st_size if path is not None else len(body)
+                self.send_response(status)
                 self.send_header("Content-Type", response.ctype)
                 self.send_header("Content-Length", str(size))
-                self.send_header("Cache-Control", "no-store")
-                for key, value in response.headers:
+                self.send_header("Cache-Control", cache_control)
+                for key, value in headers:
                     self.send_header(key, value)
                 if response.close:
                     self.close_connection = True
@@ -178,8 +229,8 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
                                 break
                             self.wfile.write(chunk)
                     return
-                if response.body:
-                    self.wfile.write(response.body)
+                if body:
+                    self.wfile.write(body)
             finally:
                 if path is not None:
                     path.unlink(missing_ok=True)

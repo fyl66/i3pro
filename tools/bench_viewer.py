@@ -131,8 +131,12 @@ def measure_compute(api, name: str, channels: list[str], buckets: int,
 
 
 def measure_http(library, name: str, channels: list[str], buckets: int,
-                 repeat: int) -> dict:
-    """量真 HTTP 往返：临时起服务、真发一次请求（**不开浏览器**）。"""
+                 repeat: int, accept_encoding: str | None = None) -> dict:
+    """量真 HTTP 往返：临时起服务、真发一次请求（**不开浏览器**）。
+
+    ``accept_encoding="gzip"`` 量的是浏览器那条路（多一层压缩的 CPU，少一大截字节）；
+    不给就是同一台机器上的纯往返，用来和 ticket #51 / #53 / #63 的数字对读。
+    """
     handler = server.make_handler(library, render.DEFAULT_BUCKETS)
     httpd = server.bind("127.0.0.1", 0, handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -146,13 +150,15 @@ def measure_http(library, name: str, channels: list[str], buckets: int,
         })
         url = (f"http://127.0.0.1:{port}/api/session/"
                f"{urllib.parse.quote(name)}/trace?{query}")
+        request = urllib.request.Request(
+            url, headers={"Accept-Encoding": accept_encoding} if accept_encoding else {})
         body = b""
-        with urllib.request.urlopen(url) as reply:      # 热身
+        with urllib.request.urlopen(request) as reply:      # 热身
             reply.read()
         times: list[float] = []
         for _ in range(max(1, int(repeat))):
             started = time.perf_counter()
-            with urllib.request.urlopen(url) as reply:
+            with urllib.request.urlopen(request) as reply:
                 body = reply.read()
             times.append((time.perf_counter() - started) * 1000.0)
         return {"ms": statistics.median(times), "bytes": len(body)}
@@ -176,11 +182,16 @@ def bench_session(path: Path, channels: int, repeat: int, with_http: bool) -> di
             row.update(measure_compute(api, name, names, buckets, repeat))
             if with_http:
                 row["http_ms"] = measure_http(library, name, names, buckets, repeat)["ms"]
+                browser = measure_http(library, name, names, buckets, repeat,
+                                       accept_encoding="gzip")
+                row["gzip_ms"] = browser["ms"]
+                row["wire_bytes"] = browser["bytes"]
             rows.append(row)
             print(f"  {buckets:>6d} 桶   {row['ms']:>8.1f} ms   "
                   f"{row['json_bytes'] / 1024:>8.1f} KB   "
                   f"{row['gzip_bytes'] / 1024:>7.1f} KB"
-                  + (f"   {row['http_ms']:>8.1f} ms" if with_http else ""))
+                  + (f"   {row['http_ms']:>8.1f} ms   {row['gzip_ms']:>8.1f} ms"
+                     f"   {row['wire_bytes'] / 1024:>8.1f} KB" if with_http else ""))
         return {
             "path": str(path),
             "session": name,
@@ -196,7 +207,9 @@ def bench_session(path: Path, channels: int, repeat: int, with_http: bool) -> di
 
 def _fmt_header(with_http: bool) -> str:
     head = f"  {'桶':>6s}   {'计算 ms':>8s}   {'JSON KB':>8s}   {'gzip KB':>7s}"
-    return head + (f"   {'HTTP ms':>8s}" if with_http else "")
+    if not with_http:
+        return head
+    return head + f"   {'HTTP ms':>8s}   {'gzip ms':>8s}   {'上线 KB':>8s}"
 
 
 def main(argv: list[str] | None = None) -> int:

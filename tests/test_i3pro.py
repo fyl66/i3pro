@@ -3191,6 +3191,114 @@ class TestJsonFastPath(unittest.TestCase):
                 self._assert_plain(payload, name)
 
 
+class TestHttpCompression(unittest.TestCase):
+    """ticket #52：JSON 响应的 gzip + 条件请求（ETag / 304）。
+
+    这条缝只碰 200 的 JSON：两张 HTML 页面与导出的流式文件必须原样（它们各自
+    有各自的缓存语义），所以要有一条把它们钉住的用例。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="i3pro-gzip-")
+        self.dir = Path(self.tmp.name)
+        # 表头与单位行**一样宽**：单位行末尾那个空字段会让它比两列的表头更宽，
+        # 于是被 `layout_of` 当成表头（那个 bug 单独记在 #64，不在这张票里修）。
+        for name, rows in (("大", 5000), ("小", 40)):
+            body = "".join(f"{i / 100.0:.2f};{i % 300};{i % 7}\n"
+                           for i in range(rows))
+            (self.dir / f"{name}.csv").write_text(
+                "Time;Vx KF;TH\ns;km/h;\n" + body, encoding="utf-8")
+        sheets = self.dir / "worksheets"
+        sheets.mkdir()
+        # 文件名（身份）只能是 ASCII——它要进网址；显示名可以是中文。
+        (sheets / "sheet-x.json").write_text(json.dumps({
+            "name": "导出", "order": 1,
+            "components": [{"type": "graph", "x": 0, "y": 0}],
+        }, ensure_ascii=False), encoding="utf-8")
+        self.library = server.SessionLibrary([self.dir], cache_size=1,
+                                             worksheets_root=self.dir)
+        self.httpd = server.bind("127.0.0.1", 0,
+                                 server.make_handler(self.library))
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        big = urllib.parse.quote("大")
+        small = urllib.parse.quote("小")
+        self.big = f"/api/session/{big}/trace?channels=Vx%20KF&buckets=8000"
+        self.big_coarse = f"/api/session/{big}/trace?channels=Vx%20KF&buckets=500"
+        self.small = f"/api/session/{small}/trace?channels=Vx%20KF"
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=5)
+        self.library.close()
+        self.tmp.cleanup()
+
+    def _get(self, path: str, headers: dict | None = None):
+        request = urllib.request.Request(self.base + path, headers=headers or {})
+        try:
+            with urllib.request.urlopen(request) as reply:
+                return reply.status, dict(reply.headers), reply.read()
+        except urllib.error.HTTPError as exc:        # 304 / 4xx 走异常
+            return exc.status, dict(exc.headers), exc.read()
+
+    def test_大响应压了而且解得回来(self):
+        status, plain_headers, plain = self._get(self.big)
+        self.assertEqual(status, 200)
+        self.assertGreater(len(plain), server.GZIP_MIN_BYTES)
+        self.assertNotIn("Content-Encoding", plain_headers, "没说要 gzip 就别压")
+        self.assertEqual(plain_headers.get("Cache-Control"), "no-cache")
+        self.assertTrue(plain_headers.get("ETag"))
+
+        status, headers, body = self._get(self.big, {"Accept-Encoding": "gzip"})
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("Content-Encoding"), "gzip")
+        self.assertIn("Accept-Encoding", headers.get("Vary", ""))
+        self.assertLess(len(body), len(plain) / 3)
+        self.assertEqual(gzip.decompress(body), plain, "解压回来必须逐字节相同")
+
+    def test_小响应不压(self):
+        status, headers, body = self._get(self.small, {"Accept-Encoding": "gzip"})
+        self.assertEqual(status, 200)
+        self.assertLess(len(body), server.GZIP_MIN_BYTES)
+        self.assertNotIn("Content-Encoding", headers)
+        self.assertEqual(json.loads(body)["Vx KF"]["samples"], 40)
+
+    def test_条件请求命中就是_304_没有体(self):
+        _status, headers, _body = self._get(self.big)
+        tag = headers["ETag"]
+        status, again, body = self._get(self.big, {"If-None-Match": tag})
+        self.assertEqual(status, 304)
+        self.assertEqual(body, b"")
+        self.assertEqual(again["ETag"], tag)
+
+    def test_载荷变了_ETag_就变(self):
+        _status, first, _body = self._get(self.big)
+        _status, second, _body = self._get(self.big_coarse)
+        self.assertNotEqual(first["ETag"], second["ETag"])
+
+    def test_页面与静态那条路的缓存语义没被动过(self):
+        status, headers, _body = self._get("/", {"Accept-Encoding": "gzip"})
+        self.assertEqual(status, 200)
+        self.assertNotIn("ETag", headers)
+        self.assertNotIn("Content-Encoding", headers)
+        self.assertEqual(headers.get("Cache-Control"), "no-store")
+
+    def test_响应自己带的头不会被吞掉(self):
+        """工作表「导出」靠 ``Content-Disposition`` 才变成下载而不是跳转（ticket #33）。
+
+        2026-10-18 真浏览器验收抓到的正是这个：gzip 那条路一开始把响应自带的头
+        整个换掉了，导出于是变成"跳到那个 URL 看一段 JSON"。
+        """
+        status, headers, body = self._get("/api/worksheets/sheet-x/export")
+        self.assertEqual(status, 200)
+        self.assertIn("attachment", headers.get("Content-Disposition", ""))
+        self.assertIn(urllib.parse.quote("导出"), headers.get("Content-Disposition", ""))
+        self.assertTrue(headers.get("ETag"))
+        self.assertEqual(json.loads(body)["name"], "导出")
+
+
 class TestViewerScript(unittest.TestCase):
     """The generated workbench must execute without throwing (needs node)."""
 

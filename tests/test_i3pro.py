@@ -18,7 +18,9 @@ import contextlib
 import atexit
 import csv
 import dataclasses
+import gzip
 import hashlib
+import importlib.util
 import io
 import itertools
 import os
@@ -2924,6 +2926,82 @@ class TestPlotResolution(unittest.TestCase):
             self.assertEqual(large["buckets"], 8000)
             self.assertGreater(len(large["traces"]["Vx KF"]["time"]),
                                len(small["traces"]["Vx KF"]["time"]))
+
+
+class TestBenchViewer(unittest.TestCase):
+    """ticket #51：性能基准工具 ``tools/bench_viewer.py``。
+
+    这份用例**不碰金标准**：合成一份 2000 行的 CSV 场次就能把两层都跑通，缺数据的
+    机器上也绿。它量的是"工具量的是真东西"，不是"这台机器有多快"——所以**一句耗时
+    都不作断言**（同一段代码换台机器就会变，钉死了只会变成随机红）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        # tools/ 不是包，按路径加载。
+        spec = importlib.util.spec_from_file_location(
+            "i3pro_tools_bench_viewer", ROOT / "tools" / "bench_viewer.py")
+        cls.tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.tool)
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="i3pro-bench-")
+        self.dir = Path(self.tmp.name)
+        # 最后一条是状态通道（无单位 + 名字里有 ready）：它不在默认优先级里，
+        # 所以"补足到 12 条"那一步必须跳过它，而不是拿它凑数。
+        rows = "".join(f"{i / 100.0:.2f};{i % 300};{i % 2}\n" for i in range(2000))
+        (self.dir / "基准.csv").write_text(
+            "Time;Vx KF;TH;System Ready\ns;km/h;;\n" + rows, encoding="utf-8")
+        self.library = server.SessionLibrary([self.dir], cache_size=1)
+        self.name = self.tool.resolve_name(self.library, self.dir / "基准.csv")
+
+    def tearDown(self):
+        self.library.close()
+        self.tmp.cleanup()
+
+    def test_计算层量的就是真实取数路径(self):
+        from i3pro import api as apimod
+
+        api = apimod.Api(self.library)
+        channels = ["Vx KF"]
+        row = self.tool.measure_compute(api, self.name, channels, 500, repeat=1)
+        direct = api.handle(["session", self.name, "trace"],
+                            self.tool.trace_query(channels, 500), "GET")
+        self.assertEqual(direct.status, 200)
+        self.assertEqual(row["json_bytes"], len(direct.body))
+        self.assertEqual(row["gzip_bytes"], len(gzip.compress(direct.body, 6)))
+        self.assertLess(row["gzip_bytes"], row["json_bytes"])
+        payload = json.loads(direct.body)
+        self.assertEqual(list(payload), channels)
+        self.assertLessEqual(len(payload["Vx KF"]["time"]), 500)
+
+    def test_http_层和计算层是同一份载荷(self):
+        from i3pro import api as apimod
+
+        api = apimod.Api(self.library)
+        channels = ["Vx KF"]
+        computed = self.tool.measure_compute(api, self.name, channels, 500, repeat=1)
+        over_http = self.tool.measure_http(self.library, self.name, channels, 500,
+                                           repeat=1)
+        self.assertEqual(over_http["bytes"], computed["json_bytes"],
+                         "HTTP 那条路取回来的不是同一份载荷")
+
+    def test_查询参数形状跟着_api_的解析器(self):
+        from i3pro import api as apimod
+
+        query = self.tool.trace_query(["Vx KF", "TH"], 2000)
+        self.assertEqual(apimod.csv_arg(query, "channels"), ["Vx KF", "TH"])
+        self.assertEqual(apimod.int_arg(query, "buckets", 0), 2000)
+        self.assertEqual(query["upsample"], [render.DEFAULT_UPSAMPLE])
+
+    def test_挑通道走界面那一份规则(self):
+        log = self.library.get(self.name)
+        names = self.tool.pick_channels(log, 12)
+        self.assertEqual(names, render.pick_channels(log, 12))
+        self.assertTrue(all(log.has(name) for name in names))
+        self.assertTrue(all(not render.is_status_channel(log.channel(name))
+                            for name in names))
+        self.assertNotIn("System Ready", names, "无单位的状态通道不该被拿来凑数")
 
 
 class TestViewerScript(unittest.TestCase):

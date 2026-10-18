@@ -3164,6 +3164,154 @@ class Checker:
         self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-layout.png"),
                           self.session)
 
+    # ------------------------------------------- 票⑩ 底部概览/状态 dock
+    def bottom_dock(self):
+        """票⑩：概览 + 状态固定在画布底边，折叠可记住，两种窗口下不重叠。
+
+        这一节要同时量三件事——用真 rect 证明 dock **不在滚动容器里**（否则内容一滚
+        就跟着走）、折叠真的把画布高度还回来、以及概览收起再展开之后还能拖动定位。
+        """
+        def rect_of(selector):
+            raw = self.js(
+                "(function(){var el=document.querySelector(%r);if(!el)return 'null';"
+                "var r=el.getBoundingClientRect();return JSON.stringify({x:r.left+r.width/2,"
+                "y:r.top+r.height/2,w:r.width,h:r.height,left:r.left,top:r.top,"
+                "right:r.right,bottom:r.bottom});})()" % selector)
+            return json.loads(raw) if raw and raw != "null" else None
+
+        charts = rect_of("#charts")
+        scroll = rect_of("#chartScroll")
+        dock = rect_of("#bottomDock")
+        overview = rect_of("#overviewHost")
+        status = rect_of("#statusLine")
+        got = bool(charts and scroll and dock and overview and status)
+        self.check("票⑩ 底部 dock 的五个区域都在", got,
+                   "%s / %s / %s / %s / %s" % (charts, scroll, dock, overview, status))
+        if not got:
+            return
+        self.check("票⑩ dock 不在滚动容器里（内容滚它不跟着走）",
+                   self.js("document.getElementById('chartScroll').contains("
+                           "document.getElementById('bottomDock'))") is False)
+        self.check("票⑩ dock 贴在画布底边、在滚动区下面",
+                   dock["bottom"] <= charts["bottom"] + 1
+                   and dock["top"] >= scroll["bottom"] - 1,
+                   "dock=%s · scroll=%s · charts=%s" % (dock, scroll, charts))
+        self.check("票⑩ 概览与状态都落在 dock 里",
+                   overview["left"] >= dock["left"] - 1
+                   and overview["right"] <= dock["right"] + 1
+                   and overview["top"] >= dock["top"] - 1
+                   and status["bottom"] <= dock["bottom"] + 1,
+                   "overview=%s · status=%s · dock=%s" % (overview, status, dock))
+
+        # 折叠 / 展开：画布高度真的换、状态记在本机
+        folded_ok = False
+        fold = rect_of("#dockFold")
+        if fold:
+            open_scroll_h, open_body_h = scroll["h"], overview["h"] + status["h"]
+            self.browser.click(fold["x"], fold["y"], self.session)
+            time.sleep(0.3)
+            folded_scroll = rect_of("#chartScroll")
+            folded_body = rect_of("#dockBody")
+            folded_ok = bool(folded_scroll and (not folded_body or folded_body["h"] <= 0))
+            self.check("票⑩ 点一下「收起概览」把 dock body 收掉",
+                       self.js("i3pro.dockOpen()") is False and folded_ok,
+                       "body=%s" % (folded_body,))
+            self.check("票⑩ 收起之后画布（滚动区）真的变高",
+                       folded_ok and folded_scroll["h"] > open_scroll_h + open_body_h * 0.5,
+                       "展开 %.0f → 收起 %.0f（dock body 约 %.0f）"
+                       % (open_scroll_h, folded_scroll["h"] if folded_scroll else -1,
+                          open_body_h))
+            self.check("票⑩ 折叠状态记在本机",
+                       self.js("localStorage.getItem('i3pro.dock.v1')") == "0",
+                       self.js("localStorage.getItem('i3pro.dock.v1')"))
+            # 真重载一次：折叠状态该跟着回来（与主题 / 工作表同一个本机记忆）
+            self.js("setTimeout(function(){location.reload();},20);true")
+            time.sleep(1.2)
+            ready = self.browser.wait_for(
+                "!!(window.i3pro && i3pro.state && document.getElementById('bottomDock'))",
+                self.session, timeout=30)
+            self.browser.js(HELPERS, self.session)
+            reloaded_body = rect_of("#dockBody")
+            self.check("票⑩ 重载之后还是收起的（状态真记住了）",
+                       ready and self.js("i3pro.dockOpen()") is False
+                       and (not reloaded_body or reloaded_body["h"] <= 0),
+                       "%s / %s" % (self.js("i3pro.dockOpen()"), reloaded_body))
+            fold2 = rect_of("#dockFold")
+            if fold2:
+                self.browser.click(fold2["x"], fold2["y"], self.session)
+                time.sleep(0.3)
+                again = rect_of("#chartScroll")
+                self.check("票⑩ 再点一下展开，画布高度与记忆都回来",
+                           self.js("i3pro.dockOpen()") is True
+                           and self.js("localStorage.getItem('i3pro.dock.v1')") == "1"
+                           and again and abs(again["h"] - open_scroll_h) < 3,
+                           "again=%s · open=%.1f" % (again, open_scroll_h))
+
+        # 概览仍可拖动定位：收起再展开之后也没坏。先缩到一个有空间挪的窗口——
+        # 重载之后视图回到整场，整场窗口拖到哪儿都被 clamp，量不出"真的动了"。
+        self.js(
+            "(function(){var f=i3pro.fullRange();var s=f[1]-f[0];"
+            "i3pro.zoomTo(f[0]+s*0.4,f[0]+s*0.6);return true;})()")
+        time.sleep(0.3)
+        canvas = rect_of("#overview")
+        before_lane = json.loads(self.js("JSON.stringify(i3pro.lane())") or "[0,0]")
+        if canvas:
+            self.browser.mouse("mousePressed", canvas["x"], canvas["y"], self.session)
+            self.browser.mouse("mouseMoved", canvas["x"] - 70, canvas["y"], self.session,
+                               buttons=1)
+            self.browser.mouse("mouseReleased", canvas["x"] - 70, canvas["y"], self.session,
+                               buttons=0)
+            self.browser.settle(self.session)
+        after_lane = json.loads(self.js("JSON.stringify(i3pro.lane())") or "[0,0]")
+        self.check("票⑩ 收起/展开之后概览还能拖动定位",
+                   bool(canvas) and abs(after_lane[0] - before_lane[0]) > 1.0,
+                   "%s -> %s" % (before_lane, after_lane))
+
+        # 两种窗口下截图：dock 不越界、不与滚动区重叠、状态行不裁切
+        for width, height in ((1280, 720), (1920, 1080)):
+            self.browser.call("Emulation.setDeviceMetricsOverride",
+                              {"width": width, "height": height, "deviceScaleFactor": 1,
+                               "mobile": False}, session=self.session)
+            time.sleep(0.6)
+            try:
+                w_charts = rect_of("#charts")
+                w_scroll = rect_of("#chartScroll")
+                w_dock = rect_of("#bottomDock")
+                w_overview = rect_of("#overviewHost")
+                w_status = rect_of("#statusLine")
+                fits = bool(w_charts and w_scroll and w_dock and w_overview and w_status) \
+                    and w_dock["bottom"] <= height + 1 \
+                    and w_status["bottom"] <= w_dock["bottom"] + 1 \
+                    and w_dock["top"] >= w_scroll["bottom"] - 1 \
+                    and w_overview["left"] >= w_dock["left"] - 1 \
+                    and w_overview["right"] <= w_dock["right"] + 1 \
+                    and w_status["left"] >= w_dock["left"] - 1 \
+                    and w_status["right"] <= w_dock["right"] + 1 \
+                    and w_overview["bottom"] <= w_status["top"] + 1
+                overflow = json.loads(self.js(
+                    "(function(){var d=document.getElementById('bottomDock');"
+                    "var s=document.getElementById('statusLine');"
+                    "return JSON.stringify({"
+                    "dock:d.scrollWidth<=d.clientWidth+1,"
+                    "status:s.scrollWidth<=s.clientWidth+1});})()") or "{}")
+                self.check("票⑩ %d×%d 下 dock/状态不重叠、不裁切" % (width, height),
+                           fits and all(overflow.values()),
+                           "charts=%s · scroll=%s · dock=%s · status=%s"
+                           % (w_charts, w_scroll, w_dock, w_status)
+                           + " · overflow=%s" % overflow)
+                self.browser.shot(
+                    os.path.join(ROOT, "out", "shots",
+                                 "verify-dock-%dx%d.png" % (width, height)),
+                    self.session)
+            finally:
+                self.browser.call("Emulation.clearDeviceMetricsOverride", session=self.session)
+                time.sleep(0.3)
+        # 收尾：把视图放回开头那一圈，后面的验收还在同一屏上继续
+        self.js(
+            "(function(){var l=(i3pro.data.laps||[]).filter(function(x){return x.complete;});"
+            "i3pro.state.view=l[1]?[l[1].start_time,l[1].end_time]:null;i3pro.renderAll();"
+            "return true;})()")
+
     # ------------------------------------------- A101 主题切换
     def theme_switch(self):
         """A101：两套配色真能切、画布跟着重画、选过的记得住。
@@ -4847,6 +4995,8 @@ def main(argv=None):
             # 票⑧ 的布局：先量"默认长什么样"（左栏只剩三块、高级工具收着），
             # 再把它展开留给后面那些要点面板里控件的验收。
             checker.layout_sheet_bar()
+            # 票⑩ 底部 dock：概览 + 状态固定在画布底边，折叠可记住
+            checker.bottom_dock()
             # A101 主题切换：变量 + 画布像素 + 重载之后记不记得住
             checker.theme_switch()
             # 票⑨ 右栏 inspector：真选中一件、改设置画布真的变、标题栏只剩高频动作

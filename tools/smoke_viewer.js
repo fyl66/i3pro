@@ -223,7 +223,14 @@ class Element {
     if (this.style && this.style.display === "none") {
       return { left: 0, top: 0, width: 0, height: 0, bottom: 0, right: 0 };
     }
-    return { left: 0, top: 0, width: 900, height: 150, bottom: 150, right: 900 };
+    // 假 DOM 没有 flex 布局。票⑩ 只补一条：dock 收起后滚动区会变高（118 与真
+    // Edge 量到的 dock body 同量级；真高度由 verify_clicks 的 bottom_dock 量）。
+    let height = 150;
+    if (this.id === "chartScroll" && REGISTRY && REGISTRY.get("bottomDock")
+        && REGISTRY.get("bottomDock").classList.contains("folded")) {
+      height += 118;
+    }
+    return { left: 0, top: 0, width: 900, height: height, bottom: height, right: 900 };
   }
   get clientWidth() { return 900; }
   get parentElement() { return this._parent || (this._parent = new Element("div")); }
@@ -4927,6 +4934,47 @@ const count = registry.get("chCount");
 check(count && String(count.textContent).indexOf("/") >= 0, "channel count missing");
 const status = registry.get("statusLine");
 check(status && String(status.innerHTML).indexOf("窗口") >= 0, "status line was not updated");
+
+// 票⑩ 底部 dock：概览与状态固定在图表滚动区外面，折叠状态记在本机
+{
+  const dock = registry.get("bottomDock");
+  const fold = registry.get("dockFold");
+  const dockBody = registry.get("dockBody");
+  const chartScroll = registry.get("chartScroll");
+  const overviewHost = registry.get("overviewHost");
+  check(!!dock && !!fold && !!dockBody && !!chartScroll && !!overviewHost,
+    "底部 dock 的 DOM 不齐（#bottomDock / #dockFold / #dockBody / #chartScroll / #overviewHost）");
+  if (dock && fold && dockBody && chartScroll && overviewHost) {
+    check(typeof api.dockOpen === "function" && api.dockOpen() === true,
+      "底部 dock 默认应当是展开的");
+    const openScrollH = chartScroll.getBoundingClientRect().height;
+    fold.dispatch("click", { target: fold });
+    check(api.dockOpen() === false, "点一下「收起概览」没有收起 dock");
+    check(dockBody.style.display === "none" || dockBody.getBoundingClientRect().height <= 0,
+      "收起之后 dock body 还占着地方");
+    check(chartScroll.getBoundingClientRect().height > openScrollH,
+      "收起之后画布（滚动区）没有变高");
+    check(ctx.storage.getItem("i3pro.dock.v1") === "0", "dock 收起没记住");
+    api.setDock(true);
+    check(api.dockOpen() === true && ctx.storage.getItem("i3pro.dock.v1") === "1",
+      "dock 展开没生效或没记住");
+    const ov = registry.get("overview");
+    if (ov) {
+      const full = api.fullRange();
+      const span = full[1] - full[0] || 1;
+      api.zoomTo(full[0] + span * 0.4, full[0] + span * 0.6);   // 给"挪窗口"留出空间
+      const before = api.lane().slice();
+      ov.dispatch("mousedown", { detail: 1, clientX: 400, clientY: 20, preventDefault() {} });
+      window.dispatch("mousemove", { clientX: 300, clientY: 20 });
+      window.dispatch("mouseup", {});
+      check(before[0] !== api.lane()[0] || before[1] !== api.lane()[1],
+        "收起/展开之后概览拖不动了");
+    } else {
+      check(false, "没有概览画布，票⑩这一组验不下去");
+    }
+  }
+}
+
 check(calls.fillText > 0, "no canvas text was drawn");
 check(calls.lineTo > 0, "no canvas traces were drawn");
 check(calls.fillRect > 0, "no canvas points were drawn");

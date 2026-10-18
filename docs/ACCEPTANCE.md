@@ -3941,7 +3941,7 @@ python tools\verify_clicks.py
 | `TestIndependentParsers` | 第二套实现交叉验证、213 通道 CSV 全量对照 |
 | `TestBeaconUndo` | 撤销的纯函数层：什么是"同一版"、什么时候没有可撤销的一步、交回去的是上一版本身 |
 | `TestBeaconUndoOverHttp` | 撤销走真实 `PUT`：改名 / 插入 / 删除各自一步回到原样、`trusted` 迁移、落盘、一次无改动的保存不吃掉上一步、没有可撤销的一步时 400 并说明下一步、页面注入的 `laps_can_undo` 三态 |
-| `TestViewerScript` | 无头驱动前端：脚本里 **609 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
+| `TestViewerScript` | 无头驱动前端：脚本里 **827 个 `check(...)` 断言点**（`rg -o "check\(" tools/smoke_viewer.js | Measure-Object`；跑起来实际执行 **888 项**，循环里的断言点会各算一次）+ 时间轴 / 双圈两条渲染路径 + 直接打开模板的提示 |
 | `TestAliases` / `TestAliasesOverHttp` | 通道别名（#36，16 项）：有序候选取第一条存在的、重复候选去掉、九种坏形状各说下一步、空候选合法、不是引用就不去别名表里翻、**同一套别名在两份金标准上落到不同通道**（`Gear Speed1` / `SpeedRL`）、`annotate` 贴出落点表、别名随文件往返、**导出 → 导入逐字段相同**、保存时给不给 aliases 的两种行为、页面载荷带着落点；HTTP：保存别名与落点、坏别名 400 带下一步 |
 | `TestPalettes` | 波形配色（#35，8 项）：三套调色板齐、每套 ≥ 8 色、前八色两两 ΔE ≥ 25、相邻 ≥ 30、对底色对比度 ≥ 3.0、"缺失"灰不属于任何一套且与所有颜色 ΔE ≥ 25、色差与对比度这两把尺子本身对拍（黑/白 = 100 / 21）、页面载荷带着三套与缺失灰、不认识的调色板名退回默认 |
 | `TestWorksheets` | 工作表（#30，13 项）：仓库里那七份文件全都读得出来（名字 / 身份 / 顺序 / 组件类型）、随版本发布的那几份**挑通道的规则不许被写没**（选了通道就要有 `pick` 兜着，A74 之后 `config` 里有通道名是允许的）、用户勾过的通道与 `pick` 并存时读 / 写 / 导出三路都保住两份、坏文件不连累别人、七种坏法各自的下一步（坏 JSON / schema 不认 / 键打错 / 尺寸非法 / 空组件列 / 空规则 / 规则键打错）、重名被挡、目录不存在与目录为空、载荷在快照与本地服务两条路上都带工作表（含 `--worksheets` 换目录只影响那一个载荷）、**搬进文件之后与搬之前逐字段一致**（夹具是硬编码那版倒出来的） |
@@ -5649,3 +5649,38 @@ python -m i3pro info $p                                     # 1 通道，不再�
 所以那三条 CAN 用例现在按 `AGENTS.md` §7 的约定 skip。它们**不算通过**——要在有帧表的机器上
 再跑一遍；判定标准仍是 `TestDbc` 的 46 条信号与 cantools 逐帧对拍、`TestSplitSessionsAreWhole`
 的 12 个 `+N` 场零不一致。
+
+## A109 · 底部概览/状态 dock 固定（本次新增，ticket #62）
+
+**要解决的问题**：概览波形与状态行以前跟工作表住在同一个滚动容器里，内容一多它们就被
+滚走；"现在看的是哪一段"和"当前光标 / 圈 / 缩放"正好是滚动时最想看见的两行字。这一票把
+中间那栏拆成滚动区（`#chartScroll`：工作表 + 滚动条 + 快捷键说明）与底部固定 dock
+（`#bottomDock`：概览 + 状态行），dock 可折叠、折叠状态记在本机。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 结构 | `section#charts` 改成 flex 列：`#chartScroll` 滚动、`#bottomDock` 固定在底边；dock **不在**滚动容器里 |
+| 尺寸 | `#overviewHost` 给 `min-height:88px`，`#statusLine` 给 `min-height:18px`：没概览数据时也不塌成一条缝 |
+| 折叠 | `#dockFold` 收起 / 展开；dock body 显示时走 CSS，收起状态写 `localStorage['i3pro.dock.v1']`（与右栏 inspector 同一个外壳状态模式，不进 `state`） |
+| 无头断言 | `smoke_viewer.js` 新增一组：dock 存在、点「收起概览」body 真的收掉、滚动区变高、状态记在本机、展开后概览仍可拖动定位 |
+| 真鼠标 | `verify_clicks.py` 新增 `bottom_dock()`：量真 rect 证明 dock 不在滚动容器里、折叠后滚动区真的变高、收起后**真重载一次**仍是收起的、概览拖动仍改窗口、1280×720 与 1920×1080 两种窗口下各 rect 不重叠/不越界/不溢出并各留一张截图 |
+
+```powershell
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"       # 888 项 PASS
+node tools\smoke_viewer.js "out\20260524-耐久正赛.html"          # 888 项 PASS
+python tools\verify_clicks.py                                    # 需要 Edge；414 项通过、0 失败
+```
+
+**通过判据（本机实测，2026-10-19）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| dock 不在滚动容器里 | `#chartScroll.contains(#bottomDock)` = **false**（内容滚它不跟着走） |
+| 展开时 dock 高度 | **152.6 px**（概览 98.9 + 状态 18.7；`#charts` 823 px） |
+| 折叠后画布高度 | 滚动区 **670.4 → 790.0 px**（+119.6），dock body 的 rect 变成 0 |
+| 折叠状态记忆 | 收起写 `0`、展开写 `1`，与 `i3pro.dockOpen()` 对得上 |
+| 重载后仍然收起 | 收起状态写进 localStorage 后真 `location.reload()`；重载完 `i3pro.dockOpen()` = **false**、`#dockBody` 高度 0 |
+| 概览拖动 | 收起再展开之后仍能改窗口：lane `[185.644, 278.341]` → `[151.636, 244.333]`（先缩到 40%–60%，否则整场窗口被 clamp，量不出"真的动了"） |
+| 窗口 1280×720 | dock `bottom=720`，状态行 `bottom=714`，滚动区 `bottom=567.4`：不重叠、不裁切；截图 `out\shots\verify-dock-1280x720.png` |
+| 窗口 1920×1080 | dock `bottom=1080`，状态行 `bottom=1074`，滚动区 `bottom=927.4`：不重叠、不裁切；截图 `out\shots\verify-dock-1920x1080.png` |
+| 四条回归 | 单测 **635 项 / 70.1 s，0 失败、28 跳过**；`verify_ld_vs_csv.py` **PASS**；两份 smoke 各 **888 项 PASS**；`verify_clicks.py` **414/414** |

@@ -62,7 +62,21 @@
          grid-template-columns:312px minmax(0,1fr) 272px; }
   main.insfold { grid-template-columns:312px minmax(0,1fr) 34px; }
   aside { background:var(--panel); border-right:1px solid var(--line); overflow:auto; padding:9px 11px 40px; }
-  section#charts { overflow:auto; padding:9px 11px 70px; }
+  /* 中间那栏（票⑩）：上面是滚动的工作表，底部 dock 固定段。dock 不进滚动容器，
+     否则概览与状态会跟着波形滚走——"缩回刚才那个窗口"时它们正好是你最想看见的。 */
+  section#charts { display:flex; flex-direction:column; min-height:0; min-width:0;
+                   overflow:hidden; padding:0; }
+  #chartScroll { flex:1 1 auto; min-height:0; overflow:auto; padding:9px 11px 24px; }
+  #bottomDock { flex:0 0 auto; background:var(--panel); border-top:1px solid var(--line);
+                padding:0 11px 6px; }
+  #dockHead { display:flex; align-items:center; gap:8px; min-height:26px; }
+  #dockHead .docklabel { color:var(--muted); font-size:11px; text-transform:uppercase;
+                         letter-spacing:.09em; font-weight:600; }
+  #dockFold { margin-left:auto; padding:1px 7px; font-size:11px; line-height:16px; }
+  #dockBody { display:flex; flex-direction:column; gap:2px; }
+  #bottomDock.folded #dockBody { display:none; }
+  #overviewHost { flex:0 0 auto; min-height:88px; }
+  #statusLine { min-height:18px; margin-top:0; }
   /* 右侧组件 inspector（票⑨）：低频设置从组件标题栏搬到这里。 */
   #inspector { background:var(--panel); border-right:none; border-left:1px solid var(--line);
                display:flex; flex-direction:column; min-height:0; overflow:hidden;
@@ -695,16 +709,28 @@
     </div><!-- /#advancedGroup -->
   </aside>
   <section id="charts">
-    <div id="worksheet"></div>
-    <div id="scrollHost"></div>
-    <div id="overviewHost"></div>
-    <div class="hint" id="statusLine"></div>
-    <div class="hint">
-      <b>缩放</b> 双击拖拽框选（<kbd>Alt</kbd> 纵向 · <kbd>Ctrl</kbd> 框选）· 双击=放大 · 滚轮 · <kbd>↑</kbd><kbd>↓</kbd> ·
-      <kbd>F2</kbd> 全出 · <kbd>W</kbd> 默认一圈 · <kbd>Z</kbd> 缩到光标 · <kbd>Esc</kbd> 取消<br>
-      <b>光标</b> 鼠标移动 · <kbd>←</kbd><kbd>→</kbd> 步进 · <kbd>Ctrl</kbd>+方向键 快进 · <kbd>H</kbd> 居中 · <kbd>F</kbd>/<kbd>B</kbd> 翻页<br>
-      <b>显示</b> <kbd>S</kbd> 点/线 · <kbd>G</kbd> 分栏/重叠 · <kbd>M</kbd> 测量 · <kbd>E</kbd> 状态 · <kbd>L</kbd> 图例 ·
-      <kbd>N</kbd>/<kbd>P</kbd> 上下圈 · <kbd>Ctrl</kbd>+<kbd>F</kbd> 最快圈 · <kbd>Q</kbd> 交换主/对比圈 · 散点双击切换趋势线
+    <div id="chartScroll">
+      <div id="worksheet"></div>
+      <div id="scrollHost"></div>
+      <div class="hint" id="keyHelp">
+        <b>缩放</b> 双击拖拽框选（<kbd>Alt</kbd> 纵向 · <kbd>Ctrl</kbd> 框选）· 双击=放大 · 滚轮 · <kbd>↑</kbd><kbd>↓</kbd> ·
+        <kbd>F2</kbd> 全出 · <kbd>W</kbd> 默认一圈 · <kbd>Z</kbd> 缩到光标 · <kbd>Esc</kbd> 取消<br>
+        <b>光标</b> 鼠标移动 · <kbd>←</kbd><kbd>→</kbd> 步进 · <kbd>Ctrl</kbd>+方向键 快进 · <kbd>H</kbd> 居中 · <kbd>F</kbd>/<kbd>B</kbd> 翻页<br>
+        <b>显示</b> <kbd>S</kbd> 点/线 · <kbd>G</kbd> 分栏/重叠 · <kbd>M</kbd> 测量 · <kbd>E</kbd> 状态 · <kbd>L</kbd> 图例 ·
+        <kbd>N</kbd>/<kbd>P</kbd> 上下圈 · <kbd>Ctrl</kbd>+<kbd>F</kbd> 最快圈 · <kbd>Q</kbd> 交换主/对比圈 · 散点双击切换趋势线
+      </div>
+    </div>
+    <!-- 底部 dock（票⑩）：概览波形 + 状态行。固定在中间那栏的底边，不跟着工作表滚。 -->
+    <div id="bottomDock">
+      <div id="dockHead">
+        <span class="docklabel">概览与状态</span>
+        <button id="dockFold" aria-expanded="true"
+                title="收起底部概览与状态；收起后画布会变高，再点一下展开">收起概览 ▾</button>
+      </div>
+      <div id="dockBody">
+        <div id="overviewHost"></div>
+        <div class="hint" id="statusLine"></div>
+      </div>
     </div>
   </section>
   <!-- 右栏：选中那一件的 inspector（票⑨）。低频设置（通道槽位 / 调色板 / 统计范围 /
@@ -4239,6 +4265,47 @@ function restoreInspector() {
   let open = true;
   try { open = localStorage.getItem(INSPECTOR_STORE) !== "0"; } catch (err) { open = true; }
   setInspector(open, false);
+}
+
+/* 底部 dock（票⑩）：概览波形与状态行住在这儿，固定在中间那栏的底边。
+   折叠状态是**外壳**的（与 sheet / 主题 / 右栏一样，不进 state、不进快照）。
+   切换时调一次 renderAll：overview 画布要先量到新宽度再重画（收起时也重画
+   一次，代价小，省得"哪条路需要重画"再分叉）。 */
+const DOCK_STORE = "i3pro.dock.v1";
+
+function dockOpen() {
+  const dock = $("bottomDock");
+  return !!dock && dock.classList && !dock.classList.contains("folded");
+}
+
+function setDock(open, remember) {
+  const dock = $("bottomDock");
+  if (!dock || !dock.classList) return;
+  dock.classList.toggle("folded", !open);
+  const button = $("dockFold");
+  if (button) {
+    button.textContent = open ? "收起概览 ▾" : "展开概览 ▴";
+    button.title = open
+      ? "收起底部概览与状态；收起后画布会变高，再点一下展开"
+      : "展开底部概览与状态";
+    if (button.setAttribute) button.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  const body = $("dockBody");
+  // inline 这一笔是给无头假 DOM 的：它不做 CSS 层叠，只看得到 style.display。
+  if (body && body.style) body.style.display = open ? "" : "none";
+  if (remember !== false) {
+    try { localStorage.setItem(DOCK_STORE, open ? "1" : "0"); } catch (err) { /* 私密模式 */ }
+    renderAll();
+  }
+}
+
+function toggleDock() { setDock(!dockOpen()); }
+
+/** 开机按记住的那一格摆；没记过就是展开（概览是判断"现在看的是哪一段"的锚）。 */
+function restoreDock() {
+  let open = true;
+  try { open = localStorage.getItem(DOCK_STORE) !== "0"; } catch (err) { open = true; }
+  setDock(open, false);
 }
 
 /** 这一件组件的手动量程（`state.panelZoom` 的键是 `组件 id|分组`）。 */
@@ -11040,6 +11107,9 @@ function init() {
   // 右栏 inspector（票⑨）：可收起，收起状态也记在本机（外壳的折叠，不进 state）。
   $("insFold").addEventListener("click", toggleInspector);
   restoreInspector();
+  // 底部 dock（票⑩）：概览与状态从滚动内容里拿出来，折叠状态同样记在本机。
+  $("dockFold").addEventListener("click", toggleDock);
+  restoreDock();
   $("modeTime").addEventListener("click", () => {
     state.mode = "time"; setView(null); state.panelZoom = {}; scheduleRefresh(); renderAll();
   });
@@ -11146,6 +11216,8 @@ window.i3pro = {
   jumpButtons: () => jumpButtons.map((e) => e.button),
   // 高级工具折叠区（票⑧）：外壳的折叠，不在 state 里（ADR-0008）
   advancedOpen: advancedOpen, setAdvanced: setAdvanced,
+  // 底部 dock（票⑩）：概览 + 状态的折叠，同样是外壳状态
+  dockOpen: dockOpen, setDock: setDock,
   // 主题（A101）：外壳的配色，也不在 state 里；画布色由 UI 那一份供
   theme: () => themeKey, setTheme: setTheme, themes: THEME_LABELS,
   // 取数缓存键（A79）：windowKey 只说"看的是哪一段"，traceKey 另外带上曲线连接方式

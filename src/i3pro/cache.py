@@ -27,6 +27,7 @@ from typing import Any
 
 __all__ = [
     "content_stamp",
+    "digest",
     "file_stamp",
     "read_json",
     "tree_stamp",
@@ -84,6 +85,22 @@ def tree_stamp(root: str | Path, pattern: str = "*.dbc") -> list | None:
         out.append([path.relative_to(directory).as_posix(),
                     int(info.st_size), int(info.st_mtime_ns)])
     return out
+
+
+def digest(value: Any) -> str:
+    """把一份指纹压成一个 sha256 十六进制串。
+
+    ``tree_stamp`` 那种形状（``i2pro_data/dbc`` 一棵树 34 份文件）要写进磁盘缓存的
+    **每一行**时，整份抄一遍会让那份 JSON 白胖一圈：一行多一百多个数，几十行就是
+    几千个。压成摘要只留"还是不是当初那一份"这一个事实——这也正是要问的问题，
+    我们并不打算从缓存里还原那棵树。
+
+    用**完整**的 sha256 而不是截短：截短之后就得论证"撞了会怎样"，而这里要的
+    恰恰是"没变就绝不误判成没变"。64 个字符的代价可以忽略。
+    """
+    return hashlib.sha256(
+        json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
 
 
 def read_json(path: str | Path, stamp: Any) -> Any | None:

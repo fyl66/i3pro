@@ -162,7 +162,8 @@ class SessionLibrary:
 
     #: 磁盘上那份列表缓存的**形状版本**：形状一改就 +1，旧文件读不出来当没有。
     #: 2 = 每一行自带钥匙（2026-10-15，"导入一份日志不该重算 110 场"）。
-    LISTING_CACHE_SHAPE = 2
+    #: 3 = 按**场次文件路径**当键、DBC 指纹按行记、写盘合并（2026-10-18，ticket #66）。
+    LISTING_CACHE_SHAPE = 3
 
     def __init__(
         self,
@@ -448,8 +449,7 @@ class SessionLibrary:
     def listing(self) -> list[dict]:
         paths = self._paths()
         stamps = self._row_stamps(paths)
-        key = (tuple((name, tuple(stamp)) for name, stamp in sorted(stamps.items())),
-               tuple(tuple(one) for one in self._dbc_stamp()))
+        key = tuple((name, tuple(stamp)) for name, stamp in sorted(stamps.items()))
         with self._lock:
             if self._listing_cache is not None and self._listing_cache[0] == key:
                 return self._listing_cache[1]
@@ -460,7 +460,7 @@ class SessionLibrary:
         out: list[dict] = []
         fresh: dict[str, dict] = {}
         for name, path in paths.items():
-            entry = cached_rows.get(name)
+            entry = cached_rows.get(str(path))
             if isinstance(entry, dict) and entry.get("stamp") == stamps[name]:
                 row = entry.get("row")
             else:
@@ -469,20 +469,27 @@ class SessionLibrary:
                 except Exception as exc:  # a broken file must not kill the index
                     row = {"name": name, "error": str(exc)}
             out.append(row)
-            fresh[name] = {"stamp": stamps[name], "row": row}
+            fresh[str(path)] = {"stamp": stamps[name], "row": row}
         self._write_index_cache(fresh)
         with self._lock:
             self._listing_cache = (key, out)
         return out
 
     def _row_stamps(self, paths: dict[str, Path]) -> dict[str, list]:
-        """每一场**自己**的钥匙：文件指纹 + 圈侧车指纹。
+        """每一场**自己**的钥匙：文件指纹 + 圈侧车指纹 + 当时那份 DBC 树的摘要。
 
         指纹怎么算在 :mod:`i3pro.cache`（ticket #49）。
+
+        DBC 那把钥匙（ticket #66）压成摘要记在**每一行**里，而不是整份清单共用一个
+        字段。共用时"换了 DBC"就等于"全作废"，而"全作废"又把不同 roots 组合的库
+        拴在一起：一份临时 roots 的库写一次盘，真数据那几十行就跟着没了（实测单测
+        里两条用例因此每次冷算 67 s）。按行记之后，DBC 变了的那些行照样立刻失效，
+        但只有它们的行失效。
         """
+        dbc = cache.digest(self._dbc_stamp())
         return {
             name: [name, str(path), *_file_stamp(path),
-                   *_file_stamp(sidecar.path_of("laps", path))]
+                   *_file_stamp(sidecar.path_of("laps", path)), "dbc", dbc]
             for name, path in paths.items()
         }
 
@@ -493,21 +500,45 @@ class SessionLibrary:
                 if (stamp := cache.tree_stamp(root / "dbc")) is not None]
 
     def _read_index_cache(self) -> dict[str, dict]:
-        """磁盘上那份列表：形状版本对得上、且 DBC 树没变才算数（缓存坏了当没有）。
+        """磁盘上那份列表，键是**场次文件的路径**（缓存坏了当没有）。
 
-        DBC 树与"每一场自己的钥匙"分开存：树的指纹有几十条，**每一行都抄一份**
-        会让这份 JSON 白胖一圈；它一变就是"全作废"，一条就够。
+        按路径当键、不按场次名当键（ticket #66）：同一份 ``i2pro_data`` 会被不同的
+        roots 组合读到（测试的 ``_test_data_<进程号>`` + 真数据、导入用的临时目录），
+        而进程号每次都变。按名字当键时，"临时 roots 的那个库"写一次盘就把真数据
+        那一行顶掉了——哪怕文件一个字节没动，它下次也得重算。
         """
         value = cache.read_json(self.index_cache, self.LISTING_CACHE_SHAPE)
-        if not isinstance(value, dict) or value.get("dbc") != self._dbc_stamp():
+        if not isinstance(value, dict):
             return {}
         rows = value.get("sessions")
         return rows if isinstance(rows, dict) else {}
 
     def _write_index_cache(self, rows: dict[str, dict]) -> None:
-        """写不进去也不吵：缓存只是省时间，不是数据。"""
-        cache.write_json(self.index_cache, self.LISTING_CACHE_SHAPE,
-                         {"dbc": self._dbc_stamp(), "sessions": rows})
+        """写回磁盘，**合并**而不是覆盖；写不进去也不吵（缓存只是省时间，不是数据）。
+
+        上一版是整份覆盖，于是"别的 roots 组合刚写过"就等于自己这份缓存从没存在
+        （ticket #66）。合并时顺手丢掉**文件已经不在了**的那些行：临时 roots 用完
+        就删，不丢的话这份文件只增不减。
+
+        这里**再读一次**盘是有意的，不是漏了优化：上面那条路可能要算几十秒（实测
+        真数据 47 场冷 68.5 s），算的这段时间里别的进程新写进来的行是**更新**的。
+        拿开头那份旧快照去覆盖，正好就把它们抹掉了——也就是本票要修的那个动作。
+        """
+        merged = {key: entry for key, entry in self._read_index_cache().items()
+                  if self._row_path_alive(entry)}
+        merged.update(rows)
+        cache.write_json(self.index_cache, self.LISTING_CACHE_SHAPE, {"sessions": merged})
+
+    @staticmethod
+    def _row_path_alive(entry) -> bool:
+        """缓存里这一行指的场次文件还在不在（形状不对就当不在）。"""
+        stamp = entry.get("stamp") if isinstance(entry, dict) else None
+        if not isinstance(stamp, list) or len(stamp) < 2 or not isinstance(stamp[1], str):
+            return False
+        try:
+            return Path(stamp[1]).exists()
+        except (OSError, ValueError):      # 路径里有非法字符之类：当作不在
+            return False
 
     # -------------------------------------------------------------- lap edits
     def remember_laps(self, path: str | Path, config: beaconsmod.LapConfig) -> None:

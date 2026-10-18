@@ -5423,3 +5423,58 @@ FAIL  A104 换一条对比圈，画布跟着重画  — 0/0 -> 0/0
 2026-09-13 的工作台重写（`7f9c96e`）把它删了，只留下 Δ 面板，于是"双圈对比"看着像
 只有一条圈；既有的自动化一条都没红（后端载荷那条 `test_overlay_is_distance_aligned`
 是绿的，smoke 的 overlay 那条只查"模式切过去没有"）。
+
+## A105 · 侧边栏列表缓存：按路径当键 + DBC 指纹按行记 + 写盘合并（本次修法，ticket #66）
+
+**要解决的问题**：用户问"工作一步为什么要 20 分钟"。`pytest --durations` 量出来单测
+630 项 **207.6 s** 里有 **137 s**（两成七）花在两条用例上——`TestServer::test_http_api_end_to_end`
+70.2 s、`TestApiLayerWithoutASocket::test_每个请求都拿得到一个回复` 66.9 s。两条都在冷算
+同一件事：真数据目录的场次列表。
+
+冷算本身没有不合理（真数据 47 场冷 **68.5 s**、命中 **0.04 s**，一千七百倍）。不合理的是
+这份磁盘缓存**永远命中不了**：它按**场次名**当键、DBC 指纹是整份文件级的一个字段、而
+`_write_index_cache` 是**整份覆盖**。于是任何一个用临时 roots 的库写一次盘（`http_session`
+一共 26 处，roots 带进程号），真数据那几十行就被顶掉——温度每次都回到 0。
+
+**这条也是真机上的问题**：换个数据目录、或者两个进程各用一套 roots，用户就要再付一次
+68 s 首屏。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 键 | 磁盘上那份列表改成按**场次文件路径**当键（原来是场次名）：同名的两份（真数据 + 临时目录副本）各占一行，谁也不顶掉谁 |
+| DBC 钥匙 | 从"整份清单共用一个文件级字段"改成**压成 sha256 记在每一行里**。共用一个字段时它一变就是"全作废"，而"全作废"恰好把不同 roots 组合的库拴在一起——只有真受影响的行该失效 |
+| 写盘 | `_write_index_cache` 改成**合并**（`cache.write_json` 的原子写不变），顺手丢掉**文件已经不在了**的行：临时 roots 用完就删，不丢就是只增不减 |
+| 新助手 | `cache.digest(value)`：把一份指纹压成 sha256。整份 DBC 树指纹（本机 `i2pro_data/dbc` 实测 34 份文件）抄进每一行会让那份 JSON 白胖一圈；用**完整** sha256 不截短，因为这里要的恰恰是"没变就绝不误判成没变" |
+| 形状版本 | `LISTING_CACHE_SHAPE` 2 → 3，旧文件自动当没有 |
+| 单元测试 | 新增"别的 roots 写过盘之后这一份不用重算"（就是本票的病）、"文件已经不在的行不再留在盘上"、`digest` 稳定性；`TestCacheStamps` 那条改成钉新形状（DBC 钥匙按行，且改 DBC 不动行里别的字段） |
+
+```powershell
+# 换一个空的缓存目录跑两遍：第一遍是冷启动，第二遍是热启动
+$cold = "out\_coldtmp"; $env:TEMP = $cold; $env:TMP = $cold
+python -m pytest tests\test_i3pro.py -q --durations=12    # 冷
+python -m pytest tests\test_i3pro.py -q --durations=12    # 热
+python -m unittest tests.test_i3pro.TestListingCache tests.test_i3pro.TestCacheStamps -v
+```
+
+**通过判据（本机实测，2026-10-18）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 单测总时长（冷缓存） | **140.9 s**（改前 **207.6 s**） |
+| 单测总时长（热缓存） | **72.4 s**（改前第二遍照样 207.6 s：整份单测跑完之后 `%TEMP%\i3pro-listing-cache.json` 里 `sessions` 是 **0 行**，实测） |
+| 第二次冷算消失 | 热跑慢榜里已经没有 `TestApiLayerWithoutASocket::test_每个请求都拿得到一个回复`（改前 66.9 s）；`TestServer::test_http_api_end_to_end` 从 70.2 s 降到 **2.94 s**——剩下的 2.9 s 是两份 staged 金标准每次都得重算（它们的路径带进程号，这是设计） |
+| 真数据列表冷/热 | 47 场：冷 **68.55 s** / 热 **0.04 s** |
+| 别的 roots 写过之后 | 真数据那一批照样 **0.04 s**；盘上 48 行共存（47 行真数据 + 1 行临时 roots），键是文件路径 |
+| 新用例单跑 | `TestListingCache` + `TestCacheStamps` 共 **10 项 / 0.43 s 全过** |
+| 两份金标准实跑 | 真数据 47 场里那两条都在：`20260908-cjh 高避5圈` **圈数 7**、`20260524-耐久正赛` **圈数 26**（`SessionLibrary([i2pro_data]).listing()`，就是这条路） |
+| 整份单测 | `python -m unittest discover -s tests`：**633 项 / 70.8 s**，3 失败 25 跳过——3 条红的是缺 `can_data\*.csv`，改前改后一样 |
+
+**怎么验的（这条判据自己先红过）**：`TestListingCache::test_别的_roots_写过盘之后这一份不用重算`
+在改之前是红的——它用 `mock.patch.object(SessionLibrary, "summary", side_effect=AssertionError)`
+把重算这条路封死，"另一拨 roots 写过之后再读还能给出行"就必须真的命中磁盘。改之前那一步
+会抛 `不该重算`。
+
+**已知的两条差**：单测里那 3 条红的（`TestDbc` ×2、`TestSplitSessionsAreWhole` ×1）是
+`can_data\*.csv` 原始帧表不在导致的，改前改后一样红，与本票无关。`verify_clicks.py` 那
+227 s 里另有约 130 s 是写死的 `sleep`（169 处字面量共 104 s，加上 74 次点击 ×0.25 s、
+35 次按键 ×0.2 s），那是另一张票。

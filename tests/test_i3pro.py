@@ -10008,6 +10008,10 @@ class TestListingCache(unittest.TestCase):
                                        side_effect=AssertionError("不该重算")):
                     again = fresh.listing()
                 self.assertEqual([r["name"] for r in again], [r["name"] for r in rows])
+                # 只看名字是不够的：``listing`` 把算这一行时抛的**任何**异常都收成
+                # ``{"error": ...}``，而那种行的 name 照样在。判据得看有没有 error。
+                self.assertNotIn("error", again[0],
+                                 "这一行是从头上重算的：%r" % (again[0].get("error"),))
                 # 数据动了一下（mtime 变了）：指纹失效，必须重算
                 os.utime(root / HILL.name, None)
                 with mock.patch.object(librarymod.SessionLibrary, "summary",
@@ -10057,6 +10061,79 @@ class TestListingCache(unittest.TestCase):
             finally:
                 for room_ in (room, fresh):
                     room_.close()
+
+
+    @_needs(HILL)
+    def test_别的_roots_写过盘之后这一份不用重算(self):
+        """ticket #66：磁盘上那份列表是**所有库共用**的，写的时候必须合并。
+
+        实测（本机 2026-10-18）：真数据 47 场冷算 68.5 s、命中 0.04 s。而单测里
+        ``TestServer`` 与 ``TestApiLayerWithoutASocket`` 那两条每次都要读真数据目录，
+        却因为别的用例建了临时 roots 的库、把这份文件**整份盖掉**，每次都在开冷车
+        （`pytest --durations` 实测 70.2 s 与 66.9 s，占整份单测 630 项的两成七）。
+        这条钉住：另一拨 roots 写过之后，这一拨的行还在盘上、还能命中。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp) / "listing.json"
+            data = Path(tmp) / "data"
+            data.mkdir()
+            shutil.copy2(HILL, data / HILL.name)
+            elsewhere = Path(tmp) / "临时"
+            elsewhere.mkdir()
+            shutil.copy2(HILL, elsewhere / HILL.name)      # 同名，不同路径
+
+            home = librarymod.SessionLibrary([data], maths_root=ROOT, index_cache=shared)
+            visitor = librarymod.SessionLibrary([elsewhere], maths_root=ROOT,
+                                                index_cache=shared)
+            again = librarymod.SessionLibrary([data], maths_root=ROOT, index_cache=shared)
+            try:
+                self.assertEqual([r["name"] for r in home.listing()], [HILL.stem])
+                self.assertEqual([r["name"] for r in visitor.listing()], [HILL.stem])
+                # 关键的一句：临时 roots 那个库写过之后，真数据这一份照样命中
+                with mock.patch.object(librarymod.SessionLibrary, "summary",
+                                       side_effect=AssertionError("不该重算")):
+                    rows = again.listing()
+                # 判据必须是"这一行没被重算"，不能只看名字：``listing`` 把重算时抛的
+                # 异常收成 ``{"error": ...}``，那种行的 name 照样是它（这条判据第一版
+                # 就是栽在这里：退回"整份覆盖"之后它照样绿）。
+                self.assertEqual(len(rows), 1)
+                self.assertNotIn("error", rows[0],
+                                 "这一行是从头上重算的：%r" % (rows[0].get("error"),))
+                # 两拨的行在盘上并存：键是**路径**，同名的两份不互相顶掉
+                saved = cache.read_json(shared, librarymod.SessionLibrary.LISTING_CACHE_SHAPE)
+                self.assertEqual(set(saved["sessions"]),
+                                 {str(data / HILL.name), str(elsewhere / HILL.name)})
+            finally:
+                for lib in (home, visitor, again):
+                    lib.close()
+
+
+    @_needs(HILL)
+    def test_文件已经不在的行不再留在盘上(self):
+        """临时 roots 用完就删；不清理的话这份缓存文件只增不减（ticket #66）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp) / "listing.json"
+            data = Path(tmp) / "data"
+            data.mkdir()
+            shutil.copy2(HILL, data / HILL.name)
+            gone = data / "走了的场次.ld"
+            shutil.copy2(HILL, gone)
+            first = librarymod.SessionLibrary([data], maths_root=ROOT, index_cache=shared)
+            try:
+                self.assertEqual(len(first.listing()), 2)
+            finally:
+                first.close()
+            saved = cache.read_json(shared, librarymod.SessionLibrary.LISTING_CACHE_SHAPE)
+            self.assertEqual(set(saved["sessions"]), {str(data / HILL.name), str(gone)})
+            gone.unlink()
+            second = librarymod.SessionLibrary([data], maths_root=ROOT, index_cache=shared)
+            try:
+                self.assertEqual([r["name"] for r in second.listing()], [HILL.stem])
+            finally:
+                second.close()
+            saved = cache.read_json(shared, librarymod.SessionLibrary.LISTING_CACHE_SHAPE)
+            self.assertEqual(set(saved["sessions"]), {str(data / HILL.name)},
+                             "已经不存在的场次还留在缓存里")
 
 
 class TestSpeedChannelResolution(unittest.TestCase):
@@ -10828,6 +10905,22 @@ class TestCacheStamps(unittest.TestCase):
         os.utime(target, (1, 1))
         self.assertEqual(cache.content_stamp(target), stamp)
 
+    def test_指纹摘要稳定且逮得住变化(self):
+        """``digest``：一棵 DBC 树（``i2pro_data/dbc`` 实测 34 份文件）要记进列表
+        缓存的**每一行**，整份抄进去就是一行多一百多个数（ticket #66）。
+        """
+        tree = [["a.dbc", 3, 10], ["261004/b.dbc", 5, 20]]
+        self.assertEqual(cache.digest(tree),
+                         cache.digest([["a.dbc", 3, 10], ["261004/b.dbc", 5, 20]]),
+                         "同一棵树两次要得同一个摘要")
+        self.assertEqual(len(cache.digest(tree)), 64)       # 完整 sha256，不截短
+        self.assertNotEqual(cache.digest(tree),
+                            cache.digest([["a.dbc", 3, 11], ["261004/b.dbc", 5, 20]]),
+                            "字节数变了摘要要变")
+        self.assertNotEqual(cache.digest(tree), cache.digest(tree[:1]),
+                            "少一份文件摘要也要变")
+        self.assertEqual(cache.digest([]), cache.digest([]))
+
     def test_坏缓存当没有_写不进去不吵(self):
         tmp = self._tmp()
         path = tmp / "cache.json"
@@ -10849,7 +10942,11 @@ class TestCacheStamps(unittest.TestCase):
         """#45 那两层缓存最怕的是**陈旧**：侧边栏数字错了没人看得出来。
 
         A87 之后钥匙是**一场一把**：场次文件动 → 那一场那把钥匙变；DBC 树动 →
-        所有行的缓存一并作废（CAN 场次的通道会跟着变）。
+        每一行里那把 DBC 钥匙都变（CAN 场次的通道会跟着变）。
+
+        ticket #66：DBC 那把钥匙从"整份清单共用一个文件级字段"改成"压成摘要记在
+        每一行里"——共用一个字段时它一变就是"全作废"，而"全作废"会把不同 roots
+        组合的库拴在一起（见 ``TestListingCache`` 那条）。
         """
         tmp = self._tmp()
         root = tmp / "data"
@@ -10864,17 +10961,25 @@ class TestCacheStamps(unittest.TestCase):
         rows = library.listing()
         self.assertTrue(index_cache.exists(), "列表算完要落盘")
         saved = cache.read_json(index_cache, library.LISTING_CACHE_SHAPE)
-        self.assertEqual(saved["dbc"], dbc)
-        entry = saved["sessions"][HILL.stem]
+        # 键是**文件路径**（ticket #66），不是场次名：同一份数据被不同的 roots
+        # 组合读到（临时目录 + 真数据）时，同名的两份各占一行，谁也不顶掉谁。
+        entry = saved["sessions"][str(root / HILL.name)]
         self.assertEqual(entry["row"]["name"], HILL.stem)
         self.assertEqual(entry["row"]["laps"], rows[0]["laps"])
         self.assertEqual(entry["stamp"], stamps[HILL.stem])
+        self.assertEqual(entry["stamp"][-2:], ["dbc", cache.digest(dbc)])
         # 场次文件动一下（mtime 变）→ 那一场的钥匙就变，旧缓存不作数
         os.utime(root / HILL.name, (1, 1))
         self.assertNotEqual(library._row_stamps(library._paths()), stamps)
-        # DBC 动一下（哪怕只加一份）→ DBC 指纹要变（通道数会跟着变）
+        # DBC 动一下（哪怕只加一份）→ 每一行的 DBC 钥匙都变，而别的字段不动
+        before_dbc = library._row_stamps(library._paths())[HILL.stem]
         (root / "dbc" / "extra.dbc").write_text("BO_ 194 B: 8 X\n", encoding="utf-8")
         self.assertNotEqual(library._dbc_stamp(), dbc)
+        moved = library._row_stamps(library._paths())[HILL.stem]
+        self.assertNotEqual(moved[-2:], before_dbc[-2:],
+                            "DBC 变了，行里的 DBC 钥匙却没变")
+        self.assertEqual(moved[:-2], before_dbc[:-2],
+                         "DBC 那一段不该动到行里别的字段")
         # 缓存文件被写坏：照常出结果，不抛
         index_cache.write_text("{ 坏了", encoding="utf-8")
         fresh = librarymod.SessionLibrary([root], maths_root=root,

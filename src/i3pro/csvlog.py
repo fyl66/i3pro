@@ -270,6 +270,19 @@ def scan_rows(path: Path, limit: int = 40) -> list[list[str]]:
     raise ValueError(f"{path.name}: 无法解码为文本")
 
 
+def _content_width(row: list[str]) -> int:
+    """Fields that actually carry a value: a trailing separator adds no column.
+
+    ``"s;km/h;"`` and ``"s;km/h"`` are the same two-column unit row. Counting the
+    empty field made a two-column unit row *wider* than its header, so the reader
+    picked it as the header and then could not find the time column (#64).
+    """
+    end = len(row)
+    while end and not str(row[end - 1]).strip():
+        end -= 1
+    return end
+
+
 def _header_index(rows: list[list[str]]) -> int:
     """The channel-name row: the widest row near the top that is not all numbers.
 
@@ -277,10 +290,11 @@ def _header_index(rows: list[list[str]]) -> int:
     excluding all-numeric rows is what stops the reader from treating the first
     line of data as the column names.
     """
-    candidates = [(len(r), i) for i, r in enumerate(rows)
-                  if len(r) > 1 and any(not _looks_numeric(c) for c in r if c != "")]
+    widths = [_content_width(r) for r in rows]
+    candidates = [(widths[i], i) for i, r in enumerate(rows)
+                  if widths[i] > 1 and any(not _looks_numeric(c) for c in r if c != "")]
     if not candidates:
-        candidates = [(len(r), i) for i, r in enumerate(rows) if len(r) > 1]
+        candidates = [(widths[i], i) for i in range(len(rows)) if widths[i] > 1]
     if not candidates:
         # 表头猜不出来的两个真实原因：整份表被切成了一列（分隔符不对），或者
         # 这份表压根没有表头行。两个都要说到，因为下一步不一样。

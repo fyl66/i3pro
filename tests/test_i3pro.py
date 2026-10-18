@@ -2913,6 +2913,8 @@ class TestSplitSessionsAreWhole(unittest.TestCase):
         （``read_can_session`` 的邻居扫描正是在这两种情况下会"自己扩"或"扩不到"）。
         全量读 74 场要两分多钟，而单测的反馈时间本身是资产。
         """
+        if not _can_frame_files():
+            self.skipTest("缺 can_data/ 原始帧日志")
         roots = [DATA] + ([CAN_DATA] if CAN_DATA.exists() else [])
         library = librarymod.SessionLibrary(
             [root for root in roots if root.exists()], maths_root=ROOT,
@@ -3201,8 +3203,7 @@ class TestHttpCompression(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="i3pro-gzip-")
         self.dir = Path(self.tmp.name)
-        # 表头与单位行**一样宽**：单位行末尾那个空字段会让它比两列的表头更宽，
-        # 于是被 `layout_of` 当成表头（那个 bug 单独记在 #64，不在这张票里修）。
+        # 真实导出的单位行末尾常有一个空字段；#64 之后它不再被算成额外一列。
         for name, rows in (("大", 5000), ("小", 40)):
             body = "".join(f"{i / 100.0:.2f};{i % 300};{i % 7}\n"
                            for i in range(rows))
@@ -9206,11 +9207,18 @@ DASHBOARD_DBC = DBC_DIR / "E27_Dashboard_AutoX_20260902_pjgps - Internal Display
 _CAN_ID_CACHE: dict[str, object] = {}
 
 
+def _can_frame_files() -> list[Path]:
+    """``can_data/`` 里的原始帧表；只剩 ``.can.json`` 侧车时不算有数据。"""
+    if not CAN_DATA.exists():
+        return []
+    return sorted(CAN_DATA.glob("*.csv"))
+
+
 def _can_id_counts() -> dict[int, int]:
     """``{帧 ID: 帧数}``：所有原始帧日志的并集（缺数据时是空字典）。"""
     if "counts" not in _CAN_ID_CACHE:
         counts: dict[int, int] = {}
-        for path in sorted(CAN_DATA.glob("*.csv")):
+        for path in _can_frame_files():
             with path.open("r", encoding="gbk", errors="replace", newline="") as handle:
                 handle.readline()
                 for line in handle:
@@ -9416,7 +9424,7 @@ BO_ 1645 Front_Aero_Ride_Height: 4 Node
     @_needs(SENSORS_DBC)
     def test_the_46_channels_are_the_signals_on_ids_the_log_really_carries(self):
         """实测：日志里出现 14 条 Sensors.dbc 的报文，共 46 条信号。"""
-        if not CAN_DATA.exists():
+        if not _can_frame_files():
             self.skipTest("缺 can_data/ 原始帧日志")
         db = dbc.parse(SENSORS_DBC.read_text(encoding="utf-8", errors="replace"))
         present = {frame_id for frame_id in _can_id_counts() if db.covers(frame_id)}
@@ -9430,14 +9438,14 @@ BO_ 1645 Front_Aero_Ride_Height: 4 Node
         cantools = _cantools()
         if cantools is None:
             self.skipTest("没装 cantools（测试期裁判）")
-        if not CAN_DATA.exists():
+        if not _can_frame_files():
             self.skipTest("缺 can_data/ 原始帧日志")
         text = SENSORS_DBC.read_text(encoding="utf-8", errors="replace")
         reference = cantools.database.load_string(text, database_format="dbc")
         mine = dbc.parse(text)
         compared = 0
         seen: set[str] = set()
-        for path in sorted(CAN_DATA.glob("*.csv"))[:3]:
+        for path in _can_frame_files()[:3]:
             with path.open("r", encoding="gbk", errors="replace", newline="") as handle:
                 handle.readline()
                 for index, line in enumerate(handle):
@@ -10593,6 +10601,29 @@ class TestTextImport(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             csvlog.open_session(path, header=99)
         self.assertIn("表头行", str(caught.exception))
+
+    def test_a_trailing_separator_on_the_unit_row_does_not_become_the_header(self):
+        """#64：``s;km/h;`` 末尾的空字段不算一列，别让它比两列的表头更宽。"""
+        two = [["Time", "Vx KF"], ["s", "km/h", ""], ["0.00", "0"], ["0.01", "1"]]
+        self.assertEqual(csvlog.layout_of(two), (0, 2))
+        three = [
+            ["Time", "Vx KF", "TH"],
+            ["s", "km/h", ""],
+            ["0.00", "0", "1"],
+        ]
+        self.assertEqual(csvlog.layout_of(three), (0, 2))  # 三列的老行为不许变
+
+        path = self.write(
+            "trailing.csv", "Time;Vx KF\ns;km/h;\n0.00;0\n0.01;1\n"
+        )
+        preview = txtlog.preview(path)
+        self.assertTrue(preview["ready"], preview.get("error"))
+        self.assertEqual(preview["effective_header"], 0)
+        self.assertEqual(preview["channels"], ["Vx KF"])
+        session = csvlog.open_session(path)
+        self.assertEqual([c.name for c in session.channels], ["Vx KF"])
+        self.assertEqual(session.channel("Vx KF").unit, "km/h")
+        np.testing.assert_allclose(session.time, [0.0, 0.01])
 
     def test_no_header_row_gets_positional_names(self):
         path = self.write("bare.txt", "".join(f"{i}\t{i * 2}\n" for i in range(6)))

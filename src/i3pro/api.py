@@ -259,6 +259,29 @@ class _Call:
     def _json(self, value, status: int = 200) -> Response:
         return self._send(dumps(value).encode("utf-8"), status)
 
+    def _json_plain(self, value, status: int = 200) -> Response:
+        """取数载荷专用：值已经是 JSON 安全的，不再逐值走一遍 ``json_safe``。
+
+        ``json_safe`` 要摸到每一个标量：8000 桶 × 12 通道实测 **149 ms**，占那次
+        `/trace` 的一半以上（ticket #63）。而 ``render`` 的出口本来就是 Python 标量
+        ——``_finite()`` 把 NaN/Inf 换掉、``.tolist()`` 把 numpy 标量换成 float/int——
+        所以这一趟是重复劳动。
+
+        ``allow_nan=False`` **必须留着**：真漏进一个 NaN 时要当场报错，不能把非法 JSON
+        写出去、把问题推给浏览器。其它入口（数学通道 / 导入 / 报表）照旧走 ``_json``，
+        它们真的可能带 NaN，那条路不能省。
+        """
+        try:
+            text = json.dumps(value, ensure_ascii=False, allow_nan=False)
+        except ValueError as exc:
+            # 按规则 6：报错要说清"这是我们坏了"以及下一步，不能把 json 模块的英文
+            # 原样丢给队友。
+            raise ValueError(
+                f"取数载荷里有 NaN / Inf（{exc}）——这是 i3pro 的 bug，"
+                f"不是你的数据的问题。请把这句话连同刚才的操作报给维护者。"
+            ) from exc
+        return self._send(text.encode("utf-8"), status)
+
     def _html(self, text: str, status: int = 200) -> Response:
         return self._send(text.encode("utf-8"), status, "text/html; charset=utf-8")
 
@@ -516,7 +539,7 @@ class _Call:
                 end=float_arg(query, "to"),
                 upsample=upsample,
             )
-        return self._json(out)
+        return self._json_plain(out)
 
     def act_points(self, log, name: str, query: dict, method: str) -> Response:
         # raw samples for the scatter component (never min/max decimated)

@@ -3103,6 +3103,94 @@ class TestBenchViewer(unittest.TestCase):
         self.assertNotIn("System Ready", names, "无单位的状态通道不该被拿来凑数")
 
 
+class TestJsonFastPath(unittest.TestCase):
+    """ticket #63：取数载荷跳过逐值 ``json_safe``，但载荷必须逐字节不变。
+
+    溜得快只有一个理由：``render`` 的出口本来就是**内置标量**、而且没有 NaN/Inf。
+    所以这份用例真正要钉的是那个前提——金标准的载荷逐值扫一遍，类型与有限性都得
+    站得住。站不住就该红，而不是悄悄少走一趟。
+    """
+
+    def setUp(self):
+        from i3pro import api as apimod
+
+        self.apimod = apimod
+        self.tmp = tempfile.TemporaryDirectory(prefix="i3pro-jsonfast-")
+        self.dir = Path(self.tmp.name)
+        rows = "".join(f"{i / 100.0:.2f};{i % 300};{i % 7}\n" for i in range(2000))
+        (self.dir / "取数.csv").write_text(
+            "Time;Vx KF;TH\ns;km/h;\n" + rows, encoding="utf-8")
+        self.library = server.SessionLibrary([self.dir], cache_size=1)
+        self.api = apimod.Api(self.library)
+
+    def tearDown(self):
+        self.library.close()
+        self.tmp.cleanup()
+
+    def _trace(self, buckets: int = 500):
+        return self.api.handle(["session", "取数", "trace"],
+                               {"channels": ["Vx KF"],
+                                "buckets": [str(buckets)]}, "GET")
+
+    def _assert_plain(self, value, where: str) -> None:
+        """每个叶子都必须是**内置**标量，每个浮点都必须有限。
+
+        这里用 ``type(x) is ...`` 而不是 ``isinstance``：``np.float64`` 是 ``float``
+        的子类，``isinstance`` 会把它放过去——而 ``json_safe`` 当初的存在理由正是它。
+        """
+        if isinstance(value, dict):
+            for key, item in value.items():
+                self.assertIs(type(key), str, f"{where} 的键不是 str：{key!r}")
+                self._assert_plain(item, f"{where}.{key}")
+            return
+        if isinstance(value, (list, tuple)):
+            for index, item in enumerate(value):
+                self._assert_plain(item, f"{where}[{index}]")
+            return
+        self.assertIn(type(value), (str, int, float, bool, type(None)),
+                      f"{where} 不是内置标量，而是 {type(value).__name__}")
+        if type(value) is float:
+            self.assertTrue(math.isfinite(value), f"{where} 不是有限值：{value!r}")
+
+    def test_快路径与旧路径逐字节相同(self):
+        response = self._trace()
+        self.assertEqual(response.status, 200)
+        parsed = json.loads(response.body)
+        # ``library.dumps`` 就是改动前那条路（json_safe + json.dumps）
+        self.assertEqual(response.body.decode("utf-8"), librarymod.dumps(parsed))
+
+    def test_别的端点仍然走_json_safe(self):
+        with mock.patch.object(self.apimod, "dumps",
+                               side_effect=librarymod.dumps) as spy:
+            listing = self.apimod.Api(self.library).handle(["sessions"], {}, "GET")
+            self.assertEqual(listing.status, 200)
+            self.assertTrue(spy.called, "别的端点必须继续走 json_safe")
+            spy.reset_mock()
+            response = self._trace()
+            self.assertEqual(response.status, 200)
+            spy.assert_not_called()
+
+    def test_载荷漏进_NaN_时当场报错(self):
+        """``allow_nan=False`` 不许被顺手删掉：NaN 要当场爆，不能写成非法 JSON。"""
+        broken = {"time": [0.0, 1.0], "value": [float("nan"), 1.0],
+                  "envelope": False, "samples": 2, "buckets": 2}
+        with mock.patch.object(render, "trace", return_value=broken):
+            response = self._trace()
+        self.assertEqual(response.status, 400)
+        message = json.loads(response.body)["error"]
+        self.assertIn("NaN", message)
+        self.assertIn("报给维护者", message)
+
+    @_needs(HILL)
+    def test_金标准的取数载荷本来就是_JSON_安全的(self):
+        with ld.LogFile.read(HILL) as log:
+            time = timebase.axis(log)
+            distance = derive.distance_series(log)[: time.size]
+            for name in render.pick_channels(log, 4):
+                payload = render.trace(log, name, time, distance, 500)
+                self._assert_plain(payload, name)
+
+
 class TestViewerScript(unittest.TestCase):
     """The generated workbench must execute without throwing (needs node)."""
 

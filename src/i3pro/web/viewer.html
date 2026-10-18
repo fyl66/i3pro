@@ -3080,6 +3080,40 @@ function drawSectionBands(ctx, pad, plotW, plotH, x0, x1, strip) {
   return drawn;
 }
 
+/** 把包络桶按**像素列**并一遍：同一根竖线上的桶合成一根（min 取最小、max 取最大）。
+ *
+ * 8000 个桶画到大约 800 像素宽的地方，一根竖线上挤着十来条——后画的盖住先画的，
+ * 画的次数全白花，观感还更脏（ticket #55）。桶不比像素列多时原样返回：合并是恒等操作。
+ *
+ * **只服务画线**：抬头统计、纵轴量程、A–B 区间统计一律还用后端给的桶，一行都不动。
+ * 所以这里返回的是新数组，绝不就地改 `spec.min` / `spec.max`。
+ */
+function pixelColumnsFor(xs, spec, sx, x0, x1, columns) {
+  if (!columns || xs.length <= columns) {
+    return { x: xs, min: spec.min, max: spec.max };
+  }
+  const outX = [], outMin = [], outMax = [];
+  let lastPx = null;
+  for (let i = 0; i < xs.length; i++) {
+    const xv = xs[i], mn = spec.min[i], mx = spec.max[i];
+    if (!Number.isFinite(xv) || !Number.isFinite(mn) || !Number.isFinite(mx)) continue;
+    if (xv < x0) continue;
+    if (xv > x1) break;
+    const px = Math.round(sx(xv));
+    if (px === lastPx && outMin.length) {
+      const last = outMin.length - 1;
+      if (mn < outMin[last]) outMin[last] = mn;
+      if (mx > outMax[last]) outMax[last] = mx;
+      continue;
+    }
+    outX.push(xv);
+    outMin.push(mn);
+    outMax.push(mx);
+    lastPx = px;
+  }
+  return { x: outX, min: outMin, max: outMax };
+}
+
 function drawTraces(ctx, pad, plotW, plotH, x0, x1, y0, y1, specs) {
   const sx = (v) => pad.l + ((v - x0) / (x1 - x0 || 1)) * plotW;
   const sy = (v) => pad.t + plotH - ((v - y0) / (y1 - y0 || 1)) * plotH;
@@ -3095,17 +3129,25 @@ function drawTraces(ctx, pad, plotW, plotH, x0, x1, y0, y1, specs) {
     if (spec.envelope && spec.min && spec.max) {
       // 每个桶一条竖线保真地盖住桶内极值；相邻桶的上界连上界、下界连下界，
       // 就是外轮廓。点样式在这里没有意义（一个点代表一整桶），按线画。
+      //
+      // 桶比画布还密时（8000 桶 × 约 800 像素列）先按像素列并一遍：同一根竖线上的
+      // 桶合成一根，画的次数按像素列封顶（ticket #55）。**这只是画法**——抬头统计、
+      // 纵轴量程、A–B 统计仍然用后端给的桶。
+      const cols = pixelColumnsFor(
+        xs, spec, sx, x0, x1,
+        Math.round(plotW * (window.devicePixelRatio || 1)));
+      const cxs = cols.x, cmins = cols.min, cmaxs = cols.max;
       ctx.globalAlpha = 0.48;
       ctx.beginPath();
-      for (let i = 0; i < xs.length; i++) {
-        const xv = xs[i];
-        if (!Number.isFinite(xv) || !Number.isFinite(spec.min[i])
-            || !Number.isFinite(spec.max[i])) continue;
+      for (let i = 0; i < cxs.length; i++) {
+        const xv = cxs[i];
+        if (!Number.isFinite(xv) || !Number.isFinite(cmins[i])
+            || !Number.isFinite(cmaxs[i])) continue;
         if (xv < x0) continue;
         if (xv > x1) break;
         const px = sx(xv);
-        ctx.moveTo(px, sy(spec.max[i]));
-        ctx.lineTo(px, sy(spec.min[i]));
+        ctx.moveTo(px, sy(cmaxs[i]));
+        ctx.lineTo(px, sy(cmins[i]));
       }
       ctx.stroke();
       ctx.globalAlpha = 1;
@@ -3113,8 +3155,8 @@ function drawTraces(ctx, pad, plotW, plotH, x0, x1, y0, y1, specs) {
         ctx.beginPath();
         let started = false;
         let prevX = 0, prevY = 0;
-        for (let i = 0; i < xs.length; i++) {
-          const xv = xs[i], yv = values[i];
+        for (let i = 0; i < cxs.length; i++) {
+          const xv = cxs[i], yv = values[i];
           if (!Number.isFinite(xv) || !Number.isFinite(yv)) continue;
           if (xv < x0) continue;
           if (xv > x1) break;
@@ -3141,8 +3183,8 @@ function drawTraces(ctx, pad, plotW, plotH, x0, x1, y0, y1, specs) {
         }
         ctx.stroke();
       };
-      outline(spec.max);
-      outline(spec.min);
+      outline(cmaxs);
+      outline(cmins);
       continue;
     }
     if (state.style === "points" && !spec.forceLine && resolutionDrawsPoints()) {

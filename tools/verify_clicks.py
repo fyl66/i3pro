@@ -3507,6 +3507,23 @@ class Checker:
         print("  NOTE  #47 /trace 金标准切档耗时：500=%s ms, 2000=%s ms, 8000=%s ms"
               % (timings.get("min"), timings.get("medium"), timings.get("max")))
 
+        # 画一帧要多久（ticket #55）。这一层 bench 出不了：它量的是服务端与 HTTP，
+        # 而"每帧 ≤ 16 ms"这条门槛量的是真浏览器里的重画。三次取平均，**不**用
+        # requestAnimationFrame（那样量到的是下一次合成，不是这次画布的工作量）。
+        choose("max")
+        self.browser.wait_for(
+            "((i3pro.state.traces[%s]||{}).buckets===8000)" % json.dumps(name),
+            self.session, timeout=30)
+        time.sleep(0.5)
+        frame_ms = self.js(
+            "(function(){var t0=performance.now();"
+            "for(var i=0;i<3;i++){i3pro.state.dataVersion++;i3pro.renderAll();}"
+            "return Math.round((performance.now()-t0)/3);})()")
+        self.check("#55 8000 桶整屏重画一帧 < 100 ms（实测写进 A96）",
+                   isinstance(frame_ms, (int, float)) and frame_ms < 100,
+                   "%s ms/帧" % frame_ms)
+        print("  NOTE  #55 实测 8000 桶整屏重画：%s ms/帧" % frame_ms)
+
         # 让后面的验收回到默认档，不留一个"最少档"的全局状态。
         choose("medium")
         self.browser.wait_for(

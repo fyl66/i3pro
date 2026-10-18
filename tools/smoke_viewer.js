@@ -4312,6 +4312,49 @@ if (canMeta) {
   api.state.style = savedStyle;
 }
 
+// 39. 像素列包络（ticket #55）：桶比画布还密时按像素列并一遍，统计仍用后端给的桶。
+{
+  const api = window.i3pro;
+  const savedStyle = api.state.style, savedUpsample = api.state.upsample;
+  api.state.style = "line";
+  api.state.upsample = "linear";
+  const dense = (n) => {
+    const x = [], min = [], max = [], values = [];
+    for (let i = 0; i < n; i++) {
+      x.push(i);
+      min.push(-i);
+      max.push(i);
+      values.push(0);
+    }
+    return { x: x, min: min, max: max, values: values,
+             envelope: true, color: "#fff" };
+  };
+  const linesFor = (spec, plotW) => {
+    const rec = { lines: 0, beginPath() {}, moveTo() {},
+                  lineTo() { this.lines += 1; }, stroke() {} };
+    api.drawTraces(rec, { l: 0, t: 0 }, plotW, 100, 0, spec.x.length - 1,
+                   -1e6, 1e6, [spec]);
+    return rec.lines;
+  };
+  const denseSpec = dense(2000);
+  const before = { x: denseSpec.x.slice(), min: denseSpec.min.slice(),
+                   max: denseSpec.max.slice(), values: denseSpec.values.slice() };
+  const merged = linesFor(denseSpec, 100);
+  check(merged <= 3 * 110,
+    "2000 个桶挤进 100 像素列，画了 " + merged + " 段——该按像素列封顶");
+  check(merged >= 100, "合并过头了，连竖线都没画出来：" + merged);
+  check(JSON.stringify(before.x) === JSON.stringify(denseSpec.x)
+        && JSON.stringify(before.min) === JSON.stringify(denseSpec.min)
+        && JSON.stringify(before.max) === JSON.stringify(denseSpec.max)
+        && JSON.stringify(before.values) === JSON.stringify(denseSpec.values),
+    "合并就地改了后端给的桶数组——抬头统计与量程会跟着错");
+  const untouched = linesFor(dense(50), 100);
+  check(untouched === 3 * 50 - 2,
+    "桶不比像素列多时不该合并：画了 " + untouched + " 段，期望 " + (3 * 50 - 2));
+  api.state.style = savedStyle;
+  api.state.upsample = savedUpsample;
+}
+
 const header = registry.get("fileInfo");
 check(header && (header.innerHTML.indexOf(".ld") >= 0
   || header.innerHTML.indexOf(".csv") >= 0

@@ -529,6 +529,15 @@ UI 与组件逻辑的"取/去"清单）。
 [ADR-0006](adr/0006-marple-parity-and-rule-relaxation.md)。对照表里标"做"的每一条，
 落地时仍要带可跑的验收命令，`tools/verify_ld_vs_csv.py` 照旧不可谈判。
 
+### M12 — 性能门槛与 Rust 边界（2026-10-18，ticket #56）
+
+性能 map（GitHub #49）把"要不要用 Rust 重写"变成**四条可判的门槛**：服务端 `/trace` 计算
+≤ 50 ms、HTTP/浏览器端到端 ≤ 150 ms、拖拽缩放每帧 ≤ 16 ms、长帧（> 50 ms）为零。
+2026-10-18 实测：前三条不达、第四条为零；触发条件成立，但证据指向**换载荷格式**
+（冷路径 118.3 ms 里 83.9 ms 是 `json.dumps`），不是换语言。门槛定义、判据命令、实测
+数字与代价表见 [ADR-0007](adr/0007-when-rust-is-allowed.md)；量具是
+`tools\bench_viewer.py`（服务端与 HTTP）与 `tools\verify_clicks.py`（真浏览器里的帧）。
+
 ## 8. 待确认事项
 
 1. **仓库托管**：代码已推到 **https://github.com/fyl66/i3pro**（**public**，2026-09-13 确认；车队数据与 MoTeC

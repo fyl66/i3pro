@@ -3524,12 +3524,129 @@ class Checker:
                    "%s ms/帧" % frame_ms)
         print("  NOTE  #55 实测 8000 桶整屏重画：%s ms/帧" % frame_ms)
 
+        # ticket #56 的第 3、4 条门槛（拖拽 / 缩放里的每一帧）单独量，口径在那个
+        # 方法自己的注释里；末尾的三条 NOTE 要原样抄进 ACCEPTANCE 与 ADR-0007。
+        self.drag_frames(name, component_id)
+
         # 让后面的验收回到默认档，不留一个"最少档"的全局状态。
         choose("medium")
         self.browser.wait_for(
             "((i3pro.state.traces[%s]||{}).buckets===2000)" % json.dumps(name),
             self.session, timeout=30)
         time.sleep(0.4)
+
+    # ------------------------------------------- #56 拖拽 / 缩放里的每一帧
+    def drag_frames(self, name, component_id):
+        """ticket #56 的第 3、4 条门槛：真鼠标拖、滚轮缩时的帧。
+
+        这一层 ``bench_viewer.py`` 出不了——它量的是服务端与 HTTP。口径固定在这儿，
+        三条 NOTE 里的数字要原样抄进 ``docs/ACCEPTANCE.md`` 与 ``docs/adr/0007``：
+
+        * 先回到**一圈**的窗口上：整段全览时一拖就出界，数据空了帧会"变快"，
+          量到的是假象（8000 桶挤在一圈里才是用户真遇到的那种拖）；
+        * 一次 ``mousemove`` / ``wheel`` 就是一次 ``renderAll()``，量那一次事件的
+          主线程墙钟；
+        * 同趟量一条**空转派发基线**（鼠标在图外动一下、不触发重画）：那只是 CDP
+          协议自身的往返，用户不付这个钱，所以门槛 3 读的是"墙钟 − 基线"；
+        * 长帧另用浏览器自己的 Long Task API（> 50 ms 的主线程任务）交叉印证。
+
+        断言只钉**回归线**（拖得动 · 缩得动 · 每步中位 ≤ 200 ms）；门槛本身是
+        16 ms / 长帧为零，写在 ADR-0007 里按 NOTE 的数字判，不写成回归。
+        """
+        def mid(values):
+            return sorted(values)[len(values) // 2]
+
+        center = json.loads(self.js(
+            "JSON.stringify((function(){var el=document.querySelector('[data-id=\"%s\"] "
+            "canvas');return el?__center(el):null;})())" % component_id) or "null")
+        lap = json.loads(self.js(
+            "JSON.stringify((i3pro.data.laps||[]).filter(function(x){return x.complete;})[0]"
+            "||null)") or "null")
+        if not center or not lap:
+            self.check("#56 找得到图表画布和一条完整的圈，好量拖拽里的帧", False,
+                       "画布=%s 圈=%s" % (bool(center), bool(lap)))
+            return
+
+        self.js("(function(){i3pro.state.view=[%r,%r];"
+                "i3pro.refreshWindowTraces(true);return true;})()"
+                % (lap["start_time"], lap["end_time"]))
+        self.browser.wait_for(
+            "(function(){var t=i3pro.state.traces[%s];var v=i3pro.state.view;"
+            "return !!(t&&t.time&&t.time.length&&v&&t.time[0]<=v[0]+1e-6&&"
+            "t.time[t.time.length-1]>=v[1]-1e-6);})()" % json.dumps(name),
+            self.session, timeout=30)
+        time.sleep(0.5)
+        observer = self.js(
+            "(function(){window.__longTasks=[];window.__longTaskOK=false;"
+            "if(window.__longTaskObs)window.__longTaskObs.disconnect();"
+            "try{var o=new PerformanceObserver(function(list){"
+            "list.getEntries().forEach(function(e){"
+            "window.__longTasks.push(Math.round(e.duration*10)/10);});});"
+            "o.observe({entryTypes:['longtask']});window.__longTaskObs=o;"
+            "window.__longTaskOK=true;}catch(err){}return window.__longTaskOK;})()")
+        baseline = []
+        for _ in range(3):
+            started = time.perf_counter()
+            self.browser.mouse("mouseMoved", 8, 8, self.session, buttons=0)
+            baseline.append((time.perf_counter() - started) * 1000.0)
+
+        before_view = self.view()
+        steps = []
+        self.browser.mouse("mouseMoved", center["x"], center["y"], self.session, buttons=0)
+        self.browser.mouse("mousePressed", center["x"], center["y"], self.session)
+        for step in range(1, 13):
+            started = time.perf_counter()
+            self.browser.mouse("mouseMoved", center["x"] + step * 12, center["y"],
+                               self.session)
+            steps.append((time.perf_counter() - started) * 1000.0)
+            time.sleep(0.016)
+        self.browser.mouse("mouseReleased", center["x"] + 144, center["y"],
+                           self.session, buttons=0)
+        time.sleep(0.8)
+        after_view = self.view()
+        drag_tasks = json.loads(self.js("JSON.stringify(window.__longTasks||[])") or "[]")
+
+        zoom_before = after_view
+        zoom_steps = []
+        self.js("window.__longTasks=[];true")
+        self.browser.mouse("mouseMoved", center["x"], center["y"], self.session, buttons=0)
+        for _ in range(6):
+            started = time.perf_counter()
+            self.browser.call("Input.dispatchMouseEvent", {
+                "type": "mouseWheel", "x": center["x"], "y": center["y"],
+                "deltaX": 0, "deltaY": -120, "button": "none", "buttons": 0,
+            }, session=self.session)
+            zoom_steps.append((time.perf_counter() - started) * 1000.0)
+            time.sleep(0.05)
+        time.sleep(0.8)
+        zoom_after = self.view()
+        zoom_tasks = json.loads(self.js("JSON.stringify(window.__longTasks||[])") or "[]")
+        self.js("(function(){if(window.__longTaskObs)window.__longTaskObs.disconnect();"
+                "return true;})()")
+
+        moved = bool(before_view and after_view
+                     and abs(after_view[0] - before_view[0]) > 1e-9)
+        zoomed = bool(zoom_before and zoom_after
+                      and abs((zoom_after[1] - zoom_after[0])
+                              - (zoom_before[1] - zoom_before[0])) > 1e-9)
+        self.check("#56 真鼠标按住图拖 12 步，窗口真的跟着平移", moved,
+                   "%s → %s" % (before_view, after_view))
+        self.check("#56 真滚轮缩 6 格，窗口真的变窄", zoomed,
+                   "%s → %s" % (zoom_before, zoom_after))
+        self.check("#56 拖拽每步的中位耗时 ≤ 200 ms（回归线；门槛是 16 ms，见 NOTE）",
+                   mid(steps) < 200.0, "中位 %.1f ms / 最大 %.1f ms" % (mid(steps), max(steps)))
+        print("  NOTE  #56 拖拽 12 步：中位 %.1f ms / 最大 %.1f ms（其中 > 16 ms 的 %d 步、"
+              "> 50 ms 的 %d 步）· 空转派发基线中位 %.1f ms"
+              % (mid(steps), max(steps), sum(1 for v in steps if v > 16),
+                 sum(1 for v in steps if v > 50), mid(baseline)))
+        print("  NOTE  #56 滚轮 6 格：中位 %.1f ms / 最大 %.1f ms（> 50 ms 的 %d 格）"
+              % (mid(zoom_steps), max(zoom_steps),
+                 sum(1 for v in zoom_steps if v > 50)))
+        print("  NOTE  #56 浏览器 Long Task（> 50 ms，%s）：拖拽 %d 个 / 最长 %.1f ms · "
+              "缩放 %d 个 / 最长 %.1f ms"
+              % ("观测中" if observer else "这台浏览器不支持，只看派发耗时",
+                 len(drag_tasks), max(drag_tasks or [0.0]),
+                 len(zoom_tasks), max(zoom_tasks or [0.0])))
 
     # ------------------------------------------- A89 光标 A–B 区间统计
     def cursor_stats(self):

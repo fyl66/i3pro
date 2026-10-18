@@ -337,6 +337,14 @@ const window = ctx.window;
 const registry = ctx.registry;
 const api = ctx.api;
 
+// 票⑧：高级工具折叠区的**开机默认**要在这里先记下来——后面那些块会去点它、跳它，
+// 等走到布局那块时它早就不是刚打开的样子了。
+const bootFold = {
+  open: api.advancedOpen(),
+  hidden: registry.get("advancedBody").hidden,
+  valuesHidden: String(registry.get("valuesGroup").style.display) === "none",
+};
+
 /** --dump-worksheets：把页面上的工作表一个个切过去，倒成 JSON，供人比对。
  *
  * 迁移用（ticket #30）：把硬编码的 7 套预设搬进 worksheets/*.json 时，用它把
@@ -4067,7 +4075,7 @@ if (canMeta) {
   check(targets.length >= 8 && buttons.length === targets.length,
     "跳转清单与按钮对不上：" + targets.length + " / " + buttons.length);
   const ids = targets.map((t) => t.id);
-  for (const want of ["channelGroup", "mathsGroup", "setupGroup", "lapGroup"]) {
+  for (const want of ["sessionGroup", "channelGroup", "mathsGroup", "setupGroup", "lapGroup"]) {
     check(ids.indexOf(want) >= 0, "跳转清单里少了常去的那一栏：" + want);
   }
   // 按钮指着一栏不存在的模块 = 点了没反应；反过来，页面上有模块没进清单 =
@@ -4087,13 +4095,20 @@ if (canMeta) {
     key("k", { ctrlKey: true });
     check(api.jumpActive() === "channelGroup",
       "Ctrl+K 之后当前那一栏不再是活跃项：" + api.jumpActive());
-    api.jumpTo("sheetGroup");
-    check(api.jumpActive() === "sheetGroup", "跳到「工作表」之后高亮没跟上");
-    // 「光标值」默认收着（按 V 才出来）：跳过去要顺手打开，不然等于没跳
-    api.state.show.values = false;
-    api.jumpTo("valuesGroup");
-    check(api.state.show.values === true, "跳到收起来的「光标值」没有把它打开");
-    api.state.show.values = false;
+    api.jumpTo("sessionGroup");
+    check(api.jumpActive() === "sessionGroup", "跳到「场次」之后高亮没跟上");
+    // 高级工具里那七栏默认收着（票⑧）：跳过去要顺手把折叠区展开，不然等于没跳
+    api.setAdvanced(false);
+    api.jumpTo("mathsGroup");
+    check(api.advancedOpen() === true, "跳到收起来的高级工具里，折叠区没展开");
+    check(api.jumpActive() === "mathsGroup",
+      "跳到「数学通道」之后高亮没跟上：" + api.jumpActive());
+    // 「Ctrl+K 仍能跳到每一栏」（票⑧的验收）：清单里每一栏都真的跳得到
+    for (const one of targets) {
+      api.jumpTo(one.id);
+      check(api.jumpActive() === one.id,
+        "跳不到这一栏：" + one.id + "（亮着 " + api.jumpActive() + "）");
+    }
     api.jumpTo("channelGroup");
     // 收起来的模块不许拦着高亮（A78 第一条）：一个 rect 全是 0 的模块根本不在
     // 页面上，不能算"已经滚过它"——算了的话滚到哪儿都亮着它。这里把最后一栏收
@@ -4111,6 +4126,77 @@ if (canMeta) {
       api.jumpTo("channelGroup");
     }
   }
+}
+
+// 34b. 布局第一票（票⑧）：工作表 tabs 到顶部第二排、左栏只剩「场次信息 + 通道 +
+//      高级工具」、高级工具默认收起、光标值是 V 键浮层。
+//      假 DOM 的 registry 是按 id 平铺的，量不出"谁在谁里面"，所以"新位置"这一条
+//      直接看源码里的先后顺序（顺序就是排）。**点得到、不遮挡**由 verify_clicks
+//      的真鼠标那条量——这两条一个证明图纸对，一个证明房子能住。
+{
+  const markup = html.split("<script>")[0];
+  const at = (id) => markup.indexOf('id="' + id + '"');
+  const bar = at("sheetBar");
+  const aside = at("asideScroll");
+  const charts = at("charts");
+  check(bar > 0 && aside > bar && charts > aside, "顶栏 / 左栏 / 画布在源码里的顺序不对");
+
+  // 顶部第二排：工作表 tabs + 管理按钮 + 绘图分辨率 + 添加组件 + 那一行的提示
+  for (const id of ["presetRow", "sheetManage", "plotResolution", "sheetName",
+                    "addType", "addBtn", "addTypeNote", "sheetNote", "wsAsk", "wsFile"]) {
+    const pos = at(id);
+    check(pos > bar && pos < aside, "这个控件没在顶部第二排（票⑧）：" + id);
+  }
+  check(at("sheetGroup") < 0, "左栏里那个「工作表」分组还在（整块都该搬走）");
+
+  // 左栏：场次信息 + 通道 + 高级工具
+  for (const id of ["sessionGroup", "fileInfo", "channelGroup", "advancedGroup",
+                    "advancedBody"]) {
+    const pos = at(id);
+    check(pos > aside && pos < charts, "这一块没在左栏里（票⑧）：" + id);
+  }
+  // 七个面板都在高级工具里（顺序上排在那两个元素之间）
+  const fold = at("advancedBody");
+  const advanced = ["lapGroup", "sectionsGroup", "notesGroup", "gpsGroup",
+                    "aliasGroup", "mathsGroup", "setupGroup"];
+  for (const id of advanced) {
+    const pos = at(id);
+    check(pos > fold && pos < charts, "这个面板没收进高级工具：" + id);
+    check(!!registry.get(id), "这个面板不见了：" + id);
+  }
+  // 「光标值」是 V 键浮层：不在左栏（源码里排在画布之后）
+  check(at("valuesGroup") > charts, "「光标值」还留在左栏里（票⑧：它走 V 键浮层）");
+
+  // 默认收起：两处都要写（真浏览器认 hidden，假 DOM 只看 style.display）。
+  // 这一条量的是**开机那一下**（后面那些块已经点过它了，见 bootFold）。
+  check(bootFold.open === false, "高级工具默认没收起");
+  check(bootFold.hidden === true,
+    "高级工具没有 hidden——真浏览器里会露出来");
+
+  // 点标题展开 / 再点收起，而且不碰 state（ADR-0008：折叠不是数据）
+  const toggle = registry.get("advancedToggle");
+  check(!!toggle, "没有「高级工具」那个可点的标题");
+  if (toggle) {
+    api.setAdvanced(false);   // 从"收着"这一头点；开机默认由 bootFold 那条守
+    toggle.dispatch("click", { target: toggle });
+    check(api.advancedOpen() === true, "点「高级工具」没展开");
+    toggle.dispatch("click", { target: toggle });
+    check(api.advancedOpen() === false, "再点「高级工具」没收起");
+  }
+
+  // 光标值：开机默认收着（bootFold），按 V 出来（浮层），再按 V 收起
+  const values = registry.get("valuesGroup");
+  check(bootFold.valuesHidden, "光标值开机默认没有收着（票⑧：它要走 V 键浮层）");
+  api.state.show.values = false;
+  api.renderAll();
+  check(!!values && String(values.style.display) === "none",
+    "show.values=false 时浮层还露着：" + (values && values.style.display));
+  key("v");
+  check(api.state.show.values === true, "按 V 没把光标值打开");
+  check(values.style.display !== "none", "V 开了，但浮层还被 display:none 压着");
+  key("v");
+  check(api.state.show.values === false, "再按 V 没收起光标值");
+  check(values.style.display === "none", "收起了 show.values，浮层还在");
 }
 
 // 35. 曲线连接（A79）：i2 Pro 的 Channel Up-sampling。三件事——

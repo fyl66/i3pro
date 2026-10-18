@@ -10,7 +10,10 @@
     --fg:#e6e9ef; --muted:#8b94a7; --accent:#4cc2ff; --good:#35d07f; --bad:#ff5d6c; --warn:#ffb454;
   }
   * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg);
+  /* 外壳：两排顶栏（第一排全局、第二排工作表），余下的高度给左栏 + 画布。
+     这里用 flex 分高度，不再写 calc(100vh - 45px)：第二排一加，那种数字就错了。 */
+  body { margin:0; background:var(--bg); color:var(--fg); display:flex; flex-direction:column;
+         height:100vh; overflow:hidden;
          font:13px/1.45 "Segoe UI","Microsoft YaHei",system-ui,sans-serif; }
   header { display:flex; gap:12px; align-items:center; flex-wrap:wrap;
            padding:8px 14px; background:var(--panel); border-bottom:1px solid var(--line); }
@@ -18,9 +21,33 @@
   header .meta { color:var(--muted); font-size:12px; }
   header .meta b { color:var(--fg); }
   header .spacer { margin-left:auto; }
-  main { display:grid; grid-template-columns:312px 1fr; height:calc(100vh - 45px); }
+  /* 第二排：工作表 tabs + 管理按钮 + 绘图分辨率（票⑧：工作表是工作区级容器，
+     它跟 tabs 同一排；左栏只留场次信息与通道）。 */
+  #sheetBar { flex:0 0 auto; display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+              padding:6px 14px; background:var(--panel2); border-bottom:1px solid var(--line); }
+  #sheetBar .row { margin-bottom:0; }
+  #sheetBar .bar-label { color:var(--muted); font-size:11px; }
+  #sheetBar #presetRow { flex:0 1 auto; }
+  /* 管理按钮跟 tabs 不是一回事（一套 vs 这一套），给它们一条分隔线 */
+  #sheetBar #sheetManage { border-left:1px solid var(--line); padding-left:8px; }
+  #sheetBar #sheetName::before { content:"当前："; }
+  main { flex:1 1 auto; min-height:0; display:grid; grid-template-columns:312px 1fr; }
   aside { background:var(--panel); border-right:1px solid var(--line); overflow:auto; padding:9px 11px 40px; }
   section#charts { overflow:auto; padding:9px 11px 70px; }
+  #sessionGroup .meta { color:var(--muted); font-size:12px; line-height:1.7; }
+  #sessionGroup .meta b { color:var(--fg); }
+  /* 高级工具：左栏默认只留「场次信息 + 通道」，其余七个面板收进这个折叠区。 */
+  .foldbtn { background:none; border:none; padding:0; color:inherit; font:inherit;
+             letter-spacing:inherit; text-transform:inherit; cursor:pointer; }
+  .foldbtn::before { content:"▸"; margin-right:3px; color:var(--muted); }
+  .foldbtn.on::before { content:"▾"; color:var(--accent); }
+  #advancedBody { border-left:2px solid var(--line); padding-left:9px; }
+  /* 光标值（V 键）：浮层——不进左栏，也不进右栏（票⑧）。 */
+  #valuesGroup.float { position:fixed; right:14px; top:104px; z-index:60; width:290px;
+                       max-height:62vh; overflow:auto; background:var(--panel);
+                       border:1px solid var(--line); border-radius:7px; padding:9px 11px;
+                       box-shadow:0 6px 20px rgba(0,0,0,.35); }
+  @media (max-width:1180px) { main { grid-template-columns:264px 1fr; } }
   .group { margin-bottom:13px; }
   .group h2 { font-size:11px; text-transform:uppercase; letter-spacing:.09em;
               color:var(--muted); margin:0 0 6px; font-weight:600;
@@ -354,7 +381,6 @@
 <body>
 <header>
   <h1>i3pro</h1>
-  <span class="meta" id="fileInfo"></span>
   <span class="spacer"></span>
   <button id="modeTime" class="on">时间轴</button>
   <button id="modeDistance">距离轴</button>
@@ -365,6 +391,38 @@
   <button id="pngBtn">导出 PNG</button>
   <button id="dataBtn" title="把这一段、这几条通道按原始或统一采样率导出成 CSV / Excel">导出数据</button>
 </header>
+<!-- 第二排：工作表（票⑧）。tabs 管"切到哪一套"，旁边那排管"这一套本身"，
+     绘图分辨率也在这一排——它是**每套具名工作表一份**的（ADR-0008 的口径一）。
+     左栏从这一票起只留「场次信息 + 通道」。 -->
+<div id="sheetBar">
+  <div class="row" id="presetRow"></div>
+  <!-- 这一排管的是"这一套本身"（ticket #33）；左边那排管"切到哪一套"。 -->
+  <div class="row" id="sheetManage">
+    <button id="wsSave" title="把当前这一屏写回正在用的工作表文件">保存</button>
+    <button id="wsSaveAs" title="把当前这一屏存成新的一套（同名自动加后缀，不覆盖）">另存为</button>
+    <button id="wsNew" title="新建一套只放一张图的工作表">新建</button>
+    <button id="wsRename" title="改名（文件名跟着变，旧文件删掉）">重命名</button>
+    <button id="wsDelete" title="删掉这一套（要点两次）">删除</button>
+    <button id="wsExport" title="导出一份 .json 发给队友">导出</button>
+    <button id="wsImport" title="导入队友发来的一份 .json">导入</button>
+  </div>
+  <span class="bar-label" id="sheetName"></span>
+  <span class="bar-label">绘图分辨率</span>
+  <select id="plotResolution" title="这一套工作表画曲线时用多少点；快照与服务两种打开方式都按它取数"></select>
+  <div class="row">
+    <select id="addType" title="选择要添加的组件"></select>
+    <button id="addBtn">＋ 添加组件</button>
+  </div>
+  <div class="row" id="wsAsk" style="display:none">
+    <span class="hint" id="wsAskLabel" style="margin:0"></span>
+    <input id="wsAskInput" type="text" spellcheck="false" placeholder="工作表名称">
+    <button id="wsAskOk">确定</button>
+    <button id="wsAskCancel">取消</button>
+  </div>
+  <input type="file" id="wsFile" accept=".json,application/json" style="display:none">
+  <div class="hint warn" id="sheetNote"></div>
+  <div class="hint" id="addTypeNote"></div>
+</div>
 <main>
   <aside id="asideScroll">
     <!-- 侧边栏快速跳转（A78）：按钮由 JUMP_TARGETS 一处生成，不在这里手写第二份清单。 -->
@@ -373,38 +431,29 @@
       <div class="jrow" id="jumpRow"></div>
       <div class="jhint" id="jumpHint">Ctrl+K 快速跳转 · 左右方向键换一栏</div>
     </div>
-    <div class="group" id="sheetGroup">
-      <h2>工作表 <span class="count" id="sheetName"></span></h2>
-      <div class="row" id="presetRow"></div>
-      <!-- 这一排管的是"这一套本身"（ticket #33）；上面那排管"切到哪一套"。 -->
-      <div class="row" id="sheetManage">
-        <button id="wsSave" title="把当前这一屏写回正在用的工作表文件">保存</button>
-        <button id="wsSaveAs" title="把当前这一屏存成新的一套（同名自动加后缀，不覆盖）">另存为</button>
-        <button id="wsNew" title="新建一套只放一张图的工作表">新建</button>
-        <button id="wsRename" title="改名（文件名跟着变，旧文件删掉）">重命名</button>
-        <button id="wsDelete" title="删掉这一套（要点两次）">删除</button>
-        <button id="wsExport" title="导出一份 .json 发给队友">导出</button>
-        <button id="wsImport" title="导入队友发来的一份 .json">导入</button>
-      </div>
-      <div class="row" id="wsAsk" style="display:none">
-        <span class="hint" id="wsAskLabel" style="margin:0"></span>
-        <input id="wsAskInput" type="text" spellcheck="false" placeholder="工作表名称">
-        <button id="wsAskOk">确定</button>
-        <button id="wsAskCancel">取消</button>
-      </div>
-      <input type="file" id="wsFile" accept=".json,application/json" style="display:none">
-      <div class="hint warn" id="sheetNote"></div>
-      <div class="row">
-        <select id="addType" title="选择要添加的组件"></select>
-        <button id="addBtn">＋ 添加组件</button>
-      </div>
-      <div class="hint" id="addTypeNote"></div>
-      <div class="row" id="sheetDisplay">
-        <span class="hint" style="margin:0">显示</span>
-        <span class="hint" style="margin:0">绘图分辨率</span>
-        <select id="plotResolution" title="这一套工作表画曲线时用多少点；快照与服务两种打开方式都按它取数"></select>
-      </div>
+    <!-- 场次信息（票⑧）：这一场是哪一台车、哪天、多久、多少通道。#fileInfo 还是
+         那一处（initHeader 写它），只是从抬头搬到了左栏——不另抄一份。 -->
+    <div class="group" id="sessionGroup">
+      <h2>场次信息</h2>
+      <div class="meta" id="fileInfo"></div>
     </div>
+    <div class="group" id="channelGroup">
+      <h2>通道 <span class="count" id="chCount"></span></h2>
+      <input type="search" id="chSearch" placeholder="搜索通道 / 单位">
+      <div class="row" style="margin-top:5px">
+        <button id="chClear">清空</button>
+        <button id="chDefault">默认</button>
+        <button id="chVisible">只留可见</button>
+      </div>
+      <div id="channelList"></div>
+    </div>
+    <!-- 高级工具（票⑧）：其余七个面板收在这里，默认收起。组里的内容一行没改，
+         只是换了个容器；跳转按钮（JUMP_TARGETS）跳进来时会顺手把它展开。 -->
+    <div class="group" id="advancedGroup">
+      <h2><button type="button" class="foldbtn" id="advancedToggle"
+                  title="圈速 / 赛道区段 / 注释 / GPS 校正 / 通道别名 / 数学通道 / 通道处理">高级工具</button>
+        <span class="count" id="advancedCount"></span></h2>
+      <div id="advancedBody" hidden style="display:none">
     <div class="group" id="lapGroup">
       <h2>圈速 <span class="count" id="lapCount"></span></h2>
       <div class="row">
@@ -465,21 +514,6 @@
       <div class="hint">坏定位（空定位 / 卫星不足 / 跳点）**永远**标注出来，和开关无关；
         上面这个开关决定要不要按时移与插值去**修正**它。轨迹图不会跨着空档或跳点连线。
         距离轴默认不动：圈速、区段、报表都建立在速度积分的距离轴上，换基准要自己点头。</div>
-    </div>
-    <div class="group" id="valuesGroup">
-      <h2>光标值 <span class="count" id="cursorInfo"></span></h2>
-      <div class="vals" id="valuesPanel"></div>
-      <div class="hint"><kbd>D</kbd> 基准光标 · <kbd>空格</kbd> 放置 · <kbd>X</kbd> 交换 · <kbd>V</kbd> 隐藏</div>
-    </div>
-    <div class="group" id="channelGroup">
-      <h2>通道 <span class="count" id="chCount"></span></h2>
-      <input type="search" id="chSearch" placeholder="搜索通道 / 单位">
-      <div class="row" style="margin-top:5px">
-        <button id="chClear">清空</button>
-        <button id="chDefault">默认</button>
-        <button id="chVisible">只留可见</button>
-      </div>
-      <div id="channelList"></div>
     </div>
     <!-- 通道别名（ticket #36）：同一套工作表换到别的场次还能用的机制。
          一条别名 = 有序候选，取第一条在本场次存在的；结果随工作表存。 -->
@@ -587,6 +621,8 @@
         </div>
       </div>
     </div>
+      </div><!-- /#advancedBody：七个面板到此为止 -->
+    </div><!-- /#advancedGroup -->
   </aside>
   <section id="charts">
     <div id="worksheet"></div>
@@ -602,6 +638,12 @@
     </div>
   </section>
 </main>
+<!-- 光标值（V 键）：浮层——不进左栏，也不进右栏（票⑧）。默认收着，按 V 才出来。 -->
+<div class="group float" id="valuesGroup" hidden style="display:none">
+  <h2>光标值 <span class="count" id="cursorInfo"></span></h2>
+  <div class="vals" id="valuesPanel"></div>
+  <div class="hint"><kbd>D</kbd> 基准光标 · <kbd>空格</kbd> 放置 · <kbd>X</kbd> 交换 · <kbd>V</kbd> 隐藏</div>
+</div>
 <div id="toast"></div>
 
 <div id="canDlg" hidden>
@@ -6486,7 +6528,9 @@ function syncReportSelectors(comp) {
 
 function renderValues() {
   const group = $("valuesGroup");
-  if (!state.show.values) { group.style.display = "none"; return; }
+  // 浮层（票⑧）：真浏览器认 hidden，无头假 DOM 只看 style.display，两个都写。
+  if (!state.show.values) { group.hidden = true; group.style.display = "none"; return; }
+  group.hidden = false;
   group.style.display = "";
   const panel = $("valuesPanel");
   $("cursorInfo").textContent = state.cursor === null ? "移动鼠标" : fmt(state.cursor, 2) + " " + axisUnit();
@@ -9845,19 +9889,58 @@ function setStatus() {
  * 加一个模块只加一行——不在这里另抄一份模块顺序。
  */
 const JUMP_TARGETS = [
-  { id: "sheetGroup", label: "工作表", count: "sheetName" },
-  { id: "lapGroup", label: "圈速", count: "lapCount" },
-  { id: "sectionsGroup", label: "区段", count: "sectionsCount" },
-  { id: "notesGroup", label: "注释", count: "notesCount" },
-  { id: "gpsGroup", label: "GPS", count: "gpsCount" },
-  // 「光标值」默认是收起来的（i2 Pro 的 Values 窗口也要按 V）——跳过去要顺手把它打开，
-  // 否则点一下什么也没发生（隐藏元素的 rect 全是 0，真浏览器里就是这么量出来的）。
-  { id: "valuesGroup", label: "光标值", count: "cursorInfo", reveal: "values" },
+  // 票⑧之后左栏只剩「场次信息 + 通道 + 高级工具」三块；下面七栏都在那个折叠区里，
+  // 跳过去要顺手把折叠区展开——隐藏元素的 rect 全是 0，不展开等于没跳（A78 的老教训）。
+  { id: "sessionGroup", label: "场次" },
   { id: "channelGroup", label: "通道", count: "chCount", focus: "chSearch" },
-  { id: "aliasGroup", label: "别名", count: "aliasCount" },
-  { id: "mathsGroup", label: "数学通道", count: "mathsCount", focus: "mathsNew" },
-  { id: "setupGroup", label: "通道处理", count: "setupCount", focus: "setupApply" },
+  // 折叠区自己也进清单：一键把七个面板全摊开，也守住"左栏每一块都跳得到"那条老规矩。
+  { id: "advancedGroup", label: "高级工具", fold: "advanced" },
+  { id: "lapGroup", label: "圈速", count: "lapCount", fold: "advanced" },
+  { id: "sectionsGroup", label: "区段", count: "sectionsCount", fold: "advanced" },
+  { id: "notesGroup", label: "注释", count: "notesCount", fold: "advanced" },
+  { id: "gpsGroup", label: "GPS", count: "gpsCount", fold: "advanced" },
+  { id: "aliasGroup", label: "别名", count: "aliasCount", fold: "advanced" },
+  { id: "mathsGroup", label: "数学通道", count: "mathsCount", focus: "mathsNew",
+    fold: "advanced" },
+  { id: "setupGroup", label: "通道处理", count: "setupCount", focus: "setupApply",
+    fold: "advanced" },
 ];
+
+/* 高级工具折叠区（票⑧）：默认收起，跳转过去时自动展开。
+   折叠状态**不进 state**——它是外壳的折叠，不是数据（ADR-0008 那 39 个键里没有它）。
+   可见性同时写 hidden 与 style.display：真浏览器认 hidden，无头假 DOM 认 style。
+   打开过就记住（本机一格 localStorage）：通道处理 / GPS「应用」都会整页重载，
+   不记的话每次重载都要重新点一遍才够得着刚才那一栏。 */
+const FOLD_STORE = "i3pro.advanced.v1";
+
+function advancedOpen() {
+  const body = $("advancedBody");
+  return !!body && body.style.display !== "none";
+}
+
+function setAdvanced(open, remember) {
+  const body = $("advancedBody");
+  if (!body) return;
+  body.hidden = !open;
+  body.style.display = open ? "" : "none";
+  const button = $("advancedToggle");
+  if (button && button.classList) {
+    button.classList.toggle("on", !!open);
+    if (button.setAttribute) button.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  if (remember !== false) {
+    try { localStorage.setItem(FOLD_STORE, open ? "1" : "0"); } catch (err) { /* 私密模式：记不住就算了 */ }
+  }
+}
+
+function toggleAdvanced() { setAdvanced(!advancedOpen()); }
+
+/** 开机按记住的那一格摆：没记过就是收起（票⑧要的默认）。 */
+function restoreAdvanced() {
+  let open = false;
+  try { open = localStorage.getItem(FOLD_STORE) === "1"; } catch (err) { open = false; }
+  setAdvanced(open, false);
+}
 
 //: 跳过去之后标题闪多久（毫秒）。太短会像没反应，太长会一直抢注意力。
 const JUMP_FLASH_MS = 900;
@@ -9946,11 +10029,8 @@ function jumpTo(id) {
   const group = $(id);
   const entry = jumpButtons.find((item) => item.target.id === id);
   if (!group) return;
-  // 收起来的模块先打开：跳过去的前提是它在那儿（见 JUMP_TARGETS 里 reveal 那一行）。
-  if (entry && entry.target.reveal === "values" && !state.show.values) {
-    state.show.values = true;
-    renderAll();
-  }
+  // 折叠区里的那一栏先展开：跳过去的前提是它在那儿（见 JUMP_TARGETS 里 fold 那一行）。
+  if (entry && entry.target.fold === "advanced") setAdvanced(true);
   const host = $("asideScroll");
   if (host && group.getBoundingClientRect && host.getBoundingClientRect) {
     // 让开的距离是**这一排本身的高度**：它钉在顶上、还是实心的，按固定数字让
@@ -10218,6 +10298,9 @@ function init() {
   $("addBtn").addEventListener("click", () => addComponentOfType($("addType").value));
   $("addType").addEventListener("change", renderAddTypeNote);
   $("plotResolution").addEventListener("change", () => setResolution($("plotResolution").value));
+  // 高级工具折叠区（票⑧）：默认收起，点标题展开/收起。
+  $("advancedToggle").addEventListener("click", toggleAdvanced);
+  restoreAdvanced();
   $("modeTime").addEventListener("click", () => {
     state.mode = "time"; state.view = null; state.panelZoom = {}; scheduleRefresh(); renderAll();
   });
@@ -10311,6 +10394,8 @@ window.i3pro = {
   // 侧边栏快速跳转（A78）
   jumpTargets: JUMP_TARGETS, jumpTo: jumpTo, syncJumpActive: syncJumpActive,
   jumpButtons: () => jumpButtons.map((e) => e.button),
+  // 高级工具折叠区（票⑧）：外壳的折叠，不在 state 里（ADR-0008）
+  advancedOpen: advancedOpen, setAdvanced: setAdvanced,
   // 取数缓存键（A79）：windowKey 只说"看的是哪一段"，traceKey 另外带上曲线连接方式
   windowKey: windowKey, traceKey: traceKey,
   jumpActive: () => {

@@ -2918,6 +2918,128 @@ class Checker:
                    "%s（原始列还在 = 覆盖没把文件里那列吃掉）" % back)
         self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-csv-override.png"), page)
 
+    # ------------------------------------------- 票⑧ 顶部工作表栏 / 高级工具折叠
+    def layout_sheet_bar(self):
+        """票⑧：工作表 tabs 到顶部第二排、左栏瘦身、高级工具默认收起、窄窗口不遮挡。
+
+        假 DOM（smoke）证明不了"排在一起"——那里的元素没有位置，只能看源码顺序。
+        这里量真 rect：顶部那一排真的在左栏上面、分辨率下拉真的落在那一排里、
+        七个面板默认 0 高、真鼠标点标题才展开、窄窗口下两排不叠。
+
+        这一节跑完**把折叠区留着展开**：后面那些验收要点里面的控件（别名 / 注释 /
+        GPS / 通道处理），用户也是先点一下「高级工具」才够得着。
+        """
+        def rect_of(selector):
+            raw = self.js(
+                "(function(){var el=document.querySelector(%r);if(!el)return 'null';"
+                "var r=el.getBoundingClientRect();return JSON.stringify({x:r.left+r.width/2,"
+                "y:r.top+r.height/2,w:r.width,h:r.height,left:r.left,top:r.top,"
+                "right:r.right,bottom:r.bottom});})()" % selector)
+            return json.loads(raw) if raw and raw != "null" else None
+
+        def height_of(element_id):
+            got = self.js(
+                "(function(){var el=document.getElementById(%r);if(!el)return -1;"
+                "return el.getBoundingClientRect().height;})()" % element_id)
+            return float(got or 0)
+
+        folded = ["lapGroup", "sectionsGroup", "notesGroup", "gpsGroup",
+                  "aliasGroup", "mathsGroup", "setupGroup"]
+        bar = rect_of("#sheetBar")
+        aside = rect_of("#asideScroll")
+        charts = rect_of("#charts")
+        self.check("票⑧ 顶部多了一排工作表栏", bool(bar and aside and charts), bar)
+        if bar and aside and charts:
+            self.check("票⑧ 工作表栏在左栏上面（不是又挤回栏里）",
+                       bar["bottom"] <= aside["top"] + 1,
+                       "bar bottom=%.1f · aside top=%.1f" % (bar["bottom"], aside["top"]))
+            for selector, label in (("#plotResolution", "绘图分辨率"),
+                                    ("#sheetBar #presetRow button", "工作表 tab"),
+                                    ("#wsSave", "保存"),
+                                    ("#addBtn", "添加组件")):
+                box = rect_of(selector)
+                inside = bool(box) and box["w"] > 0 \
+                    and box["left"] >= bar["left"] - 1 and box["right"] <= bar["right"] + 1 \
+                    and box["top"] >= bar["top"] - 1 and box["bottom"] <= bar["bottom"] + 1
+                self.check("票⑧ 「%s」落在顶部那一排里" % label, inside,
+                           "%s · 那一排 %s" % (box, bar))
+            for element_id, label in (("sessionGroup", "场次信息"),
+                                      ("channelGroup", "通道"),
+                                      ("advancedGroup", "高级工具")):
+                self.check("票⑧ 左栏里「%s」在" % label, height_of(element_id) > 0,
+                           height_of(element_id))
+        # 七个面板默认收着
+        closed = dict((one, height_of(one)) for one in folded)
+        self.check("票⑧ 高级工具里那七个面板默认都是收着的",
+                   all(value <= 0 for value in closed.values()), closed)
+        # 这张是"左栏只剩场次信息与通道"那一条的证据：折叠区还收着的时候拍
+        self.browser.shot(os.path.join(ROOT, "out", "shots",
+                                       "verify-layout-default.png"), self.session)
+        # 真鼠标点标题：展开 / 再收起来
+        toggle = rect_of("#advancedToggle")
+        self.check("票⑧ 「高级工具」标题真的点得到", bool(toggle) and toggle["w"] > 0, toggle)
+        if toggle:
+            self.browser.click(toggle["x"], toggle["y"], self.session)
+            time.sleep(0.5)
+            opened = dict((one, height_of(one)) for one in folded)
+            self.check("票⑧ 真点一下「高级工具」，七个面板都露出来了",
+                       all(value > 0 for value in opened.values()), opened)
+            self.browser.click(toggle["x"], toggle["y"], self.session)
+            time.sleep(0.5)
+            again = dict((one, height_of(one)) for one in folded)
+            self.check("票⑧ 再点一下又收起来", all(value <= 0 for value in again.values()),
+                       again)
+        # 光标值：V 键浮层，不进左栏
+        self.check("票⑧ 「光标值」默认是收着的",
+                   self.js("i3pro.state.show.values") is False,
+                   self.js("i3pro.state.show.values"))
+        self.check("票⑧ 「光标值」不在左栏里（它走 V 键浮层）",
+                   self.js("!!document.getElementById('asideScroll').contains("
+                           "document.getElementById('valuesGroup'))") is False)
+        self.browser.key_named("v", "KeyV", 86, self.session, text="v")
+        time.sleep(0.5)
+        values = rect_of("#valuesGroup")
+        self.check("票⑧ 按 V 浮层真的出来了", bool(values) and values["h"] > 0, values)
+        if values and aside:
+            self.check("票⑧ 浮层不压着左栏（它挂在画布那一侧）",
+                       values["left"] >= aside["right"] - 1,
+                       "浮层 left=%.1f · 左栏 right=%.1f" % (values["left"], aside["right"]))
+        self.browser.key_named("v", "KeyV", 86, self.session, text="v")
+        time.sleep(0.4)
+        self.check("票⑧ 再按 V 收起来", self.js("i3pro.state.show.values") is False,
+                   self.js("i3pro.state.show.values"))
+        # 窄窗口：两排不叠、下拉不越界、左栏不把画布挤没（票⑧的"窄窗口下不遮挡"）
+        self.browser.call("Emulation.setDeviceMetricsOverride",
+                          {"width": 1000, "height": 800, "deviceScaleFactor": 1,
+                           "mobile": False}, session=self.session)
+        time.sleep(0.6)
+        try:
+            narrow_bar = rect_of("#sheetBar")
+            narrow_charts = rect_of("#charts")
+            narrow_res = rect_of("#plotResolution")
+            narrow_aside = rect_of("#asideScroll")
+            got = bool(narrow_bar and narrow_charts and narrow_res and narrow_aside)
+            self.check("票⑧ 窄窗口（1000 px）下顶栏与画布不叠",
+                       got and narrow_bar["bottom"] <= narrow_charts["top"] + 1,
+                       "%s / %s" % (narrow_bar, narrow_charts))
+            self.check("票⑧ 窄窗口下「绘图分辨率」还在窗口里",
+                       got and narrow_res["left"] >= 0 and narrow_res["right"] <= 1000,
+                       narrow_res)
+            self.check("票⑧ 窄窗口下左栏变窄、画布还有地方",
+                       got and narrow_aside["w"] <= 300 and narrow_charts["w"] > 400,
+                       "左栏 %.0f · 画布 %.0f"
+                       % (narrow_aside["w"] if got else -1,
+                          narrow_charts["w"] if got else -1))
+            self.browser.shot(os.path.join(ROOT, "out", "shots",
+                                           "verify-layout-narrow.png"), self.session)
+        finally:
+            self.browser.call("Emulation.clearDeviceMetricsOverride", session=self.session)
+            time.sleep(0.4)
+        # 收尾：折叠区留给后面的验收（它们要点里面的控件），并留一张整屏截图
+        self.js("i3pro.setAdvanced(true);true")
+        self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-layout.png"),
+                          self.session)
+
     # ------------------------------------------------ A78 侧边栏快速跳转
     def sidebar_jump(self):
         """A78：左边那一栏比屏幕长得多，"跳到哪一栏"要**真的滚过去**、光标放对地方。
@@ -2948,7 +3070,7 @@ class Checker:
             time.sleep(0.6)
             return box
 
-        first = click_chip("sheetGroup")
+        first = click_chip("sessionGroup")
         self.check("A78 侧边栏顶上有一排「跳到哪一栏」的按钮", bool(first), first)
         if not first:
             return
@@ -2957,31 +3079,36 @@ class Checker:
         top = scroll_top()
         self.check("A78 跳到最上面那一栏时滚动条在顶（不然下面那两步量不出东西）",
                    top <= 30, top)
-        # 高亮那条 bug（2026-10-14 评审补的真浏览器版本）：滚动条在顶、而「光标值」
-        # 还是收着的时候，"滚到哪儿了"不能算到它头上。收起来的元素 rect 全是 0，
-        # 顶边永远"过了按钮排"——不跳过它，滚到哪儿都亮着它。
+        # 高亮那条 bug（2026-10-14 评审补的真浏览器版本）：滚动条在顶、而下面的模块
+        # 还是收着的时候，"滚到哪儿了"不能算到它们头上。收起来的元素 rect 全是 0，
+        # 顶边永远"过了按钮排"——不跳过它，滚到哪儿都亮着它。票⑧之后高级工具里
+        # 那七栏默认就是收着的，"收起来不许拦高亮"这条比过去更要紧。
         collapsed = self.js(
-            "document.getElementById('valuesGroup').getBoundingClientRect().height<=0")
+            "document.getElementById('setupGroup').getBoundingClientRect().height<=0")
         here = self.js("i3pro.syncJumpActive(); i3pro.jumpActive()")
         self.check("A78 收起来的模块不会把高亮拦在自己身上（滚动条在顶时）",
-                   (not collapsed) or here != "valuesGroup",
+                   (not collapsed) or here not in ("setupGroup", "mathsGroup", "lapGroup"),
                    "收着=%s · 高亮=%s" % (collapsed, here))
 
         # 靠前的某一栏：这一栏量得准"标题贴到按钮排下面"。**不能拿最靠下的那几栏
         # 量**：它们底下没有足够内容，滚到底就顶住了（那是正常的，不是 bug）。
-        # 「光标值」还多一层：它默认是收起来的（按 V 才出来），跳过去要顺手打开它——
-        # 隐藏元素的 rect 全是 0，跳了等于没跳（这一条就是真浏览器里量出来的）。
+        # 「数学通道」多一层：它在高级工具折叠区里，默认收着——跳过去要顺手展开，
+        # 否则隐藏元素的 rect 全是 0，跳了等于没跳（票⑧的验收就钉在这条上）。
+        self.js("i3pro.setAdvanced(false);true")   # 从"收着"这一头量才有意义
+        time.sleep(0.3)
         hidden_before = self.js(
-            "document.getElementById('valuesGroup').getBoundingClientRect().height<=0")
-        click_chip("valuesGroup")
+            "!i3pro.advancedOpen() "
+            "|| document.getElementById('mathsGroup').getBoundingClientRect().height<=0")
+        click_chip("mathsGroup")
         moved = scroll_top()
-        self.check("A78 真点中间那一栏「光标值」-> 侧边栏真的滚下去了",
+        self.check("A78 真点「数学通道」-> 侧边栏真的滚下去了",
                    moved > top + 40, "%s -> %s" % (top, moved))
-        self.check("A78 跳到一个收起来的模块会顺手打开它（光标值默认收着）",
+        self.check("A78 跳到一个收起来的模块会顺手打开它（高级工具默认收着）",
                    (not hidden_before) or self.js(
-                       "document.getElementById('valuesGroup').getBoundingClientRect().height>0"),
+                       "i3pro.advancedOpen() && "
+                       "document.getElementById('mathsGroup').getBoundingClientRect().height>0"),
                    "跳之前收着=%s" % hidden_before)
-        group = rect_of("#valuesGroup > h2")
+        group = rect_of("#mathsGroup > h2")
         rail = rect_of("#jumpRail")
         if group and rail:
             gap = group["top"] - rail["bottom"]
@@ -2990,7 +3117,7 @@ class Checker:
         else:
             self.check("A78 能读到目标那一栏的位置", False, "读不到 rect")
         self.check("A78 滚过去的那一栏在按钮上也亮着",
-                   self.js("i3pro.jumpActive()") == "valuesGroup",
+                   self.js("i3pro.jumpActive()") == "mathsGroup",
                    self.js("i3pro.jumpActive()"))
 
         # 最靠下的那一栏：到底之后滚不到顶（正常的），但它必须进视野，
@@ -3032,8 +3159,8 @@ class Checker:
         self.browser.key_named("ArrowRight", "ArrowRight", 39, self.session)
         time.sleep(0.4)
         moved = focused_chip()
-        self.check("A78 这一排里按右方向键换的是选中项（通道 -> 别名）",
-                   moved == "aliasGroup" and moved != here, "%s -> %s" % (here, moved))
+        self.check("A78 这一排里按右方向键换的是选中项（通道 -> 高级工具）",
+                   moved == "advancedGroup" and moved != here, "%s -> %s" % (here, moved))
         self.check("A78 在这一排里按方向键不会顺手把测量光标挪走",
                    self.js("String(i3pro.state.cursor)") == cursor_before,
                    "%s -> %s" % (cursor_before, self.js("String(i3pro.state.cursor)")))
@@ -3043,11 +3170,11 @@ class Checker:
         landed = self.js("i3pro.jumpActive()")
         self.browser.key_named("Enter", "Enter", 13, self.session, text="\r")
         time.sleep(0.6)
-        self.check("A78 键盘回车真的跳到选中那一栏（高亮从「通道」换到「别名」）",
-                   self.js("i3pro.jumpActive()") == "aliasGroup",
+        self.check("A78 键盘回车真的跳到选中那一栏（高亮从「通道」换到「高级工具」）",
+                   self.js("i3pro.jumpActive()") == "advancedGroup",
                    "回车前亮着 %s，回车后亮着 %s" % (landed, self.js("i3pro.jumpActive()")))
         # 收尾：回到最上面那一栏，后面的验收从原来那一屏继续
-        click_chip("sheetGroup")
+        click_chip("sessionGroup")
 
     # ------------------------------------------- A83 写路径的唯一出口
     def attitude(self):
@@ -4015,6 +4142,9 @@ def main(argv=None):
                 session,
             )
             time.sleep(0.5)
+            # 票⑧ 的布局：先量"默认长什么样"（左栏只剩三块、高级工具收着），
+            # 再把它展开留给后面那些要点面板里控件的验收。
+            checker.layout_sheet_bar()
             checker.sections()
             checker.crossings(sidecar)
             checker.rename(sidecar)

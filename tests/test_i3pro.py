@@ -49,6 +49,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from i3pro import (  # noqa: E402
     axes as axesmod,
+    api as apimod,
     attitude as attitudemod,
     cache, canlog, channelpick, channelref, channels, csvlog, dbc, derive, gpsfix,
     cursorstats as cursorstatsmod,
@@ -62,6 +63,7 @@ from i3pro import (  # noqa: E402
     pairing,
     resolution as resolutionmod,
     server, sidecar, store, timebase,
+    tracewire,
     txtlog,
     worksheets as worksheetsmod,
     export as exportmod, xlsx as xlsxmod,
@@ -3065,13 +3067,14 @@ class TestBenchViewer(unittest.TestCase):
 
         api = apimod.Api(self.library)
         channels = ["Vx KF"]
-        row = self.tool.measure_compute(api, self.name, channels, 500, repeat=1)
+        row = self.tool.measure_compute(api, self.name, channels, 500, repeat=1,
+                                        wire="json")
         direct = api.handle(["session", self.name, "trace"],
                             self.tool.trace_query(channels, 500), "GET")
         self.assertEqual(direct.status, 200)
-        self.assertEqual(row["json_bytes"], len(direct.body))
+        self.assertEqual(row["bytes"], len(direct.body))
         self.assertEqual(row["gzip_bytes"], len(gzip.compress(direct.body, 6)))
-        self.assertLess(row["gzip_bytes"], row["json_bytes"])
+        self.assertLess(row["gzip_bytes"], row["bytes"])
         payload = json.loads(direct.body)
         self.assertEqual(list(payload), channels)
         self.assertLessEqual(len(payload["Vx KF"]["time"]), 500)
@@ -3081,10 +3084,11 @@ class TestBenchViewer(unittest.TestCase):
 
         api = apimod.Api(self.library)
         channels = ["Vx KF"]
-        computed = self.tool.measure_compute(api, self.name, channels, 500, repeat=1)
+        computed = self.tool.measure_compute(api, self.name, channels, 500,
+                                             repeat=1, wire="json")
         over_http = self.tool.measure_http(self.library, self.name, channels, 500,
-                                           repeat=1)
-        self.assertEqual(over_http["bytes"], computed["json_bytes"],
+                                           repeat=1, wire="json")
+        self.assertEqual(over_http["bytes"], computed["bytes"],
                          "HTTP 那条路取回来的不是同一份载荷")
 
     def test_查询参数形状跟着_api_的解析器(self):
@@ -3094,6 +3098,9 @@ class TestBenchViewer(unittest.TestCase):
         self.assertEqual(apimod.csv_arg(query, "channels"), ["Vx KF", "TH"])
         self.assertEqual(apimod.int_arg(query, "buckets", 0), 2000)
         self.assertEqual(query["upsample"], [render.DEFAULT_UPSAMPLE])
+        self.assertNotIn("format", query, "默认量 JSON，不要顺手改协议")
+        self.assertEqual(self.tool.trace_query(["Vx KF"], 500, wire="bin")["format"],
+                         ["bin"])
 
     def test_挑通道走界面那一份规则(self):
         log = self.library.get(self.name)
@@ -3193,6 +3200,112 @@ class TestJsonFastPath(unittest.TestCase):
                 self._assert_plain(payload, name)
 
 
+class TestTraceWire(unittest.TestCase):
+    """C2：``/trace`` 的二进制帧与 JSON 是同一份数据，只是换了一层编码。
+
+    这一层不重算取数：``render.trace`` 仍是对照物。判据分三层：
+
+    * 合成 raw / envelope 两种形状都能 round-trip；
+    * 合成场次的 HTTP ``format=bin`` 与默认 JSON 逐点一致；
+    * 两份金标准上各取默认通道实跑一遍（五件套第⑤条）。
+    """
+
+    def _sample_trace(self, envelope: bool) -> dict:
+        trace = {
+            "time": [0.0, 0.5, 1.0, 1.5],
+            "value": [1.0, 2.5, 3.0, 4.5],
+            "envelope": envelope,
+            "samples": 8,
+            "buckets": 4,
+            "unit": "km/h",
+            "rate": 100.0,
+            "upsample": "linear",
+        }
+        if envelope:
+            trace.update({
+                "min": [0.5, 2.0, 2.5, 4.0],
+                "max": [1.5, 3.0, 3.5, 5.0],
+                "count": [2, 2, 2, 2],
+                "span": [0.0, 1.5],
+                "distance": [0.0, 1.25, 2.5, 3.75],
+                "distance_span": [0.0, 3.75],
+            })
+        return trace
+
+    def _assert_same_trace(self, expected: dict, actual: dict) -> None:
+        for key in ("envelope", "samples", "buckets", "unit", "rate", "upsample"):
+            self.assertEqual(actual[key], expected[key], key)
+        for key in ("span", "distance_span"):
+            if key in expected:
+                self.assertEqual(actual[key], expected[key], key)
+        for key, values in expected.items():
+            if not isinstance(values, list):
+                continue
+            self.assertIn(key, actual)
+            np.testing.assert_allclose(actual[key], values, rtol=1e-6, atol=1e-6,
+                                       err_msg=key)
+
+    def test_合成载荷两种形状都能往返(self):
+        for envelope in (False, True):
+            expected = self._sample_trace(envelope)
+            body = tracewire.encode({"Vx KF": expected})
+            self.assertTrue(body.startswith(tracewire.MAGIC))
+            actual = tracewire.decode(body)["Vx KF"]
+            self._assert_same_trace(expected, actual)
+
+    def test_坏帧会报出下一步而不是猜(self):
+        with self.assertRaisesRegex(ValueError, "magic"):
+            tracewire.decode(b"NOPE" + b"\x00" * 20)
+        with self.assertRaisesRegex(ValueError, "版本"):
+            header = json.dumps({"version": 999, "channels": []}).encode("utf-8")
+            body = bytearray(tracewire.MAGIC)
+            body.extend(len(header).to_bytes(4, "little"))
+            body.extend(header)
+            tracewire.decode(bytes(body))
+
+    def test_合成场次的_HTTP_bin_与_JSON_逐点一致(self):
+        tmp = tempfile.TemporaryDirectory(prefix="i3pro-tracewire-")
+        try:
+            root = Path(tmp.name)
+            rows = "".join(f"{i / 100.0:.2f};{i % 300};{i % 7}\n"
+                           for i in range(3000))
+            (root / "取样.csv").write_text(
+                "Time;Vx KF;TH\ns;km/h;\n" + rows, encoding="utf-8")
+            library = server.SessionLibrary([root], cache_size=1)
+            try:
+                api = apimod.Api(library)
+                base = {"channels": ["Vx KF"], "buckets": ["500"],
+                        "upsample": ["linear"]}
+                plain = api.handle(["session", "取样", "trace"], base, "GET")
+                binary = api.handle(["session", "取样", "trace"],
+                                    dict(base, format=["bin"]), "GET")
+                self.assertEqual(binary.ctype, tracewire.CONTENT_TYPE)
+                self._assert_same_trace(json.loads(plain.body)["Vx KF"],
+                                        tracewire.decode(binary.body)["Vx KF"])
+            finally:
+                library.close()
+        finally:
+            tmp.cleanup()
+
+    def _golden_round_trip(self, path: Path) -> None:
+        with ld.LogFile.read(path) as log:
+            time = timebase.axis(log)
+            distance = derive.distance_series(log)[: time.size]
+            for name in render.pick_channels(log, 3):
+                expected = render.trace(log, name, time, distance, 500)
+                actual = tracewire.decode(
+                    tracewire.encode({name: expected}))[name]
+                self._assert_same_trace(expected, actual)
+
+    @_needs(HILL)
+    def test_高避金标准上的二进制往返(self):
+        self._golden_round_trip(HILL)
+
+    @_needs(ENDURANCE)
+    def test_耐久金标准上的二进制往返(self):
+        self._golden_round_trip(ENDURANCE)
+
+
 class TestHttpCompression(unittest.TestCase):
     """ticket #52：JSON 响应的 gzip + 条件请求（ETag / 304）。
 
@@ -3265,6 +3378,24 @@ class TestHttpCompression(unittest.TestCase):
         self.assertLess(len(body), server.GZIP_MIN_BYTES)
         self.assertNotIn("Content-Encoding", headers)
         self.assertEqual(json.loads(body)["Vx KF"]["samples"], 40)
+
+    def test_二进制取数走同一套缓存与gzip(self):
+        status, headers, body = self._get(
+            self.big + "&format=bin", {"Accept-Encoding": "gzip"})
+        self.assertEqual(status, 200)
+        self.assertTrue(headers.get("Content-Type", "").startswith(
+            tracewire.CONTENT_TYPE))
+        self.assertEqual(headers.get("Content-Encoding"), "gzip")
+        self.assertEqual(headers.get("Cache-Control"), "no-cache")
+        self.assertTrue(headers.get("ETag"))
+        self.assertTrue(gzip.decompress(body).startswith(tracewire.MAGIC))
+
+    def test_不认识的取数格式说下一步(self):
+        status, _headers, body = self._get(self.big + "&format=msgpack")
+        self.assertEqual(status, 400)
+        message = json.loads(body)["error"]
+        self.assertIn("不认识的取数格式", message)
+        self.assertIn("'bin'", message)
 
     def test_条件请求命中就是_304_没有体(self):
         _status, headers, _body = self._get(self.big)

@@ -303,7 +303,7 @@ function run(hash) {
   const navigator = { clipboard: { writeText: async () => {} } };
   const sandbox = {
     document, window, location, navigator, console,
-    setTimeout, clearTimeout, URLSearchParams,
+    setTimeout, clearTimeout, URLSearchParams, TextDecoder,
     // browser globals the workbench relies on
     btoa: (s) => Buffer.from(s, "binary").toString("base64"),
     atob: (s) => Buffer.from(s, "base64").toString("binary"),
@@ -476,6 +476,52 @@ if (api) {
       window.requestAnimationFrame = oldRaf;
       window.cancelAnimationFrame = oldCancel;
     }
+  }
+
+  // C2：二进制取数帧的浏览器端解码。这里手工造一小帧，断言 TypedArray 视图与
+  // 元数据都落对了；真正的服务端编码由 Python 单测与 bench 工具对拍。
+  {
+    const header = Buffer.from(JSON.stringify({
+      version: 1,
+      channels: [{
+        name: "Vx KF", unit: "km/h", rate: 100, upsample: "linear",
+        envelope: false, samples: 2, buckets: 2,
+        arrays: [
+          { key: "time", dtype: "f8", length: 2 },
+          { key: "value", dtype: "f4", length: 2 },
+        ],
+      }],
+    }), "utf8");
+    const time = Float64Array.of(0, 0.5);
+    const value = Float32Array.of(1, 2.5);
+    const timeStart = (8 + header.length + 7) & ~7;
+    const valueStart = (timeStart + time.byteLength + 7) & ~7;
+    const buffer = new ArrayBuffer(valueStart + value.byteLength);
+    const bytes = new Uint8Array(buffer);
+    bytes.set([0x49, 0x33, 0x54, 0x52], 0);
+    new DataView(buffer).setUint32(4, header.length, true);
+    bytes.set(header, 8);
+    new Float64Array(buffer, timeStart, time.length).set(time);
+    new Float32Array(buffer, valueStart, value.length).set(value);
+    const decoded = api.decodeTraceBinary(buffer);
+    check(ArrayBuffer.isView(decoded["Vx KF"].time)
+          && ArrayBuffer.isView(decoded["Vx KF"].value)
+          && decoded["Vx KF"].time.constructor.name === "Float64Array"
+          && decoded["Vx KF"].value.constructor.name === "Float32Array"
+          && decoded["Vx KF"].time[1] === 0.5
+          && decoded["Vx KF"].value[1] === 2.5
+          && decoded["Vx KF"].unit === "km/h",
+      "二进制取数帧没有解成正确的 TypedArray / 元数据");
+    check(api.traceUsesEnvelope({
+      envelope: true,
+      time: new Float64Array(2),
+      min: new Float32Array(2),
+      max: new Float32Array(2),
+    }), "TypedArray 的包络没有被认出来");
+    let bad = false;
+    try { api.decodeTraceBinary(new ArrayBuffer(4)); }
+    catch (err) { bad = /magic|太短/.test(String(err.message)); }
+    check(bad, "坏掉的二进制取数帧没有当场报错");
   }
 
   const canvases = [];

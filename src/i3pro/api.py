@@ -46,6 +46,7 @@ from . import (
     sections,
     spectrum as spectrummod,
     timebase,
+    tracewire,
     txtlog,
     worksheets as worksheetsmod,
 )
@@ -543,6 +544,17 @@ class _Call:
                 start=float_arg(query, "from"),
                 end=float_arg(query, "to"),
                 upsample=upsample,
+            )
+        wire = (query.get("format") or ["json"])[0]
+        if wire == "bin":
+            return self._send(
+                tracewire.encode(out), 200, tracewire.CONTENT_TYPE
+            )
+        if wire != "json":
+            return self._error(
+                400,
+                f"不认识的取数格式 {wire!r}。这一版能用的是 'json'（兼容）"
+                f"与 'bin'（更快）；界面会自动选，手工请求时改 format 参数。",
             )
         return self._json_plain(out)
 

@@ -5017,10 +5017,17 @@ class Checker:
             return
         rate = (linear_all[name].get("rate"))
 
+        def close_values(got, want):
+            """二进制取数的值列是 float32，和 JSON 的十进制小数只到 1e-6 量级。"""
+            return (len(got) == len(want)
+                    and all(abs(float(a) - float(b))
+                            <= 1e-4 * max(1.0, abs(float(b)))
+                            for a, b in zip(got, want)))
+
         def values(n):
             raw = self.js(
                 "(function(){var t=i3pro.state.traces[%s]||{};"
-                "return JSON.stringify((t.value||[]).slice(0,%d));})()"
+                "return JSON.stringify(Array.prototype.slice.call(t.value||[],0,%d));})()"
                 % (json.dumps(name), n))
             return json.loads(raw) if raw else []
 
@@ -5047,7 +5054,7 @@ class Checker:
         load(name)
         linear = values(10)
         self.check("A79 界面默认取的也是线性那一份（前后端默认是同一个词）",
-                   linear == probe["linear"],
+                   close_values(linear, probe["linear"]),
                    "界面 %s · 直接问接口 %s" % (linear[:4], probe["linear"][:4]))
 
         self.browser.wait_for(
@@ -5096,7 +5103,8 @@ class Checker:
             self.session, timeout=20)
         kept = values(10)
         self.check("A79 选「阶梯保持」之后取回来的值真的换了（就是保持前值那一份）",
-                   kept == probe["previous"] and kept != probe["linear"],
+                   close_values(kept, probe["previous"])
+                   and not close_values(kept, probe["linear"]),
                    "阶梯 %s · 线性 %s" % (kept[:4], probe["linear"][:4]))
         self.check("A79 服务端回的那一份也说是阶梯保持",
                    self.js("(i3pro.state.traces[%s]||{}).upsample||''" % json.dumps(name))
@@ -5114,7 +5122,7 @@ class Checker:
             self.session, timeout=20)
         back = values(10)
         self.check("A79 点回线性之后取回来的又是线性那一份（不是一次性的闩）",
-                   back == probe["linear"], back[:6])
+                   close_values(back, probe["linear"]), back[:6])
         # 收尾：把窗口放开，后面的验收从整场那一屏继续
         self.js("(function(){i3pro.state.view=null;i3pro.renderAll();return true;})()")
 

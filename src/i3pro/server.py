@@ -199,10 +199,11 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
             return Response(status, text.encode("utf-8"), "text/html; charset=utf-8")
 
         def _json_transport(self, response: Response, headers: list):
-            """JSON 响应的传输层：ETag + 条件请求 + gzip。
+            """可缓存取数响应的传输层：ETag + 条件请求 + gzip。
 
-            只碰 JSON。两张 HTML 页面与导出那条流式文件一个字节都不动——它们各有各的
-            缓存语义（``Cache-Control: no-store`` 那一条不能顺手改掉）。
+            只碰 JSON 与 ``application/x-i3pro-trace``。两张 HTML 页面与导出那条
+            流式文件一个字节都不动——它们各有各的缓存语义（``Cache-Control: no-store``
+            那一条不能顺手改掉）。
             ``headers`` 是已经算好的响应头，**只能往上加，不能换掉**——工作表「导出」
             就靠 ``Content-Disposition`` 才变成下载而不是跳转（ticket #33，
             2026-10-18 真浏览器验收抓到的就是这个）。
@@ -238,8 +239,8 @@ def make_handler(library: SessionLibrary, buckets: int = render.DEFAULT_BUCKETS)
             status = response.status
             cache_control = "no-store"
             # 只有 200 的 JSON 走这条路：报错体都很小，压了反而亏。
-            if (path is None and response.status == 200
-                    and response.ctype.startswith("application/json")):
+            if (path is None and response.status == 200 and response.ctype.startswith(
+                    ("application/json", "application/x-i3pro-trace"))):
                 body, headers, tag, packed, not_modified = self._json_transport(
                     response, headers)
                 if not_modified:

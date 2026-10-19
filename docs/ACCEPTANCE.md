@@ -5764,3 +5764,43 @@ python tools\verify_clicks.py                                    # 需要 Edge�
 **边界**：这次修的是"同一帧里别重复广播"，不是"每个组件只画自己依赖的那一块"。
 按组件失效（C4）留到下一张票；本票的 `RENDER_ALL` 仍与旧 `renderAll()` 同一套全量顺序，
 所以直接调用 `renderAll()` 的性能与改前一致。
+
+## A112 · `/trace` 二进制载荷：serve 走 TypedArray，JSON 留给快照（本次新增，架构评审 C2）
+
+**要解决的问题**：ADR-0007 已经量出冷路径 118.3 ms 里约 **83.9 ms 是 `json.dumps`**——
+服务端已经把数据算成 Python 列表，却又把它逐值变成 JSON 文本，浏览器再逐值解回来。
+这一票给 `/trace` 加 `format=bin`：帧头只放通道元数据，大数组直接是 `float64` / `float32`
+/ `int32` 字节，浏览器建 TypedArray 视图；快照与不传 `format` 的请求仍走 JSON。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 编解码层 | 新增 `src/i3pro/tracewire.py`：magic `I3TR` + 版本 + UTF-8 头 + 8 字节对齐数组；`encode()` 生产、`decode()` 当单测裁判 |
+| 路由 | `act_trace` 支持 `format=json`（默认）与 `format=bin`；不认识的格式回 400 并列出可选项。`format` 进缓存 key，两种编码各自缓存 |
+| 传输 | 二进制响应类型 `application/x-i3pro-trace`，与 JSON 共用 ETag / 条件请求 / gzip；命中缓存时不再重压 |
+| 前端 | `apiGet` 支持可选 reader；`decodeTraceBinary()` 用 `DataView` + TypedArray 解码，失败回退 JSON；`traceUsesEnvelope` 接受 TypedArray |
+| 精度 | 时间 `float64`；值 / min / max / 距离 `float32`；验收对 JSON 对拍按显示精度容差（A79 的 3 条改为 `1e-4 × max(1, |v|)`） |
+| 协议决策 | [ADR-0009](adr/0009-binary-trace-payload.md)；ADR-0007 的翻案条件 1 已补记 |
+
+```powershell
+python tools\bench_viewer.py --http --repeat 3                    # JSON / BIN 的冷热耗时与字节
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"       # 908 项 PASS
+node tools\smoke_viewer.js "out\20260524-耐久正赛.html"          # 908 项 PASS
+python tools\verify_clicks.py                                    # 需要 Edge；429 项通过、0 失败
+```
+
+**通过判据（本机实测，2026-10-19）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 高避 8000 桶计算 | JSON **118.8 ms** → BIN **49.3 ms**（明文 **3607.6 → 2630.1 KB**） |
+| 耐久 8000 桶计算 | JSON **171.3 ms** → BIN **88.9 ms**（明文 **4086.3 → 2630.1 KB**） |
+| 高避 HTTP 冷/热 | JSON **126.8 / 7.0 ms** → BIN **84.3 / 5.6 ms**（BIN gzip 上线 **720.1 KB**） |
+| 耐久 HTTP 冷/热 | JSON **178.1 / 7.1 ms** → BIN **135.5 / 5.6 ms**（BIN gzip 上线 **1049.0 KB**） |
+| 二进制与 JSON 对拍 | 合成 raw / envelope 两种形状 round-trip；两份金标准默认通道逐点一致（float32 容差内） |
+| 缓存与压缩 | 二进制响应也有 `ETag` / `Cache-Control: no-cache` / gzip；第二次请求命中缓存，不重算不重压 |
+| 前端解码 | 无头 smoke 手工造帧，断言 `Float64Array` / `Float32Array` 与元数据；真 Edge serve 模式实际走 `format=bin` |
+| 四条回归 | 单测 **642 项 / 71.2 s，0 失败、28 跳过**；`verify_ld_vs_csv.py` **PASS**；两份 smoke 各 **908 项 PASS**；`verify_clicks.py` **429/429** |
+
+**边界**：BIN 的 gzip 上线字节比 JSON 略大（高避 **720.1 vs 694.3 KB**，+3.7%）——
+二进制把明文缩了约 27%，但十进制 JSON 的文本冗余更高、压得更狠。这次换来的主要是
+服务端 CPU 与冷 HTTP 时间；热请求两者都已被响应缓存吃掉，所以只差约 1.4 ms。

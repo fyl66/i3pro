@@ -86,13 +86,16 @@ def pick_channels(log, limit: int) -> list[str]:
     return [name for name in render.pick_channels(log, limit) if log.has(name)]
 
 
-def trace_query(channels: list[str], buckets: int) -> dict:
+def trace_query(channels: list[str], buckets: int, wire: str = "json") -> dict:
     """``/trace`` 的查询参数。形状跟着 ``api.csv_arg`` / ``api.int_arg`` 走。"""
-    return {
+    query = {
         "channels": [",".join(channels)],
         "buckets": [str(int(buckets))],
         "upsample": [UPSAMPLE],
     }
+    if wire != "json":
+        query["format"] = [wire]
+    return query
 
 
 def resolve_name(library, path: Path) -> str:
@@ -108,13 +111,13 @@ def resolve_name(library, path: Path) -> str:
 
 
 def measure_compute(api, name: str, channels: list[str], buckets: int,
-                    repeat: int) -> dict:
+                    repeat: int, wire: str = "json") -> dict:
     """量服务端计算：中位数耗时 + 载荷大小。
 
     先空跑一次当热身：解析、数学通道、距离积分这些是"打开这场次"的一次性代价，
     要量的是**同一个窗口被反复取数**有多快（缩放、改配置、切组件都是这一种）。
     """
-    query = trace_query(channels, buckets)
+    query = trace_query(channels, buckets, wire)
     api.handle(["session", name, "trace"], query, "GET")
     times: list[float] = []
     body = b""
@@ -125,13 +128,14 @@ def measure_compute(api, name: str, channels: list[str], buckets: int,
         body = response.body
     return {
         "ms": statistics.median(times),
-        "json_bytes": len(body),
+        "bytes": len(body),
         "gzip_bytes": len(gzip.compress(body, 6)),
     }
 
 
 def measure_http(library, name: str, channels: list[str], buckets: int,
-                 repeat: int, accept_encoding: str | None = None) -> dict:
+                 repeat: int, accept_encoding: str | None = None,
+                 wire: str = "json") -> dict:
     """量真 HTTP 往返：临时起服务、真发请求（**不开浏览器**）。
 
     ``accept_encoding="gzip"`` 量的是浏览器那条路（多一层压缩的 CPU，少一大截字节）；
@@ -151,6 +155,7 @@ def measure_http(library, name: str, channels: list[str], buckets: int,
             "channels": ",".join(channels),
             "buckets": int(buckets),
             "upsample": UPSAMPLE,
+            **({"format": wire} if wire != "json" else {}),
         })
         url = (f"http://127.0.0.1:{port}/api/session/"
                f"{urllib.parse.quote(name)}/trace?{query}")
@@ -187,23 +192,42 @@ def bench_session(path: Path, channels: int, repeat: int, with_http: bool) -> di
         rows = []
         for buckets in buckets_to_try():
             row = {"buckets": buckets}
-            row.update(measure_compute(api, name, names, buckets, repeat))
+            json_row = measure_compute(api, name, names, buckets, repeat, wire="json")
+            bin_row = measure_compute(api, name, names, buckets, repeat, wire="bin")
+            row.update({
+                "json_ms": json_row["ms"],
+                "json_bytes": json_row["bytes"],
+                "json_gzip_bytes": json_row["gzip_bytes"],
+                "bin_ms": bin_row["ms"],
+                "bin_bytes": bin_row["bytes"],
+                "bin_gzip_bytes": bin_row["gzip_bytes"],
+            })
             if with_http:
-                plain = measure_http(library, name, names, buckets, repeat)
-                row["http_cold_ms"] = plain["cold_ms"]
-                row["http_ms"] = plain["ms"]
-                browser = measure_http(library, name, names, buckets, repeat,
-                                       accept_encoding="gzip")
-                row["gzip_cold_ms"] = browser["cold_ms"]
-                row["gzip_ms"] = browser["ms"]
-                row["wire_bytes"] = browser["bytes"]
+                json_plain = measure_http(library, name, names, buckets, repeat,
+                                          wire="json")
+                json_gzip = measure_http(library, name, names, buckets, repeat,
+                                         accept_encoding="gzip", wire="json")
+                bin_gzip = measure_http(library, name, names, buckets, repeat,
+                                        accept_encoding="gzip", wire="bin")
+                row["json_http_cold_ms"] = json_plain["cold_ms"]
+                row["json_http_ms"] = json_plain["ms"]
+                row["json_gzip_cold_ms"] = json_gzip["cold_ms"]
+                row["json_gzip_ms"] = json_gzip["ms"]
+                row["json_wire_bytes"] = json_gzip["bytes"]
+                row["bin_http_cold_ms"] = bin_gzip["cold_ms"]
+                row["bin_http_ms"] = bin_gzip["ms"]
+                row["bin_wire_bytes"] = bin_gzip["bytes"]
             rows.append(row)
-            print(f"  {buckets:>6d} 桶   {row['ms']:>8.1f} ms   "
-                  f"{row['json_bytes'] / 1024:>8.1f} KB   "
-                  f"{row['gzip_bytes'] / 1024:>7.1f} KB"
-                  + (f"   {row['http_cold_ms']:>7.1f}/{row['http_ms']:>6.1f} ms"
-                     f"   {row['gzip_cold_ms']:>7.1f}/{row['gzip_ms']:>6.1f} ms"
-                     f"   {row['wire_bytes'] / 1024:>8.1f} KB" if with_http else ""))
+            print(f"  {buckets:>6d} 桶  JSON {row['json_ms']:>7.1f} ms / "
+                  f"{row['json_bytes'] / 1024:>7.1f} KB · gzip "
+                  f"{row['json_gzip_bytes'] / 1024:>7.1f} KB  |  BIN "
+                  f"{row['bin_ms']:>7.1f} ms / {row['bin_bytes'] / 1024:>7.1f} KB "
+                  f"· gzip {row['bin_gzip_bytes'] / 1024:>7.1f} KB"
+                  + (f"  |  HTTP JSON {row['json_http_cold_ms']:>7.1f}/"
+                     f"{row['json_http_ms']:>6.1f} ms · BIN "
+                     f"{row['bin_http_cold_ms']:>7.1f}/{row['bin_http_ms']:>6.1f} ms "
+                     f"· 上线 {row['bin_wire_bytes'] / 1024:>7.1f} KB"
+                     if with_http else ""))
         return {
             "path": str(path),
             "session": name,
@@ -218,11 +242,12 @@ def bench_session(path: Path, channels: int, repeat: int, with_http: bool) -> di
 
 
 def _fmt_header(with_http: bool) -> str:
-    head = f"  {'桶':>6s}   {'计算 ms':>8s}   {'JSON KB':>8s}   {'gzip KB':>7s}"
+    head = (f"  {'桶':>6s}   {'JSON 计算 ms':>12s}   {'JSON KB':>8s}"
+            f"   {'BIN 计算 ms':>11s}   {'BIN KB':>8s}")
     if not with_http:
         return head
-    return (head + f"   {'HTTP 冷/热 ms':>13s}   {'gzip 冷/热 ms':>13s}"
-                   f"   {'上线 KB':>8s}")
+    return (head + f"   {'HTTP JSON 冷/热 ms':>18s}"
+                   f"   {'HTTP BIN 冷/热 ms':>17s}   {'BIN 上线 KB':>11s}")
 
 
 def main(argv: list[str] | None = None) -> int:

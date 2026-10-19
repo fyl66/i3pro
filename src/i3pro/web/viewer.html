@@ -1268,8 +1268,10 @@ function resolutionDrawsPoints() {
   return resolutionPoints(state.resolution) <= 4000;
 }
 function traceUsesEnvelope(trace) {
+  const arrayLike = (value) => Array.isArray(value)
+    || (typeof ArrayBuffer !== "undefined" && ArrayBuffer.isView(value));
   return !!(trace && trace.envelope
-    && Array.isArray(trace.min) && Array.isArray(trace.max)
+    && arrayLike(trace.min) && arrayLike(trace.max)
     && trace.min.length === trace.max.length
     && trace.min.length === (trace.time || []).length);
 }
@@ -3029,6 +3031,63 @@ async function readJson(res) {
   try { return await res.json(); } catch (err) { return null; }
 }
 
+const TRACE_MAGIC = [0x49, 0x33, 0x54, 0x52];   // "I3TR"
+const TRACE_DTYPES = {
+  f8: { ctor: Float64Array, bytes: 8 },
+  f4: { ctor: Float32Array, bytes: 4 },
+  i4: { ctor: Int32Array, bytes: 4 },
+};
+
+function align8(value) { return (value + 7) & ~7; }
+
+/**
+ * `/trace?format=bin` 的正文：小端自描述帧，头只放通道元数据，数组直接建
+ * TypedArray 视图。它不是第二套取数语义——服务端仍走 render.trace，只有
+ * “列表 → JSON 文本”这一步换成了“列表 → 字节”。
+ */
+function decodeTraceBinary(buffer) {
+  if (buffer.byteLength < 8) throw new Error("取数二进制帧太短");
+  const bytes = new Uint8Array(buffer);
+  for (let i = 0; i < TRACE_MAGIC.length; i += 1) {
+    if (bytes[i] !== TRACE_MAGIC[i]) throw new Error("取数二进制帧的 magic 不对");
+  }
+  const view = new DataView(buffer);
+  const headerLen = view.getUint32(4, true);
+  if (8 + headerLen > buffer.byteLength) throw new Error("取数二进制帧的头越界");
+  const header = JSON.parse(new TextDecoder("utf-8").decode(
+    new Uint8Array(buffer, 8, headerLen)));
+  if (header.version !== 1) throw new Error("取数二进制帧的版本不认识");
+  const out = {};
+  let offset = align8(8 + headerLen);
+  for (const channel of header.channels || []) {
+    const trace = {
+      envelope: !!channel.envelope,
+      samples: channel.samples,
+      buckets: channel.buckets,
+      unit: channel.unit,
+      rate: channel.rate,
+      upsample: channel.upsample,
+    };
+    if (channel.span) trace.span = channel.span;
+    if (channel.distance_span) trace.distance_span = channel.distance_span;
+    for (const descriptor of channel.arrays || []) {
+      const dtype = TRACE_DTYPES[descriptor.dtype];
+      if (!dtype) throw new Error("取数二进制帧里有不认识的 dtype");
+      offset = align8(offset);
+      const end = offset + descriptor.length * dtype.bytes;
+      if (end > buffer.byteLength) throw new Error("取数二进制帧的数组越界");
+      trace[descriptor.key] = new dtype.ctor(buffer, offset, descriptor.length);
+      offset = end;
+    }
+    out[channel.name] = trace;
+  }
+  return out;
+}
+
+async function readTraceBinary(res) {
+  return decodeTraceBinary(await res.arrayBuffer());
+}
+
 /** 非 2xx 或正文里带 error 都算失败，原因（服务端那句中文）跟着异常一起抛。 */
 function failureOf(res, body) {
   const failure = new Error((body && body.error) || ("HTTP " + res.status));
@@ -3037,9 +3096,13 @@ function failureOf(res, body) {
   return failure;
 }
 
-/** 读路径的唯一出口：URL 由调用方用 apiUrl 拼（它要带查询参数）。 */
-async function apiGet(url) {
+/**
+ * 读路径的唯一出口：URL 由调用方用 apiUrl 拼（它要带查询参数）。
+ * 可选 ``reader`` 给二进制取数用；错误响应仍按 JSON 读，失败文案不变。
+ */
+async function apiGet(url, reader) {
   const res = await fetch(url);
+  if (reader && res.ok) return reader(res);
   const body = await readJson(res);
   if (!res.ok || (body && body.error)) throw failureOf(res, body);
   return body;
@@ -3139,11 +3202,20 @@ async function refreshWindowTraces(force) {
   setStatus();
   try {
     const w = windowRange();
-    const body = await apiGet(apiUrl("/trace", {
+    const params = {
       channels: names.join(","), from: w.from, to: w.to,
       buckets: resolutionPoints(state.resolution),
       upsample: state.upsample,
-    }));
+    };
+    let body;
+    try {
+      body = await apiGet(apiUrl("/trace", Object.assign({}, params, { format: "bin" })),
+                          readTraceBinary);
+    } catch (err) {
+      // 新前端 + 老服务、或某台浏览器没有 ArrayBuffer 解码路径时，退回原来的
+      // JSON 取数；数据语义不变，只是慢一点。
+      body = await apiGet(apiUrl("/trace", params));
+    }
     Object.assign(state.traces, body);
     state.dataVersion += 1;
   } catch (err) {
@@ -11507,6 +11579,8 @@ window.i3pro = {
   // 就淹掉了。新增一个名字前先看它有没有消费者（单测按源码守这一条）。
   state: state, data: DATA, renderAll: renderAll, lane: lane,
   renderScheduler: renderScheduler,
+  decodeTraceBinary: decodeTraceBinary,
+  traceUsesEnvelope: traceUsesEnvelope,
   channels: CHANNELS, renderChannelList: renderChannelList,
   fullRange: fullRange, zoomTo: zoomTo, windowRange: windowRange,
   groupsFor: groupsFor, selectedChannels: selectedChannels,

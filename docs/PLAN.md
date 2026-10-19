@@ -163,10 +163,10 @@ i2 Pro 的结构是 `Project → Workbook → Worksheet → Component`。我们�
 
 ### M3 — 工程化（已完成）
 
-单测（真实数据回归 + HTTP 端到端 + 无头 JS 冒烟）从当时的 21 项一路加上来，现在 **635 项**
+单测（真实数据回归 + HTTP 端到端 + 无头 JS 冒烟）从当时的 21 项一路加上来，现在 **642 项**
 （`python -m unittest discover -s tests`）、零第三方运行期依赖、git 仓库。
 
-**验收从"三条"变"四条"**：无头冒烟（`tools/smoke_viewer.js`，**905 项检查**——它自己
+**验收从"三条"变"四条"**：无头冒烟（`tools/smoke_viewer.js`，**908 项检查**——它自己
 在收尾那行念出来，所以这个数跟着命令复跑）跑在
 假 DOM 上——元素没有面积、没有遮挡，disabled 的控件照样派发 `click`。它能证明"代码
 调用了它该调用的函数"，证明不了**用户点得到**。所以补了第四条
@@ -538,6 +538,11 @@ UI 与组件逻辑的"取/去"清单）。
 （冷路径 118.3 ms 里 83.9 ms 是 `json.dumps`），不是换语言。门槛定义、判据命令、实测
 数字与代价表见 [ADR-0007](adr/0007-when-rust-is-allowed.md)；量具是
 `tools\bench_viewer.py`（服务端与 HTTP）与 `tools\verify_clicks.py`（真浏览器里的帧）。
+
+**后续（2026-10-19，架构评审 C2）**：`/trace` 的 serve 路径加了 `format=bin`，JSON
+留给快照与回退。8000 桶高避冷计算 **118.8 → 49.3 ms**、耐久 **171.3 → 88.9 ms**；
+高避已过 ADR-0007 的门槛 1，耐久仍高于 50 ms。协议与代价见
+[ADR-0009](adr/0009-binary-trace-payload.md)。
 
 ## 8. 待确认事项
 

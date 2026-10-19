@@ -52,6 +52,12 @@ def _array(values, dtype_name: str) -> np.ndarray:
     return np.ascontiguousarray(arr.reshape(-1))
 
 
+def _payload(trace: Mapping, key: str):
+    """Read an optional array without using truthiness (numpy arrays raise)."""
+    value = trace.get(key)
+    return [] if value is None else value
+
+
 def encode(traces: Mapping[str, Mapping]) -> bytes:
     """把 ``render.trace`` 的结果编成自描述二进制帧。"""
     header = {"version": VERSION, "channels": []}
@@ -82,16 +88,16 @@ def encode(traces: Mapping[str, Mapping]) -> bytes:
             })
             arrays.append(arr)
 
-        add("time", "f8", trace.get("time") or [])
-        add("value", "f4", trace.get("value") or [])
+        add("time", "f8", _payload(trace, "time"))
+        add("value", "f4", _payload(trace, "value"))
         if "min" in trace:
-            add("min", "f4", trace["min"])
+            add("min", "f4", _payload(trace, "min"))
         if "max" in trace:
-            add("max", "f4", trace["max"])
+            add("max", "f4", _payload(trace, "max"))
         if "count" in trace:
-            add("count", "i4", trace["count"])
+            add("count", "i4", _payload(trace, "count"))
         if "distance" in trace:
-            add("distance", "f4", trace["distance"])
+            add("distance", "f4", _payload(trace, "distance"))
         header["channels"].append(channel)
 
     text = json.dumps(

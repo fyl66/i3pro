@@ -791,6 +791,15 @@ class TestTraceEnvelope(unittest.TestCase):
         self.assertTrue(render.envelope_needed(101, 50))
         self.assertFalse(render.envelope_needed(100, 50))
 
+    def test_二进制路径可以保持_numpy_数组(self):
+        time = np.linspace(0.0, 10.0, 1001)
+        values = np.sin(time)
+        arrays = render.downsample_arrays(time, values, buckets=100)
+        listed = render.downsample(time, values, buckets=100)
+        for key in ("time", "value", "min", "max", "count"):
+            self.assertIsInstance(arrays[key], np.ndarray, key)
+            np.testing.assert_allclose(arrays[key], listed[key], rtol=0, atol=0, err_msg=key)
+
     def test_rate_times_window_threshold_is_reproducible(self):
         rate = 100.0
         window_seconds = 20.005
@@ -3252,6 +3261,15 @@ class TestTraceWire(unittest.TestCase):
             self.assertTrue(body.startswith(tracewire.MAGIC))
             actual = tracewire.decode(body)["Vx KF"]
             self._assert_same_trace(expected, actual)
+
+    def test_二进制帧直接收_numpy_数组(self):
+        expected = self._sample_trace(True)
+        arrays = {
+            key: np.asarray(values) if isinstance(values, list) else values
+            for key, values in expected.items()
+        }
+        actual = tracewire.decode(tracewire.encode({"Vx KF": arrays}))["Vx KF"]
+        self._assert_same_trace(expected, actual)
 
     def test_坏帧会报出下一步而不是猜(self):
         with self.assertRaisesRegex(ValueError, "magic"):

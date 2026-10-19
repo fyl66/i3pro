@@ -5878,3 +5878,45 @@ python tools\verify_ld_vs_csv.py                                 # PASS，0 chan
 **边界**：这是一张显式依赖表，不是自动依赖分析。新增一个数据源时，作者仍要决定它读
 哪几个 revision；漏写会表现为“该重算的没重算”，所以每条新依赖都要加一条无头断言。
 窗口、分辨率、曲线连接方式仍走原来的精确键，不升级成全局 revision。
+
+## A115 · BIN 取数去掉 list 往返（本次新增，实测瓶颈）
+
+**要解决的问题**：C2 之后 BIN 路径仍把 `render.downsample()` 的 numpy 结果先
+`tolist()`，`tracewire.encode()` 又 `np.asarray()` 转回数组。耐久 8000 桶 BIN
+计算 **84.8 ms**，cProfile 里 `tracewire.encode` 每请求约 **21 ms**，其中大头就是这次
+无意义的往返。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 数组核心 | `render.downsample_arrays()` 保留 numpy 数组；JSON 路径的 `downsample()` 仍负责转 list，行为不变 |
+| trace 接缝 | `render.trace(..., arrays=True)` 给 BIN 用；默认 `False`，JSON / 旧调用方不改 |
+| 二进制编码 | `tracewire.encode()` 直接收 ndarray，不再用 truthiness 判断数组；list 输入仍兼容 |
+| 路由 | `act_trace` 只在 `format=bin` 时传 `arrays=True`；JSON 分支完全不动 |
+
+```powershell
+python tools\bench_viewer.py --http --repeat 3                    # 对比 BIN 前后
+python -m unittest tests.test_i3pro.TestTraceEnvelope tests.test_i3pro.TestTraceWire tests.test_i3pro.TestTraceCache
+python -m unittest discover -s tests                             # 644 项，OK，28 跳过
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"       # 920 项 PASS
+node tools\smoke_viewer.js "out\20260524-耐久正赛.html"          # 920 项 PASS
+python tools\verify_clicks.py                                    # 需要 Edge；429 项通过、0 失败
+python tools\verify_ld_vs_csv.py                                 # PASS，0 channel(s) outside tolerance
+```
+
+**通过判据（本机实测，2026-10-19）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 高避 8000 桶 BIN 计算 | **49.7 → 28.4 ms**（-42.9%） |
+| 耐久 8000 桶 BIN 计算 | **84.8 → 66.0 ms**（-22.2%） |
+| 高避 8000 桶 BIN HTTP 冷请求 | **84.3 → 63.4 ms** |
+| 耐久 8000 桶 BIN HTTP 冷请求 | **131.2 → 113.4 ms** |
+| BIN 上线字节 | 不变：高避 **720.1 KB**、耐久 **1049.0 KB**（gzip 后） |
+| JSON 对照 | JSON 分支未改；同机重跑高避 **114.7 → 118.7 ms**、耐久 **166.9 → 175.7 ms**，属机器抖动范围 |
+| 逐点一致 | `TestTraceWire` 对合成 raw / envelope、两份金标准做 round-trip；`TestTraceEnvelope` 断言 ndarray 与 list 路径逐值相同 |
+| 四条回归 | 单测 **644 项 / 73.355 s，0 失败、28 跳过**；`verify_ld_vs_csv.py` **PASS**；两份 smoke 各 **920 项 PASS**；`verify_clicks.py` **429/429** |
+
+**边界**：耐久 8000 桶 BIN 仍有 **66.0 ms**，主要剩在 `render.trace` 的
+`upsample_to_master` / `_finite` / `downsample_arrays` 与每次请求的
+`SessionLibrary._entries()` 发现扫描。这次只删掉了已经量出来的双转换，没有把取数语义
+或 JSON 路径改掉。

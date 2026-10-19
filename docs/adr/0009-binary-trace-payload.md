@@ -29,6 +29,20 @@ ADR-0007 把性能瓶颈指到了 `json.dumps`：12 通道 × 8000 桶的冷路�
 明文缩了约 27%，但十进制 JSON 的文本冗余更高、压得更狠，所以 gzip 后略大 3.7%。
 这次换来的主要是**服务端 CPU 与冷 HTTP 时间**，不是 gzip 上线体积。
 
+### 后续实测：去掉 list 往返（2026-10-19）
+
+首版 BIN 仍让 `render.downsample()` 把 numpy 数组 `tolist()`，再由
+`tracewire.encode()` `np.asarray()` 转回来。耐久 8000 桶的 cProfile 里，`tracewire.encode`
+每请求约 **21 ms**，其中大头就是这次无意义往返。现在 `render.trace(..., arrays=True)`
+直接走 `downsample_arrays()`，BIN 计算变为：
+
+| 场次 / 8000 桶 | 首版 BIN | 去往返后 BIN | HTTP 冷请求 |
+| --- | --- | --- | --- |
+| 高避 5 圈 | **49.7 ms** | **28.4 ms** | **84.3 → 63.4 ms** |
+| 耐久正赛 | **84.8 ms** | **66.0 ms** | **131.2 → 113.4 ms** |
+
+JSON 路径与二进制帧格式都没有改；这是一次编码前的数据形状优化，不是协议变更。
+
 ## 代价与边界
 
 - 值 / min / max / 距离是 float32；它们和 JSON 里按 5 / 3 位小数舍入后的数只差

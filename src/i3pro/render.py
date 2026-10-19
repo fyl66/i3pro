@@ -547,34 +547,31 @@ def _bucket_edges(n: int, buckets: int) -> np.ndarray:
     return np.linspace(0, int(n), max(1, int(buckets)) + 1).astype(np.int64)
 
 
-def downsample(
+def downsample_arrays(
     time: np.ndarray,
     values: np.ndarray,
     distance: np.ndarray | None = None,
     buckets: int = DEFAULT_BUCKETS,
 ) -> dict:
-    """Package a trace as raw samples or per-bucket min/max envelopes.
+    """Like :func:`downsample`, but keep numeric columns as numpy arrays.
 
-    When the raw sample count exceeds ``2 × buckets``, the trace is reduced to
-    one envelope bucket per horizontal slot: ``min`` / ``max`` keep the actual
-    excursion, ``value`` is the bucket mean for cursor/statistics, and
-    ``count`` makes the mean reproducible by the UI.  Otherwise the raw points
-    are returned unchanged.
+    The JSON path needs plain lists; the binary path does not. Keeping this
+    core separate avoids ``tolist()`` followed immediately by ``np.asarray()``
+    on every ``format=bin`` request.
     """
     n = time.size
     buckets = max(1, int(buckets))
     values = _finite(values)
     if not envelope_needed(n, buckets):
-        picked = np.arange(n)
         out = {
-            "time": np.round(time[picked], 4).tolist(),
-            "value": np.round(values[picked], 5).tolist(),
+            "time": np.round(time, 4),
+            "value": np.round(values, 5),
             "envelope": False,
             "samples": int(n),
             "buckets": buckets,
         }
         if distance is not None and distance.size == n:
-            out["distance"] = np.round(_finite(distance)[picked], 3).tolist()
+            out["distance"] = np.round(_finite(distance), 3)
         return out
 
     # 分桶一律走 `reduceat`：逐桶调 numpy 是每桶三次调用，8000 桶 × 12 通道就是
@@ -602,11 +599,11 @@ def downsample(
     bucket_max = np.maximum.reduceat(values, starts)
 
     out = {
-        "time": np.round(bucket_time, 4).tolist(),
-        "value": np.round(bucket_mean, 5).tolist(),
-        "min": np.round(bucket_min, 5).tolist(),
-        "max": np.round(bucket_max, 5).tolist(),
-        "count": counts.tolist(),
+        "time": np.round(bucket_time, 4),
+        "value": np.round(bucket_mean, 5),
+        "min": np.round(bucket_min, 5),
+        "max": np.round(bucket_max, 5),
+        "count": counts,
         "envelope": True,
         "samples": int(n),
         "buckets": buckets,
@@ -617,11 +614,34 @@ def downsample(
     }
     if distances is not None:
         out["distance"] = np.round(
-            (distances[starts] + distances[ends - 1]) / 2.0, 3).tolist()
+            (distances[starts] + distances[ends - 1]) / 2.0, 3)
         out["distance_span"] = [
             round(float(distances[0]), 3),
             round(float(distances[-1]), 3),
         ]
+    return out
+
+
+def downsample(
+    time: np.ndarray,
+    values: np.ndarray,
+    distance: np.ndarray | None = None,
+    buckets: int = DEFAULT_BUCKETS,
+) -> dict:
+    """Package a trace as raw samples or per-bucket min/max envelopes.
+
+    When the raw sample count exceeds ``2 × buckets``, the trace is reduced to
+    one envelope bucket per horizontal slot: ``min`` / ``max`` keep the actual
+    excursion, ``value`` is the bucket mean for cursor/statistics, and
+    ``count`` makes the mean reproducible by the UI.  Otherwise the raw points
+    are returned unchanged.
+    """
+    out = downsample_arrays(time, values, distance, buckets)
+    for key in ("time", "value", "min", "max", "distance"):
+        if key in out:
+            out[key] = np.asarray(out[key]).tolist()
+    if "count" in out:
+        out["count"] = np.asarray(out["count"]).tolist()
     return out
 
 
@@ -667,26 +687,31 @@ def trace(
     start: float | None = None,
     end: float | None = None,
     upsample: str = DEFAULT_UPSAMPLE,
+    arrays: bool = False,
 ) -> dict:
     """One channel on the master time base, raw or min/max enveloped.
 
     ``upsample`` 定的是"原始采样点之间怎么取值"（i2 Pro 的 Up-sampling 属性）：
     画图默认 ``linear``，分析路径用的是 ``previous``。两条路都只影响**取到的值**，
     抽稀与"留下尖峰"的做法一模一样；是否启用包络由 :func:`envelope_needed` 一处定。
+
+    ``arrays=True`` 给二进制载荷用：数值列保持 numpy 数组，避免
+    ``downsample()`` 先转 list、``tracewire.encode()`` 再转回来。
     """
     values = derive.upsample_to_master(log, name, upsample)[: time.size]
+    pack = downsample_arrays if arrays else downsample
     if start is not None or end is not None:
         lo = 0 if start is None else int(np.searchsorted(time, start))
         hi = time.size if end is None else int(np.searchsorted(time, end))
         lo, hi = max(0, lo), min(time.size, hi)
-        payload = downsample(
+        payload = pack(
             time[lo:hi],
             values[lo:hi],
             None if distance is None else distance[lo:hi],
             buckets,
         )
     else:
-        payload = downsample(time, values, distance, buckets)
+        payload = pack(time, values, distance, buckets)
     # 数学通道的单位来自它的定义，采样率是主时间基——哪怕它和一条慢的原生通道同名
     # （这条判断在 channels.py 里，ticket #18）
     channel = log.channel(name)

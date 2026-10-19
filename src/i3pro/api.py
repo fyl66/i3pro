@@ -531,6 +531,7 @@ class _Call:
             distance = derive.distance_series(log)[: time.size]
         except ValueError:
             distance = None
+        wire = (query.get("format") or ["json"])[0]
         out = {}
         for channel in names:
             if not log.has(channel):
@@ -544,8 +545,8 @@ class _Call:
                 start=float_arg(query, "from"),
                 end=float_arg(query, "to"),
                 upsample=upsample,
+                arrays=wire == "bin",
             )
-        wire = (query.get("format") or ["json"])[0]
         if wire == "bin":
             return self._send(
                 tracewire.encode(out), 200, tracewire.CONTENT_TYPE

@@ -5804,3 +5804,40 @@ python tools\verify_clicks.py                                    # 需要 Edge�
 **边界**：BIN 的 gzip 上线字节比 JSON 略大（高避 **720.1 vs 694.3 KB**，+3.7%）——
 二进制把明文缩了约 27%，但十进制 JSON 的文本冗余更高、压得更狠。这次换来的主要是
 服务端 CPU 与冷 HTTP 时间；热请求两者都已被响应缓存吃掉，所以只差约 1.4 ms。
+
+## A113 · 通道列表拆成行模型与 DOM 适配器（本次新增，架构评审 C3）
+
+**要解决的问题**：`renderChannelList()` 同时算四档语义、搜通道、拼行 markup、绑每个
+checkbox / ★ / ⚙ 的监听，再整段重建 `#channelList`。高避场次一次要建 **467 个列表子节点**
+（438 条通道行 + 分组抬头）；搜索每敲一个键都重来一遍。这一票把"该显示哪些行"提成纯
+模型，把节点复用和事件接线留给 DOM 适配器。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 纯行模型 | `channelRows(input)`：输入 query / view / groups / channels / missing / selected / pinned / recent，输出分组、行语义、空状态与 `shown`；不读 DOM、不绑事件 |
+| DOM 适配器 | `renderChannelList()` 只负责收集当前状态、调用模型、同步节点；每个 `#channelList` 用 `WeakMap` 保存自己的行节点缓存，按 key 复用 label 与分组抬头 |
+| 事件委托 | `change` / `mousedown` / `click` 各在 `#channelList` 上接一次：勾选、点行记「最近」、★、⚙、分组「全选 / 为什么」都从 `event.target` 找回行或分组 |
+| 搜索调度 | 搜索框的 `input` 走 `scheduleChannelList()`，真浏览器里同一帧只重算一次；`renderChannelList()` 本身仍是同步入口，工具与旧断言不用改 |
+| 可测接缝 | `window.i3pro.channelRows` 供 smoke 直接验四档语义；DOM 复用用 `document.createElement` 计数验，不靠时间抖动 |
+
+```powershell
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"       # 915 项 PASS
+node tools\smoke_viewer.js "out\20260524-耐久正赛.html"          # 915 项 PASS
+python tools\verify_clicks.py                                    # 需要 Edge；429 项通过、0 失败
+python -m unittest discover -s tests                             # 642 项，OK，28 跳过
+python tools\verify_ld_vs_csv.py                                 # PASS，0 channel(s) outside tolerance
+```
+
+**通过判据（本机实测，2026-10-19）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 行模型四档 | `channelRows` 不碰 DOM 就能算出「全量 / 当前 / 固定 / 最近」、搜索命中、缺通道行、固定 / 勾选标记 |
+| DOM 复用 | 同一份通道列表第二次渲染新建节点 **0 个**；改前同一位置实测 **467 个**（红测：`cold=934 warm=467`，改后 `cold>0 warm=0`） |
+| 搜索合并 | 同一帧多次 `input` 只登记一个 rAF；模型与 diff 仍在帧内完成，但不再重建 438 条 label |
+| 事件委托 | 真 Edge 点 ★、⚙、checkbox、通道行、四档按钮全过；两份 smoke 各 **915 项 PASS** |
+| 四条回归 | 单测 **642 项 / 71.034 s，0 失败、28 跳过**；`verify_ld_vs_csv.py` **PASS**；两份 smoke 各 **915 项 PASS**；`verify_clicks.py` **429/429** |
+
+**边界**：这是"行模型 + 节点复用 + 事件委托"，不是虚拟滚动。第一次进入「全量」仍会建
+当前场次所有可见行；搜索仍会算一遍模型并移动可见节点。虚拟列表要等行数或单行成本真的
+把这一层压出瓶颈再做；现在先把四档语义和 DOM 适配器分开，后续换实现不碰模型。

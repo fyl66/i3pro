@@ -173,6 +173,22 @@ class Element {
     return child;
   }
 
+  insertBefore(child, reference) {
+    if (!child) return null;
+    const from = this._children.indexOf(child);
+    if (from >= 0) this._children.splice(from, 1);
+    if (child.tagName === "FRAGMENT") {
+      child._children.forEach((one) => { one._parent = this; });
+      const at = reference ? this._children.indexOf(reference) : -1;
+      this._children.splice(at >= 0 ? at : this._children.length, 0, ...child._children);
+      return child;
+    }
+    child._parent = this;
+    const at = reference ? this._children.indexOf(reference) : -1;
+    this._children.splice(at >= 0 ? at : this._children.length, 0, child);
+    return child;
+  }
+
   removeChild(child) {
     const i = this._children.indexOf(child);
     if (i >= 0) this._children.splice(i, 1);
@@ -5084,7 +5100,7 @@ check(status && String(status.innerHTML).indexOf("窗口") >= 0, "status line wa
   api.setChannelView("all");
   const row = (registry.get("channelList")._children || []).filter(
     (r) => r._html && r._html.indexOf('class="nm">' + firstName + "</span>") >= 0)[0];
-  if (row) row.dispatch("mousedown", {});
+  if (row) registry.get("channelList").dispatch("mousedown", { target: row });
   check(api.recentChannels().indexOf(firstName) >= 0,
     "点过通道行之后没进「最近」：" + JSON.stringify(api.recentChannels()));
   api.setChannelView("recent");
@@ -5106,6 +5122,84 @@ check(status && String(status.innerHTML).indexOf("窗口") >= 0, "status line wa
   check(api.asideOpen() === true && api.asideWidth() === kept,
     "折叠再展开宽度变了：" + kept + " -> " + api.asideWidth());
   check(ctx.storage.getItem("i3pro.aside.v1") !== null, "左栏偏好没写进本机");
+
+  // C3：四档语义从 DOM 里提出来，独立算；DOM 适配器复用行节点，不每键重建。
+  check(typeof api.channelRows === "function",
+    "通道行模型 channelRows 没有导出，四档语义还锁在 DOM 函数里");
+  if (typeof api.channelRows === "function") {
+    const names = api.data.channels.slice(0, 3).map((one) => one.name);
+    const sample = new Map(names.map((name) => [name, {
+      unit: "V", rate: 1, samples: 2, has_data: true,
+    }]));
+    const model = api.channelRows({
+      query: "", view: "all",
+      groups: [{ key: "sample", label: "样组", unit: "V", channels: names }],
+      channels: sample, missing: ["缺失甲"], selected: [names[0]],
+      pinned: [names[1]], recent: [names[2]],
+      isEmpty: () => false, processed: {},
+    });
+    check(model.groups.length === 2 && model.groups[0].rows.length === 3
+      && model.groups[1].rows[0].missing === true,
+      "channelRows 没有把全量组与本场次没有的通道分成两份："
+      + JSON.stringify(model.groups.map((group) => group.rows.map((row) => row.name))));
+    check(model.groups[0].rows[1].pinned === true
+      && model.groups[0].rows[0].checked === true,
+      "channelRows 没把固定 / 勾选状态带进行模型");
+    const pinned = api.channelRows({
+      query: "", view: "pinned", groups: [], channels: sample,
+      missing: [], selected: [names[0]], pinned: [names[1]], recent: [],
+      isEmpty: () => false, processed: {},
+    });
+    check(pinned.groups.length === 1
+      && pinned.groups[0].rows.map((row) => row.name).join(",") === names[1],
+      "channelRows 的「固定」档没有只返回固定通道");
+    const byUnit = api.channelRows({
+      query: "v", view: "all", groups: [{ key: "sample", label: "样组", channels: names }],
+      channels: sample, missing: [], selected: [], pinned: [], recent: [],
+      isEmpty: () => false, processed: {},
+    });
+    check(byUnit.groups.length === 1 && byUnit.shown === 3,
+      "channelRows 的搜索没有按单位匹配：" + JSON.stringify(byUnit));
+  }
+
+  // 搜索框的 input 先登记，同一帧只留一个 rAF 回调。
+  {
+    const search = registry.get("chSearch");
+    const queued = [];
+    const oldRaf = window.requestAnimationFrame;
+    window.requestAnimationFrame = (fn) => { queued.push(fn); return queued.length; };
+    search.value = "";
+    search.dispatch("input", {});
+    search.dispatch("input", {});
+    check(queued.filter(Boolean).length === 1,
+      "同一帧的多次搜索输入没有合并成一个 rAF：" + queued.length);
+    queued.filter(Boolean).forEach((fn) => fn());
+    window.requestAnimationFrame = oldRaf;
+  }
+
+  // 同一份通道列表的第二次渲染应该复用上一次建出来的 label，
+  // 只重排 / 改标记；搜索每键重建 438 行是这一票要消掉的成本。
+  {
+    const oldList = registry.get("channelList");
+    const freshList = new Element("div", "channelList");
+    registry.set("channelList", freshList);
+    const realCreate = ctx.document.createElement;
+    let created = 0;
+    ctx.document.createElement = function createCounted(tag) {
+      created += 1;
+      return realCreate.call(this, tag);
+    };
+    api.setChannelView("all");
+    api.renderChannelList();
+    const coldCreated = created;
+    api.renderChannelList();
+    const warmCreated = created - coldCreated;
+    ctx.document.createElement = realCreate;
+    registry.set("channelList", oldList);
+    api.renderChannelList();
+    check(coldCreated > 0 && warmCreated === 0,
+      "第二次渲染仍在重建通道行节点：cold=" + coldCreated + " warm=" + warmCreated);
+  }
 }
 
 check(calls.fillText > 0, "no canvas text was drawn");

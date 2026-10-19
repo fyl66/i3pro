@@ -9275,141 +9275,344 @@ function renderChannelViews() {
   });
 }
 
-function renderChannelList() {
-  const term = $("chSearch").value.trim().toLowerCase();
-  const list = $("channelList");
-  list.innerHTML = "";
-  const frag = document.createDocumentFragment();
-  const chosen = selectedChannels();
-  const comp = focusedComponent();
-  const missingAll = workbenchMissing();
-  let shown = 0;
+/* C3：通道列表先算成不碰 DOM 的行模型，再由适配器画进 #channelList。
+ *
+ * 这一层缝让四档语义（全量 / 当前 / 固定 / 最近）、搜索、缺通道分组可以在
+ * 无头驱动里单独验；DOM 适配器只关心"哪些行、怎么复用节点、事件从哪里来"。
+ * 同一个列表第二次渲染复用上一次的行节点，搜索不再每键重建 400+ 个 label。
+ */
+function channelRows(input) {
+  const opts = input || {};
+  const query = String(opts.query || "").trim().toLowerCase();
+  const view = opts.view || "all";
+  const channels = opts.channels || new Map();
+  const groups = opts.groups || [];
+  const missingAll = opts.missing || [];
+  const selected = opts.selected || [];
+  const pinned = opts.pinned || [];
+  const recent = opts.recent || [];
+  const processed = opts.processed || {};
+  const isEmpty = opts.isEmpty || (() => false);
   const match = (name) => {
-    if (!term) return true;
-    const ch = CHANNELS.get(name) || {};
-    return name.toLowerCase().indexOf(term) >= 0
-      || String(ch.unit || "").toLowerCase().indexOf(term) >= 0;
+    if (!query) return true;
+    const ch = channels.get(name) || {};
+    return String(name).toLowerCase().indexOf(query) >= 0
+      || String(ch.unit || "").toLowerCase().indexOf(query) >= 0;
   };
-
-  const appendRow = (name) => {
-    const ch = CHANNELS.get(name) || {};
-    const on = chosen.indexOf(name) >= 0;
-    const row = document.createElement("label");
-    if (missingAll.indexOf(name) >= 0) {
-      row.className = "ch missing";
-      row.title = name + " · 本场次没有这条通道"
-        + "（工作表里还留着，换回原来的场次就还在）";
-      row.innerHTML = '<input type="checkbox" ' + (on ? "checked" : "") + ">"
-        + '<span class="swatch" style="background:' + MISSING_COLOR + '"></span>'
-        + '<span class="nm">' + esc(name) + "</span>"
-        + '<span class="unit">本场次没有</span>';
-    } else {
-      row.className = "ch";
-      row.title = name + " · " + (ch.unit || "无单位") + " · " + ch.rate + " Hz · " + ch.samples + " 点";
-      // 通道在、但整段没有有效样本：与"本场次没有"分开说明（ticket #34）。
-      const dead = isEmptyChannel(name);
-      if (dead) row.title = name + " · 整段没有有效样本（列是全空的）";
-      row.innerHTML = '<input type="checkbox" ' + (on ? "checked" : "") + ">"
-        + '<span class="swatch" style="background:' + (on ? channelColor(name, comp) : "#3a4150") + '"></span>'
-        // 通道名来自用户文件（.ld / CSV 表头）：它是文本，不是标记
-        + '<span class="nm">' + esc(name) + '</span>'
-        // 处理过的通道（A75）：一个 ƒ 角标，悬停说清是哪一套处理。
-        + (isProcessed(name)
-          ? '<span class="proc" title="' + esc(processedTitle(name)) + '">ƒ</span>' : "")
-        + '<span class="unit' + (dead ? " dead" : "") + '">'
-        + (dead ? "全程无有效" : (ch.unit || "")) + "</span>"
-        // 固定（票⑫）：★ 把常用通道钉到「固定」那一档，存在本机、不写工作表。
-        + '<button type="button" class="pin' + (isPinned(name) ? " on" : "")
-        + '" title="' + (isPinned(name) ? "取消固定" : "固定到「固定」那一档") + '">★</button>'
-        + '<button type="button" class="cog" title="通道处理：滤波 / 增益 / 偏置 / 用光标处归零">⚙</button>';
-    }
-    row.querySelector("input").addEventListener("change", (event) => {
-      toggleChannel(name, event.target.checked);
-    });
-    if (row.className.indexOf("missing") < 0) {
-      // 点这一行 = 把"当前通道"定在它身上（快捷键与面板的落点）
-      row.addEventListener("mousedown", () => {
-        state.channelFocus = name;
-        noteChannelUse(name);
-      });
-      row.querySelector(".pin").addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        togglePinned(name);
-      });
-      row.querySelector(".cog").addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        openChannelSetup(name);
-      });
-    }
-    frag.appendChild(row);
-    shown += 1;
+  const rowOf = (name) => {
+    const ch = channels.get(name) || {};
+    const missing = missingAll.indexOf(name) >= 0;
+    const dead = !missing && isEmpty(name);
+    return {
+      name: name,
+      missing: missing,
+      checked: selected.indexOf(name) >= 0,
+      pinned: pinned.indexOf(name) >= 0,
+      unit: ch.unit || "",
+      dead: dead,
+      processed: !!processed[name],
+      title: missing
+        ? name + " · 本场次没有这条通道"
+          + "（工作表里还留着，换回原来的场次就还在）"
+        : (dead
+          ? name + " · 整段没有有效样本（列是全空的）"
+          : name + " · " + (ch.unit || "无单位") + " · " + ch.rate
+            + " Hz · " + ch.samples + " 点"),
+      unitText: missing ? "本场次没有" : (dead ? "全程无有效" : (ch.unit || "")),
+    };
   };
-
-  const appendGroup = (label, names, addall) => {
-    const usable = names.filter(match);
-    if (!usable.length) return;
-    const head = document.createElement("div");
-    head.className = "grphead";
-    if (addall) {
-      head.innerHTML = "<span>" + label + '</span><span class="addall">全选</span>';
-      head.querySelector(".addall").addEventListener("click", () => {
-        const merged = {};
-        chosen.concat(usable).forEach((n) => { merged[n] = 1; });
-        usable.forEach(noteChannelUse);
-        setSelectedChannels(Object.keys(merged));
-        renderChannelList();
-        refreshWindowTraces(true).then(renderAll);
-        renderAll();
-      });
-    } else {
-      head.innerHTML = "<span>" + label + "</span>";
+  const out = [];
+  if (view === "all") {
+    for (const group of groups) {
+      const usable = group.channels.filter(match);
+      if (usable.length) {
+        out.push({
+          key: group.key,
+          label: group.label,
+          addAll: true,
+          rows: usable.map(rowOf),
+        });
+      }
     }
-    frag.appendChild(head);
-    for (const name of usable) appendRow(name);
-  };
-
-  if (channelView === "all") {
-    for (const group of GROUPS) appendGroup(group.label, group.channels, true);
-    // 工作表引用了、本场次没有的通道（ticket #34）：**列出来、灰着、说清原因**。
-    // 绝不自动剔除：它们还在组件配置里（勾是勾着的），换回原来的场次原样还在。
+    // 工作表引用了、本场次没有的通道（ticket #34）：列出来、灰着、说清原因。
     const missing = missingAll.filter(match);
     if (missing.length) {
-      const head = document.createElement("div");
-      head.className = "grphead";
-      head.innerHTML = "<span>本场次没有</span>"
-        + '<span class="addall">为什么</span>';
-      head.querySelector(".addall").addEventListener("click", () => {
-        toast("这 " + missing.length + " 条通道是工作表里留着的，本场次的数据里没有。"
-          + "它们不会被自动删掉——换回原来的场次，勾选和配置原样还在。");
+      out.push({
+        key: "__missing__",
+        label: "本场次没有",
+        addAll: false,
+        action: "why",
+        rows: missing.map(rowOf),
       });
-      frag.appendChild(head);
-      for (const name of missing) appendRow(name);
     }
   } else {
-    const spec = CHANNEL_VIEWS.find((one) => one.key === channelView) || CHANNEL_VIEWS[3];
-    let names = [];
-    if (channelView === "pinned") names = asidePrefs.pinned.slice();
-    else if (channelView === "recent") names = asidePrefs.recent.slice();
-    else names = selectedChannels().slice();
-    appendGroup(spec.label, names, false);
+    const names = view === "pinned" ? pinned.slice()
+      : (view === "recent" ? recent.slice() : selected.slice());
+    const spec = opts.viewSpec || { key: view, label: view };
+    const usable = names.filter(match);
+    if (usable.length) {
+      out.push({
+        key: view,
+        label: spec.label,
+        addAll: false,
+        rows: usable.map(rowOf),
+      });
+    }
   }
+  const shown = out.reduce((sum, group) => sum + group.rows.length, 0);
+  const empty = {
+    pinned: "还没有固定通道：把鼠标移到通道行，点右边的 ★ 固定常用通道。",
+    recent: "这一台机器还没记下用过的通道：勾一条通道或点一下通道行就记上了。",
+    current: "当前组件没有选通道：先点一下工作表里的组件，或在上面的通道里勾一条。",
+    all: "没有匹配的通道。",
+  };
+  return {
+    view: view,
+    groups: out,
+    shown: shown,
+    empty: empty[view] || empty.all,
+  };
+}
 
-  if (!shown) {
-    const empty = {
-      pinned: "还没有固定通道：把鼠标移到通道行，点右边的 ★ 固定常用通道。",
-      recent: "这一台机器还没记下用过的通道：勾一条通道或点一下通道行就记上了。",
-      current: "当前组件没有选通道：先点一下工作表里的组件，或在上面的通道里勾一条。",
-      all: "没有匹配的通道。",
-    };
-    list.innerHTML = "<p class='hint'>" + (empty[channelView] || empty.all) + "</p>";
-  } else {
-    list.appendChild(frag);
+const CHANNEL_LIST_CACHE = new WeakMap();
+let channelListFrame = null;
+
+/** 搜索每键只登记一次；真浏览器里由 rAF 合并到下一帧。 */
+function scheduleChannelList() {
+  if (channelListFrame !== null) return;
+  channelListFrame = requestRenderFrame(() => {
+    channelListFrame = null;
+    renderChannelList();
+  });
+}
+
+function channelListCache(list) {
+  let cache = CHANNEL_LIST_CACHE.get(list);
+  if (!cache) {
+    cache = new Map();
+    CHANNEL_LIST_CACHE.set(list, cache);
   }
+  return cache;
+}
+
+function channelListChildren(list) {
+  return list._children || (list.children ? Array.prototype.slice.call(list.children) : []);
+}
+
+function channelListChild(list, index) {
+  const children = channelListChildren(list);
+  return children[index] || null;
+}
+
+function channelListCount(list) { return channelListChildren(list).length; }
+
+function channelListRemoveLast(list) {
+  const children = channelListChildren(list);
+  if (children.length) list.removeChild(children[children.length - 1]);
+}
+
+/** 按顺序复用节点；只移动位置，不重建整段列表。 */
+function syncChannelChildren(list, desired) {
+  for (let i = 0; i < desired.length; i += 1) {
+    const current = channelListChild(list, i);
+    if (current === desired[i]) continue;
+    if (list.insertBefore) {
+      list.insertBefore(desired[i], current);
+      continue;
+    }
+    // 假 DOM 的兜底路径：只给没有 insertBefore 的老驱动用。
+    const children = channelListChildren(list);
+    const from = children.indexOf(desired[i]);
+    if (from >= 0) children.splice(from, 1);
+    children.splice(i, 0, desired[i]);
+    desired[i]._parent = list;
+  }
+  while (channelListCount(list) > desired.length) channelListRemoveLast(list);
+}
+
+function channelRowNode(cache, row, comp) {
+  const key = "row:" + row.name;
+  const name = row.name;
+  let node = cache.get(key);
+  if (!node) {
+    node = document.createElement("label");
+    cache.set(key, node);
+  }
+  const color = row.missing ? MISSING_COLOR
+    : (row.checked ? channelColor(row.name, comp) : "#3a4150");
+  const procTitle = row.processed ? processedTitle(row.name) : "";
+  const signature = [row.missing, row.checked, row.pinned, row.unitText, row.dead,
+                     row.processed, procTitle, row.title, color].join("\u0000");
+  node.className = row.missing ? "ch missing" : "ch";
+  node.title = row.title;
+  node.dataset.channel = row.name;
+  if (node._i3sig !== signature) {
+    if (row.missing) {
+      node.innerHTML = '<input type="checkbox" ' + (row.checked ? "checked" : "") + ">"
+        + '<span class="swatch" style="background:' + MISSING_COLOR + '"></span>'
+        + '<span class="nm">' + esc(row.name) + "</span>"
+        + '<span class="unit">' + row.unitText + "</span>";
+    } else {
+      node.innerHTML = '<input type="checkbox" ' + (row.checked ? "checked" : "") + ">"
+        + '<span class="swatch" style="background:' + color + '"></span>'
+        // 通道名来自用户文件（.ld / CSV 表头）：它是文本，不是标记。
+        + '<span class="nm">' + esc(name) + '</span>'
+        // 处理过的通道（A75）：一个 ƒ 角标，悬停说清是哪一套处理。
+        + (row.processed
+          ? '<span class="proc" title="' + esc(procTitle) + '">ƒ</span>' : "")
+        + '<span class="unit' + (row.dead ? " dead" : "") + '">'
+        + (row.dead ? "全程无有效" : row.unit) + "</span>"
+        // 固定（票⑫）：★ 把常用通道钉到「固定」那一档，存在本机、不写工作表。
+        + '<button type="button" class="pin' + (row.pinned ? " on" : "")
+        + '" title="' + (row.pinned ? "取消固定" : "固定到「固定」那一档") + '">★</button>'
+        + '<button type="button" class="cog" title="通道处理：滤波 / 增益 / 偏置 / 用光标处归零">⚙</button>';
+    }
+    node._i3sig = signature;
+  }
+  return node;
+}
+
+function channelHeadNode(cache, group, index) {
+  const key = "head:" + index + ":" + group.key;
+  let node = cache.get(key);
+  if (!node) {
+    node = document.createElement("div");
+    cache.set(key, node);
+  }
+  const action = group.action || (group.addAll ? "addall" : "");
+  const signature = [group.label, action, index].join("\u0000");
+  node.className = "grphead";
+  node.dataset.group = String(index);
+  if (action) node.dataset.action = action;
+  else delete node.dataset.action;
+  if (node._i3sig !== signature) {
+    node.innerHTML = "<span>" + group.label + "</span>"
+      + (action === "addall" ? '<span class="addall">全选</span>'
+        : (action === "why" ? '<span class="addall">为什么</span>' : ""));
+    node._i3sig = signature;
+  }
+  return node;
+}
+
+function channelEmptyNode(cache, model) {
+  const key = "empty:" + model.view;
+  let node = cache.get(key);
+  if (!node) {
+    node = document.createElement("p");
+    node.className = "hint";
+    cache.set(key, node);
+  }
+  if (node._i3sig !== model.empty) {
+    node.innerHTML = model.empty;
+    node._i3sig = model.empty;
+  }
+  return node;
+}
+
+function channelListPartFrom(node, root, className) {
+  while (node && node !== root) {
+    const classes = String(node.className || "").split(/\s+/);
+    if (classes.indexOf(className) >= 0) return node;
+    node = node.parentNode;
+  }
+  return null;
+}
+
+function channelListRowFrom(node, root) {
+  return channelListPartFrom(node, root, "ch");
+}
+
+function wireChannelList(list) {
+  if (!list || list._i3ChannelWired || !list.addEventListener) return;
+  list._i3ChannelWired = true;
+  list.addEventListener("change", (event) => {
+    const row = channelListRowFrom(event.target, list);
+    if (!row || !row.dataset) return;
+    toggleChannel(row.dataset.channel, !!(event.target && event.target.checked));
+  });
+  list.addEventListener("mousedown", (event) => {
+    const row = channelListRowFrom(event.target, list);
+    if (!row || !row.dataset || String(row.className).indexOf("missing") >= 0) return;
+    state.channelFocus = row.dataset.channel;
+    noteChannelUse(row.dataset.channel);
+  });
+  list.addEventListener("click", (event) => {
+    const row = channelListRowFrom(event.target, list);
+    if (row && row.dataset) {
+      const pin = channelListPartFrom(event.target, row, "pin");
+      if (pin) {
+        event.preventDefault();
+        event.stopPropagation();
+        togglePinned(row.dataset.channel);
+        return;
+      }
+      const cog = channelListPartFrom(event.target, row, "cog");
+      if (cog) {
+        event.preventDefault();
+        event.stopPropagation();
+        openChannelSetup(row.dataset.channel);
+        return;
+      }
+    }
+    const head = channelListPartFrom(event.target, list, "grphead");
+    if (!head || !head.dataset) return;
+    const model = list._i3Model;
+    const group = model && model.groups[Number(head.dataset.group)];
+    if (!group) return;
+    if (head.dataset.action === "addall") {
+      event.preventDefault();
+      const usable = group.rows.map((row) => row.name);
+      const merged = {};
+      selectedChannels().concat(usable).forEach((name) => { merged[name] = 1; });
+      usable.forEach(noteChannelUse);
+      setSelectedChannels(Object.keys(merged));
+      renderChannelList();
+      refreshWindowTraces(true).then(renderAll);
+      renderAll();
+    } else if (head.dataset.action === "why") {
+      event.preventDefault();
+      toast("这 " + group.rows.length + " 条通道是工作表里留着的，本场次的数据里没有。"
+        + "它们不会被自动删掉——换回原来的场次，勾选和配置原样还在。");
+    }
+  });
+}
+
+function renderChannelList() {
+  const list = $("channelList");
+  if (!list) return null;
+  const chosen = selectedChannels();
+  const comp = focusedComponent();
+  const focusedGraph = !!(comp && comp.type === "graph");
+  const missingAll = workbenchMissing();
+  const viewSpec = CHANNEL_VIEWS.find((one) => one.key === channelView)
+    || CHANNEL_VIEWS[3];
+  const model = channelRows({
+    query: $("chSearch").value,
+    view: channelView,
+    groups: GROUPS,
+    channels: CHANNELS,
+    missing: missingAll,
+    selected: chosen,
+    pinned: asidePrefs.pinned,
+    recent: asidePrefs.recent,
+    isEmpty: isEmptyChannel,
+    processed: processedChannels(),
+    viewSpec: viewSpec,
+  });
+  const cache = channelListCache(list);
+  const desired = [];
+  model.groups.forEach((group, index) => {
+    desired.push(channelHeadNode(cache, group, index));
+    group.rows.forEach((row) => desired.push(channelRowNode(cache, row, comp)));
+  });
+  if (!model.shown) desired.push(channelEmptyNode(cache, model));
+  list._i3Model = model;
+  syncChannelChildren(list, desired);
+  wireChannelList(list);
   $("chCount").textContent = chosen.length + " / " + DATA.channels.length
-    + (comp && comp.type === "graph" ? "" : "（未选中图）")
+    + (focusedGraph ? "" : "（未选中图）")
     + (missingAll.length ? "，缺 " + missingAll.length + " 条" : "");
+  return model;
 }
 
 function toggleChannel(name, on) {
@@ -11376,7 +11579,7 @@ function init() {
   renderResolutionControl();
   attachInteractions();
 
-  $("chSearch").addEventListener("input", renderChannelList);
+  $("chSearch").addEventListener("input", scheduleChannelList);
   $("lapMode").addEventListener("change", () => {
     saveLaps(Object.assign({}, state.lapsConfig, { mode: $("lapMode").value }));
   });
@@ -11581,7 +11784,7 @@ window.i3pro = {
   renderScheduler: renderScheduler,
   decodeTraceBinary: decodeTraceBinary,
   traceUsesEnvelope: traceUsesEnvelope,
-  channels: CHANNELS, renderChannelList: renderChannelList,
+  channels: CHANNELS, channelRows: channelRows, renderChannelList: renderChannelList,
   fullRange: fullRange, zoomTo: zoomTo, windowRange: windowRange,
   groupsFor: groupsFor, selectedChannels: selectedChannels,
   addComponentOfType: addComponentOfType, applyPreset: applyPreset,

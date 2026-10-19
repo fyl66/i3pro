@@ -1050,6 +1050,9 @@ class Checker:
                    json.dumps(comp, ensure_ascii=False) if comp else "没有直方图组件")
         if not comp:
             return
+        self.check("#9 新直方图是当前选中项（不然会被上面那件图盖住）",
+                   self.js("i3pro.state.focusId") == comp["id"],
+                   {"focus": self.js("i3pro.state.focusId"), "id": comp["id"]})
 
         painted = self.js(
             "(function(){var cv=document.querySelector('.comp[data-id=\"%s\"] canvas');"
@@ -1086,10 +1089,15 @@ class Checker:
 
         # 缩放：真双击图（不是直方图自己）-> 直方图必须跟着重问一次
         seen = len(hist_calls())
-        x = self.js("__px((i3pro.lane()[0]+i3pro.lane()[1])/2)")
-        y = self.js("__py(60)")
+        graph_point = json.loads(self.js(
+            "(function(){var g=[].filter.call(document.querySelectorAll('.comp'),"
+            "function(e){return e.dataset.type==='graph';})[0];"
+            "var cv=g&&g.querySelector('canvas');if(!cv)return 'null';"
+            "g.scrollIntoView({block:'start'});var r=cv.getBoundingClientRect();"
+            "return JSON.stringify({x:r.left+r.width/2,y:r.top+80});})()"))
+        time.sleep(0.2)
         before_view = self.view()
-        self.browser.double_click(x, y, self.session)
+        self.browser.double_click(graph_point["x"], graph_point["y"], self.session)
         calls = hist_calls()
         view = self.view()
         self.check("#9 真双击放大 -> 直方图跟着换了窗口（重新问了一次）",
@@ -1100,11 +1108,29 @@ class Checker:
         # 门槛写一条不存在的通道：表头要写出下一步，而不是装没看见
         gate_box = self.js(
             "(function(){var el=document.querySelector('.comp[data-id=\"%s\"] input[data-hist=\"gate\"]');"
-            "return el?JSON.stringify(__center(el)):'null';})()" % comp["id"]
+            "if(!el)return 'null';el.scrollIntoView({block:'center'});"
+            "return JSON.stringify(__center(el));})()" % comp["id"]
         )
         if gate_box and gate_box != "null":
+            time.sleep(0.2)
             point = json.loads(gate_box)
             self.browser.click(point["x"], point["y"], self.session)
+            focused = self.js(
+                "(function(){var a=document.activeElement;"
+                "return a?a.tagName+'|'+(a.getAttribute('data-hist')||''):'none';})()")
+            self.check("#9 门槛输入框真鼠标点得到（焦点落在这一格）",
+                       focused == "INPUT|gate",
+                       focused + " · " + self.js(
+                           "(function(){var el=document.querySelector('.comp[data-id=\"%s\"]"
+                           " input[data-hist=\"gate\"]');var r=el.getBoundingClientRect();"
+                           "var e=document.elementFromPoint(r.left+6,r.top+r.height/2);"
+                           "var c=el.closest('.comp');var cs=getComputedStyle(c);"
+                           "return JSON.stringify({rect:{l:r.left,t:r.top,w:r.width,h:r.height},"
+                           "hit:e?e.tagName+'|'+(e.getAttribute('data-hist')||''):'none',"
+                           "comp:{cls:c.className,z:cs.zIndex,focus:i3pro.state.focusId},"
+                           "stack:document.elementsFromPoint(r.left+6,r.top+r.height/2)"
+                           ".slice(0,5).map(function(x){return x.tagName+'.'+x.className;})});})()"
+                           % comp["id"]))
             self.browser.key_named("a", "KeyA", 65, self.session, modifiers=2)
             self.browser.insert_text("查无此通道", self.session)
             self.browser.key_named("Enter", "Enter", 13, self.session)
@@ -1131,8 +1157,10 @@ class Checker:
             point = json.loads(self.js(
                 "(function(){var el=document.querySelector('.comp[data-id=\"%s\"]"
                 " input[data-hist=\"gate\"]');"
-                "return el?JSON.stringify(__center(el)):'null';})()" % comp["id"]
+                "if(!el)return 'null';el.scrollIntoView({block:'center'});"
+                "return JSON.stringify(__center(el));})()" % comp["id"]
             ))
+            time.sleep(0.2)
             self.browser.click(point["x"], point["y"], self.session)
             self.browser.key_named("a", "KeyA", 65, self.session, modifiers=2)
             self.browser.key_named("Backspace", "Backspace", 8, self.session)
@@ -3918,6 +3946,86 @@ class Checker:
         self.js("i3pro.state.focusId=null;i3pro.buildWorksheet();i3pro.renderAll();true")
         time.sleep(0.3)
 
+    # ------------------------------------------- A118 缩放后抬头跟着重排
+    def resize_heads(self):
+        """A118：拖大 / 拖小一件多分栏图，图里的通道抬头必须跟着分栏落位。
+
+        旧实现把抬头缓存在 ``legendKey`` 里，而那个键只记内容不记几何：画布变高了，
+        抬头仍停在旧坐标，看起来像"标题钉在原地"。这一节用真鼠标拖下边缘，量
+        ``.glegend`` 相对组件顶部的偏移，再拖回去确认能复原。
+        """
+        def snapshot():
+            raw = self.js(
+                "(function(){var c=[].filter.call(document.querySelectorAll('.comp'),"
+                "function(el){return el.dataset.type==='graph'&&"
+                "el.querySelectorAll('.glegend').length>1;})[0];"
+                "if(!c)return 'null';var r=c.getBoundingClientRect();"
+                "var heads=[].map.call(c.querySelectorAll('.glegend'),function(el){"
+                "var q=el.getBoundingClientRect();return Math.round(q.top-r.top);});"
+                "var h=c.querySelector('.rzbottom').getBoundingClientRect();"
+                "return JSON.stringify({id:c.dataset.id,h:Math.round(r.height),"
+                "heads:heads,handle:{x:h.left+h.width/2,y:h.top+h.height/2},"
+                "focus:i3pro.state.focusId,z:getComputedStyle(c).zIndex,"
+                "cls:String(c.className)});})()")
+            return json.loads(raw) if raw and raw != "null" else None
+
+        def drag(x, y, dy):
+            self.browser.mouse("mouseMoved", x, y, self.session, buttons=0)
+            self.browser.mouse("mousePressed", x, y, self.session)
+            for step in range(1, 11):
+                self.browser.mouse("mouseMoved", x, y + dy * step / 10.0, self.session)
+                time.sleep(0.03)
+            during = snapshot()
+            self.browser.mouse("mouseReleased", x, y + dy, self.session, buttons=0)
+            time.sleep(0.8)
+            return during
+
+        scroll_before = self.js("document.getElementById('chartScroll').scrollTop")
+        self.js("i3pro.applyPreset('分析');i3pro.state.focusId=null;"
+                "i3pro.buildWorksheet();i3pro.renderAll();true")
+        time.sleep(0.6)
+        before = snapshot()
+        self.check("A118 工作表里有一件多分栏曲线（不然重排验不下去）",
+                   bool(before) and len(before["heads"]) > 1, before)
+        if not before:
+            return
+        self.js("document.querySelector('[data-id=\"%s\"]')"
+                ".scrollIntoView({block:'start'});true" % before["id"])
+        time.sleep(0.3)
+        before = snapshot()
+        handle = before["handle"]
+        during = drag(handle["x"], handle["y"], 480)
+        tall = snapshot()
+        self.check("A118 拖下边缘之后组件真的变高",
+                   bool(tall) and tall["h"] >= before["h"] + 300,
+                   "%s -> %s" % (before["h"], tall and tall["h"]))
+        self.check("A118 最后一个分栏的抬头跟着下移",
+                   bool(tall) and tall["heads"][-1] >= before["heads"][-1] + 100,
+                   "%s -> %s" % (before["heads"], tall and tall["heads"]))
+        self.check("A118 每个抬头都留在组件里（没有落到标题栏/组件外）",
+                   bool(tall) and all(20 <= top < tall["h"] for top in tall["heads"]),
+                   tall and tall["heads"])
+        self.check("A118 拖动中的组件被抬到最上层（不被相邻组件盖住）",
+                   bool(during) and "dragging" in during["cls"]
+                   and str(during["z"]).isdigit() and int(during["z"]) > 0,
+                   during and {"cls": during["cls"], "z": during["z"]})
+        self.browser.shot(os.path.join(ROOT, "out", "shots",
+                                       "verify-resize-heads-tall.png"), self.session)
+        # 拖大之后下边缘可能已经落到底部 dock 后面：真用户会先滚一下再拖回来。
+        self.js("document.getElementById('chartScroll').scrollTop += 220;true")
+        time.sleep(0.3)
+        tall = snapshot()
+        drag(tall["handle"]["x"], tall["handle"]["y"], -480)
+        back = snapshot()
+        self.check("A118 缩回去之后组件与抬头都回到原来的位置",
+                   bool(back) and abs(back["h"] - before["h"]) <= 32
+                   and abs(back["heads"][-1] - before["heads"][-1]) <= 10,
+                   "%s -> %s" % (before, back))
+        self.js("document.getElementById('chartScroll').scrollTop=%r;"
+                "i3pro.state.focusId=null;i3pro.buildWorksheet();i3pro.renderAll();true"
+                % (scroll_before or 0))
+        time.sleep(0.3)
+
     # ------------------------------------------- A104 双圈对比真的画两条圈
     def lap_overlay(self):
         """A104：真点「基」「比」选中两条圈，画布上**真的出现两条圈**的曲线。
@@ -5204,6 +5312,8 @@ def main(argv=None):
             checker.inspector_panel()
             # 票⑪ 组件标题栏：悬浮 / 选中才出操作，… 菜单开合与键盘路径
             checker.component_menu()
+            # A118 缩放后图内抬头跟着分栏重排，且拖动中的组件在最上层
+            checker.resize_heads()
             # A104 双圈对比：真选两条圈，画布上真的画出两条（这次修的 bug）
             checker.lap_overlay()
             checker.sections()

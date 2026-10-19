@@ -304,8 +304,15 @@
   .wrow > .comp { flex:1 1 0; min-width:0; margin-bottom:6px; }
   .comp { background:var(--panel); border:1px solid var(--line); border-radius:7px;
           position:absolute; display:flex; flex-direction:column; overflow:hidden;
-          box-sizing:border-box; }
-  .comp.focus { border-color:var(--accent); }
+          box-sizing:border-box;
+          /* 每件组件是独立图层：把手自己的 z-index:15 只在本组件内比较。少了这一条，
+             后画组件的把手会跑到前一件的 z-index:5 之上，拖大之后连自己的下边缘
+             都点不到（A120 真鼠标量出来的）。 */
+          isolation:isolate; }
+  .comp.focus { border-color:var(--accent); z-index:5; }
+  /* 只在拖动/缩放期间抬到最上层：拖大之后新面积不能被相邻组件盖住，松手后
+     恢复原来的图层（新加的组件不会因为别的组件被选中就永久被压住）。 */
+  .comp.dragging { z-index:5; }
   .compbar { display:flex; align-items:center; gap:8px; padding:2px 8px 2px 10px;
              border-bottom:1px solid var(--line); font-size:11px; color:var(--muted);
              user-select:none; flex:0 0 auto; }
@@ -4054,7 +4061,7 @@ function buildWorksheet() {
     const bundle = { comp: comp, el: el, body: body, canvas: null, head: null,
                      sizeSpan: sizeSpan, titleSpan: titleSpan,
                      off: null, cacheKey: "", legendKey: "", valueNodes: [],
-                     abNote: null };
+                     legendBlocks: [], missingNote: null, abNote: null };
     // 控件条由组件自己声明（注册表 #17/#19/#20）。位置与迁移前一致：在 canvas 之前。
     if (spec && spec.controls) spec.controls(comp, bundle, body);
     if (tabular) {
@@ -4175,6 +4182,7 @@ function beginMove(event, comp, el) {
   const colPx = (rect.width || 1200) / GRID_COLS;
   const startX = event.clientX, startY = event.clientY;
   const originX = comp.x, originY = comp.y;
+  el.classList.add("dragging");
   const move = (e) => {
     let x = originX + (e.clientX - startX) / colPx;
     let y = originY + (e.clientY - startY) / ROW_PX;
@@ -4209,6 +4217,7 @@ function beginMove(event, comp, el) {
   const up = () => {
     window.removeEventListener("mousemove", move);
     window.removeEventListener("mouseup", up);
+    el.classList.remove("dragging");
     showGuides(null, null, host);
     host.style.height = Math.max(160,
       Math.max.apply(null, state.components.map((c) => c.y + c.h)) * ROW_PX + 8) + "px";
@@ -4227,6 +4236,10 @@ function beginResize(event, comp, el, axis) {
   const colPx = (rect.width || 1200) / GRID_COLS;
   const startX = event.clientX, startY = event.clientY;
   const originW = comp.w, originH = comp.h;
+  // 从把手开始拖动也算"选中这一件"：右栏切到它，图层抬到最上面。
+  state.focusId = comp.id;
+  markFocused();
+  el.classList.add("dragging");
   const move = (e) => {
     let w = originW, h = originH;
     if (axes.indexOf("x") >= 0) w = originW + (e.clientX - startX) / colPx;
@@ -4252,6 +4265,7 @@ function beginResize(event, comp, el, axis) {
   const up = () => {
     window.removeEventListener("mousemove", move);
     window.removeEventListener("mouseup", up);
+    el.classList.remove("dragging");
     showGuides(null, null, host);
     saveLayout();
   };
@@ -4912,10 +4926,14 @@ function renderGraphComponent(comp, b) {
  * 刻度字上了（第一次真浏览器截图里那行正好盖住 "1:00"）；`lift` 再往上抬，给
  * 同时出现的那两句话错开一行。（这两行原来各写了一遍同一个算式，评审点出来后
  * 收成一个函数。） */
-function headNote(host, cls, panel, lift, text) {
+function headNoteTop(panel, lift) {
   const spot = panel || { top: 0, panelH: 0 };
+  return Math.max(2, spot.top + spot.panelH - 30 - (lift || 0));
+}
+
+function headNote(host, cls, panel, lift, text) {
   const row = makeEl("div", "lrow " + cls, host);
-  row.style.top = Math.max(2, spot.top + spot.panelH - 30 - (lift || 0)) + "px";
+  row.style.top = headNoteTop(panel, lift) + "px";
   row.textContent = text;
   return row;
 }
@@ -4946,12 +4964,15 @@ function renderGraphHead(comp, b, groups, panels, overlapped) {
   if (b.legendKey !== signature) {
     b.head.innerHTML = "";
     b.valueNodes = [];
+    b.legendBlocks = [];
+    b.missingNote = null;
     b.abNote = null;
     b.head.style.paddingLeft = "70px";
     let stacked = 0;
     groups.forEach((group, gi) => {
       const block = makeEl("div", "glegend", b.head);
       block.style.top = (overlapped ? stacked + 4 : panels[gi].top + 4) + "px";
+      b.legendBlocks.push(block);
       for (const name of group.channels) {
         const row = makeEl("div", "lrow", block);
         const sw = makeEl("i", "swatch", row);
@@ -5005,7 +5026,8 @@ function renderGraphHead(comp, b, groups, panels, overlapped) {
     });
     if (gone.length) {
       const last = panels[panels.length - 1];
-      headNote(b.head, "lmissing", last, 0, "本场次没有（不画）：" + gone.join("、"));
+      b.missingNote = headNote(b.head, "lmissing", last, 0,
+                              "本场次没有（不画）：" + gone.join("、"));
     }
     // 选 A–B 又没放基准光标时，抬头**不印数字**，改说那句现成的下一步（ticket #44）。
     // 贴法与上面那条"本场次没有"共用同一个函数：同一个锚点（最后一个分栏的底部往上
@@ -5016,6 +5038,25 @@ function renderGraphHead(comp, b, groups, panels, overlapped) {
     note.style.display = "none";
     b.abNote = note;
     b.legendKey = signature;
+  }
+  // 尺寸变化时内容没变，但每个分栏的 top 变了：抬头必须跟着重新落位。
+  // 这里只改 style.top，不重建 DOM——拖边每帧都走这里，不能把几十个节点
+  // 连同色块与事件一起重造。
+  if (b.legendBlocks) {
+    let stacked = 0;
+    groups.forEach((group, gi) => {
+      const block = b.legendBlocks[gi];
+      if (!block) return;
+      block.style.top = (overlapped ? stacked + 4 : panels[gi].top + 4) + "px";
+      stacked += group.channels.length * 15 + 6;
+    });
+  }
+  const lastPanel = panels[panels.length - 1];
+  if (b.missingNote) {
+    b.missingNote.style.top = headNoteTop(lastPanel, 0) + "px";
+  }
+  if (b.abNote) {
+    b.abNote.style.top = headNoteTop(lastPanel, gone.length ? 15 : 0) + "px";
   }
   // 统计范围（#44）：可见区间（默认）或光标 A–B。A–B 拿不到（没放基准光标 /
   // 主光标不在图上）时**一律不印数字**，由 abNote 那句现成的话顶上。
@@ -11274,6 +11315,10 @@ function setResolution(key) {
 
 function addComponentOfType(type) {
   const comp = makeComponent(type);
+  // 新组件从已有内容下面开始摆：默认 (0,0) 会和第一张图完全重叠，选中别的
+  // 组件之后它就被压在下面，连自己的标题栏都点不到（A120 真浏览器里撞到的）。
+  comp.x = 0;
+  comp.y = state.components.reduce((row, one) => Math.max(row, one.y + one.h), 0);
   const spec = specOf(comp);
   // "刚加进来时先看什么"也归这一类自己声明（注册表 #20）。
   if (spec && spec.onAdd) spec.onAdd(comp);
@@ -11288,6 +11333,10 @@ function addComponentOfType(type) {
   syncScatterSelectors();
   refreshWindowTraces(true).then(() => { refreshAllComponentData().then(renderAll); });
   renderAll();
+  const added = SHEET.get(comp.id);
+  if (added && added.el && added.el.scrollIntoView) {
+    added.el.scrollIntoView({ block: "nearest" });
+  }
 }
 
 function setStatus() {

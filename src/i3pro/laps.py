@@ -45,6 +45,19 @@ from . import gpsfix
 from . import ld as ldmod
 from . import timebase
 from .axes import distance_on_master, overlay, time_at_distance, time_delta
+from .lapgates import (
+    _angle_diff,
+    _best_alternative_gate,
+    _best_figure8_gate,
+    _bounds_from_crossings,
+    _crossings_for_gate,
+    _cut_quality,
+    _distance_on_gps,
+    _gate_candidates,
+    _heading,
+    classify_track,
+    turn_direction,
+)
 from .beacons import (
     Beacon,
     CONFIG_SUFFIX,
@@ -74,6 +87,7 @@ __all__ = [
     "figure8_laps",
     "gps_laps",
     "lap_table",
+    "classify_track",
     "run_laps",
     "turn_direction",
     # 转出来的：信标与配置（见 i3pro.beacons）
@@ -221,120 +235,6 @@ def _bounds_from_beacon(time: np.ndarray, beacon: np.ndarray) -> list[tuple[floa
 
 
 # ------------------------------------------------------------------ GPS
-def _heading(x: np.ndarray, y: np.ndarray, i: int, span: int) -> float:
-    j = min(i + span, len(x) - 1)
-    return math.atan2(y[j] - y[i], x[j] - x[i])
-
-
-def _gate_candidates(
-    x: np.ndarray,
-    y: np.ndarray,
-    speed: np.ndarray,
-    speed_threshold: float = 8.0,
-    bin_m: float = 10.0,
-) -> list[tuple[int, float, float, int]]:
-    """Candidate start/finish gates, earliest first.
-
-    The trajectory is quantised into 10 m bins and, for every bin, we count how
-    many separate times the car *entered* it across the whole session - that
-    count is the number of times the car came back around, i.e. the number of
-    laps a gate placed there would produce.
-
-    Candidates are ordered by first visit, and ``gps_laps`` takes the earliest
-    one that is revisited at least three times. That anchors the lap boundary
-    at the launch point (where the car really did start) while automatically
-    skipping places that are only ever seen once - the pit box, a spin, or the
-    access road to the track.
-
-    Each entry is ``(first_index, mean_x, mean_y, entries)``.
-    """
-    moving = speed > speed_threshold
-    index = np.flatnonzero(moving)
-    if index.size < 10:
-        return []
-
-    bx = np.floor(x[index] / bin_m).astype(np.int64)
-    by = np.floor(y[index] / bin_m).astype(np.int64)
-    # pack the 2-D bin into one integer so a single np.unique does the counting
-    keys = (bx - bx.min()) * (by.max() - by.min() + 2) + (by - by.min())
-
-    enters = np.empty(keys.size, dtype=bool)
-    enters[0] = True
-    np.not_equal(keys[1:], keys[:-1], out=enters[1:])
-
-    entry_keys = keys[enters]
-    entry_rows = index[enters]
-    unique_keys, counts = np.unique(entry_keys, return_counts=True)
-    count_of = dict(zip(unique_keys.tolist(), counts.tolist()))
-
-    out: list[tuple[int, float, float, int]] = []
-    seen: set[int] = set()
-    for row, key in zip(entry_rows.tolist(), entry_keys.tolist()):
-        if key in seen:
-            continue
-        seen.add(key)
-        members = index[keys == key]
-        if members.size == 0:
-            continue
-        out.append(
-            (row, float(np.mean(x[members])), float(np.mean(y[members])), count_of[key])
-        )
-    return out
-
-
-def _crossings_for_gate(
-    t: np.ndarray,
-    x: np.ndarray,
-    y: np.ndarray,
-    segments: list[np.ndarray],
-    px: float,
-    py: float,
-    first_index: int,
-    span: int,
-    heading_tolerance: float,
-    min_lap_time: float,
-    gate_radius: float,
-) -> list[float]:
-    dist = np.hypot(x - px, y - py)
-    inside = dist < gate_radius
-    heading0 = _heading(x, y, first_index, span)
-    crossings: list[float] = []
-    last = -math.inf
-    for segment in segments:
-        segment = segment[segment >= first_index]
-        if segment.size < 3:
-            continue
-        armed = not inside[segment[0]]
-        i = 0
-        while i < segment.size:
-            idx = segment[i]
-            if not inside[idx]:
-                armed = True
-                i += 1
-                continue
-            if not armed:
-                i += 1
-                continue
-            j = i
-            while j + 1 < segment.size and inside[segment[j + 1]]:
-                j += 1
-            window = segment[i : j + 1]
-            k = int(window[int(np.argmin(dist[window]))])
-            if (
-                _angle_diff(_heading(x, y, k, span), heading0) <= heading_tolerance
-                and t[k] - last > min_lap_time
-            ):
-                crossings.append(float(t[k]))
-                last = float(t[k])
-            armed = False
-            i = j + 1
-    return crossings
-
-
-def _angle_diff(a: float, b: float) -> float:
-    return abs((a - b + math.pi) % (2 * math.pi) - math.pi)
-
-
 def gps_laps(
     log: ldmod.LogFile,
     gate_radius: float = 30.0,
@@ -402,6 +302,7 @@ def gps_laps(
         px = (float(gate[1]) - lon0) * 111_320.0 * math.cos(math.radians(lat0))
         py = (float(gate[0]) - lat0) * 110_540.0
         i0 = int(np.argmin(np.hypot(x - px, y - py)))
+        candidates: list[tuple[int, float, float, int]] = []
     else:
         candidates = _gate_candidates(x, y, speed, speed_threshold)
         chosen = next((c for c in candidates if c[3] >= 3), None)
@@ -423,20 +324,49 @@ def gps_laps(
         min_lap_time=min_lap_time,
         gate_radius=gate_radius,
     )
-
     start = float(t[first_moving])
     end = float(t[-1])
+    crossings = [c for c in crossings if c >= start]
+
+    # The point-circle gate is retained as the safe baseline. It is replaced
+    # only when its cut is weak and a heading-aligned line gate produces
+    # materially more complete, mutually consistent laps.
+    if gate is None:
+        baseline_bounds = _bounds_from_crossings(start, end, crossings)
+        baseline_quality = _cut_quality(
+            baseline_bounds,
+            t,
+            _distance_on_gps(t, speed),
+            min_lap_time,
+        )
+        should_try_alternative = (
+            baseline_quality.complete < 2
+            or (
+                baseline_quality.time_cv + baseline_quality.distance_cv > 0.65
+            )
+        )
+        if should_try_alternative:
+            alternative = _best_alternative_gate(
+                t,
+                x,
+                y,
+                _distance_on_gps(t, speed),
+                segments,
+                candidates,
+                first_moving,
+                span,
+                heading_tolerance,
+                min_lap_time,
+                half_width=max(6.0, min(12.0, 0.08 * diagonal)),
+            )
+            if alternative is not None:
+                alternative_crossings, alternative_quality = alternative
+                if alternative_quality.better_than(baseline_quality):
+                    crossings = alternative_crossings
+
     # A brief twitch before the sustained driving phase can register as a
     # crossing; the lap clock starts when the car really gets going.
-    crossings = [c for c in crossings if c >= start]
-    edges = [start, *crossings, end]
-    bounds: list[tuple[float, float, str, bool]] = []
-    for n, (a, b) in enumerate(zip(edges, edges[1:]), start=1):
-        if b - a <= 0:
-            continue
-        complete = n not in (1, len(edges) - 1)
-        bounds.append((a, b, str(n), complete))
-    return bounds
+    return _bounds_from_crossings(start, end, crossings)
 
 
 def winding_laps(
@@ -468,24 +398,6 @@ def winding_laps(
 
 
 # ------------------------------------------------------------------- API
-def turn_direction(x: np.ndarray, y: np.ndarray) -> int:
-    """+1 for a predominantly left (counter-clockwise) loop, -1 right, 0 neither.
-
-    The path is measured by how far it winds around its own centroid: a closed
-    loop sweeps ±2π, a there-and-back path sweeps ~0. In the local projection
-    (x east, y north) a positive sweep is a left-hand loop, which is what we need
-    to label the two halves of a figure-of-eight.
-    """
-    if x.size < 8:
-        return 0
-    cx, cy = float(np.mean(x)), float(np.mean(y))
-    angle = np.unwrap(np.arctan2(y - cy, x - cx))
-    sweep = float(angle[-1] - angle[0])
-    if abs(sweep) < 2.0 * math.pi * 0.6:
-        return 0
-    return 1 if sweep > 0 else -1
-
-
 def run_laps(
     log: ldmod.LogFile,
     stop_speed: float = 3.0,
@@ -516,6 +428,21 @@ def run_laps(
     return bounds
 
 
+def _track_speed(log: ldmod.LogFile, track: dict) -> np.ndarray:
+    try:
+        return np.interp(track["time"], timebase.axis(log), derive.speed_series(log))
+    except ValueError:
+        # GPS-derived speed is enough for classification and gate selection.
+        t = np.asarray(track["time"], dtype=float)
+        x = np.asarray(track["x"], dtype=float)
+        y = np.asarray(track["y"], dtype=float)
+        dt = np.gradient(t)
+        dt[dt <= 0] = 1.0 / max(float(track.get("rate", 1.0)), 1.0)
+        raw = np.hypot(np.gradient(x) / dt, np.gradient(y) / dt) * 3.6
+        window = max(1, int(float(track.get("rate", 1.0)) * 2.0))
+        return np.convolve(raw, np.ones(window) / window, mode="same")
+
+
 def figure8_laps(log: ldmod.LogFile, **kwargs) -> list[tuple[float, float, str, bool]]:
     """Split a figure-of-eight into one segment per loop (left / right).
 
@@ -525,7 +452,29 @@ def figure8_laps(log: ldmod.LogFile, **kwargs) -> list[tuple[float, float, str, 
     is say which loop a segment is, so ``detect_laps`` labels each one by its
     turn direction.
     """
-    return gps_laps(log, **kwargs)
+    min_lap_time = float(kwargs.get("min_lap_time", 8.0))
+    fix = kwargs.get("fix")
+    track = derive.gps_track(log, fix=gpsfix.resolve(log, fix, "laps"), scope="laps")
+    t = np.asarray(track["time"], dtype=float)
+    x = np.asarray(track["x"], dtype=float)
+    y = np.asarray(track["y"], dtype=float)
+    speed = _track_speed(log, track)
+    moving = speed > float(kwargs.get("speed_threshold", 8.0))
+    hold = max(1, int(round(float(track["rate"]) * 3.0)))
+    sustained = np.convolve(moving.astype(int), np.ones(hold, dtype=int), mode="valid") >= hold
+    if not sustained.any():
+        return gps_laps(log, **kwargs)
+    first_moving = int(np.argmax(sustained))
+    span = max(1, int(round(float(track["rate"]))))
+    gaps = np.flatnonzero(np.diff(t) > 1.5) + 1
+    if "breaks" in track:
+        gaps = np.union1d(gaps, np.flatnonzero(track["breaks"]))
+    segments = [part for part in np.split(np.arange(t.size), gaps) if part.size > 2]
+    candidates = _gate_candidates(x, y, speed, float(kwargs.get("speed_threshold", 8.0)))
+    found = _best_figure8_gate(
+        t, x, y, segments, candidates, first_moving, span, min_lap_time
+    )
+    return found if found is not None else gps_laps(log, **kwargs)
 
 
 def detect_laps(
@@ -556,6 +505,8 @@ def detect_laps(
         gps_speed = np.hypot(*gps_speed) * track["rate"]  # m/s on the GPS grid
         distance = np.interp(time, track["time"], np.cumsum(gps_speed) / track["rate"])
     time = timebase.axis(log)
+    auto_pattern: str | None = None
+    selected_method = method
     if beacons:
         edges = sorted(float(b) for b in beacons)
         bounds = [
@@ -576,7 +527,23 @@ def detect_laps(
             elif method == "beacon":
                 raise ValueError(f"{log.path.name}: no live beacon/lap channel")
             else:
-                bounds = gps_laps(log, fix=fix, **kwargs)
+                try:
+                    track = derive.gps_track(log, fix=laps_fix, scope="laps")
+                    speed = _track_speed(log, track)
+                    auto_pattern = classify_track(track["x"], track["y"], speed)
+                except ValueError:
+                    # No usable GPS is not a reason to fail when the speed
+                    # channel can still separate runs.
+                    auto_pattern = "runs"
+                if auto_pattern == "figure8":
+                    selected_method = "figure8"
+                    bounds = figure8_laps(log, fix=fix, **kwargs)
+                elif auto_pattern == "runs":
+                    selected_method = "run"
+                    bounds = run_laps(log, **kwargs)
+                else:
+                    selected_method = "gps"
+                    bounds = gps_laps(log, fix=fix, **kwargs)
     elif method == "gps":
         bounds = gps_laps(log, fix=fix, **kwargs)
     elif method == "winding":
@@ -588,10 +555,18 @@ def detect_laps(
     else:
         raise ValueError(f"unknown lap detection method: {method!r}")
     min_time = kwargs.get("min_lap_time", 8.0)
-    if method != "run":
+    if selected_method != "run":
         bounds = [b for b in bounds if b[1] - b[0] >= min_time]
     laps = _lap_from_bounds(log, distance, bounds)
-    if method == "figure8":
+    # If a single shape was mistaken for a closed circuit, a healthy GPS pass
+    # often produces one all-session "lap". More than one sustained run is a
+    # useful analysis unit and is what the driver actually did.
+    if auto_pattern == "circuit" and len(laps) <= 2 and not any(l.complete for l in laps):
+        runs = run_laps(log, **kwargs)
+        if len(runs) >= 2:
+            selected_method = "run"
+            laps = _lap_from_bounds(log, distance, runs)
+    if selected_method == "figure8":
         try:
             track = derive.gps_track(log, fix=laps_fix, scope="laps")
         except ValueError:
@@ -601,6 +576,11 @@ def detect_laps(
                 inside = ((track["time"] >= lap.start_time) & (track["time"] <= lap.end_time))
                 turn = turn_direction(track["x"][inside], track["y"][inside])
                 lap.turn = {1: "left", -1: "right"}.get(turn)
+    # Runs are already delimited by sustained standstill; applying lap-time and
+    # lap-distance medians to them would silently mark a valid three-second
+    # radiator test as incomplete.
+    if selected_method == "run":
+        return laps
     return _flag_implausible(laps)
 
 

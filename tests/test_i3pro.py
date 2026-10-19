@@ -1065,6 +1065,87 @@ class TestLapModes(unittest.TestCase):
             lapsmod.turn_direction(np.cos(out_and_back), np.sin(out_and_back)), 0
         )
 
+    def test_track_classifier_separates_runs_circuit_and_figure8(self):
+        """The auto mode must choose the unit before it chooses a gate."""
+        speed = np.full(4000, 40.0)
+
+        tight = np.tile(np.array([0.0, 100.0]), 2000)
+        flat = np.zeros_like(tight)
+        self.assertEqual(lapsmod.classify_track(tight, flat, speed), "runs")
+
+        angles = np.linspace(0.0, 2.0 * np.pi * 5.0, 4000)
+        circuit = (100.0 * np.cos(angles), 100.0 * np.sin(angles))
+        self.assertEqual(lapsmod.classify_track(*circuit, speed), "circuit")
+
+        angles = np.linspace(0.0, 2.0 * np.pi * 20.0, 4000)
+        eight = (40.0 * np.cos(angles), 40.0 * np.sin(2.0 * angles))
+        self.assertEqual(lapsmod.classify_track(*eight, speed), "figure8")
+
+    @_needs(DATA / "20261007-传杰绕圆.csv")
+    def test_october_circle_uses_a_line_gate_instead_of_the_access_road(self):
+        """10.07 绕圆 previously produced two edge-to-edge segments and 0 laps."""
+        with csvlog.read_csv_session(DATA / "20261007-传杰绕圆.csv") as log:
+            found = lapsmod.detect_laps(log)
+        complete = [lap for lap in found if lap.complete]
+        self.assertGreaterEqual(len(complete), 7)
+        median_time = float(np.median([lap.lap_time for lap in complete]))
+        median_distance = float(np.median([lap.distance for lap in complete]))
+        self.assertGreater(median_time, 9.0)
+        self.assertLess(median_time, 13.0)
+        self.assertGreater(median_distance, 140.0)
+        self.assertLess(median_distance, 160.0)
+
+    @_needs(DATA / "20261018-耐久合并.csv")
+    def test_october_merged_endurance_recovers_every_regular_lap(self):
+        """A 22.9 km session-wide interval must not masquerade as one lap."""
+        with csvlog.read_csv_session(DATA / "20261018-耐久合并.csv") as log:
+            found = lapsmod.detect_laps(log)
+        complete = [lap for lap in found if lap.complete]
+        self.assertGreaterEqual(len(complete), 18)
+        median_time = float(np.median([lap.lap_time for lap in complete]))
+        median_distance = float(np.median([lap.distance for lap in complete]))
+        self.assertGreater(median_time, 59.0)
+        self.assertLess(median_time, 62.0)
+        self.assertGreater(median_distance, 943.0)
+        self.assertLess(median_distance, 950.0)
+
+    @_needs(DATA / "20261007-jhy绕桩.csv")
+    def test_october_slalom_auto_switches_from_laps_to_runs(self):
+        with csvlog.read_csv_session(DATA / "20261007-jhy绕桩.csv") as log:
+            found = lapsmod.detect_laps(log)
+        self.assertEqual(len(found), 15)
+        self.assertTrue(all(lap.complete for lap in found))
+        self.assertLess(float(np.median([lap.lap_time for lap in found])), 30.0)
+
+    @_needs(DATA / "20261006-YJW中庭试车掉电.csv")
+    def test_october_tiny_gps_pad_uses_moving_runs_instead_of_zero_speed_error(self):
+        with csvlog.read_csv_session(DATA / "20261006-YJW中庭试车掉电.csv") as log:
+            found = lapsmod.detect_laps(log)
+        self.assertEqual(len(found), 4)
+        self.assertTrue(all(lap.complete for lap in found))
+
+    @_needs(DATA / "20261005-底马八字.csv")
+    def test_october_figure8_auto_uses_a_center_gate_and_labels_both_sides(self):
+        with csvlog.read_csv_session(DATA / "20261005-底马八字.csv") as log:
+            found = lapsmod.detect_laps(log)
+        complete = [lap for lap in found if lap.complete and lap.turn in ("left", "right")]
+        self.assertGreaterEqual(len(complete), 30)
+        self.assertGreaterEqual(sum(lap.turn == "left" for lap in complete), 10)
+        self.assertGreaterEqual(sum(lap.turn == "right" for lap in complete), 10)
+        adjacent = list(zip(complete, complete[1:]))
+        alternating = sum(a.turn != b.turn for a, b in adjacent) / max(1, len(adjacent))
+        self.assertGreater(alternating, 0.55)
+
+    @_needs(DATA / "20261005-cjh高避TV1.csv")
+    def test_october_high_avoidance_keeps_its_working_cut(self):
+        """The conservative replacement rule must not chase a worse gate."""
+        with csvlog.read_csv_session(DATA / "20261005-cjh高避TV1.csv") as log:
+            found = lapsmod.detect_laps(log)
+        complete = [lap for lap in found if lap.complete]
+        self.assertEqual(len(complete), 3)
+        self.assertGreater(min(lap.lap_time for lap in complete), 30.0)
+        self.assertLess(max(lap.lap_time for lap in complete), 70.0)
+
     @_needs(HILL)
     def test_run_mode_splits_on_standstill(self):
         """`run` must return whole attempts, not laps - it is never shorter."""

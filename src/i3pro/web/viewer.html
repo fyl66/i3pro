@@ -1082,6 +1082,9 @@ const COMPONENT_TYPES = {
     group: "curve", adoptChannels: adoptGraphChannels,
     get sidebar() { return graphSidebar; },
     encode: graphEncode, decode: graphDecode,
+    canvasRevision: () => revisionKey("channels", "traces", "maths",
+                                      "sections", "laps", "overlay")
+      + "|showSections:" + (state.showSections ? 1 : 0),
     render: renderGraphComponent,
   },
   scatter: {
@@ -1301,7 +1304,7 @@ function graphOnAdd(comp) { comp.config.channels = (DATA.selected || []).slice()
 /** 侧边栏那份通道清单：图直接读写自己的通道。 */
 const graphSidebar = {
   get: (comp) => comp.config.channels,
-  set: (comp, names) => { comp.config.channels = names; state.dataVersion += 1; },
+  set: (comp, names) => { comp.config.channels = names; },
 };
 function graphEncode(comp) {
   return comp.config.channels.join("|") + "#" + (comp.config.mode || "tiled");
@@ -1334,7 +1337,6 @@ function scatterControls(comp, bundle, body) {
     comp.config.x = sx.value || null;
     comp.config.y = sy.value ? [sy.value] : [];
     comp.config.colour = sc.value || null;
-    state.dataVersion += 1;
     refreshComponentData(comp, true).then(renderAll);
     renderAll();
   };
@@ -1367,6 +1369,7 @@ const scatterData = {
     const w = windowRange();
     return [cfg.x || "", (cfg.y || [])[0] || "", cfg.colour || "",
             Math.round(w.from * 1000) + "-" + Math.round(w.to * 1000),
+            revisionKey("channels", "maths"),
             DATA.api ? "serve" : "snap"].join("|");
   },
   load: (comp) => {
@@ -1630,6 +1633,7 @@ const trackData = {
   error: "轨迹加载失败",
   key: (comp) => [(comp.config.window || "all") === "zoom"
                     ? (DATA.api ? windowKey() : "all") : "all",
+                  revisionKey("channels"),
                   DATA.api ? "serve" : "snap"].join("|"),
   load: (comp) => {
     if ((comp.config.window || "all") !== "zoom") return state.track;
@@ -2115,7 +2119,6 @@ const chreportSidebar = {
   get: (comp) => comp.config.channels || [],
   set: (comp, names) => {
     comp.config.channels = names.slice(0, MAX_REPORT_CHANNELS);
-    state.dataVersion += 1;
     saveLayout();
   },
 };
@@ -2560,8 +2563,41 @@ const state = {
   channelFocus: null,
   pending: 0,
   windowKey: "",
-  dataVersion: 0,
 };
+
+/* C4：按依赖记的 revision stamp。
+ *
+ * 以前一个 `dataVersion` 管所有组件：换一对对比圈也会让离屏的散点 / 报表缓存失效。
+ * 这里只记六件事，谁读什么就把哪一项放进自己的键：
+ *   channels  通道索引（哪条在、单位 / 有效样本）
+ *   traces    当前窗口的曲线数据
+ *   laps      圈 / 信标
+ *   maths     数学通道与通道处理
+ *   sections  区段
+ *   overlay   双圈对比载荷
+ */
+const REVISION_NAMES = ["channels", "traces", "laps", "maths", "sections", "overlay"];
+const revisions = {
+  channels: 0,
+  traces: 0,
+  laps: 0,
+  maths: 0,
+  sections: 0,
+  overlay: 0,
+  bump(name, amount) {
+    if (REVISION_NAMES.indexOf(name) < 0) throw new Error("不认识的 revision：" + name);
+    this[name] += amount === undefined ? 1 : amount;
+    return this[name];
+  },
+  of(name) {
+    return REVISION_NAMES.indexOf(name) < 0 ? 0 : this[name];
+  },
+};
+
+function revisionKey() {
+  return Array.prototype.map.call(arguments,
+    (name) => name + ":" + revisions.of(name)).join(",");
+}
 
 let band = null;
 let dragPan = null;
@@ -3217,7 +3253,7 @@ async function refreshWindowTraces(force) {
       body = await apiGet(apiUrl("/trace", params));
     }
     Object.assign(state.traces, body);
-    state.dataVersion += 1;
+    revisions.bump("traces");
   } catch (err) {
     toast("通道加载失败: " + err.message);
   } finally {
@@ -3957,6 +3993,9 @@ function sizeCanvas(canvas, w, h) {
 /** Everything that invalidates a component's cached trace layer. */
 function componentKey(comp, b, w, h) {
   const r = lane();
+  const spec = specOf(comp) || {};
+  const canvasRevision = typeof spec.canvasRevision === "function"
+    ? spec.canvasRevision(comp) : "";
   // themeKey 也在键里：网格 / 区段带子 / 包络都是画在**离屏画布**上的，换了主题
   // 不重画的话，切过去还是旧配色那一层（A101 真浏览器里量出来的）。
   // 双圈对比（A104）同理：换一对圈，画布上那两条线必须重画——把这一对的名字放进键里。
@@ -3964,7 +4003,7 @@ function componentKey(comp, b, w, h) {
   return [r[0].toFixed(3), r[1].toFixed(3), state.mode, state.style, state.groupMode,
           themeKey, pair,
           state.show.measure ? 1 : 0, Math.round(w), Math.round(h),
-          state.dataVersion, JSON.stringify(comp.config)].join("|");
+          canvasRevision, JSON.stringify(comp.config)].join("|");
 }
 
 function buildWorksheet() {
@@ -4753,7 +4792,8 @@ function renderInspectorEmpty(host) {
  * **尺寸与位置不进这个键**：拖边改的是它们，那一半由 `renderInspectorSize()` 单独写。
  */
 function inspectorKey(comp) {
-  return [state.focusId || "-", state.components.length, state.dataVersion,
+  return [state.focusId || "-", state.components.length,
+          revisionKey("channels", "maths"),
           DATA && DATA.api ? "api" : "snap", state.upsample, state.style,
           comp ? JSON.stringify(comp.config) : "",
           inspectorZoomKeys(comp).join(","),
@@ -5736,6 +5776,7 @@ function histogramKey(comp) {
     ? (cfg.window || "all")
     : (Math.round(w.from * 1000) + "-" + Math.round(w.to * 1000));
   return [cfg.channel || "", cfg.bins, cfg.colour || "", cfg.gate || "",
+          revisionKey("channels", "maths"),
           DATA.api ? "serve" : "snap", span].join("|");
 }
 
@@ -6044,6 +6085,7 @@ function heatmapKey(comp) {
        : Math.round(spot.from * 1000) + "-" + Math.round(spot.to * 1000));
   return [cfg.x || "", cfg.y || "", cfg.z || "", bins[0] + "x" + bins[1],
           heatmapScheme(cfg), cfg.range || "view", span,
+          revisionKey("channels", "maths", "laps"),
           DATA.api ? "serve" : "snap"].join("|");
 }
 
@@ -6409,6 +6451,7 @@ function spectrumKey(comp) {
     : (Math.round(w.from * 1000) + "-" + Math.round(w.to * 1000));
   return [cfg.channel || "", cfg.against || "", cfg.points || 1024, cfg.win || "hann",
           cfg.overlap === undefined ? 0.5 : cfg.overlap, cfg.smooth || 1, span,
+          revisionKey("channels", "maths"),
           DATA.api ? "serve" : "snap"].join("|");
 }
 
@@ -7247,8 +7290,8 @@ function reportFetchKey(comp) {
   const shape = specOf(comp).table === "time"
     ? "time"
     : "channels|" + (cfg.by || "lap") + "|" + (cfg.lap || "");
-  // dataVersion 进键：改过区段 / 数学通道 / 圈之后，同一张表也得重算
-  return [shape, channels, state.dataVersion].join("|");
+  // 报表读圈 / 数学 / 区段；无关的 traces 改动不该把它带走。
+  return [shape, channels, revisionKey("laps", "maths", "sections")].join("|");
 }
 
 function snapshotReportTable(comp) {
@@ -7714,7 +7757,7 @@ function applyLapsResponse(data) {
   renderLapTable();
   if (data.notice) toast(data.notice);
   state.windowKey = "";
-  state.dataVersion += 1;          // 圈变了，报表 / 缓存都得重算
+  revisions.bump("laps");         // 圈变了：报表与热力图按圈的那一档要重算
   refreshWindowTraces(true).then(renderAll);
   renderAll();
 }
@@ -7813,8 +7856,8 @@ async function ensureOverlay() {
     state.overlay = await apiGet(apiUrl("/overlay", {
       ref: state.ref, cmp: state.cmp, channels: channels.join(","),
     }));
-    // 换了一对圈 = 这一屏的数据变了：让各处缓存（画布那一层、抬头那一行）跟着失效。
-    state.dataVersion += 1;
+    // 换了一对圈 = 这一屏的数据变了：只失效读 overlay 的那几处。
+    revisions.bump("overlay");
   } catch (err) {
     toast("对比圈加载失败: " + err.message);
   }
@@ -8406,7 +8449,7 @@ function mathsSaveList(draft) {
 /** 服务端算完一次之后，把列表、报错、函数表一起换掉。 */
 function applyMathsResponse(data) {
   state.maths = data;
-  state.dataVersion += 1;          // 数学通道变了：报表里报的可能是它们
+  revisions.bump("maths");        // 数学通道变了：报表与按通道取数的几类要重算
   closeMathsEditor();
   renderMathsList();
   renderMathsFunctions();
@@ -8990,7 +9033,7 @@ async function saveSections(payload, okMessage) {
 function applySectionsResponse(data) {
   state.sections = data;
   state.sectionsForce = false;
-  state.dataVersion += 1;          // 区段变了：报表里的分段计时与区段统计都得重算
+  revisions.bump("sections");     // 区段变了：报表里的分段计时与区段统计都得重算
   renderSections();
   renderAll();
 }
@@ -9073,6 +9116,7 @@ function reindexChannels(payload) {
     }
     DATA.groups = payload.groups;
   }
+  revisions.bump("channels");
   renderChannelList();
 }
 
@@ -9095,7 +9139,6 @@ function selectChannel(name) {
   if (comp.config.channels.indexOf(name) >= 0) return false;
   comp.config.channels.push(name);
   noteChannelUse(name);
-  state.dataVersion += 1;
   return true;
 }
 
@@ -11782,6 +11825,8 @@ window.i3pro = {
   // 就淹掉了。新增一个名字前先看它有没有消费者（单测按源码守这一条）。
   state: state, data: DATA, renderAll: renderAll, lane: lane,
   renderScheduler: renderScheduler,
+  revisions: revisions,
+  componentKey: componentKey,
   decodeTraceBinary: decodeTraceBinary,
   traceUsesEnvelope: traceUsesEnvelope,
   channels: CHANNELS, channelRows: channelRows, renderChannelList: renderChannelList,

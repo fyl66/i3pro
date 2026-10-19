@@ -2023,13 +2023,13 @@ if (api) {
     }
     api.data.api = savedApi;
 
-    // 改了区段 / 圈 / 数学通道之后，同一张表必须重算（dataVersion 进键）
+    // 改了区段 / 圈 / 数学通道之后，同一张表必须重算（各自的 revision 进键）
     timeComp.config.filter = "all";
     api.renderAll();
     const keyBefore = api.reportFetchKey(timeComp);
     api.applySectionsResponse(Object.assign({}, api.sectionsState() || {}, { notice: "（测试）" }));
     check(api.reportFetchKey(timeComp) !== keyBefore,
-      "区段改了之后报表没有失效：dataVersion 没进刷新键");
+      "区段改了之后报表没有失效：sections revision 没进刷新键");
 
     // 布局要靠 URL 带走：过滤与分组都得回来
     timeComp.config.filter = "straight";
@@ -4925,7 +4925,6 @@ if (canMeta) {
   if (graph && overlay && (overlay.laps || []).length === 2) {
     const saved = {
       ref: api.state.ref, cmp: api.state.cmp, mode: api.state.mode, view: api.state.view,
-      dataVersion: api.state.dataVersion,
     };
     const name = (graph.config.channels || [])[0];
     api.state.ref = overlay.laps[0].lap;
@@ -4988,7 +4987,6 @@ if (canMeta) {
     api.state.cmp = saved.cmp;
     api.state.mode = saved.mode;
     api.state.view = saved.view;
-    api.state.dataVersion = saved.dataVersion;
     api.state.cursor = null;
     api.renderAll();
   }
@@ -5200,6 +5198,32 @@ check(status && String(status.innerHTML).indexOf("窗口") >= 0, "status line wa
     check(coldCreated > 0 && warmCreated === 0,
       "第二次渲染仍在重建通道行节点：cold=" + coldCreated + " warm=" + warmCreated);
   }
+}
+
+// C4：缓存失效按依赖走。报表只读圈 / 数学 / 区段，不该被无关的 traces 改动带走。
+check(!!api.revisions && typeof api.revisions.bump === "function"
+  && typeof api.revisions.of === "function",
+  "revisions 没有导出：dataVersion 还在一把梭");
+if (api.revisions) {
+  const reportProbe = { type: "report", config: { filter: "all" } };
+  const graphProbe = { type: "graph", config: { channels: ["Vx KF"], mode: "tiled" } };
+  const scatterProbe = {
+    type: "scatter",
+    config: { x: "Vx KF", y: ["G Force Lat"], colour: null, style: "points" },
+  };
+  const reportBefore = api.reportFetchKey(reportProbe);
+  const graphBefore = api.componentKey(graphProbe, {}, 600, 300);
+  const scatterBefore = api.componentKey(scatterProbe, {}, 600, 300);
+  api.revisions.bump("traces");
+  check(api.reportFetchKey(reportProbe) === reportBefore,
+    "无关的 traces revision 让报表缓存失效了");
+  check(api.componentKey(graphProbe, {}, 600, 300) !== graphBefore,
+    "traces revision 没有让曲线图重画");
+  check(api.componentKey(scatterProbe, {}, 600, 300) === scatterBefore,
+    "无关的 traces revision 让散点图也重画了");
+  api.revisions.bump("sections");
+  check(api.reportFetchKey(reportProbe) !== reportBefore,
+    "sections revision 没有让报表缓存失效");
 }
 
 check(calls.fillText > 0, "no canvas text was drawn");

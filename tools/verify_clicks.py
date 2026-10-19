@@ -4651,7 +4651,7 @@ class Checker:
         time.sleep(0.5)
         frame_ms = self.js(
             "(function(){var t0=performance.now();"
-            "for(var i=0;i<3;i++){i3pro.state.dataVersion++;i3pro.renderAll();}"
+            "for(var i=0;i<3;i++){i3pro.revisions.bump('traces');i3pro.renderAll();}"
             "return Math.round((performance.now()-t0)/3);})()")
         self.check("#55 8000 桶整屏重画一帧 < 100 ms（实测写进 A96）",
                    isinstance(frame_ms, (int, float)) and frame_ms < 100,

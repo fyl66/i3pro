@@ -5384,7 +5384,7 @@ python tools\verify_clicks.py                                # 需要 Edge；393
 | 纵轴 | `groupScaleFor` 在对比模式按**两条圈**的值量程——只按 `state.traces` 量的话，两条线会被裁掉一半 |
 | 抬头 | 对比模式下那一行印"蓝 x · 橙 y"，Δ 变成**两条圈的值差**（Δ值），min/max/avg 也是"蓝 / 橙"一对；色块画成左蓝右橙两半 |
 | 标题 | 组件标题追加"蓝=圈 X · 橙=圈 Y"（图上那两条线才有名字）；对比模式下不再写"已抽稀（包络）"——画的是 overlay，不是那一屏的抽稀迹线 |
-| 缓存 | `componentKey` 里带上这一对圈的名字 + `ensureOverlay` 拿到新载荷后 `dataVersion += 1`：换一条对比圈必须重画（否则留着上一对的线） |
+| 缓存 | `componentKey` 里带上这一对圈的名字 + `ensureOverlay` 拿到新载荷后 bump `overlay` revision：换一条对比圈必须重画（否则留着上一对的线；C4 起见 ADR-0010） |
 | 语义色 | `--ref` / `--cmp` 两个主题变量（深色 `#2f6bff` / `#ff6a00`，浅色 `#1f4fd8` / `#c2410c`），画布线也走它们（与 A101 同一条纪律）。这两个色**不在任何一套调色板里**——"画布上有没有这两个色"因此能当判据 |
 | 无头断言 | `smoke_viewer.js` 第 42 组：数据源是那两条圈、两条线共用同一条距离网格、颜色就是那对语义色、抬头同时印两条圈的值与 Δ值、标题写清是哪两条圈、切回时间轴只剩一条 |
 | 真鼠标 | `verify_clicks.py` 新增 `lap_overlay()`：真点「基」「比」选两条圈，量**图表画布**上两种语义色的像素数，再换一条对比圈看画布是否重画 |
@@ -5841,3 +5841,40 @@ python tools\verify_ld_vs_csv.py                                 # PASS，0 chan
 **边界**：这是"行模型 + 节点复用 + 事件委托"，不是虚拟滚动。第一次进入「全量」仍会建
 当前场次所有可见行；搜索仍会算一遍模型并移动可见节点。虚拟列表要等行数或单行成本真的
 把这一层压出瓶颈再做；现在先把四档语义和 DOM 适配器分开，后续换实现不碰模型。
+
+## A114 · 缓存失效改成按依赖记的 revision（本次新增，架构评审 C4）
+
+**要解决的问题**：`state.dataVersion` 是一个全局计数器。改一条数学通道、换一对对比圈，
+所有组件的 `componentKey`、inspector 和报表刷新键都会一起变化——离屏的散点图与报表
+也要陪着重画。失效是安全的，但粒度太粗，而且“为什么这一块重算了”说不清。
+
+| 改/加 | 内容 |
+| --- | --- |
+| revision 表 | `viewer.html` 新增模块级 `revisions`：`channels / traces / laps / maths / sections / overlay` 六项；`bump()` 单调递增，`revisionKey()` 把需要的项拼进缓存键 |
+| 画布依赖 | 曲线图在自己的 `canvasRevision` 里声明六项依赖加 `showSections`；散点图不再因无关 revision 重画，数据变化由自己的 `dataKey` 清画布缓存 |
+| 取数依赖 | 散点 / 直方图 / 频谱带 `channels + maths`；热力图加 `laps`；报表带 `laps + maths + sections`；轨迹带 `channels` |
+| inspector | 右栏只读 `channels + maths`，不再被轨迹 / 区段 / 对比圈改动带走 |
+| 状态归属 | `dataVersion` 从 `state` 删除；revision 只在页面内存里，不写工作表、不写侧车（ADR-0008 / ADR-0010） |
+| 基准修正 | `verify_clicks.py` 的 `#55` 全量重画基准改用 `revisions.bump("traces")`，确保量的仍是曲线图真重画 |
+
+```powershell
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"       # 920 项 PASS
+node tools\smoke_viewer.js "out\20260524-耐久正赛.html"          # 920 项 PASS
+python tools\verify_clicks.py                                    # 需要 Edge；429 项通过、0 失败
+python -m unittest discover -s tests                             # 642 项，OK，28 跳过
+python tools\verify_ld_vs_csv.py                                 # PASS，0 channel(s) outside tolerance
+```
+
+**通过判据（本机实测，2026-10-19）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 依赖隔离 | `revisions.bump("traces")` 后，曲线图 `componentKey` 变化、散点图 `componentKey` 不变 |
+| 报表隔离 | 同一趟里报表 `reportFetchKey` 不因 `traces` 变化；`revisions.bump("sections")` 后变化 |
+| 真浏览器 | 真 Edge 的 `#55` 全量重画基准仍量到 **20 ms/帧**（< 100 ms 门槛）；总数 **429/429** |
+| 无头回归 | 两份金标准 smoke 各 **920 项 PASS** |
+| 四条回归 | 单测 **642 项 / 71.601 s，0 失败、28 跳过**；`verify_ld_vs_csv.py` **PASS**；两份 smoke 各 **920 项 PASS**；`verify_clicks.py` **429/429** |
+
+**边界**：这是一张显式依赖表，不是自动依赖分析。新增一个数据源时，作者仍要决定它读
+哪几个 revision；漏写会表现为“该重算的没重算”，所以每条新依赖都要加一条无头断言。
+窗口、分辨率、曲线连接方式仍走原来的精确键，不升级成全局 revision。

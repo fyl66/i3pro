@@ -447,6 +447,37 @@ if (api) {
   const state = api.state;
   const host = registry.get("chartHost");
   const worksheet = registry.get("worksheet");
+
+  // 渲染调度（C1）：同一帧里的多个连续事件只能落成一次 rAF 回调。这里在假 DOM
+  // 里装一个可控的 rAF，跑完立刻还原——后面的断言仍要"调用后立刻读结果"。
+  {
+    const scheduler = api.renderScheduler;
+    check(!!scheduler && !!scheduler.stats && !!scheduler.flags,
+      "renderScheduler was not exported");
+    if (scheduler) {
+      const queued = [];
+      const oldRaf = window.requestAnimationFrame;
+      const oldCancel = window.cancelAnimationFrame;
+      window.requestAnimationFrame = (fn) => { queued.push(fn); return queued.length; };
+      window.cancelAnimationFrame = (id) => { queued[id - 1] = null; };
+      const before = { scheduled: scheduler.stats.scheduled,
+                       flushes: scheduler.stats.flushes };
+      scheduler.schedule(scheduler.flags.cursor);
+      scheduler.schedule(scheduler.flags.view);
+      check(queued.filter(Boolean).length === 1,
+        "连续脏位没有合并成一帧");
+      queued.filter(Boolean).forEach((fn) => fn());
+      check(scheduler.stats.scheduled - before.scheduled === 2
+            && scheduler.stats.flushes - before.flushes === 1,
+        "调度器没有把两次登记合并成一次 flush");
+      check(scheduler.stats.lastDirty
+            === (scheduler.flags.cursor | scheduler.flags.view),
+        "调度器丢了脏位：" + scheduler.stats.lastDirty);
+      window.requestAnimationFrame = oldRaf;
+      window.cancelAnimationFrame = oldCancel;
+    }
+  }
+
   const canvases = [];
   (function walk(node, owner) {
     if (!node || !node._children) return;

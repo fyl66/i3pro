@@ -5727,3 +5727,40 @@ python tools\verify_clicks.py                                    # 需要 Edge�
    "窄窗口下左栏变窄"当场变红**（左栏 312、画布 416）。改成"拖过才加 `.asideSized`"。
 2. `setAside()` 只改了 class，忘了把 `folded` 写进偏好对象——**"折叠状态记住"是假的**，
    重载又展开。`smoke` 的假 DOM 里没读这条持久化路径，只有真重载才露出来。
+
+## A111 · 连续交互的渲染调度：同一帧只画一次（本次新增，架构评审 C1）
+
+**要解决的问题**：连续交互以前每来一个事件就同步跑一遍 `renderAll()`——一次 `mousemove`
+会把所有组件、概览、滚动条、状态行和 inspector 全广播一次。同一帧里的多个鼠标事件各自
+重画一次，主线程被切成一串小任务；`renderAll()` 又同时是画轴的依据和工具里的同步入口，
+不能直接改成异步。这一票把"要画什么"收成渲染层的粗粒度脏位，连续事件登记、由 `rAF`
+合并成一帧；离散动作仍走同步 `renderAll()`。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 调度器 | `viewer.html` 新增 `RENDER_CURSOR / VIEW / DATA / LAYOUT / CHROME / COMPONENTS` 与 `scheduleRender()`；`flushRender()` 按脏位只跑依赖它的那几块，`renderAll()` 仍是同步全量入口 |
+| 连续路径 | 图内光标、滚轮、图内拖拽、概览拖动、滚动条拖动、姿态拖拽、热力图 hover、纵轴缩放、窗口 resize 都改走 `scheduleRender(...)`；离散点击 / 表单变更仍走 `renderAll()` |
+| 状态归属 | 脏位与调度统计只在渲染层（`renderScheduler`），不进 `state`、不进工作表文件（ADR-0008）；公共 `renderAll()` 的同步语义保留，工具与旧验收不需要改写 |
+| 无头断言 | `smoke_viewer.js` 装一个可控 rAF：连续登记 `cursor + view` 只留一个回调，flush 后脏位不丢；两份金标准各 **905 项 PASS** |
+| 真鼠标 | `verify_clicks.py` 在同一帧里发 8 次 `mousemove`，断言"登记 8 次 / flush 1 次"，并打印事件到下一帧的派发耗时与帧内渲染耗时；总数 **429/429** |
+
+```powershell
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"       # 905 项 PASS
+node tools\smoke_viewer.js "out\20260524-耐久正赛.html"          # 905 项 PASS
+python tools\verify_clicks.py                                    # 需要 Edge；429 项通过、0 失败
+```
+
+**通过判据（本机实测，2026-10-19）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 同一帧 8 次连续 `mousemove` | 登记 **8** 次、flush **1** 次；事件派发 **0.3 ms**、那一帧的渲染 **2.7 ms** |
+| 旧路径的对照 | 旧代码同一批 8 次事件会同步跑 8 次全量广播。A98 同机记过的全量稳态是 **17.9–26.2 ms/次**，照旧路径约 **143–210 ms**；这是按旧记录推算，**不是本轮同趟对照** |
+| 真鼠标拖 12 步 | 中位 **10.7 ms** / 最大 **67.9 ms**（>16 ms 的 2 步、>50 ms 的 1 步）；空转派发基线中位 **16.8 ms**；Long Task **0 个**。这一列现在量的是事件派发墙钟，渲染已推迟到下一帧，**不能再拿它减基线当渲染耗时** |
+| 真滚轮缩 6 格 | 中位 **17.4 ms** / 最大 **33.7 ms**（>50 ms 的 0 格）；Long Task **0 个** |
+| 整屏 8000 桶直接 `renderAll()` | **32 ms/帧**（`#55`；这是直接全量入口的当前机器数，不是调度器的收益） |
+| 四条回归 | 单测 **635 项 / 71.3 s，0 失败、28 跳过**；`verify_ld_vs_csv.py` **PASS**（`0 channel(s) outside tolerance`）；两份 smoke 各 **905 项 PASS**；`verify_clicks.py` **429/429** |
+
+**边界**：这次修的是"同一帧里别重复广播"，不是"每个组件只画自己依赖的那一块"。
+按组件失效（C4）留到下一张票；本票的 `RENDER_ALL` 仍与旧 `renderAll()` 同一套全量顺序，
+所以直接调用 `renderAll()` 的性能与改前一致。

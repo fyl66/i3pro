@@ -4710,6 +4710,33 @@ class Checker:
             "t.time[t.time.length-1]>=v[1]-1e-6);})()" % json.dumps(name),
             self.session, timeout=30)
         time.sleep(0.5)
+
+        # C1：连续事件不该各自同步重画。用同一帧里 8 次真事件对象驱动，等两个 rAF
+        # 让调度器落地，断言"登记 8 次、flush 1 次"；同时记录事件到下一帧的延迟与
+        # 那一帧里的实际渲染耗时（旧指标只量事件派发，量不到被推迟的这半段）。
+        burst = json.loads(self.js(
+            "(function(){var c=document.querySelector('[data-id=\"%s\"] canvas');"
+            "var r=c.getBoundingClientRect();var s=i3pro.renderScheduler.stats;"
+            "var bs=s.scheduled,bf=s.flushes;var t0=performance.now();"
+            "for(var i=0;i<8;i++){c.dispatchEvent(new MouseEvent('mousemove',"
+            "{clientX:r.left+20+i*8,clientY:r.top+20,bubbles:true}));}"
+            "var dispatchMs=performance.now()-t0;"
+            "return new Promise(function(res){requestAnimationFrame(function(){"
+            "requestAnimationFrame(function(){res(JSON.stringify({"
+            "scheduled:s.scheduled-bs,flushes:s.flushes-bf,"
+            "dispatchMs:Math.round(dispatchMs*10)/10,"
+            "frameMs:Math.round(s.lastMs*10)/10}));});});});})()"
+            % component_id) or "{}")
+        self.check("#C1 连续 8 次 mousemove 合并成一帧",
+                   burst.get("scheduled", 0) >= 8 and burst.get("flushes") == 1,
+                   "登记 %s 次 / flush %s 次 / 派发 %s ms / 帧内 %s ms"
+                   % (burst.get("scheduled"), burst.get("flushes"),
+                      burst.get("dispatchMs"), burst.get("frameMs")))
+        print("  NOTE  #C1 连续 8 次 mousemove：登记 %s 次 / flush %s 次 · "
+              "派发 %s ms · 帧内渲染 %s ms"
+              % (burst.get("scheduled"), burst.get("flushes"),
+                 burst.get("dispatchMs"), burst.get("frameMs")))
+
         observer = self.js(
             "(function(){window.__longTasks=[];window.__longTaskOK=false;"
             "if(window.__longTaskObs)window.__longTaskObs.disconnect();"

@@ -1997,7 +1997,7 @@ function attitudeHooks(comp, b) {
     attitudeDrag.x = event.clientX;
     attitudeDrag.y = event.clientY;
     event.stopPropagation();
-    renderAll();
+    scheduleRender(RENDER_COMPONENTS);
   });
   const stop = () => { if (attitudeDrag && attitudeDrag.comp === comp) attitudeDrag = null; };
   canvas.addEventListener("mouseup", stop);
@@ -2564,6 +2564,82 @@ const state = {
 let band = null;
 let dragPan = null;
 let refreshTimer = null;
+
+/* ------------------------------------------------------------ 渲染调度（C1）
+ * 连续交互（拖、缩、移光标）以前每来一个事件就同步跑一遍 `renderAll()`：同一帧里
+ * 的多个事件各自重画一次，主线程被切成一串小任务。这里把"要画什么"记成一组粗粒度
+ * 脏位，连续事件只登记、由 rAF 合并成一帧；离散动作仍走同步 `renderAll()`，
+ * 所以 `tools/` 里"调用后立刻读结果"的用法不变。
+ *
+ * 这些位是渲染层的实现细节，不进 `state`、不进工作表文件（ADR-0008）。
+ */
+const RENDER_CURSOR = 1 << 0;      // 光标 / 基准光标
+const RENDER_VIEW = 1 << 1;        // 时间或距离窗口
+const RENDER_DATA = 1 << 2;        // 取数、圈、区段、数学通道等
+const RENDER_LAYOUT = 1 << 3;      // 尺寸、列宽、dock 折叠
+const RENDER_CHROME = 1 << 4;      // 顶栏、状态行、inspector 外壳
+const RENDER_COMPONENTS = 1 << 5;  // 只重画组件（姿态 / 热力图悬停等）
+const RENDER_ALL = RENDER_CURSOR | RENDER_VIEW | RENDER_DATA | RENDER_LAYOUT
+  | RENDER_CHROME | RENDER_COMPONENTS;
+
+let renderDirty = 0;
+let renderFrame = null;
+const renderStats = { scheduled: 0, flushes: 0, lastDirty: 0, lastMs: 0 };
+
+const renderNow = () => (typeof performance !== "undefined" && performance.now)
+  ? performance.now() : Date.now();
+
+function requestRenderFrame(fn) {
+  if (typeof requestAnimationFrame === "function") return requestAnimationFrame(fn);
+  if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+    return window.requestAnimationFrame(fn);
+  }
+  // 无头假 DOM 没有 rAF：同步跑，保持"调用后立刻能断言"的旧语义。
+  fn();
+  return null;
+}
+
+function cancelRenderFrame(id) {
+  if (id === null) return;
+  if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(id);
+  else if (typeof window !== "undefined" && typeof window.cancelAnimationFrame === "function") {
+    window.cancelAnimationFrame(id);
+  }
+}
+
+/** 登记一帧要画的内容；同一帧里重复登记只合并脏位，不重复画。 */
+function scheduleRender(dirty) {
+  renderDirty |= (dirty || RENDER_ALL);
+  renderStats.scheduled += 1;
+  if (renderFrame !== null) return;
+  renderFrame = requestRenderFrame(flushRender);
+}
+
+function flushRender() {
+  renderFrame = null;
+  const dirty = renderDirty;
+  renderDirty = 0;
+  if (!dirty) return;
+  const started = renderNow();
+  renderStats.flushes += 1;
+  renderStats.lastDirty = dirty;
+  renderDirtyNow(dirty);
+  renderStats.lastMs = renderNow() - started;
+}
+
+const renderScheduler = {
+  schedule: scheduleRender,
+  stats: renderStats,
+  flags: {
+    cursor: RENDER_CURSOR,
+    view: RENDER_VIEW,
+    data: RENDER_DATA,
+    layout: RENDER_LAYOUT,
+    chrome: RENDER_CHROME,
+    components: RENDER_COMPONENTS,
+    all: RENDER_ALL,
+  },
+};
 
 /* ------------------------------------------------------------------ utils */
 function toast(text) {
@@ -3258,7 +3334,7 @@ function zoomTo(x0, x1) {
   if (Math.abs(x1 - x0) < span * 1e-4) return;
     setView(x0, x1);
   scheduleRefresh();
-  renderAll();
+  scheduleRender(RENDER_VIEW);
 }
 
 function zoomFactor(factor, at) {
@@ -3273,7 +3349,7 @@ function zoomFactor(factor, at) {
       setView(pivot - span * left, pivot + span * (1 - left));
   }
   scheduleRefresh();
-  renderAll();
+  scheduleRender(RENDER_VIEW);
 }
 
 function panBy(fraction) {
@@ -3281,7 +3357,7 @@ function panBy(fraction) {
   const shift = (r[1] - r[0]) * fraction;
     setView(r[0] + shift, r[1] + shift);
   scheduleRefresh();
-  renderAll();
+  scheduleRender(RENDER_VIEW);
 }
 
 function zoomToLap(label) {
@@ -5319,7 +5395,7 @@ function attachOverviewInteractions(canvas) {
               clamp(drag.view[1] + shift, f[0] + span, f[1]));
     }
     scheduleRefresh();
-    renderAll();
+    scheduleRender(RENDER_VIEW);
   });
   window.addEventListener("mouseup", () => {
     if (!drag) return;
@@ -5357,7 +5433,7 @@ function renderScrollbar() {
       setView(clamp(at - drag.grab, f[0], f[1] - drag.span),
               clamp(at - drag.grab + drag.span, f[0] + drag.span, f[1]));
       scheduleRefresh();
-      renderAll();
+      scheduleRender(RENDER_VIEW);
     });
     window.addEventListener("mouseup", () => {
       if (!drag) return;
@@ -6183,12 +6259,12 @@ function heatmapHooks(comp, b) {
     const now = b.hover || null;
     if ((!next && !now) || (next && now && next.ix === now.ix && next.iy === now.iy)) return;
     b.hover = next;
-    renderAll();
+    scheduleRender(RENDER_COMPONENTS);
   });
   b.canvas.addEventListener("mouseleave", () => {
     if (!b.hover) return;
     b.hover = null;
-    renderAll();
+    scheduleRender(RENDER_COMPONENTS);
   });
 }
 
@@ -9466,11 +9542,11 @@ function attachInteractions() {
     if (!canvas) return;
     if (canvas.id === "overview" || canvas.id === "scrollCanvas" || canvas.id === "track") return;
     state.cursor = xAt(event, canvas);
-    renderAll();
+    scheduleRender(RENDER_CURSOR);
   });
   // The cursor stays where you left it (i2 Pro behaviour), so the keyboard and
   // the datum cursor still have something to work with after the mouse leaves.
-  host.addEventListener("mouseleave", () => { renderAll(); });
+  host.addEventListener("mouseleave", () => { scheduleRender(RENDER_CURSOR); });
 
   host.addEventListener("mousedown", (event) => {
     const canvas = event.target.closest ? event.target.closest("canvas") : null;
@@ -9489,7 +9565,7 @@ function attachInteractions() {
     const shift = (-(event.clientX - dragPan.x) / Math.max(1, rect.width)) * span;
     setView(dragPan.view[0] + shift, dragPan.view[1] + shift);
     scheduleRefresh();
-    renderAll();
+    scheduleRender(RENDER_VIEW);
   });
   window.addEventListener("mouseup", (event) => {
     if (band) { finishBand(event); return; }
@@ -9513,7 +9589,7 @@ function attachInteractions() {
         const mid = (s[0] + s[1]) / 2;
         const half = ((s[1] - s[0]) / 2) * (event.deltaY > 0 ? 1.2 : 1 / 1.2);
         state.panelZoom[panelKey(target.comp, group)] = [mid - half, mid + half];
-        renderAll();
+        scheduleRender(RENDER_COMPONENTS);
       }
       return;
     }
@@ -9521,7 +9597,7 @@ function attachInteractions() {
   }, { passive: false });
 
   window.addEventListener("keydown", onKeyDown);
-  window.addEventListener("resize", renderAll);
+  window.addEventListener("resize", () => scheduleRender(RENDER_LAYOUT));
 }
 
 function moveCursor(delta, fast) {
@@ -9529,7 +9605,7 @@ function moveCursor(delta, fast) {
   const r = lane();
   const start = state.cursor === null ? r[0] : state.cursor;
   state.cursor = clamp(start + delta * step, r[0], r[1]);
-  renderAll();
+  scheduleRender(RENDER_CURSOR);
 }
 
 function zoomVertical(factor) {
@@ -9542,7 +9618,7 @@ function zoomVertical(factor) {
   const mid = (s[0] + s[1]) / 2;
   const half = ((s[1] - s[0]) / 2) * factor;
   state.panelZoom[panelKey(comp, group)] = [mid - half, mid + half];
-  renderAll();
+  scheduleRender(RENDER_COMPONENTS);
 }
 
 function stepLap(direction) {
@@ -11104,22 +11180,48 @@ function focusJumpRail() {
   entry.button.classList.add("on");
 }
 
+/**
+ * 同步全量渲染。保留这个入口的旧语义：工具与验收会在调用后立刻读 DOM / 画布，
+ * 不能把这里改成异步。连续事件走 `scheduleRender(...)`，离散动作仍走这里。
+ */
 function renderAll() {
-  $("modeTime").classList.toggle("on", state.mode === "time");
-  $("modeDistance").classList.toggle("on", state.mode === "distance");
-  $("modeOverlay").classList.toggle("on", state.mode === "overlay");
-  $("modeOverlay").disabled = !state.overlay;
-  $("modeDistance").disabled = !DATA.meta.has_distance;
-  renderComponents();
-  renderValues();
-  renderScrollbar();
-  renderOverview();
-  markLapRows();
-  setStatus();
-  renderMissingNotice();
-  renderJumpCounts();
-  // 右栏（票⑨）跟着 + 变；变了才重建，每帧跑到的那些调用是空转。
-  renderInspector();
+  if (renderFrame !== null) {
+    cancelRenderFrame(renderFrame);
+    renderFrame = null;
+  }
+  renderDirty = 0;
+  renderDirtyNow(RENDER_ALL);
+}
+
+/** 按脏位只跑真的依赖它的那几块；`RENDER_ALL` 时与旧 `renderAll()` 顺序一致。 */
+function renderDirtyNow(dirty) {
+  if (dirty & RENDER_CHROME) {
+    $("modeTime").classList.toggle("on", state.mode === "time");
+    $("modeDistance").classList.toggle("on", state.mode === "distance");
+    $("modeOverlay").classList.toggle("on", state.mode === "overlay");
+    $("modeOverlay").disabled = !state.overlay;
+    $("modeDistance").disabled = !DATA.meta.has_distance;
+  }
+  if (dirty & (RENDER_CURSOR | RENDER_VIEW | RENDER_DATA
+               | RENDER_LAYOUT | RENDER_COMPONENTS)) {
+    renderComponents();
+  }
+  if (dirty & (RENDER_CURSOR | RENDER_VIEW | RENDER_DATA
+               | RENDER_LAYOUT | RENDER_COMPONENTS)) {
+    renderValues();
+  }
+  if (dirty & (RENDER_VIEW | RENDER_DATA | RENDER_LAYOUT)) {
+    renderScrollbar();
+    renderOverview();
+  }
+  if (dirty & (RENDER_VIEW | RENDER_DATA)) markLapRows();
+  if (dirty) setStatus();
+  if (dirty & (RENDER_DATA | RENDER_LAYOUT | RENDER_CHROME)) {
+    renderMissingNotice();
+    renderJumpCounts();
+    // 右栏（票⑨）跟着 + 变；变了才重建，每帧跑到的那些调用是空转。
+    renderInspector();
+  }
 }
 
 /* ------------------------------------------------------------------- init */
@@ -11404,6 +11506,7 @@ window.i3pro = {
   // 68 个（导出 207 个、tools/ 与 tests/ 里一半没人过）——缝宽了，"哪条边才是可测的"
   // 就淹掉了。新增一个名字前先看它有没有消费者（单测按源码守这一条）。
   state: state, data: DATA, renderAll: renderAll, lane: lane,
+  renderScheduler: renderScheduler,
   channels: CHANNELS, renderChannelList: renderChannelList,
   fullRange: fullRange, zoomTo: zoomTo, windowRange: windowRange,
   groupsFor: groupsFor, selectedChannels: selectedChannels,

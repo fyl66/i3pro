@@ -820,7 +820,8 @@
       <label>通道</label>
       <select id="exportChannels">
         <option value="all">全部通道</option>
-        <option value="selected">侧边栏勾选的通道</option>
+        <option value="worksheet">本工作表所有组件的通道</option>
+        <option value="selected">当前组件的通道</option>
       </select>
       <label class="chk"><input type="checkbox" id="exportMaths" checked> 含数学通道</label>
     </div>
@@ -10228,7 +10229,9 @@ let exportFilenameFrom = "";
 
 function exportDefaults() {
   return {
-    range: "all", from: "", to: "", channels: "all", maths: true,
+    // 默认是本工作表用到的通道：面板打开时先给"我现在看的这几张图"，
+    // 448 条全导是另一档，一次点击就能换（A121）。
+    range: "all", from: "", to: "", channels: "worksheet", maths: true,
     rate: "auto", custom: "", resample: "linear", meta: true,
     axis: "time", format: "csv", layout: "wide",
   };
@@ -10266,6 +10269,74 @@ function exportConfig() {
   };
 }
 
+/* ---------------------------------------------------- 导出的三档通道范围（A121）
+ * 报过的 bug：一个工作表里摆了几件组件时，"导出"给出的通道是**一件组件**的
+ * ——因为那一档的名字写作"侧边栏勾选的通道"，而左栏是按**当前组件**编辑的
+ * （见 `selectedChannels`），一个工作表里摆三件组件，它也只认其中一件。
+ *
+ * 现在三档各是各的，名字里写清是哪一份、有几条，谁也不再冒充谁：
+ *
+ *   all       —— 本场次**所有**通道，名单由服务端现列（场次说了算）；
+ *   worksheet —— 本工作表**所有组件**用到的通道（并集，A121 新加）；
+ *   selected  —— **当前组件**（右栏 / 通道列表正在编辑的那一件，即左栏那几档）。
+ *
+ * 通道名一律要过一遍 `exportRequestNames`：槽位里写的可能是别名（`@车速`），
+ * 别名**不**是场次里的通道名，原样发给服务端只会被当成"本场次没有"。
+ */
+
+/** 配置里的一串通道名 → 导出请求里该发的名字（别名先落到本场次的具体通道）。 */
+function exportRequestNames(raw) {
+  const out = [];
+  (raw || []).forEach((one) => {
+    // 别名落不到本场次的通道上时**原样保留**：与其在这里悄悄吞掉，不如发给
+    // 服务端，让它照 ticket #34 的规矩写进元数据的 excluded_missing。
+    const name = (isAliasReference(one) ? aliasLanding(one) : one) || one;
+    if (name && out.indexOf(name) < 0) out.push(name);
+  });
+  return out;
+}
+
+/** 本工作表所有组件用到的通道——**并集**，不只是当前点中的那一件。 */
+function worksheetExportChannels() {
+  return exportRequestNames(worksheetChannels());
+}
+
+/** 一档范围认得的通道。`all` 的名单在服务端，这里给 null（只报条数）。 */
+function exportChannelScope(value) {
+  if (value === "all") {
+    const all = DATA.channels ? DATA.channels.length : 0;
+    return { value: "all", label: "全部通道（本场次 " + all + " 条）",
+             names: null, count: all };
+  }
+  if (value === "worksheet") {
+    const names = worksheetExportChannels();
+    return { value: "worksheet", label: "本工作表所有组件的通道（" + names.length + " 条）",
+             names: names, count: names.length };
+  }
+  if (value === "selected") {
+    const names = exportRequestNames(selectedChannels());
+    return { value: "selected", label: "当前组件的通道（" + names.length + " 条）",
+             names: names, count: names.length };
+  }
+  return null;
+}
+
+function exportChannelOptions() {
+  return ["all", "worksheet", "selected"].map(exportChannelScope);
+}
+
+/** 下拉里那三档的文案跟着**当前**工作表与焦点走：条数写在名字里，别让用户猜。 */
+function renderExportChannelOptions() {
+  const sel = $("exportChannels");
+  if (!sel || !sel.options) return;   // 无头假 DOM 没有 options：静态 markup 已经写着三档
+  const labels = {};
+  exportChannelOptions().forEach((one) => { labels[one.value] = one.label; });
+  Array.prototype.forEach.call(sel.options, (option) => {
+    const label = labels[option.value];
+    if (label) option.textContent = label;
+  });
+}
+
 /** 这次导出点名要、但本场次没有的通道（ticket #34）。
  *
  * 「全部通道」永远缺不了（服务端按本场次现列），所以只有「侧边栏勾选的」这一档
@@ -10273,8 +10344,10 @@ function exportConfig() {
  * 不在这里另写一遍 `CHANNELS.has`。
  */
 function exportMissingChannels(cfg) {
-  if (!cfg || cfg.channels !== "selected") return [];
-  return selectedChannels().filter(isMissingChannel);
+  if (!cfg) return [];
+  const raw = cfg.channels === "worksheet" ? worksheetChannels()
+            : cfg.channels === "selected" ? selectedChannels() : [];
+  return raw.filter(isMissingChannel);
 }
 
 function applyExportConfig(cfg) {
@@ -10308,6 +10381,8 @@ function applyExportConfig(cfg) {
 
 /** 只有「指定」这一档才要起止；只有「自定义」才要那个数字框。 */
 function syncExportFields() {
+  // 三档通道范围的条数跟着当前工作表 / 焦点走，每开一次面板、每改一次配置都刷一遍。
+  renderExportChannelOptions();
   const cfg = exportConfig();
   const typed = cfg.range === "time" || cfg.range === "distance";
   $("exportFromRow").hidden = !typed;
@@ -10429,14 +10504,20 @@ function exportURL(cfg, plan) {
     params.set("from", from.value);
     params.set("to", to.value);
   }
-  if (cfg.channels === "selected") {
-    const names = selectedChannels();
-    if (!names.length) {
-      return { error: "侧边栏一条通道都没勾：先在左边「通道」里勾几条，或者把通道换成「全部通道」。" };
-    }
+  if (cfg.channels === "worksheet" || cfg.channels === "selected") {
+    const mine = cfg.channels === "worksheet";
+    const raw = mine ? worksheetChannels() : selectedChannels();
+    const names = exportRequestNames(raw);
     const gone = exportMissingChannels(cfg);
-    if (gone.length === names.length) {
-      return { error: "侧边栏勾的通道本场次一条都没有（" + gone.join("、")
+    const where = mine ? "这个工作表" : "当前组件";
+    if (!names.length) {
+      return { error: mine
+        ? "这个工作表里还没有任何通道：先在左上加一件组件、给它挂几条通道，或者把通道换成「全部通道」。"
+        : "当前组件一条通道都没勾：先点中你要导的那一件，在左边「通道」里勾几条，"
+          + "或者把通道换成「本工作表所有组件的通道」。" };
+    }
+    if (raw.length && gone.length === raw.length) {
+      return { error: where + "点名的通道本场次一条都没有（" + gone.join("、")
         + "），没有列可以导。换一套工作表，或者把通道换成「全部通道」。" };
     }
     params.set("channels", "selected");
@@ -10485,6 +10566,10 @@ function applyExportPlan(body) {
   const range = body.range && body.range.label ? esc(body.range.label) : "";
   let text = "";
   if (range) text += "范围 " + range + "<br>";
+  // 导的是哪几条通道，这里先说一句：列数（下面的「N 列」）只说明列有多少，
+  // 说不清"这一档到底拿的是谁的通道"（A121 那一份投诉就是从这儿来的）。
+  const scope = exportChannelScope(exportConfig().channels);
+  if (scope) text += "通道 " + esc(scope.label) + "<br>";
   text += "<b>" + Number(body.rows).toLocaleString() + "</b> 行 × <b>" + body.columns + "</b> 列"
     + " · 约 " + formatBytes(body.bytes);
   if (body.sheets > 1) text += " · 分 " + body.sheets + " 张表";
@@ -11908,6 +11993,9 @@ window.i3pro = {
   workbenchMissing: workbenchMissing,
   renderMissingNotice: renderMissingNotice,
   exportMissingChannels: exportMissingChannels,
+  exportChannelScope: exportChannelScope,
+  exportChannelOptions: exportChannelOptions,
+  worksheetExportChannels: worksheetExportChannels,
   palettes: PALETTE_SET, missingColor: MISSING_COLOR,
   headFields: headFields,
   // 双圈对比（A104）：两条圈的数据源、图上那两条线的规格、共同网格上的取数与区间统计

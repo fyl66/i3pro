@@ -3302,6 +3302,100 @@ if (api && exportDlg) {
   api.data.api = savedApi;
 }
 
+/* ------------------- 导出的通道范围（A121，多组件的工作表） -------------------
+ * 用户报的 bug：同一个工作表里摆了几件组件时，"导出"给出的通道是**一件组件**的，
+ * 不是整个工作表用到的通道。三档范围从此各是各的，且不许互相冒充：
+ *   all       —— 本场次所有通道（服务端现列）
+ *   worksheet —— 本工作表**所有组件**用到的通道（并集，A121 新加）
+ *   selected  —— 当前组件（右栏 / 通道列表正在编辑的那一件）
+ * 以前只有 all 与 selected 两档，而 selected 的名字写作"侧边栏勾选的通道"——
+ * 看名字像"这一屏的通道"，拿到的却只是一件组件的。 */
+{
+  const api = window.i3pro;
+  const graphs = api.state.components.filter((c) => c.type === "graph");
+  check(graphs.length >= 1, "这份页面里一张图都没有，量不了导出的通道范围");
+  const first = graphs[0];
+  const kept = first.config.channels.slice();
+
+  // 再摆一件图组件，给它一条**第一件没有**的真实通道：并集才有得量。
+  api.addComponentOfType("graph");
+  const second = api.state.components[api.state.components.length - 1];
+  const spare = Array.from(api.channels.keys())
+    .filter((name) => kept.indexOf(name) < 0
+      && api.channelState(name) === "present")[0];
+  second.config.channels = [spare];
+  // 焦点留在第一件上：这正是报 bug 时的工作表状态（"当前组件"与"整个工作表"
+  // 指的不是同一组通道，两者必须分得开）。
+  api.state.focusId = first.id;
+  api.renderChannelList();
+
+  check(html.indexOf('<option value="worksheet">') >= 0,
+    "导出面板的「通道」一栏没有「本工作表所有组件的通道」这一档");
+
+  api.applyExportConfig({
+    range: "all", from: "", to: "", channels: "worksheet", maths: true,
+    rate: "auto", custom: "", resample: "linear", meta: false,
+    axis: "time", format: "csv", layout: "wide",
+  });
+  const sheetUrl = api.exportURL(api.exportConfig(), false);
+  check(!sheetUrl.error && !!sheetUrl.href,
+    "「本工作表的通道」这一档拼不出导出请求：" + JSON.stringify(sheetUrl));
+  if (sheetUrl.href) {
+    const asked = decodeURIComponent(sheetUrl.href);
+    check(asked.indexOf("channels=selected") >= 0,
+      "「本工作表的通道」没有走 selected + names：" + asked);
+    check(kept.every((name) => asked.indexOf(name) >= 0),
+      "第一件组件的通道没进导出名单：" + kept + " → " + asked);
+    check(asked.indexOf(spare) >= 0,
+      "第二件组件的通道没进导出名单（导出的还是单一组件的通道）：" + spare + " → " + asked);
+  }
+
+  // 三档各自认得的通道数：workbench 的并集 ≥ 当前组件那一档，且只有它含 spare。
+  // （先问一句"这个入口在不在"，是为了让这一组失败时**整份断言还跑得完**——
+  //  抛出来会把别处的红一起盖掉。）
+  check(typeof api.exportChannelScope === "function",
+    "面板认不出「本工作表的通道」这一档（exportChannelScope 没有导出来）");
+  const scope = typeof api.exportChannelScope === "function"
+    ? api.exportChannelScope("worksheet") : null;
+  check(scope && scope.names.indexOf(spare) >= 0 && scope.names.indexOf(kept[0]) >= 0,
+    "exportChannelScope('worksheet') 没给出整个工作表的通道：" + JSON.stringify(scope));
+  const here = typeof api.exportChannelScope === "function"
+    ? api.exportChannelScope("selected") : null;
+  check(here && here.names.indexOf(spare) < 0,
+    "「当前组件」那一档不该含别的组件的通道：" + JSON.stringify(here));
+
+  // 面板上的档位文案要写清各有几条，别让用户猜"这一档到底是哪些通道"。
+  const options = typeof api.exportChannelOptions === "function"
+    ? api.exportChannelOptions() : [];
+  check(options.length === 3, "「通道」一栏的档位不是三档：" + JSON.stringify(options));
+  const labels = options.map((one) => one.value + ":" + one.label).join(" | ");
+  options.forEach((one) => {
+    check(one.label.indexOf(String(one.count)) >= 0,
+      "「" + one.value + "」这一档没写清有几条通道：" + labels);
+  });
+
+  // 槽位里写的可能是**别名**（`@车速` 这种写法，ticket #36）。别名不是场次里的
+  // 通道名，原样发给服务端只会被当成"本场次没有"静默跳过——导出前必须先落到
+  // 本场次的具体通道上。
+  const alias = "@A121 探针";
+  api.state.aliasLanding[alias] = spare;
+  second.config.channels = [alias];
+  check(api.worksheetExportChannels().indexOf(spare) >= 0,
+    "工作表用别名引用的通道没有落到具体通道上：" + api.worksheetExportChannels());
+  const aliasUrl = api.exportURL(api.exportConfig(), false);
+  check(!aliasUrl.error && !!aliasUrl.href
+    && decodeURIComponent(aliasUrl.href).indexOf(spare) >= 0,
+    "别名没有换成场次里的通道名：" + JSON.stringify(aliasUrl));
+  delete api.state.aliasLanding[alias];
+
+  // 还原：撤掉探针组件，焦点放回去。
+  api.state.components.splice(api.state.components.indexOf(second), 1);
+  first.config.channels = kept;
+  api.state.focusId = first.id;
+  api.renderAll();
+  api.renderChannelList();
+}
+
 /* ----------------------------------------------- 工作表（ticket #30）
  * 顶上那排按钮现在来自仓库里的 worksheets/*.json（服务端读出来塞进 DATA.worksheets，
  * 快照内嵌一份）。这一组钉三件事：按钮与文件一一对应；pick 规则挑得到通道、挑不到

@@ -2460,6 +2460,20 @@ class Checker:
         self.check("面板显示服务端算出的预估", got_plan,
                    self.js("document.getElementById('exportPlan').textContent"))
 
+        # A121：导出的通道范围分三档，名字里写清"是哪一份、有几条"。以前只有
+        # 「全部通道」与「侧边栏勾选的通道」两档，而左栏是按**当前组件**编辑的
+        # （见 selectedChannels）——一个工作表里摆几件组件，点了导出拿到的仍是
+        # **一件**组件的通道。这一档文案只有真 DOM 才渲染得出来（假 DOM 没有
+        # select.options），所以在这儿量。
+        scopes = json.loads(self.js(
+            "(function(){var s=document.getElementById('exportChannels');"
+            "return JSON.stringify([].map.call(s.options,function(o){"
+            "return [o.value,o.textContent];}));})()"
+        ))
+        self.check("A121 「通道」一栏是三档，且各写清了条数（真 DOM 里的文案）",
+                   [row[0] for row in scopes] == ["all", "worksheet", "selected"]
+                   and all("条" in row[1] for row in scopes), str(scopes))
+
         download_dir = os.path.join(work_dir, "_downloads")
         shutil.rmtree(download_dir, ignore_errors=True)
         os.makedirs(download_dir)
@@ -2609,6 +2623,103 @@ class Checker:
         )
         # 收尾：把面板关掉，后面的用例在干净状态下跑
         self.js("i3pro.closeExportDialog(); true")
+
+    def export_scopes(self):
+        """A121：一个工作表里摆了几件组件时，导出给的是**整个工作表**的通道。
+
+        报过的 bug：以前只有「全部通道」与「侧边栏勾选的通道」两档，而左栏是按
+        **当前组件**编辑的——摆了三件组件，点导出拿到的仍是一件的那几条。
+
+        这里真点「＋ 添加组件」摆出第二件图、给它一条第一件没有的通道，再让服务端
+        真数一遍两档的列数。这一步放在**所有别的用例之后**跑（`main` 里它排在
+        `component_bar` 后面）：它要改动工作表，排在中间会污染后面那些用例。
+        """
+        # 先摆组件：导出面板是一层盖住整页的浮层，开着它去点工具栏只会点到浮层上
+        # （第一次跑就是在这儿红的）。
+        self.check("A121 开场时导出面板是关着的（否则下面的真点击会打在浮层上）",
+                   self.js("document.getElementById('exportDlg').hidden"))
+        add = json.loads(self.js(
+            "(function(){document.getElementById('addType').value='graph';"
+            "var b=document.getElementById('addBtn');"
+            "b.scrollIntoView({block:'center'});"
+            "var r=b.getBoundingClientRect();"
+            "return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2});})()"
+        ))
+        self.browser.click(add["x"], add["y"], self.session)
+        spare = str(self.js(
+            "(function(){var a=i3pro.state.components.filter(function(c){"
+            "return c.type==='graph';});"
+            "if(a.length<2) return '';"
+            "var owned={};a[0].config.channels.forEach(function(n){owned[n]=1;});"
+            "var pick=Array.from(i3pro.channels.keys()).filter(function(n){"
+            "return !owned[n]&&i3pro.channelState(n)==='present';})[0];"
+            "if(!pick) return '';"
+            "a[a.length-1].config.channels=[pick];"
+            "i3pro.state.focusId=a[0].id;"
+            "i3pro.renderAll();i3pro.renderChannelList();"
+            "return pick;})()"
+        ))
+        self.check("A121 真点「＋ 添加组件」摆出了第二件图，并给它单独一条通道",
+                   bool(spare), spare or "第二件图没摆出来")
+        if not spare:
+            return
+
+        point = json.loads(self.js(
+            "(function(){var b=document.getElementById('dataBtn');"
+            "b.scrollIntoView({block:'nearest'});"
+            "var r=b.getBoundingClientRect();"
+            "return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2});})()"
+        ))
+        self.browser.click(point["x"], point["y"], self.session)
+        self.check("A121 又打开了导出面板",
+                   self.js("!document.getElementById('exportDlg').hidden"))
+
+        asked = str(self.js(
+            "i3pro.applyExportConfig({range:'time',from:'10',to:'12',"
+            "channels:'worksheet',maths:true,rate:'10',custom:'',"
+            "resample:'linear',meta:false,axis:'time',format:'csv',"
+            "layout:'wide'});"
+            "decodeURIComponent(i3pro.exportURL(i3pro.exportConfig(),false).href||'')"
+        ))
+        self.check("A121 「本工作表的通道」把两件组件的通道都放进了 names=",
+                   spare in asked and "channels=selected" in asked
+                   and "skip_missing" not in asked, asked[:160])
+        # 服务端真数一遍列数：整个工作表那一档必须**多于**当前组件那一档。
+        both = json.loads(self.js(
+            "(async()=>{"
+            "const one=await (await fetch(i3pro.exportURL({range:'all',"
+            "channels:'selected',maths:true,rate:'auto',custom:'',"
+            "resample:'linear',meta:false,axis:'time',format:'csv',"
+            "layout:'wide'},true).href)).json();"
+            "const all=await (await fetch(i3pro.exportURL({range:'all',"
+            "channels:'worksheet',maths:true,rate:'auto',custom:'',"
+            "resample:'linear',meta:false,axis:'time',format:'csv',"
+            "layout:'wide'},true).href)).json();"
+            "return JSON.stringify({one:one.columns,none:one.error||null,"
+            "all:all.columns,nall:all.error||null});})()"
+        ))
+        self.check("A121 服务端算出来：整个工作表的列数多于当前组件",
+                   bool(both.get("all")) and bool(both.get("one"))
+                   and both["all"] > both["one"], json.dumps(both, ensure_ascii=False))
+        self.js("i3pro.refreshExportPlan(); true")
+        scoped = self.browser.wait_for(
+            "document.getElementById('exportPlan').textContent"
+            ".indexOf('本工作表所有组件的通道') >= 0",
+            self.session, timeout=30,
+        )
+        self.check("A121 预估里写明了这一档是哪一份通道", scoped,
+                   self.js("document.getElementById('exportPlan').textContent"))
+
+        # 收尾：把探针组件撤掉，面板关掉——这一步排在最后，但仍然不给下一次留尾巴。
+        self.js(
+            "(function(){var a=i3pro.state.components.filter(function(c){"
+            "return c.type==='graph';});"
+            "if(a.length>1){var last=a[a.length-1];"
+            "i3pro.state.components.splice(i3pro.state.components.indexOf(last),1);}"
+            "i3pro.state.focusId=a[0].id;"
+            "i3pro.saveLayout();i3pro.renderAll();i3pro.renderChannelList();"
+            "i3pro.closeExportDialog();return true;})()"
+        )
 
     def rename(self, sidecar):
         """#4 / #6：就地改名（回车存、Esc 撤）+ 撤销。
@@ -5350,6 +5461,8 @@ def main(argv=None):
             checker.component_bar()
             # #47 分桶包络：真切档位，请求点数变化，画布像素也跟着变。
             checker.resolution_envelope()
+            # A121 导出的通道范围（要真摆第二件组件，所以排在这条链的最后）
+            checker.export_scopes()
             errors = browser.page_errors()
             checker.check("整场没有页面级报错", not errors, errors[:3])
         bad = [name for name, ok in checker.results if not ok]

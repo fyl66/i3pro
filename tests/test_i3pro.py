@@ -65,6 +65,7 @@ from i3pro import (  # noqa: E402
     pairing,
     resolution as resolutionmod,
     server, sidecar, store, timebase,
+    stitch,
     tracewire,
     txtlog,
     worksheets as worksheetsmod,
@@ -12900,6 +12901,245 @@ class TestPairing(unittest.TestCase):
             self.assertEqual(list(data.iterdir()), [], "--list 不该写任何文件")
         finally:
             shutil.rmtree(data, ignore_errors=True)
+
+
+class TestStitch(unittest.TestCase):
+    """几场接连录下来的记录接成一场（``i3pro stitch`` 的全部判据）。
+
+    真场景：10.25 耐久换车手——``20261025-cjh耐久12圈`` 记 16:05:08–16:29:03，
+    ``20261025-jhy耐久12圈`` 记 16:29:20–16:47:00。整场分析（电耗、连着的圈速表）
+    要的是**一场**，所以要把两段首尾接起来。
+    """
+
+    STEP = 0.01
+
+    def _session(self, channels, rows, *, offset=0.0, rate=100.0):
+        """合成一场：``channels`` 是 ``(名字, 单位, 值)`` 或 ``(名字, 单位, 起始值)``。"""
+        axis = offset + np.arange(rows) / rate
+        values = {}
+        for name, unit, spec in channels:
+            values[name] = (np.asarray(spec, dtype=np.float64)
+                            if np.ndim(spec) else np.linspace(float(spec),
+                                                              float(spec) + rows - 1,
+                                                              rows))
+        return _FakeCan(axis, [(name, unit) for name, unit, _ in channels], values)
+
+    # ------------------------------------------------------------ 时间轴
+    def test_两段接成一条连续的时间轴(self):
+        first = self._session([("Vx KF", "km/h", 0.0)], rows=11)
+        second = self._session([("Vx KF", "km/h", 100.0)], rows=6)
+        time, columns, _units, scheme = stitch.stack([first, second])
+        self.assertEqual(time.size, 17)
+        self.assertTrue(np.allclose(np.diff(time), self.STEP),
+                        "接缝处也要是**一个采样间隔**，不能多也不能少")
+        self.assertAlmostEqual(float(time[10]), 0.10, places=9)
+        self.assertAlmostEqual(float(time[11]), 0.11, places=9)
+        self.assertEqual(scheme.seam(0), (0.10, 0.11))
+        # 第二段自己的值原样落在后半（不是按零阶保持重采样，也不改数值）
+        self.assertTrue(np.allclose(columns["Vx KF"][11:], np.arange(6) + 100.0))
+
+    def test_接缝可以按给定秒数留出停顿(self):
+        first = self._session([("Vx KF", "km/h", 0.0)], rows=11)
+        second = self._session([("Vx KF", "km/h", 0.0)], rows=11)
+        time, _columns, _units, scheme = stitch.stack([first, second], gap_s=5.0)
+        self.assertAlmostEqual(float(time[11]) - float(time[10]), 5.0 + self.STEP,
+                               places=9)
+        self.assertEqual(scheme.gap_s, 5.0)
+        self.assertAlmostEqual(scheme.starts[1], 0.10 + self.STEP + 5.0, places=9)
+
+    def test_后一场的首点不是零也能接对(self):
+        """导入表的时间列可能不从 0 起；接缝算的是**首点落在哪**，不是"加多少"。"""
+        first = self._session([("Vx KF", "km/h", 0.0)], rows=11)
+        second = self._session([("Vx KF", "km/h", 0.0)], rows=11, offset=7.5)
+        time, _columns, _units, scheme = stitch.stack([first, second])
+        self.assertAlmostEqual(scheme.starts[1], -7.5 + 0.10 + self.STEP, places=9)
+        self.assertAlmostEqual(float(time[11]), 0.11, places=9)
+        before, after = scheme.seam(0)
+        self.assertAlmostEqual(before, 0.10, places=9)
+        self.assertAlmostEqual(after, 0.11, places=9)
+        self.assertAlmostEqual(before, float(time[10]), places=9,
+                               msg="接缝打印的是时间轴上的时刻，不是加了多少")
+
+    # ------------------------------------------------------------ 列
+    def test_列是两场的并集_某一场没有的列留空(self):
+        first = self._session([("Vx KF", "km/h", 0.0), ("Brake", "bar", 0.0)], rows=11)
+        second = self._session([("Vx KF", "km/h", 0.0), ("Aero", "mm", 0.0)], rows=6)
+        _time, columns, units, _scheme = stitch.stack([first, second])
+        self.assertEqual(list(columns), ["Vx KF", "Brake", "Aero"],
+                         "第一场的名字与顺序在前，后面多出来的按名字排")
+        self.assertTrue(np.isnan(columns["Aero"][:11]).all(),
+                        "前半没有这条通道——留空，不是补 0")
+        self.assertFalse(np.isnan(columns["Aero"][11:]).any())
+        self.assertTrue(np.isnan(columns["Brake"][11:]).all())
+        self.assertEqual(units["Aero"], "mm")
+
+    def test_同名两种写法只留一条_保留先来的那个(self):
+        """``Vx KF`` / ``Vx_KF`` 是同一条通道的两种写法，判据是 ``pairing.name_key``。"""
+        first = self._session([("Vx KF", "km/h", 0.0)], rows=11)
+        second = self._session([("Vx_KF", "km/h", 100.0)], rows=6)
+        _time, columns, _units, scheme = stitch.stack([first, second])
+        self.assertEqual(list(columns), ["Vx KF"])
+        self.assertTrue(np.allclose(columns["Vx KF"][11:], np.arange(6) + 100.0))
+        self.assertEqual(scheme.aliases, (("Vx_KF", "Vx KF"),))
+
+    def test_只是名字像的两条通道不会被并掉(self):
+        """``AngVelX body`` 与 ``AngVelX hor`` 是两条真的不同的通道。"""
+        first = self._session([("AngVelX body", "deg/s", 0.0)], rows=11)
+        second = self._session([("AngVelX hor", "deg/s", 0.0)], rows=6)
+        _time, columns, _units, _scheme = stitch.stack([first, second])
+        self.assertEqual(sorted(columns), ["AngVelX body", "AngVelX hor"])
+
+    # ------------------------------------------------------------ 报错
+    def test_只有一场是拒绝的(self):
+        one = self._session([("Vx KF", "km/h", 0.0)], rows=11)
+        with self.assertRaises(stitch.StitchError) as caught:
+            stitch.stack([one])
+        self.assertIn("至少要两场", str(caught.exception))
+
+    def test_负的间隔是拒绝的(self):
+        first = self._session([("Vx KF", "km/h", 0.0)], rows=11)
+        second = self._session([("Vx KF", "km/h", 0.0)], rows=6)
+        with self.assertRaises(stitch.StitchError) as caught:
+            stitch.stack([first, second], gap_s=-1.0)
+        self.assertIn("≥ 0", str(caught.exception))
+
+    def test_比主时间基慢的通道按零阶保持搬过去(self):
+        """``.ld`` 里有慢通道（高避金标准的 ``Gear`` 只有 464 个样本 / 464 s）。
+
+        零阶保持的右端是**开**的（:func:`pairing.hold_sample` 与 ``canlog`` 一致）：
+        最后一个样本不往后带，所以轴末那个点留空——这是既有语义，不在这里另立一条。
+        """
+        session = self._session([("Vx KF", "km/h", 0.0), ("Slow", "n", 0.0)], rows=11)
+        session.channels[1] = _FakeChannel("Slow", "n", 10.0, np.arange(2, dtype=float))
+        session.columns["Slow"] = np.arange(2, dtype=float)
+        other = self._session([("Vx KF", "km/h", 0.0)], rows=6)
+        _time, columns, _units, _scheme = stitch.stack([session, other])
+        self.assertTrue(np.allclose(columns["Slow"][:10], 0.0))
+        self.assertTrue(np.isnan(columns["Slow"][10]), "零阶保持的右端是开的")
+        self.assertTrue(np.isnan(columns["Slow"][11:]).all(), "第二场没有这条通道")
+
+    def test_慢通道读不到采样率时明确报错(self):
+        session = self._session([("Vx KF", "km/h", 0.0), ("Slow", "n", 0.0)], rows=11)
+        session.channels[1] = _FakeChannel("Slow", "n", 0.0, np.arange(3, dtype=float))
+        session.columns["Slow"] = np.arange(3, dtype=float)
+        other = self._session([("Vx KF", "km/h", 0.0)], rows=6)
+        with self.assertRaises(stitch.StitchError) as caught:
+            stitch.stack([session, other])
+        self.assertIn("采样率", str(caught.exception))
+
+    # ------------------------------------------------------------ 落盘与命令行
+    def _write_csv(self, path: Path, channels: dict[str, np.ndarray], rows: int):
+        """写一份再普通不过的宽表（形状就是 i3pro 自己导出的那种）。"""
+        axis = np.arange(rows) / 100.0
+        return pairing.write_merged(
+            path, axis, channels, units={name: "" for name in channels},
+        )
+
+    def test_命令行接出来的表读回来就是一场(self):
+        folder = scratch("_stitch_cli")
+        shutil.rmtree(folder, ignore_errors=True)
+        folder.mkdir(parents=True, exist_ok=True)
+        try:
+            rows = 11
+            head = folder / "前半.csv"
+            tail = folder / "后半.csv"
+            self._write_csv(head, {"Vx KF": np.arange(rows) * 1.0}, rows)
+            self._write_csv(tail, {"Vx KF": np.arange(rows) * 1.0 + 100.0}, rows)
+            target = folder / "接起来.csv"
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = cli.main(["stitch", str(head), str(tail),
+                                 "--out", str(target)])
+            self.assertEqual(code, 0, out.getvalue())
+            self.assertTrue(target.exists())
+            self.assertIn("22 行", out.getvalue())
+            session = csvlog.open_session(target)
+            try:
+                self.assertFalse(canlog.looks_like_frames(target),
+                                 "接出来的宽表不该被当成帧表")
+                self.assertEqual(np.asarray(session.time).size, rows * 2)
+                self.assertTrue(np.allclose(
+                    np.asarray(session.values("Vx KF"), dtype=float)[rows:],
+                    np.arange(rows) + 100.0,
+                ))
+            finally:
+                session.close()
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_不给输出就只打印方案(self):
+        folder = scratch("_stitch_dry")
+        shutil.rmtree(folder, ignore_errors=True)
+        folder.mkdir(parents=True, exist_ok=True)
+        try:
+            head = folder / "前半.csv"
+            tail = folder / "后半.csv"
+            self._write_csv(head, {"Vx KF": np.arange(11) * 1.0}, 11)
+            self._write_csv(tail, {"Vx KF": np.arange(11) * 1.0}, 11)
+            before = {item.name for item in folder.iterdir()}
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = cli.main(["stitch", str(head), str(tail)])
+            self.assertEqual(code, 0, out.getvalue())
+            self.assertIn("只打印方案", out.getvalue())
+            self.assertIn("接缝 1", out.getvalue())
+            self.assertEqual({item.name for item in folder.iterdir()}, before,
+                             "不给 --out 时一个字节都不写")
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_目标已存在时先拒写(self):
+        folder = scratch("_stitch_busy")
+        shutil.rmtree(folder, ignore_errors=True)
+        folder.mkdir(parents=True, exist_ok=True)
+        try:
+            head = folder / "前半.csv"
+            tail = folder / "后半.csv"
+            self._write_csv(head, {"Vx KF": np.arange(11) * 1.0}, 11)
+            self._write_csv(tail, {"Vx KF": np.arange(11) * 1.0}, 11)
+            target = folder / "接起来.csv"
+            target.write_bytes(b"# \xb1\xf0\xb8\xc7\xd4\xad\xc0\xb4\xbe\xcd\xd5\xe2\xd1\xf9")
+            kept = target.read_bytes()
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = cli.main(["stitch", str(head), str(tail),
+                                 "--out", str(target)])
+            self.assertEqual(code, 1)
+            self.assertIn("--overwrite", out.getvalue())
+            self.assertEqual(target.read_bytes(), kept, "拒绝之后原件一个字节都不许动")
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    # ------------------------------------------------------------ 金标准
+    @_needs(HILL)
+    def test_金标准高避接自己就是两倍的行数(self):
+        """规则第 5 条：新能力要在金标准上实跑。这里拿同一份金标接自己。"""
+        log = ld.LogFile.read(HILL)
+        self.addCleanup(log.close)
+        axis = stitch.axis_of(log)
+        time, columns, _units, scheme = stitch.stack([log, log])
+        self.assertEqual(time.size, axis.size * 2)
+        self.assertEqual(scheme.rows, (axis.size, axis.size))
+        self.assertAlmostEqual(scheme.seam(0)[0], float(axis[-1]), places=9)
+        self.assertAlmostEqual(scheme.seam(0)[1], float(axis[-1]) + 1.0 / log.sample_rate,
+                               places=9)
+        for name in ("Vx KF", "G Force Lat"):
+            if name not in columns:
+                continue
+            self.assertTrue(np.array_equal(columns[name][:axis.size],
+                                           columns[name][axis.size:]),
+                            "同一份数据接自己，前后两段该逐点相同")
+
+    @_needs(ENDURANCE)
+    def test_金标准耐久接自己的方案(self):
+        log = ld.LogFile.read(ENDURANCE)
+        self.addCleanup(log.close)
+        axis = stitch.axis_of(log)
+        scheme = stitch.plan([log, log])
+        self.assertEqual(scheme.total, axis.size * 2)
+        self.assertEqual(scheme.starts[0], 0.0)
+        self.assertAlmostEqual(scheme.starts[1], float(axis[-1]) + 1.0 / log.sample_rate,
+                               places=6)
 
 
 if __name__ == "__main__":

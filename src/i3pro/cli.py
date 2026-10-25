@@ -734,6 +734,70 @@ def _open_ld(path: Path):
     return ldmod.LogFile.read(path)
 
 
+def cmd_stitch(args: argparse.Namespace) -> int:
+    """把接连录下来的几场接成一场（耐久里换车手那种）。
+
+    不给 ``--out`` 时**只打印接续方案**、一个字节都不写（先看一眼接缝对不对）；
+    给了才落盘，目标已存在时还要 ``--overwrite``——产物是几百 MB 的数据文件，
+    不该被一次手滑盖掉。
+    """
+    from . import stitch as stitchmod
+
+    paths = [Path(item) for item in args.files]
+    for path in paths:
+        if not path.is_file():
+            print(f"找不到文件：{path}。下一步：把路径写全，或者先用 `i3pro info` "
+                  "确认这个场次叫什么。")
+            return 1
+    out = Path(args.out) if args.out else None
+    if out is not None and out.exists() and not args.overwrite:
+        print(f"{out} 已经在了。下一步：换一个 --out 名字，"
+              "或者加 --overwrite 明确要盖掉它。")
+        return 1
+
+    sessions = []
+    try:
+        for path in paths:
+            sessions.append(csvlog.open_session(path))
+        try:
+            scheme = stitchmod.plan(sessions, args.gap)
+        except stitchmod.StitchError as exc:
+            print(f"{exc}")
+            return 1
+        for path, session, start, rows, head, tail in zip(
+            paths, sessions, scheme.starts, scheme.rows, scheme.heads, scheme.tails
+        ):
+            print(f"  {path.name:36s}  {rows:>8,} 行"
+                  f"  {tail - head:9.2f} s"
+                  f"  {session.sample_rate:g} Hz"
+                  f"  合并时间轴 {start:.2f} s 起")
+        for index in range(len(sessions) - 1):
+            before, after = scheme.seam(index)
+            print(f"  接缝 {index + 1}：{before:.2f} s -> {after:.2f} s"
+                  f"（间隔 {scheme.gap_s:g} s）")
+        if out is None:
+            print("\n（只打印方案，一个字节都没写。要真接上就加 --out <输出.csv>）")
+            return 0
+
+        time, columns, units, scheme = stitchmod.stack(sessions, args.gap)
+        info = stitchmod.write(out, time, columns, units=units)
+        print(f"    -> {out.name}  {info['rows']:,} 行 × {info['columns']} 列"
+              f"  {info['bytes'] / 1e6:.1f} MB  （接 {len(sessions)} 场，"
+              f"末点 {float(time[-1]):.2f} s）"
+              + (f"；重名的 {len(scheme.aliases)} 种写法并成一条："
+                 + "、".join(f"{drop} -> {keep}" for drop, keep in scheme.aliases[:4])
+                 + ("…" if len(scheme.aliases) > 4 else "")
+                 if scheme.aliases else ""))
+        print("下一步: 把这份 CSV 放进 i2pro_data（或双击 导入数据.bat），"
+              "侧边栏里就是一场；要压小可以再跑 "
+              "`python tools\\make_csv_gz.py <那份文件> --delete`。")
+        return 0
+    finally:
+        for session in sessions:
+            with contextlib.suppress(Exception):
+                session.close()
+
+
 def cmd_import(args: argparse.Namespace) -> int:
     """把 .ld/.ldx/.csv/.xlsx/.txt/.tsv 复制或移动进数据目录，让它们出现在侧边栏。"""
     from . import importer
@@ -1184,6 +1248,27 @@ def build_parser() -> argparse.ArgumentParser:
                         f"放宽多少秒（.ld 头里的绝对时间不可靠；默认 "
                         f"{pairingmod.MAX_LAG_S:g}）")
     p.set_defaults(func=cmd_pair)
+
+    p = sub.add_parser(
+        "stitch",
+        help="把接连录下来的几场接成一场（耐久里换车手那种）",
+        description=(
+            "耐久的两段是两次记录：车手换人时记录仪停了再起，于是 .ld 与合并产物都是"
+            "两份，圈速接不上、整场电耗也各算一半。这条命令按给定顺序把几场接在一条"
+            "时间轴上：后一场的首点落在前一场末点 + 一个采样间隔上（--gap 可以在接缝"
+            "上额外留出秒数，默认 0 = 首尾相接，把换人的停表时间丢掉）。列取各场通道"
+            "的并集，某一场没有的列留空。不给 --out 时只打印方案，一个字节都不写。"
+        ),
+    )
+    p.add_argument("files", nargs="+",
+                   help="按时间顺序排好的几场（.ld / .csv / .csv.gz / .xlsx / .txt）")
+    p.add_argument("--out", default=None,
+                   help="接好的宽表写到哪（.csv，UTF-8 带 BOM）；不给就只打印方案")
+    p.add_argument("--gap", type=float, default=0.0,
+                   help="接缝上额外留多少秒（默认 0：首尾相接，前面的场次在前）")
+    p.add_argument("--overwrite", action="store_true",
+                   help="目标已存在时也照写（默认拒写，让人换个名字）")
+    p.set_defaults(func=cmd_stitch)
 
     p = sub.add_parser("report", help="时间报告 / 通道报告（分段计时、理论最快圈、通道统计）")
     p.add_argument("file")

@@ -6049,6 +6049,59 @@ python tools\verify_clicks.py
 | 无头 smoke | 两份金标准各 `920 checks`，全过 |
 | 真浏览器 | `429 项检查：429 通过，0 失败` |
 
+## A123 · 接续：把接连录下来的几场接成一场（本次新增，`i3pro stitch`）
+
+**要解决的问题**：10.25 的耐久是**两次记录**——换车手时记录仪停了再起，于是
+`20261025-cjh耐久12圈`（16:05:08–16:29:03）与 `20261025-jhy耐久12圈`
+（16:29:20–16:47:00）各是一个场次。分开看的话圈速接不上、整场电耗各算一半、
+报表只有半场。要的是**一场**。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 纯函数 | 新增 `src/i3pro/stitch.py`：`axis_of` / `step_of` / `plan` / `stack` / `write`，不读盘、不写盘、不 import 服务层 |
+| 接缝 | 后一场的**首点**落在"前一场末点 + 一个采样间隔 + `--gap`"上；默认 `--gap 0` 就是首尾相接（把换人的停表时间丢掉），与 10.18 的 `20261018-耐久合并` 同一条口径 |
+| 列 | 各场通道的**并集**：第一场的名字与顺序在前，后面多出来的按名字排后；同名两种写法（`Vx KF` / `Vx_KF`）算同一条、保留先来的那个——判据是 `pairing.name_key`（本次从私有 `_key` 提为公开，`merge_sources` 与 `stitch` 共用一处） |
+| 缺列 | 某一场没有的通道留空（NaN），不补 0 |
+| 慢通道 | `.ld` 里比主时间基慢的通道（高避金标准 437 条里 147 条比 50 Hz 慢，`Gear` 只有 464 个样本 / 464 s）按零阶保持搬到那一场自己的时间轴上；读不到采样率时明确报错而不是错位 |
+| 落盘 | 走 `pairing.write_merged`（合并宽表的形状只在一处定义：首列 `time_s`、第二行单位、UTF-8 带 BOM） |
+| 命令行 | `i3pro stitch <前半> <后半> [...] --out <场次>.csv [--gap 秒]`；不给 `--out` 只打印方案、一个字节都不写，目标已存在时先拒写（要 `--overwrite`） |
+| 词表 | `CONTEXT.md` 新增「接续 / stitch」，并写明它与「合并场次」（`.ld` + CAN 帧表）的区别 |
+
+```powershell
+python -m unittest tests.test_i3pro.TestStitch -v
+.\i3pro.cmd stitch "i2pro_data\20261025-cjh耐久12圈.csv.gz" "i2pro_data\20261025-jhy耐久12圈.csv.gz"
+.\i3pro.cmd stitch "i2pro_data\20261025-cjh耐久12圈.csv.gz" "i2pro_data\20261025-jhy耐久12圈.csv.gz" --out "out\20261025-耐久合并.csv"
+python out\_stitch_verify.py "out\20261025-耐久合并.csv" "i2pro_data\20261025-cjh耐久12圈.csv.gz" "i2pro_data\20261025-jhy耐久12圈.csv.gz"
+.\i3pro.cmd info "i2pro_data\20261025-耐久合并.csv.gz"
+python tools\make_csv_gz.py "i2pro_data\20261025-耐久合并.csv" --delete
+python -m unittest discover -s tests -q
+python tools\verify_ld_vs_csv.py
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
+node tools\smoke_viewer.js "out\20260524-耐久正赛.html"
+python tools\verify_clicks.py
+```
+
+**通过判据（本机实测，2026-10-25）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 两段 | `cjh` 143,500 行 / 1434.99 s、`jhy` 106,000 行 / 1059.99 s，各 100 Hz、515 条原生通道 |
+| 接缝 | `1434.99 s -> 1435.00 s`（间隔 0 s）；墙钟上两段是 16:29:03 / 16:29:20，**17 s 换人停顿不在产物里**（与 10.18 的 140 s 同一条口径） |
+| 产物 | **249,500 行 × 515 列 / 491.4 MB**（491,445,828 字节），末点 `2494.99 s`，行数 = 两段相加 |
+| 接缝逐点核对 | **515 条通道 0 条不一致**：前半逐点等于 `cjh`、后半逐点等于 `jhy`（`out\_stitch_verify.py` 的判据） |
+| 列序 | 与前半完全相同；两场的通道名集合相同，所以没有并集新增列、没有重名折叠 |
+| 读回来 | `i3pro info`：`2495.0 s / 100 Hz / 520 条`（515 原生 + 5 条数学通道）；`looks_like_frames` 为假 |
+| 关键通道 | `I Data` −92.46…60.89（249,498 个有效）、`U1 Data` −0.001…593.468、`Battery Power` −31.2…45.67、`Vx KF` −0.88…83.26 |
+| GPS | `latitude MTI` 249,496 个有效（−0.00000…22.68555）、`longitude MTI` 249,496 个有效（−0.00000…114.28104）——接完两段都在 |
+| 压过的容器 | 491.4 MB -> **79.0 MB（16%）**，本地只留 `.csv.gz`；共享目录留 `.csv` + `.csv.gz` |
+| 同一份内容 | 解压后 SHA-256 `61E4E5E1827EC75CA0AB486A0AE91C35A3BC72D6F7474FAEE1E1CBFD4C8E3535`（本地 .csv.gz 解压 = 共享 .csv）；压缩字节 SHA-256 `6A0638DA75C564D7E824099CA9DA603AA58E36716EA2544F0481267F223EF926`（本地 = 共享） |
+| 单测 | `TestStitch` **15 项**全过（含金标准高避 / 耐久各一条） |
+| 四条回归 | 单测 `Ran 688 tests in 112.777s`，`OK (skipped=28)`；解析对照 `PASS - 0 channel(s) outside tolerance`；两份金标准 smoke 各 **935 checks** 全过；真浏览器 **444 项检查：444 通过，0 失败** |
+
+**边界**：接续**只按给定顺序**接，不自己排时间顺序、也不自己算墙钟偏移（记录仪的钟
+本身不准，真实停表秒数要靠墙钟，得人给 `--gap`）。它不写侧车、不改任何原件；
+接出来的是一份新的宽表，进 `i2pro_data` 之后就是普通场次。
+
 ## A122 · `.csv.gz`：纯文本场次的**只读**压缩容器（本次新增，ADR-0012）
 
 **要解决的问题**：10.25 那批 15 个合并场次合计 2.72 GB，共享目录被顶到 7.3 GB。用户

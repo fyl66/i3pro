@@ -50,6 +50,7 @@ __all__ = [
     "ld_window",
     "merge_columns",
     "merge_sources",
+    "name_key",
     "overlap_seconds",
     "recording_window",
     "write_merged",
@@ -168,11 +169,17 @@ def _same_name(left: str, right: str) -> bool:
     （实测 CAN 那侧就是这么少了十几条通道）。所以只在"两边都只差空格 / 下划线 /
     大小写"时才认为同名。
     """
-    return _key(left) == _key(right)
+    return name_key(left) == name_key(right)
 
 
-def _key(name: str) -> str:
-    """:func:`_same_name` 的键形式（两侧都只差空格 / 下划线 / 大小写时相等）。"""
+def name_key(name: str) -> str:
+    """"同一个名字的两种写法"的键：**只**抹掉空格 / 下划线、统一大小写。
+
+    比 :func:`channelref.normalise`（抹掉所有非字母数字）**严**：那一条会把
+    ``AngVelX_body`` 与 ``AngVelX_hor`` 并成一条，把两条真的不同的通道吃掉。
+    合并（:func:`merge_sources`）与接续（``stitch.stack``）判"同一条通道"都用它，
+    这样"同名"在这两条路上只有一个答案。
+    """
     return name.replace("_", "").replace(" ", "").lower()
 
 
@@ -736,12 +743,12 @@ def merge_sources(log, sources):
         else:
             columns[channel.name] = hold_sample(grid, values, axis)
 
-    taken = {_key(name) for name in columns}
+    taken = {name_key(name) for name in columns}
     # 帧表那边本场次没有的通道：按名字排序接在后面（输出稳定、可 diff）。
     seen_can: dict[str, str] = {}
     for session, _offset in sources:
         for channel in session.channels:
-            if _key(channel.name) in taken or channel.name in seen_can:
+            if name_key(channel.name) in taken or channel.name in seen_can:
                 continue
             seen_can[channel.name] = str(getattr(channel, "unit", "") or "")
     for name in sorted(seen_can):
@@ -756,7 +763,7 @@ def merge_sources(log, sources):
             # 字典会让"这一场算出来的数学通道"在合并时 KeyError。
             values = np.asarray(session.values(channel.name), dtype=np.float64)
             unit = str(getattr(channel, "unit", "") or "")
-            key = _key(channel.name)
+            key = name_key(channel.name)
             if key in taken:
                 # 同名：对面是空的（C125 里没接上的 IVT 模板通道，整段 0）就换成真的
                 # 有数的这一条；真的有数就不动它，把 CAN 的这条记进 skipped。
@@ -768,7 +775,7 @@ def merge_sources(log, sources):
                 # 无效哨兵（实测这份日志从 0 跳到 429496），而 ``.ld`` 那条空列
                 # 下面有 ``derive.distance_series`` 的速度积分兜底。让它保持空列，
                 # 比把整条距离轴换成 429 km 安全。
-                keep_ld = _key(existing) in ("distance", "distance2")
+                keep_ld = name_key(existing) in ("distance", "distance2")
                 if not replaceable or keep_ld:
                     if channel.name not in skipped:
                         skipped.append(channel.name)

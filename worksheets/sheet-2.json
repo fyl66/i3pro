@@ -9,7 +9,14 @@
       "x": 0.0,
       "y": 0.0,
       "w": 12.0,
-      "h": 10.0,
+      "h": 30.5,
+      "config": {
+        "channels": [
+          "Channel_1",
+          "Steering_Linear"
+        ],
+        "mode": "tiled"
+      },
       "pick": {
         "channels": {
           "limit": 8

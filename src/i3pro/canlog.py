@@ -126,6 +126,11 @@ def looks_like_frames(path: str | Path) -> bool:
     判据是**表头特征**（不是文件名）：至少要认出时间、ID、数据三列，而且第二列带
     Excel 写坏的那个 ``="`` 前缀。认不出就当普通通道表走 CSV 那条路——宁可报"没有
     时间列"，也不能把一张通道表按帧解。
+
+    ``.csv.gz`` 一律返回 ``False``（ADR-0012：帧表不压缩）。这一条是**承重**的：
+    场次库启动时会对每份 ``.csv`` 调一次这里，压过的文件要真去解压嗅探，那趟扫描
+    就变成逐份解压；读取端（:func:`i3pro.csvlog.open_session`）也不再对压缩容器
+    做帧表嗅探，"文件是压缩的"与"这是帧表"这两件事在 i3pro 里互斥。
     """
     path = Path(path)
     if path.suffix.lower() != ".csv":

@@ -17,7 +17,7 @@ import csv
 import re
 from pathlib import Path
 
-from . import csvlog, sidecar
+from . import containers, csvlog, sidecar
 
 __all__ = [
     "DELIMITERS", "DELIMITER_LABELS", "ENCODINGS", "ENCODING_LABELS",
@@ -57,7 +57,7 @@ def _decodes(blob: bytes, encoding: str) -> bool:
 
 def detect_encoding(path: str | Path, limit: int = SAMPLE_BYTES) -> str:
     """这份文件该按什么编码读。BOM 说了算，其次 UTF-8，再其次 GBK。"""
-    with Path(path).open("rb") as handle:
+    with containers.open_binary(path) as handle:
         head = handle.read(limit)
     if head[:2] in (b"\xff\xfe", b"\xfe\xff"):
         return "utf-16"
@@ -125,10 +125,10 @@ def scan_text(
     path = Path(path)
     encoding = encoding or detect_encoding(path)
     if delimiter is None:
-        with path.open("r", encoding=encoding, newline="") as handle:
+        with containers.open_text(path, encoding=encoding) as handle:
             delimiter, _scores = sniff_delimiter(handle.read(SAMPLE_BYTES))
     rows: list[list[str]] = []
-    with path.open("r", encoding=encoding, newline="") as handle:
+    with containers.open_text(path, encoding=encoding) as handle:
         for line in handle:
             rows.append(split_line(line.rstrip("\r\n"), delimiter))
             if limit is not None and len(rows) >= limit:
@@ -147,7 +147,10 @@ def read_frame(path: str | Path, *, encoding: str, delimiter: str, skip: int, li
     import pandas as pd
 
     common = dict(header=None, skiprows=skip, nrows=limit, skip_blank_lines=True,
-                  on_bad_lines="skip", encoding=encoding, encoding_errors="replace")
+                  on_bad_lines="skip", encoding=encoding, encoding_errors="replace",
+                  # 压过的表由 pandas 现解压（`.gz` 它自己认得，但写出来更明白：
+                  # 这一条是 ADR-0012 的读取路径，别让"能不能压"取决于 pandas 的版本）。
+                  compression="gzip" if containers.is_compressed(path) else "infer")
     if delimiter == " ":
         # 连续空白只能用 python 引擎的正则分隔符；这类表一般不大。
         return pd.read_csv(path, sep=r"\s+", engine="python", **common)
@@ -215,7 +218,7 @@ def read_text_session(
             f"{path.name}: 表头之后没有数据行。"
             "下一步：在导入预览里把表头行指到真正的那一行，或确认这份导出里带着数据。"
         )
-    resolved = fmt or ("csv" if path.suffix.lower() == ".csv" else "txt")
+    resolved = fmt or ("csv" if containers.format_suffix(path) == ".csv" else "txt")
     session = csvlog.session_from_frame(
         path, rows[: skip], frame, renames=renames, units=units, fmt=resolved,
         header=head, unit_row=bool(skip == head + 2),

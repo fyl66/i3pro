@@ -1,37 +1,31 @@
 {
   "definitions": [
     {
-      "name": "总G",
-      "expr": "sqrt('G Force Lat'^2 + 'G Force Long'^2)",
-      "unit": "g",
-      "note": "合成加速度。两条金标准场次都算得出来（最大 2.228 g / 2.052 g）。"
-    },
-    {
-      "name": "纵向加速度g",
-      "expr": "'G Force Long'",
-      "unit": "g",
-      "note": "只是想给它一个中文名并在报表里直接用。"
-    },
-    {
-      "name": "速度kmh",
-      "expr": "'Vx KF'",
-      "unit": "km/h",
-      "note": "本场选用的车速通道；换车换场次时改成实际存在的那一条。"
-    },
-    {
-      "name": "平滑纵向G",
-      "expr": "smooth('G Force Long', 0.1)",
-      "unit": "g",
-      "note": "0.1 秒滑动平均，看纵向加速度的趋势而不是毛刺。"
-    },
-    {
-      "name": "Left Ride height",
-      "expr": "abs('FSD13 Distance1'-200 )+200-193.5",
+      "name": "ST torque",
+      "expr": "('Steering Torque'-0.0163) *981.595",
       "unit": ""
     },
     {
-      "name": "Right Ride Height",
-      "expr": "abs('FSD13 Distance2'-200 )+200-197",
+      "name": "Drive Energy",
+      "expr": "integrate(max(battery_power(), 0) / 3600)",
+      "unit": "kWh",
+      "note": "驱动电耗：电池放电能量。正=从电池取电；优先 Battery Power，缺了用 -I Data×U1 Data。"
+    },
+    {
+      "name": "Regen Energy",
+      "expr": "integrate(max(-battery_power(), 0) / 3600)",
+      "unit": "kWh",
+      "note": "回收能量：回充到电池的能量。正=回充；与 Drive Energy 使用同一来源。"
+    },
+    {
+      "name": "Net Energy",
+      "expr": "'Drive Energy' - 'Regen Energy'",
+      "unit": "kWh",
+      "note": "净耗电 = 驱动电耗 − 回收能量。总耗电量按这个口径。"
+    },
+    {
+      "name": "空速",
+      "expr": "'Steering_Linear' / 64 * 201 * 600",
       "unit": ""
     }
   ]

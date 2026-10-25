@@ -22,7 +22,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from i3pro import ld, motec_csv  # noqa: E402
+from i3pro import containers, ld, motec_csv  # noqa: E402
 
 #: 裁判要的两份东西（``.ld`` 与 MoTeC 自己导出的同名 ``.csv``）放哪。默认仓库里的
 #: ``i2pro_data/``，但可以另放——用户把数据挪走之后这条就没法跑了（2026-10-06 实测）：
@@ -31,9 +31,22 @@ from i3pro import ld, motec_csv  # noqa: E402
 DATA = Path(os.environ.get("I3PRO_DATA") or (ROOT / "i2pro_data"))
 
 
+def _reference(name: str) -> Path | None:
+    """``<主名>.csv`` 那份裁判在哪：裸 ``.csv`` 优先，其次是压过的 ``.csv.gz``。
+
+    压过的导出同样是那一次导出的逐字节内容（只是套了 gzip），所以拿它当裁判一样
+    成立——ADR-0012 定的容器，读取器两边都认。
+    """
+    for suffix in (".csv", ".csv.gz"):
+        candidate = DATA / f"{name}{suffix}"
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def compare(stem: str, sample_limit: int = 20000, verbose: bool = False) -> dict:
     log = ld.LogFile.read(DATA / f"{stem}.ld")
-    csv = motec_csv.load(DATA / f"{stem}.csv", max_rows=sample_limit + 10)
+    csv = motec_csv.load(_reference(stem), max_rows=sample_limit + 10)
     master = csv.sample_rate or log.sample_rate
     compared = 0
     exact = 0
@@ -85,8 +98,8 @@ def main() -> int:
     # 认不出的跳过并说出来。
     stems, skipped = [], []
     for path in sorted(DATA.glob("*.ld")):
-        pair = DATA / f"{path.stem}.csv"
-        if not pair.exists():
+        pair = _reference(path.stem)
+        if pair is None:
             continue
         if _is_motec_export(pair):
             stems.append(path.stem)
@@ -120,7 +133,7 @@ def _is_motec_export(path: Path) -> bool:
     用 ``time_s``——那是**另一种形态**，不是 MoTeC 的对照物，所以这里只认 ``Time``。
     """
     try:
-        with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as handle:
+        with containers.open_text(path, encoding="utf-8-sig", errors="replace") as handle:
             for _ in range(400):
                 head = next(csv.reader([handle.readline()]), [])
                 if head and str(head[0]).strip() == "Time":

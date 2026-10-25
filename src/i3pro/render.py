@@ -25,6 +25,7 @@ from . import channelpick as channelpickmod
 from . import axes as axesmod
 from . import channelref
 from . import channels as channelsmod
+from . import containers
 from . import (derive, gpsfix, heatmap as heatmapmod, histogram as histogrammod,
                laps as lapsmod)
 from . import notes as notesmod, report as reportmod, sections as sectionsmod
@@ -1166,7 +1167,8 @@ def build_payload(
         ),
         "api": api_base,
         "buckets": buckets,
-        "session": log.path.stem,
+        # 场次名按**容器**取（ADR-0012）：`X.csv.gz` 的主名是 `X`，不是 `X.csv`。
+        "session": containers.session_name(log.path),
         # 工作表（ticket #30）：界面顶上那排按钮全来自 worksheets/*.json，
         # 快照与服务两种模式都带上，所以离线打开照样能切。
         "worksheets": sheets,

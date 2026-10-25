@@ -18,7 +18,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from i3pro import csvlog  # noqa: E402
+from i3pro import containers, csvlog  # noqa: E402
 
 WHEELS = ("FR", "FL", "RL", "RR")
 IDX = {"FR": 1, "FL": 2, "RL": 3, "RR": 4}
@@ -29,7 +29,10 @@ U_MIN = 100.0
 
 def _sessions(data: Path) -> list[dict]:
     out = []
-    for path in sorted(p for p in data.glob("*.csv")
+    # 合并产物现在可能是压过的 `.csv.gz`（ADR-0012）——只扫 `*.csv` 的话，这份数据上
+    # 会**静默**一个场次都找不到（脚本本来就是拿来跑这些合并场次的）。
+    paths = [*data.glob("*.csv"), *data.glob("*.csv.gz")]
+    for path in sorted(p for p in paths
                        if not p.name[:4].isdigit() or "_" not in p.name):
         session = csvlog.read_csv_session(path)
         names = {c.name for c in session.channels}

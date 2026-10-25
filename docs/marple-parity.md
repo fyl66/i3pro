@@ -59,7 +59,7 @@
 | 13 | 通道清单与元数据 | `POST /api/v1/sources/signals`：请求 `{dataset_filter:{dataset,stream,layer_shift}, signal_filters:[{name}]}` → 响应 `{message:{signal_list:[{count, datatype, display_name, frequency, metadata:{id, unit, min, max, mean, sum, storage_status, description, count_pre, count_value, count_text}}]}}` | `channels` 命令 + 侧边栏通道列表（单位 / 采样率 / 小数位 / min / max） | 已覆盖；只有 `storage_status` 可作参考 |
 | 14 | 区段轴 | 横轴模式枚举 `{DISTANCE, SEGMENTS}`；端点 `/sources/segments` | 区段是**带子 + 报表分组**；横轴只有时间/距离/双圈 | 押后 |
 | 15 | 导出任务化 | `exportJobs`；`DATA_EXPORT` / `PLOT_EXPORT` / `FIGURES_EXPORT` 三种模态 | 导出是同步的（已有预计行数 + 进度条 + 取消） | 押后 |
-| 16 | 函数目录 | 前端 12 个：`calibration` `clamp` `cumsum` `difference` `discrete_derivative` `integral` `moving_aggregate` `outliers_fixed` `outliers_stddev` `sample_shift` `time` `zeroing`；**参数带类型**（signal / enum / number），表单按类型渲染 | `maths.py` **53 个函数** + 插入通道下拉 + 本地/全局作用域 | 已超越（只借鉴"参数类型驱动表单"这一条表述） |
+| 16 | 函数目录 | 前端 12 个：`calibration` `clamp` `cumsum` `difference` `discrete_derivative` `integral` `moving_aggregate` `outliers_fixed` `outliers_stddev` `sample_shift` `time` `zeroing`；**参数带类型**（signal / enum / number），表单按类型渲染 | `maths.py` **56 个函数** + 插入通道下拉 + 本地/全局作用域 | 已超越（只借鉴"参数类型驱动表单"这一条表述） |
 | 17 | 通道别名与库筛选 | `FILTER_FUNCTION_ONLY_MINE` / `FILTER_*_TAGS`、`/tags`、`SETTING_LIBRARY_COLUMNS` | 通道别名（有序候选）、工作表 `pick` 挑通道 | 已超越（服务端库/标签体系不做） |
 | 18 | 配色方案 | `SETTING_OVERLAY_PALETTE`（含 "Matplotlib (tab10)"） | 三套调色板 + 手选色 + ΔE/WCAG 可辨性实测 | 已覆盖 |
 | 19 | 标注 | 端点 `/annotations/add`、`/annotations/remove`、`LOAD_ANNOTATIONS` | Notes 组件（琥珀色虚线 + 就地改名 + 侧车） | 已覆盖 |

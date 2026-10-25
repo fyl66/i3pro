@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from i3pro import api as apimod  # noqa: E402
 from i3pro.cli import _utf8_console  # noqa: E402  # 控制台编码只有那一处实现
+from i3pro import containers  # noqa: E402
 from i3pro import library as librarymod  # noqa: E402
 from i3pro import render, resolution, server, timebase  # noqa: E402
 
@@ -102,12 +103,13 @@ def resolve_name(library, path: Path) -> str:
     """这个文件在场次库里叫什么名字。
 
     同名 ``.ld`` 与 ``.csv`` 并存时，库会给第二个加后缀，所以不能拿 ``path.stem``
-    当答案——按路径反查，查不到才回落。
+    当答案——按路径反查，查不到才回落到**主名**（``X.csv.gz`` 的主名是 ``X``，
+    ``path.stem`` 会给出 ``X.csv``，见 ADR-0012）。
     """
     for name in library.names():
         if library.path_of(name) == path:
             return name
-    return path.stem
+    return containers.session_name(path)
 
 
 def measure_compute(api, name: str, channels: list[str], buckets: int,

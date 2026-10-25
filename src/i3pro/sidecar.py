@@ -95,8 +95,18 @@ def kind_of(name: str) -> Kind:
 
 
 def path_of(name: str, session_path: str | Path) -> Path:
-    """``<场次>.ld``（或 ``.csv`` / ``.ldx``）-> 这种侧车的路径。"""
-    return Path(session_path).with_suffix(kind_of(name).suffix)
+    """``<主名>.ld``（或 ``.csv`` / ``.csv.gz`` / ``.ldx``）-> 这种侧车的路径。
+
+    侧车只认**主名**（:func:`i3pro.containers.session_name`）：``X.csv`` 与
+    ``X.csv.gz`` 是同一场的两种容器，用户画在它们上面的信标/切分是同一份，所以只
+    有 ``X.laps.json``，不会冒出 ``X.csv.gz.laps.json``（ADR-0012）。用
+    ``with_suffix`` 做不到这件事——它只换最后一段，``X.csv.gz`` 会变成
+    ``X.csv.laps.json``。
+    """
+    from . import containers
+
+    path = Path(session_path)
+    return path.with_name(containers.session_name(path) + kind_of(name).suffix)
 
 
 def _unreadable(kind: Kind, path: Path, why: Exception) -> str:

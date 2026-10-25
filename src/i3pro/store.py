@@ -20,6 +20,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from . import channels as channelsmod
+from . import containers
 from . import ld as ldmod
 from . import timebase
 
@@ -111,7 +112,7 @@ def write_parquet(
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     table, meta = build_table(log, channels=channels, master_rate=master_rate)
-    stem = Path(log.path).stem
+    stem = containers.session_name(log.path)
     parquet_path = outdir / f"{stem}.parquet"
     meta_path = outdir / f"{stem}.meta.json"
     pq.write_table(table, parquet_path, compression=compression)
@@ -182,7 +183,7 @@ def query(sql: str, paths: list[str | Path]) -> "pd.DataFrame":
     names = []
     for path in paths:
         path = Path(path)
-        name = _slug(path.stem)
+        name = _slug(containers.session_name(path))
         frame = load_frame(path)
         frame.to_sql(name, con, index=False)
         names.append(name)

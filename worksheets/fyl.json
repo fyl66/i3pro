@@ -20,7 +20,8 @@
           "RR_Tire_Temperature3",
           "RR_Tire_Temperature1",
           "RF_Tire_Temperature0",
-          "RF_Tire_Temperature2"
+          "RF_Tire_Temperature2",
+          "Vx_KF"
         ],
         "mode": "tiled"
       }
@@ -36,7 +37,11 @@
           "RL_Aero_Ride_Height",
           "RR_Aero_Ride_Height",
           "FR_Aero_Ride_Height",
-          "FL_Aero_Ride_Height"
+          "FL_Aero_Ride_Height",
+          "RL Aero Ride Height",
+          "RR Aero Ride Height",
+          "FR Aero Ride Height",
+          "FL Aero Ride Height"
         ],
         "mode": "tiled"
       }
@@ -50,7 +55,9 @@
       "config": {
         "channels": [
           "FR_Brake_Disc_Temperature",
-          "RR_Brake_Disc_Temperature"
+          "RR_Brake_Disc_Temperature",
+          "Left_Rear_Brake_Disc_Temp",
+          "Right_Front_Brake_Disc_Temp"
         ],
         "mode": "tiled"
       }
@@ -66,7 +73,11 @@
           "Right_Rear_Suspension_Load",
           "Left_Rear_Suspension_Load",
           "Right_Front_Suspension_Load",
-          "Left_Front_Suspension_Load"
+          "Left_Front_Suspension_Load",
+          "Left Front Suspension Load",
+          "Right Front Suspension Load",
+          "Left Rear Suspension Load",
+          "Right Rear Suspension Load"
         ],
         "mode": "tiled"
       }

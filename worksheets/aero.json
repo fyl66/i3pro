@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "name": "aero",
+  "order": 83,
+  "hints": [],
+  "components": [
+    {
+      "type": "graph",
+      "x": 0.0,
+      "y": 0.0,
+      "w": 8.0,
+      "h": 30.25,
+      "config": {
+        "channels": [
+          "gyrZ MTI",
+          "Vx KF",
+          "Radius",
+          "SW Angle",
+          "空速",
+          "Vx_KF"
+        ],
+        "mode": "tiled",
+        "palette": "default",
+        "colors": {
+          "yaw MTI": "#ff5d6c"
+        }
+      },
+      "pick": {
+        "channels": {
+          "limit": 8
+        }
+      }
+    },
+    {
+      "type": "track",
+      "x": 8.0,
+      "y": 0.0,
+      "w": 4.0,
+      "h": 13.0,
+      "config": {
+        "window": "zoom"
+      }
+    }
+  ]
+}

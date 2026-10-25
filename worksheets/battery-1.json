@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "name": "Battery",
+  "order": 82,
+  "hints": [],
+  "components": [
+    {
+      "type": "graph",
+      "x": 0.0,
+      "y": 0.0,
+      "w": 8.0,
+      "h": 35.25,
+      "config": {
+        "channels": [
+          "Max temp (2)",
+          "Max voltage",
+          "U2 Data",
+          "U1 Data",
+          "I Data",
+          "Battery Power",
+          "Min voltage",
+          "SOC",
+          "Drive Energy",
+          "Regen Energy",
+          "Net Energy"
+        ],
+        "mode": "tiled"
+      },
+      "pick": {
+        "channels": {
+          "limit": 8
+        }
+      }
+    },
+    {
+      "type": "track",
+      "x": 8.0,
+      "y": 0.0,
+      "w": 4.0,
+      "h": 13.0,
+      "config": {
+        "window": "zoom"
+      }
+    }
+  ]
+}

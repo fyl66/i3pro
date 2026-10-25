@@ -36,7 +36,7 @@ from pathlib import Path
 import numpy as np
 
 from . import channels as channelsmod
-from . import derive, ld as ldmod, timebase, xlsx
+from . import containers, derive, ld as ldmod, timebase, xlsx
 
 __all__ = [
     "RATES",
@@ -726,7 +726,7 @@ def metadata(log: ldmod.LogFile, req: Request, rows: int, columns: int) -> dict:
     """CSV 的 ``metadata.json`` 与 Excel 的「元数据」sheet 用的是同一份内容。"""
     info = {
         "file": log.path.name,
-        "session": log.path.stem,
+        "session": containers.session_name(log.path),
         "range": {
             "label": req.range_label,
             "from": req.start,
@@ -811,7 +811,8 @@ def filename(log: ldmod.LogFile, req: Request) -> str:
     """下载时那个文件名（中文保留，路径分隔符与冒号换成安全字符）。"""
     label = req.range_label.replace(":", "：").replace("/", "-").replace("\\", "-")
     mark = "-绝对时间" if req.index == "timestamp" else ""
-    name = f"{log.path.stem}-{label}-{req.rate_label()}{mark}-{req.layout}.{req.fmt}"
+    name = (f"{containers.session_name(log.path)}-{label}-"
+            f"{req.rate_label()}{mark}-{req.layout}.{req.fmt}")
     if req.bundle and req.fmt == "csv":
         name += ".zip"
     return name
@@ -903,7 +904,7 @@ def _write_csv(log: ldmod.LogFile, req: Request, path: Path, progress) -> dict:
     if req.bundle:
         meta = metadata(log, req, rows, len(header))
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.write(data_path, arcname=f"{log.path.stem}.csv")
+            zf.write(data_path, arcname=f"{containers.session_name(log.path)}.csv")
             zf.writestr("metadata.json", json.dumps(meta, ensure_ascii=False, indent=2))
         data_path.unlink(missing_ok=True)
     if progress is not None:

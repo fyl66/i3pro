@@ -160,8 +160,11 @@ def speed_channel(log: ldmod.LogFile) -> str | None:
         actual = resolve_channel(log, candidate, table)
         if actual is None:
             continue
-        values = log.values(actual)
-        if np.nanmax(np.abs(values)) > 1.0:  # not a dead channel
+        values = np.asarray(log.values(actual), dtype=np.float64)
+        finite = values[np.isfinite(values)]
+        if finite.size and float(np.max(np.abs(finite))) > 1.0:
+            # 空通道（整列 NaN）不是"速度很大"，也不是"速度为零"；它只是没有
+            # 采样。先取有限值再判，既避免 nanmax 警告，也让距离轴继续找下一条。
             return actual
     return None
 

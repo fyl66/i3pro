@@ -52,7 +52,9 @@ from i3pro import (  # noqa: E402
     api as apimod,
     attitude as attitudemod,
     cache, canlog, channelpick, channelref, channels, csvlog, dbc, derive, gpsfix,
+    containers,
     cursorstats as cursorstatsmod,
+    energy as energymod,
     heatmap as heatmapmod,
     cli,
     laps as lapsmod, ld, library as librarymod,
@@ -2410,6 +2412,58 @@ class TestCsvSession(unittest.TestCase):
         self.assertEqual(cells["Left Rear Damper"]["name"], "Left Rear Damper")
         self.assertEqual(cells["Left Rear Damper"]["unit"], "mm")
         self.assertEqual(cells["Left Rear Damper"]["matched_by"], "未匹配")
+
+    def test_an_all_blank_numeric_column_stays_as_an_empty_channel(self):
+        """文件里有这一列、只是整列为空时，通道不能被读取器静默吃掉。
+
+        20261018 耐久合并里有 74 条 `.ld` 模板通道：表头与列都在，但整列没有
+        有效样本。旧读取器把它们标成“整列没有可用数值”后直接跳过，界面看起来
+        就像通道消失。空通道要保留下来，由 ``channels.state`` 显示成 empty。
+        """
+        import tempfile
+
+        rows = [
+            "Time,Vx KF,FR Aero Ride Height",
+            "s,km/h,cm",
+            "0.00,10,",
+            "0.01,20,",
+            "0.02,30,",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "empty-column.csv"
+            path.write_text("\n".join(rows), encoding="utf-8")
+            session = csvlog.read_csv_session(path)
+        self.assertTrue(session.has("FR Aero Ride Height"))
+        self.assertEqual(
+            channels.state(session, "FR Aero Ride Height"), channels.EMPTY
+        )
+        self.assertFalse(
+            next(
+                row for row in render.channel_index(session)
+                if row["name"] == "FR Aero Ride Height"
+            )["has_data"]
+        )
+        entry = next(
+            row for row in session.report
+            if row["column"] == "FR Aero Ride Height"
+        )
+        self.assertEqual(entry["status"], "通道")
+        self.assertFalse(entry["has_data"])
+        self.assertIn("通道保留", entry["detail"])
+
+    def test_an_empty_speed_channel_is_not_used_as_the_distance_source(self):
+        """空速度模板不是“速度 0”，也不该触发全 NaN 警告或生成假距离轴。"""
+        import tempfile
+        import warnings
+
+        rows = ["Time,Vx KF", "s,km/h", "0.00,", "0.01,", "0.02,"]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "empty-speed.csv"
+            path.write_text("\n".join(rows), encoding="utf-8")
+            session = csvlog.read_csv_session(path)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            self.assertIsNone(derive.speed_channel(session))
 
     def test_a_csv_without_a_time_column_is_refused_with_a_next_step(self):
         """Silently eating the first data column as time would be worse."""
@@ -5052,12 +5106,12 @@ class TestMaths(unittest.TestCase):
             "stat_min", "stat_max", "stat_mean", "stat_std_dev", "stat_start", "stat_end",
             "smooth", "filter_lp", "filter_hp",
             "filter_lp0", "filter_hp0",
-            "derivative", "integrate", "choose", "invalid", "flip_flop",
+            "derivative", "battery_power", "integrate", "choose", "invalid", "flip_flop",
             "time_shift", "time_valid", "range_is", "range_change",
             "bit_and", "bit_or", "bit_xor", "bit_not", "edge_delay", "hypot",
         ):
             self.assertIn(expected, names, f"函数表里缺 {expected}")
-        self.assertEqual(len(names), 55)
+        self.assertEqual(len(names), 56)
 
     # -------------------------------------------- 通道名怎么打得出来（用户反馈）
     def test_a_channel_name_with_spaces_can_be_typed_without_quotes(self):
@@ -7442,17 +7496,19 @@ class TestXlsxImport(_ExportBase):
         ``Time,A,Empty,B`` 里，叫 ``B`` 的通道拿到了 10/20/30，而 ``Empty`` 拿到了
         本该属于 B 的数字，报告里还写着 B「缺列」——一个错都不报，数字全配错了对。
         文字列在旧写法里则是抛一句 pandas 的 ``could not convert string to float``，
-        没有下一步。
+        没有下一步。现在空数值列会**保留成空通道**（``channels.state == empty``），
+        文字列仍然跳过；两种情况下 B 的值都必须留在 B 上。
         """
         blank = self.tmp() / "blank.csv"
         blank.write_text("Time,A,Empty,B\n0,1,,10\n0.01,2,,20\n0.02,3,,30\n",
                          encoding="utf-8")
         session = csvlog.read_csv_session(blank)
-        self.assertEqual([c.name for c in session.channels], ["A", "B"])
+        self.assertEqual([c.name for c in session.channels], ["A", "Empty", "B"])
         np.testing.assert_allclose(session.values("A"), [1, 2, 3])
         np.testing.assert_allclose(session.values("B"), [10, 20, 30])
+        self.assertEqual(channels.state(session, "Empty"), channels.EMPTY)
         self.assertEqual([row["column"] for row in session.report
-                          if row.get("status", "").startswith("跳过")], ["Empty"])
+                          if row.get("status", "").startswith("跳过")], [])
 
         text = self.tmp() / "text.csv"
         text.write_text("Time,A,Note,B\n0,1,hello,10\n0.01,2,world,20\n0.02,3,x,30\n",
@@ -9137,6 +9193,173 @@ class TestWorksheetEditingOverHttp(unittest.TestCase):
                 http.close()
 
 
+class TestEnergy(unittest.TestCase):
+    """电池功率与累计能量的符号、单位、回退和真实耐久数据。"""
+
+    @staticmethod
+    def _last(log, name: str) -> float:
+        return float(np.asarray(log.values(name), dtype=np.float64)[-1])
+
+    @staticmethod
+    def _ivt_totals(log) -> tuple[float, float, float]:
+        current = derive.hold_to_master(log, "I Data")
+        voltage = derive.hold_to_master(log, "U1 Data")
+        power = np.where(
+            voltage > energymod.MIN_BUS_VOLTAGE,
+            -current * voltage / 1000.0,
+            0.0,
+        )
+        axis = timebase.axis(log)
+        drive = float(np.trapezoid(np.maximum(power, 0.0), axis) / 3600.0)
+        regen = float(np.trapezoid(np.maximum(-power, 0.0), axis) / 3600.0)
+        return drive, regen, drive - regen
+
+    def test_battery_power_prefers_the_direct_channel(self):
+        session = _MathSession(
+            {"Battery Power": np.array([1.0, -2.0, 3.0])}, rate=1.0
+        )
+        np.testing.assert_allclose(
+            mathsmod.evaluate("battery_power()", session), [1.0, -2.0, 3.0]
+        )
+        source, power = energymod.power_series(session)
+        self.assertEqual(source, "Battery Power")
+        np.testing.assert_allclose(power, [1.0, -2.0, 3.0])
+
+    def test_ivt_fallback_uses_logger_sign_and_masks_low_voltage(self):
+        session = _MathSession(
+            {
+                "I Data": np.array([-10.0, -10.0, -10.0, -10.0]),
+                "U1 Data": np.array([50.0, 200.0, 0.0, 400.0]),
+            },
+            rate=1.0,
+        )
+        source, power = energymod.power_series(session)
+        self.assertEqual(source, "I Data × U1 Data")
+        np.testing.assert_allclose(power, [0.0, 2.0, 0.0, 4.0])
+
+    def test_zero_battery_power_stays_zero(self):
+        session = _MathSession({"Battery Power": np.zeros(5)}, rate=1.0)
+        source, power = energymod.power_series(session)
+        self.assertEqual(source, "Battery Power")
+        np.testing.assert_array_equal(power, np.zeros(5))
+
+    def test_missing_sources_say_what_to_do(self):
+        session = _MathSession({"车速": np.zeros(5)}, rate=1.0)
+        with self.assertRaises(mathsmod.MathError) as caught:
+            mathsmod.evaluate("battery_power()", session)
+        message = str(caught.exception)
+        self.assertIn("Battery Power", message)
+        self.assertIn("I Data", message)
+        self.assertIn("U1 Data", message)
+
+    def test_cumulative_energy_identity_and_units(self):
+        session = _MathSession(
+            {"Battery Power": np.array([10.0, 10.0, -5.0, -5.0, 0.0])},
+            rate=1.0,
+        )
+        got = energymod.cumulative(session)
+        self.assertIsNotNone(got)
+        np.testing.assert_allclose(
+            got["Net Energy"], got["Drive Energy"] - got["Regen Energy"]
+        )
+        self.assertAlmostEqual(
+            float(got["Drive Energy"][-1]), 15.0 / 3600.0, places=12
+        )
+        self.assertAlmostEqual(
+            float(got["Regen Energy"][-1]), 10.0 / 3600.0, places=12
+        )
+        self.assertAlmostEqual(
+            float(got["Net Energy"][-1]), 5.0 / 3600.0, places=12
+        )
+
+    def test_global_json_has_energy_channels_and_no_old_name(self):
+        payload = json.loads((ROOT / "maths" / "global.json").read_text(
+            encoding="utf-8"
+        ))
+        by_name = {item["name"]: item for item in payload["definitions"]}
+        self.assertIn("ST torque", by_name)
+        self.assertNotIn("驱动电量", by_name)
+        for name in ("Drive Energy", "Regen Energy", "Net Energy"):
+            self.assertIn(name, by_name)
+            self.assertEqual(by_name[name]["unit"], "kWh")
+
+    @_needs(DATA / "20261018-耐久合并.csv")
+    def test_10_18_endurance_totals_and_ivt_cross_check(self):
+        path = DATA / "20261018-耐久合并.csv"
+        with csvlog.open_session(
+            path, dbc_dir=[DATA / "dbc", ROOT / "can_data" / "dbc"]
+        ) as log:
+            _added, errors = mathsmod.apply_to_session(log, root=ROOT)
+            energy_errors = [
+                item for item in errors
+                if item.get("name") in ("Drive Energy", "Regen Energy", "Net Energy")
+            ]
+            self.assertEqual(energy_errors, [])
+            for name in ("Drive Energy", "Regen Energy", "Net Energy"):
+                self.assertTrue(log.has(name), name)
+
+            drive = self._last(log, "Drive Energy")
+            regen = self._last(log, "Regen Energy")
+            net = self._last(log, "Net Energy")
+            self.assertAlmostEqual(drive, 6.351, delta=0.02)
+            self.assertAlmostEqual(regen, 1.025, delta=0.02)
+            self.assertAlmostEqual(net, 5.326, delta=0.02)
+            self.assertAlmostEqual(net, drive - regen, places=12)
+
+            ivt_drive, ivt_regen, ivt_net = self._ivt_totals(log)
+            self.assertAlmostEqual(drive, ivt_drive, delta=0.02)
+            self.assertAlmostEqual(regen, ivt_regen, delta=0.02)
+            self.assertAlmostEqual(net, ivt_net, delta=0.02)
+
+    def test_other_endurance_sessions(self):
+        cases = (
+            (DATA / "20261007-jhy耐久.csv", 1.454, 0.305, 1.149),
+            (DATA / "20261007-庞仙耐久两圈.csv", 1.102, 0.163, 0.940),
+            (ENDURANCE, 4.612, 0.000, 4.612),
+            (DATA / "FSS_jhy_endu.ld", 2.174, 0.478, 1.696),
+        )
+        for path, want_drive, want_regen, want_net in cases:
+            with self.subTest(session=path.name):
+                if not path.exists():
+                    self.skipTest(f"sample log not present: {path.name}")
+                with csvlog.open_session(
+                    path, dbc_dir=[DATA / "dbc", ROOT / "can_data" / "dbc"]
+                ) as log:
+                    _added, errors = mathsmod.apply_to_session(log, root=ROOT)
+                    energy_errors = [
+                        item for item in errors
+                        if item.get("name") in (
+                            "Drive Energy", "Regen Energy", "Net Energy"
+                        )
+                    ]
+                    self.assertEqual(energy_errors, [])
+                    self.assertAlmostEqual(
+                        self._last(log, "Drive Energy"), want_drive, delta=0.02
+                    )
+                    self.assertAlmostEqual(
+                        self._last(log, "Regen Energy"), want_regen, delta=0.02
+                    )
+                    self.assertAlmostEqual(
+                        self._last(log, "Net Energy"), want_net, delta=0.02
+                    )
+
+    def test_zero_battery_power_golden_session_attaches_zero_channels(self):
+        if not HILL.exists():
+            self.skipTest(f"sample log not present: {HILL.name}")
+        with csvlog.open_session(
+            HILL, dbc_dir=[DATA / "dbc", ROOT / "can_data" / "dbc"]
+        ) as log:
+            _added, errors = mathsmod.apply_to_session(log, root=ROOT)
+            energy_errors = [
+                item for item in errors
+                if item.get("name") in ("Drive Energy", "Regen Energy", "Net Energy")
+            ]
+            self.assertEqual(energy_errors, [])
+            for name in ("Drive Energy", "Regen Energy", "Net Energy"):
+                self.assertTrue(log.has(name), name)
+                np.testing.assert_allclose(log.values(name), 0.0)
+
+
 class TestMathsOverHttp(unittest.TestCase):
     """#3 走到界面之前的那一段：PUT/GET/POST + 侧车文件 + 作用域。"""
 
@@ -9262,7 +9485,7 @@ class TestMathsOverHttp(unittest.TestCase):
                 status, catalogue = request("/api/maths/functions")
                 self.assertEqual(status, 200)
                 # 55 = 53 + 两个零相位滤波（filter_lp0 / filter_hp0，A75）
-                self.assertEqual(len(catalogue), 55)
+                self.assertEqual(len(catalogue), 56)
             finally:
                 http.close()
 
@@ -10883,7 +11106,9 @@ class TestTextImport(unittest.TestCase):
     def test_the_import_page_offers_the_parse_choices(self):
         library = librarymod.SessionLibrary([self.dir])
         page = server.index_page(library)
-        for needle in ('accept=".ld,.ldx,.csv,.xlsx,.txt,.tsv"', 'id="cardOk"',
+        # `accept` 里必须带上 `.csv.gz`（ADR-0012）：漏了它，压过的场次拖进窗口会被
+        # 浏览器直接筛掉，用户看到的是"什么都没发生"。
+        for needle in ('accept=".ld,.ldx,.csv,.csv.gz,.xlsx,.txt,.tsv"', 'id="cardOk"',
                        'id="optDelimiter"', 'id="optEncoding"', 'id="optHeader"',
                        'id="optUnitRow"', 'id="optRate"'):
             self.assertIn(needle, page)
@@ -11030,6 +11255,175 @@ class TestTextImport(unittest.TestCase):
         self.assertGreaterEqual(len([l for l in laps if l.complete]), 3)
 
 
+class TestCompressedContainer(unittest.TestCase):
+    """``.csv.gz``：同一个 CSV 的压缩容器（ADR-0012）。
+
+    这里要钉死的是**身份**，不是"能不能解压"——解压谁都会。一个场次的名字从主名来
+    （``X.csv.gz`` -> ``X``），而这个名字同时是侧边栏标题、侧车文件名、导出文件名。
+    任何一处退回 ``path.stem``，用户看到的是"这场叫 ``X.csv``"，或者更糟：给
+    ``X.csv.gz`` 画完信标存成了 ``X.csv.gz.laps.json``，拿 ``X.csv`` 打开却一条都
+    没有。所以判据全是"两条容器路径必须给出同一个答案"。
+    """
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="i3pro-gz-"))
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.tool = self._tool()
+
+    @staticmethod
+    def _tool():
+        """tools/ 不是包，按路径加载（和 TestBenchViewer 同一条规矩）。"""
+        spec = importlib.util.spec_from_file_location(
+            "i3pro_tools_make_csv_gz", ROOT / "tools" / "make_csv_gz.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def csv(self, name: str = "场次.csv", rows: int = 200) -> Path:
+        body = "\n".join(f"{i / 100:.3f},{10 + i % 7},{i % 2}" for i in range(rows))
+        path = self.dir / name
+        path.write_text("Time,Vx KF [km/h],TH\ns,km/h,\n" + body + "\n", encoding="utf-8")
+        return path
+
+    def gzip(self, source: Path) -> Path:
+        target = source.with_name(containers.session_name(source)
+                                 + source.suffix + ".gz")
+        self.tool.compress_file(source, target)
+        return target
+
+    # ------------------------------------------------------------ 读出来一样
+    def test_a_compressed_csv_reads_as_the_same_session(self):
+        plain = self.csv()
+        packed = self.gzip(plain)
+        with csvlog.open_session(plain) as left, csvlog.open_session(packed) as right:
+            self.assertEqual([c.name for c in left.channels], [c.name for c in right.channels])
+            self.assertEqual([c.unit for c in left.channels], [c.unit for c in right.channels])
+            for name in ("Vx KF", "TH"):
+                np.testing.assert_array_equal(left.values(name), right.values(name))
+                self.assertEqual(left.values(name).dtype, right.values(name).dtype)
+            self.assertEqual(left.metadata()["channels"], right.metadata()["channels"])
+            self.assertAlmostEqual(left.metadata()["duration"],
+                                   right.metadata()["duration"], places=6)
+            self.assertAlmostEqual(left.sample_rate, right.sample_rate, places=6)
+            # 事件名（标题/侧边栏里那个）是主名，不是文件名
+            self.assertEqual(right.metadata()["event"], "场次")
+
+    def test_a_dot_in_the_name_is_not_a_container_boundary(self):
+        """``报告.2.csv.gz`` 的主名是 ``报告.2``——不能按"第一个点"切。"""
+        self.assertEqual(containers.split_container("报告.2.csv.gz"),
+                         ("报告.2", ".csv", ".gz"))
+        self.assertEqual(containers.session_name("报告.2.csv"), "报告.2")
+        # 认不出来的尾巴原样返回，不猜
+        self.assertEqual(containers.session_name("场次.laps.json"), "场次.laps.json")
+        self.assertEqual(containers.session_name("场次.ldx"), "场次")
+
+    # --------------------------------------------------------- 身份只有一个
+    def test_the_two_containers_are_one_session_plus_one_extra_row(self):
+        plain = self.csv("八字练习.csv")
+        library = librarymod.SessionLibrary([self.dir])
+        self.assertEqual(library.names(), ["八字练习"])
+        packed = self.gzip(plain)
+        self.assertEqual(sorted(library.names()), sorted(["八字练习", "八字练习 (csv.gz)"]))
+        self.assertEqual(library.path_of("八字练习"), plain)
+        self.assertEqual(library.path_of("八字练习 (csv.gz)"), packed)
+
+    def test_a_sidecar_does_not_belong_to_the_container(self):
+        """侧车跟**场次**走，不跟容器走：压在 `.gz` 上的信标，`.csv` 那份也看得见。"""
+        plain = self.csv("绕圆.csv")
+        packed = self.gzip(plain)
+        self.assertEqual(sidecar.path_of("laps", packed), sidecar.path_of("laps", plain))
+        self.assertEqual(sidecar.path_of("laps", packed).name, "绕圆.laps.json")
+        # 真的落在同一个文件上（"存进去、换成另一个容器就找不到"就是这么来的）
+        sidecar.path_of("laps", packed).write_text(json.dumps({"beacons": []}),
+                                                   encoding="utf-8")
+        self.assertTrue(sidecar.path_of("laps", plain).exists())
+        self.assertFalse((self.dir / "绕圆.csv.gz.laps.json").exists())
+
+    # --------------------------------------------------------------- 导入
+    def test_importing_a_compressed_csv_keeps_it_compressed(self):
+        from i3pro import importer
+
+        source = self.csv("别的队给的.csv")
+        packed = self.gzip(source)
+        destination = self.dir / "data"
+        rows = importer.import_paths([packed], destination)
+        self.assertEqual([r["file"] for r in rows], ["别的队给的.csv.gz"])
+        self.assertEqual(rows[0]["stem"], "别的队给的")
+        again = importer.import_paths([packed], destination)
+        # 编号加在主名上，不是加在最后一段上
+        self.assertEqual([r["file"] for r in again], ["别的队给的-1.csv.gz"])
+        with csvlog.open_session(destination / "别的队给的.csv.gz") as log:
+            self.assertEqual(log.metadata()["event"], "别的队给的")
+        with csvlog.open_session(destination / "别的队给的-1.csv.gz") as log:
+            # 主名跟着文件走：`-1` 是名字的一部分，不是容器的一部分
+            self.assertEqual(log.metadata()["event"], "别的队给的-1")
+
+    def test_a_compressed_spreadsheet_is_refused_before_it_lands(self):
+        """``.xlsx.gz`` 既不收也读不了：压了没用，报错要说"解压回原样"。"""
+        from i3pro import importer
+
+        with self.assertRaises(ValueError):
+            importer.safe_name("表.xlsx.gz")
+        packed = self.dir / "表.xlsx.gz"
+        packed.write_bytes(b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03")
+        with self.assertRaises(ValueError) as caught:
+            csvlog.open_session(packed)
+        self.assertIn("解压", str(caught.exception))
+        self.assertIn(".xlsx", str(caught.exception))
+
+    # ------------------------------------------------------------- 帧表
+    def test_a_frame_table_is_neither_compressed_nor_mistaken_for_a_table(self):
+        frame = self.dir / "2026_10_25_111445_ID0001.csv"
+        frame.write_text(
+            "序号,系统时间,时间标识,CAN通道,ID号,帧类型,帧格式,CAN类型,长度,数据\n"
+            '0,="11:14:45.000000,0.010000,ch1,0x123,数据帧,标准帧,CAN,8,'
+            "x| 01 02 03 04 05 06 07 08\n", encoding="gbk")
+        self.assertTrue(canlog.looks_like_frames(frame))
+        keep, why = self.tool._wanted(frame)
+        self.assertFalse(keep)
+        self.assertIn("帧表", why)
+        # 就算硬压了，i3pro 也不再把它当帧表（帧表不压缩，ADR-0012）
+        packed = frame.with_name(frame.name + ".gz")
+        self.tool.compress_file(frame, packed)
+        self.assertFalse(canlog.looks_like_frames(packed))
+        # 压过的那份在场次库里是普通场次，不会再被当成 "can" 那一场
+        frame.unlink()
+        self.assertEqual(librarymod.SessionLibrary([self.dir]).names(),
+                         ["2026_10_25_111445_ID0001"])
+
+    # ------------------------------------------------------- 可复现 / 裁判
+    def test_compressing_is_reproducible_byte_for_byte(self):
+        """gzip 头里的 mtime 与文件名被钉死：同一份内容压两次逐字节相同。"""
+        source = self.csv()
+        first, second = self.dir / "a.gz", self.dir / "b.gz"
+        self.tool.compress_file(source, first)
+        os.utime(source, (1_600_000_000, 1_600_000_000))
+        self.tool.compress_file(source, second)
+        self.assertEqual(first.read_bytes(), second.read_bytes())
+        header = first.read_bytes()[:10]
+        self.assertEqual(header[:4], b"\x1f\x8b\x08\x00")   # FLG=0：不写原文件名
+        self.assertEqual(header[4:8], b"\x00\x00\x00\x00")  # MTIME=0
+
+    def test_the_referee_tool_finds_a_gzipped_export(self):
+        """``verify_ld_vs_csv.py`` 找裁判时也要认 ``.csv.gz``（裸 ``.csv`` 优先）。"""
+        tool = importlib.util.spec_from_file_location(
+            "i3pro_tools_verify", ROOT / "tools" / "verify_ld_vs_csv.py")
+        module = importlib.util.module_from_spec(tool)
+        tool.loader.exec_module(module)
+        data = self.dir / "裁判"
+        data.mkdir()
+        source = self.csv("耐久正赛.csv")
+        packed = data / "耐久正赛.csv.gz"
+        self.tool.compress_file(source, packed)
+        with mock.patch.object(module, "DATA", data):
+            self.assertEqual(module._reference("耐久正赛"), packed)
+            self.assertTrue(module._is_motec_export(packed))
+        (data / "耐久正赛.csv").write_bytes(source.read_bytes())
+        with mock.patch.object(module, "DATA", data):
+            self.assertEqual(module._reference("耐久正赛"), data / "耐久正赛.csv")
+        self.assertIsNone(module._reference("没有这场"))
+
+
 class TestChannelStates(unittest.TestCase):
     """缺失通道的**三态**（ticket #34）：present / empty / missing。
 
@@ -11051,10 +11445,9 @@ class TestChannelStates(unittest.TestCase):
     def csv_session(self, name: str = "三态.csv"):
         """一列有数，外加一条**整段是 NaN 的数学通道**——那就是 ``empty`` 的样子。
 
-        为什么用数学通道造这条状态：CSV 导入会把**整列空**的列直接跳过
-        （``csvlog`` 的"整列没有可用数值"），所以"通道在但一个有效样本都没有"
-        在导入路径上到不了界面；数学通道会（表达式算出全 NaN 时）。CAN 那条路
-        同理——没有报文的信号列就是全 NaN 挂着。
+        CSV 导入现在也会保留**整列空**的原生列：通道在、``sample_count`` 是文件
+        行数、``valid_count`` 是 0，界面按 ``empty`` 显示。这里另外用数学通道造
+        一条全 NaN 列，顺便钉住数学通道和原生通道走同一个三态入口。
         """
         path = self.dir / name
         path.write_text(
@@ -12371,6 +12764,36 @@ class TestPairing(unittest.TestCase):
         _axis, columns, _units, skipped = pairing.merge_columns(log, session, 0.0)
         self.assertTrue(np.allclose(columns["I Data"][:3], [-5.0, -4.96, -4.92]))
         self.assertIn("I_Data", skipped)
+
+    def test_a_placeholder_at_the_tolerance_boundary_is_replaced(self):
+        """恰好落在容差边界上的模板列也算空列。
+
+        实测 10.7 ``20261007-传杰绕圆``：``.ld`` 的 ``FR/FL Aero Ride Height`` 是
+        ``-0.01 … 0``，旧判据写成 ``< 0.01``，于是保留了 C125 的零列，把 ``0x66D``
+        解出来的真实前轴高度当成重名通道丢掉了。边界要含等号。
+        """
+        log, session = self._merge_fixture()
+        log._values["I Data"] = np.concatenate([[-0.01, 0.0], np.zeros(99)])
+        _axis, columns, _units, _skipped = pairing.merge_columns(log, session, 0.0)
+        self.assertTrue(np.allclose(columns["I Data"][:3], [-10.0, -10.2, -10.4]))
+
+    def test_a_can_distance_does_not_replace_the_ld_placeholder(self):
+        """CAN 的 ``Distance`` 可能是计数器或哨兵，不能顶掉速度积分的距离兜底。
+
+        实测 10.7 ``20261007-传杰绕圆`` 的 CAN ``Distance`` 从 0 跳到 429496；
+        同名替换一旦放行，``derive.distance_series`` 就会把整条绕圆距离轴当成
+        429 km。边界修复只该放出高度 / 温度这些真实通道。
+        """
+        log, session = self._merge_fixture()
+        n = 101
+        log._values["Distance"] = np.concatenate([[-0.01], np.zeros(n - 1)])
+        log.channels.append(_FakeChannel("Distance", "m", 100.0, log._values["Distance"]))
+        distance = np.full(n, 429496.0)
+        session.columns["Distance"] = distance
+        session.channels.append(_FakeChannel("Distance", "m", 100.0, distance))
+        _axis, columns, _units, skipped = pairing.merge_columns(log, session, 0.0)
+        self.assertLessEqual(float(np.nanmax(np.abs(columns["Distance"]))), 0.01)
+        self.assertIn("Distance", skipped)
 
     def _pairing(self, label: str, expect: float, offset: float):
         """只为 :func:`pairing.consistent_pairings` 造一条配对（只要那两个数）。"""

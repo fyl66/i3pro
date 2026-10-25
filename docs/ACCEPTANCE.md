@@ -573,7 +573,7 @@ i2 Pro 的 **Missed Beacons**：车确实穿过了起终点，但没被检出，
 | 白名单：`maths.py` 的 AST 里没有任何 `eval` / `exec` / `compile` / `__import__` 调用 | `TestMaths::test_whitelist_only_never_calls_eval` |
 | `__import__('os').system('calc')`、`os.system(...)`、`lambda`、列表推导**连编译都过不去** | 同上 |
 | 未知函数 / 未知通道 / 括号不配平 / 结尾缺运算数 / 看不懂的字符，各给一条**说下一步做什么**的中文报错 | `TestMaths::test_unknown_function_says_what_to_do`、`test_unknown_channel_says_what_to_do`、`test_unbalanced_and_dangling_expressions_explain_themselves` |
-| 函数集覆盖验收点列出的每一类（算术 / 三角 / 对数 / 取整 / min·max·abs / 区间统计 / 条件选择 / 无效标记 / 平滑滤波 / 微分积分），共 **53** 个 | `TestMaths::test_function_catalogue_covers_what_the_ticket_promised` |
+| 函数集覆盖验收点列出的每一类（算术 / 三角 / 对数 / 取整 / min·max·abs / 区间统计 / 条件选择 / 无效标记 / 平滑滤波 / 微分积分），共 **56** 个 | `TestMaths::test_function_catalogue_covers_what_the_ticket_promised` |
 | `filter_cheby_*` / `rand_*` **明确不提供**，报错里说清原因与替代（`filter_lp` / `filter_hp`） | `TestMaths::test_unsupported_functions_say_why_and_what_to_use_instead` |
 | 区间统计：`reset` 切段、条件筛样本；段里没有合格样本时给 **NaN 而不是 0** | `TestMaths::test_interval_statistics_honour_condition_and_reset`、`test_interval_statistic_without_qualified_samples_is_nan_not_zero` |
 | 微分（斜坡 → 斜率）、积分（常数 → 斜坡）、平滑与低通（标准差下降）各一条数值断言 | `TestMaths::test_derivative_of_a_ramp_is_the_slope`、`test_integrate_of_a_constant_is_a_ramp`、`test_smooth_reduces_ripple`、`test_low_pass_keeps_the_average_and_drops_the_ripple` |
@@ -741,7 +741,7 @@ i2 Pro 的 **Missed Beacons**：车确实穿过了起终点，但没被检出，
 **第四轮（用户："数学通道可以改成不用手写，直接从下拉里选"）**
 
 表达式不再只能靠手打：**通道下拉**（按单位分组、带单位后缀，一场 400+ 条通道也找得着）
-与**函数下拉**（53 个函数，标出参数个数 `1~3` 与说明）——点一下就把 `'通道名'` / `函数(`
+与**函数下拉**（56 个函数，标出参数个数 `1~3` 与说明）——点一下就把 `'通道名'` / `函数(`
 插到表达式光标处：通道名自动带单引号，函数插完光标停在括号里，紧接着再从通道下拉挑参数。
 光标位置优先，没有 `selectionStart` 的环境退化成追加。
 
@@ -783,7 +783,7 @@ node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"   # 第 22 组：�
 | `退格` | 删掉光标前一个字符（有选中就删选中的那段） |
 | `清空` | 表达式清空，换个算法重来比在长表达式里改快 |
 | `插入通道…` | 第四轮就有：按单位分组、自动加单引号 |
-| `插入函数…` | 第四轮就有：53 个函数带参数个数，插完光标停在括号里 |
+| `插入函数…` | 第四轮就有：56 个函数带参数个数，插完光标停在括号里 |
 | `筛选通道…` | 打几个字把下拉里的选项缩到几条；**选完自动清空**，下次挑通道从头找 |
 
 按钮走**事件委托**：符号写在 markup 的 `data-ins` 里，以后加按钮只改 HTML，不用一根根接线。
@@ -3971,7 +3971,7 @@ python tools\verify_clicks.py
 | `TestMissingChannelsOnExport` | 缺失通道走到出口（#34，5 项）：默认硬报错并说"确实想跳过就加 `skip_missing=1`"、明说跳过时名单进 `excluded_missing`（**空的时候键也在**）、Excel 元数据 sheet 里也写着这一行、一条都不剩时说下一步、导出的 CSV 里真的没有那一列 |
 | `TestCanAgainstMoTeC` | CAN 侧的三条交叉检查（#42/#43/#44，4 项）：同一条 ID 跨两条总线要吵出来（合成帧表）、ch3 上的 IVT 真的进到场次里、`.can.json` 的摘要按指纹失效（圈侧车 / DBC 内容）、CAN 日志认得出 MTi 经纬度 |
 | `TestListingCache` | 侧边栏列表的磁盘缓存（#45，1 项）：冷启动读磁盘缓存（把 `summary()` patch 成抛异常仍给同样的行）、数据动过（mtime）就失效重算 |
-| `TestPairing` | CAN 帧表对到 `.ld` 并合并通道（A76，16 项）：`log_time` 是**结束**时刻、帧表日期从文件名拿、墙钟偏移的正负、候选按重叠筛（含"文件名不是那个形状就认不出日期"）、互相关认出的是**数据**而不是墙钟、墙钟估错的偏移照样找回来、**速度像但加速度不像要拒绝**（实测假配对的形状）、两次不相干的驾驶不配对、重叠太短说"太短"而不是猜、同名只留一份且 `.ld` 的写法赢、**整段为 0 的占位通道被真值替换**、`AngVelX_body` 与 `AngVelX_hor` 是两条都要留、新加的 CAN 通道接在 `.ld` 通道后面、写出来的宽表 `csvlog` 读得回、`--list` 一个字节都不写 |
+| `TestPairing` | CAN 帧表对到 `.ld` 并合并通道（A76，23 项）：`log_time` 是**结束**时刻、帧表日期从文件名拿、墙钟偏移的正负、候选按重叠筛（含"文件名不是那个形状就认不出日期"）、互相关认出的是**数据**而不是墙钟、墙钟估错的偏移照样找回来、**速度像但加速度不像要拒绝**（实测假配对的形状）、两次不相干的驾驶不配对、重叠太短说"太短"而不是猜、同名只留一份且 `.ld` 的写法赢、**整段为 0 的占位通道被真值替换**、**恰好落在 `±0.01` 边界的占位列也能被真值替换**、**CAN `Distance` 不顶掉速度积分的距离兜底**、`AngVelX_body` 与 `AngVelX_hor` 是两条都要留、新加的 CAN 通道接在 `.ld` 通道后面、写出来的宽表 `csvlog` 读得回、`--list` 一个字节都不写 |
 ---
 
 ## A78 · 侧边栏快速跳转到哪一栏（本次新增）
@@ -5921,6 +5921,51 @@ python tools\verify_ld_vs_csv.py                                 # PASS，0 chan
 `SessionLibrary._entries()` 发现扫描。这次只删掉了已经量出来的双转换，没有把取数语义
 或 JSON 路径改掉。
 
+## A116 · 电池能量通道：Drive Energy / Regen Energy / Net Energy（本次新增）
+
+**要解决的问题**：耐久分析要看电池的驱动电耗、回收能量与净耗电，但原来的
+`驱动电量 = integrate('I Data' * 'U1 Data' /1000)` 既没有 `/3600`（单位是 kW·s，不是
+kWh），符号也是反的（`I Data` 放电为负），而且只认 IVT，不认 `Battery Power`。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 纯函数 | 新增 `src/i3pro/energy.py`：`power_series` / `battery_power` / `cumulative`，来源判定与符号约定只在这里 |
+| 数学函数 | `maths.py` 新增 `battery_power()`；优先 `Battery Power`，缺了用 `-I Data×U1 Data`，母线电压 ≤100 V / 非有限值按 0 |
+| 全局定义 | `maths/global.json` 用 `Drive Energy` / `Regen Energy` / `Net Energy` 替换旧 `驱动电量`，单位 `kWh`；`Net Energy = 'Drive Energy' - 'Regen Energy'` |
+| 工作表 | `worksheets/battery-1.json` 的图加入 `Battery Power` 与三条能量通道 |
+| 文档 | 新增 `docs/energy.md`；README 增加能耗通道说明与 `energy` L2 模块 |
+
+```powershell
+python -m unittest tests.test_i3pro.TestEnergy -v
+python -m unittest tests.test_i3pro.TestMaths.test_function_catalogue_covers_what_the_ticket_promised -v
+.\i3pro.cmd render "i2pro_data\20261018-耐久合并.csv" --channels "Vx KF,GPS Speed,Brake Signal,TH,G Force Lat,G Force Long,G Force Vert,SW Angle,AMKFR ActualTorqueValue,Battery Power,MCU1 FR TempMotor,GPS Heading,Drive Energy,Regen Energy,Net Energy" --out "out\20261018-耐久合并.html"
+node tools\smoke_viewer.js "out\20261018-耐久合并.html"
+python -m unittest discover -s tests -v
+python tools\verify_ld_vs_csv.py
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
+node tools\smoke_viewer.js "out\20260524-耐久正赛.html"
+python tools\verify_clicks.py
+```
+
+**通过判据（本机实测，2026-10-19）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 10.18 耐久合并 | `Drive Energy 6.351 / Regen Energy 1.025 / Net Energy 5.326 kWh` |
+| 10.18 IVT 对拍 | `6.355 / 1.023 / 5.332 kWh`，与 Battery Power 差 < 0.02 kWh |
+| 10.07 jhy 耐久 | `1.454 / 0.305 / 1.149 kWh` |
+| 10.07 庞仙耐久两圈 | `1.102 / 0.163 / 0.940 kWh` |
+| 20260524 耐久正赛 | `4.612 / 0.000 / 4.612 kWh` |
+| FSS_jhy_endu | `2.174 / 0.478 / 1.696 kWh` |
+| 高避金标准 | `Battery Power` 全 0，三条通道均为 0 kWh，0 条能量通道报错 |
+| 单位与恒等式 | 三条通道单位都是 `kWh`；`Net Energy` 与 `'Drive Energy' - 'Regen Energy'` 逐点一致 |
+| 无头 smoke | 用三条能量通道渲染的快照里，三条通道都在通道索引里，且 `Net = Drive - Regen` |
+| 四条回归 | 单测 **653 项 / 84.286 s，0 失败、28 跳过**；`verify_ld_vs_csv.py` **PASS**（`0 channel(s) outside tolerance`）；两份金标准 smoke 各 **920 项 PASS**；能量快照 smoke **923 项 PASS**；`verify_clicks.py` **429/429** |
+
+**边界**：这是**累计**通道；每圈电耗用通道报告的「变化量」列或光标 A–B 统计读，不新增
+按圈组件。`Battery Power` 是整车电池功率，不是四条电机功率之和；换车或换逆变器后
+要重新核对来源和符号。
+
 ## A117 · 切圈：候选门线评分 + 测试类型自动判别（Issue #69）
 
 **要解决的问题**：2026-10-04 至 10-18 的 19 个 CSV 里，旧 `auto` 把“第一次重访三次的
@@ -5964,46 +6009,172 @@ python tools\verify_clicks.py
 左右环计时时，在工作区放置“左环/右环”两个 beacon。自动结果给出候选分栏和可疑信号，
 不会写回 `.ld`，也不会覆盖已有手工 beacon。
 
-## A121 · 导出的通道范围：整个工作表 / 当前组件 / 全部（本次修复）
+## A118 · 合并时 `±0.01` 边界模板列顶掉真实 CAN 通道（本次修复）
 
-**要解决的问题**：一个工作表里摆了多件组件时，点「导出数据」拿到的通道是**一件组件**
-的。取数那一半没错——错在那一档的名字：「侧边栏勾选的通道」，而左栏的通道列表是按
-**当前组件**编辑的（`selectedChannels()` 取的就是焦点组件）。摆了三件组件的工作表，
-这一档也只给其中一件的通道，名字还让人以为拿的是"这一屏的通道"。
+**要解决的问题**：`20261007-传杰绕圆.csv` 里 `FR/FL Aero Ride Height` 几乎全是 0，
+但原始帧表的 `0x66D Front_Aero_Ride_Height` 明明有正常数据。原因是 `.ld` 的这两条
+模板列恰好是 `-0.01 … 0`，旧判据写成严格 `< 0.01`，`-0.01` 没被判成空列；合并时
+保留了模板列，把 CAN 解出来的真实前轴高度按“重名”丢掉了。
 
 | 改/加 | 内容 |
 | --- | --- |
-| 三档范围 | 「全部通道（本场次 N 条）」/「本工作表所有组件的通道（N 条）」/「当前组件的通道（N 条）」，条数写在档位名上 |
-| 默认档 | 没记住过配置时默认「本工作表所有组件的通道」（`exportDefaults()`）；以前存过的配置照旧读 |
-| 别名 | 槽位里的 `@车速` 这类别名先落到本场次的具体通道（`exportRequestNames`）；落不到的**原样保留**，仍交给服务端的 `skip_missing` 写进 `excluded_missing` |
-| 预估 | 面板第一行写明「通道 本工作表所有组件的通道（N 条）」，不再只有一个列数 |
-| 无头 | `tools/smoke_viewer.js` 新增 A121 那一段：三档各是各的、第二件组件的通道真的进 `names=`、别名落地、档位文案带条数 |
-| 真浏览器 | `tools/verify_clicks.py` 新增 `export_scopes()`（排在所有别的用例之后，因为它要改工作表）：真点「＋ 添加组件」、真开导出面板、服务端真数两档列数 |
+| 边界判定 | `pairing._empty(..., inclusive=True)` 只在“同名碰撞、对面有数”这一步包含 `±0.01` 边界；全局空列判断仍保持原语义，避免提前清空整段通道 |
+| 替换 | 边界模板列被替换时先把整列清空，再按零阶保持填 CAN 值；覆盖不到的两端留空 |
+| 距离保护 | `Distance` / `Distance (2)` 不参与同名替换：记录仪该通道可能是计数器/无效哨兵（实测从 0 跳到 `429496`），而 `derive.distance_series` 有速度积分兜底 |
+| 单测 | `TestPairing` 新增两条：边界值可替换、CAN `Distance` 不替换 |
+| 数据 | 重新生成并同步共享目录的 `20261007-传杰绕圆.csv` |
 
 ```powershell
+python -m unittest tests.test_i3pro.TestPairing -v
+python -m unittest discover -s tests -q
+python tools\verify_ld_vs_csv.py
 node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
 node tools\smoke_viewer.js "out\20260524-耐久正赛.html"
 python tools\verify_clicks.py
 ```
 
-**通过判据（本机实测，2026-10-21）**：
+**通过判据（本机实测，2026-10-19）**：
 
 | 断言 | 实测 |
 | --- | --- |
-| 三档文案（真 DOM 里读出来的） | `all｜全部通道（本场次 441 条）`、`worksheet｜本工作表所有组件的通道（12 条）`、`selected｜当前组件的通道（12 条）`（默认工作表只有一件图，两档一样多） |
-| 真点「＋ 添加组件」之后 | `worksheet` 变 **13 条**，`selected` 仍是 **12 条** |
-| 真导出请求 | `…&channels=selected&names=Vx KF,Vx KF Init,GPS Speed,Brake Signal,TH,month MTI,tenthms MTI,…`，且含第二件组件那条（`AMKFL ActualTorqueValue`） |
-| 服务端预估（同一份日志、同一范围） | 「当前组件」**13 列**（时间 + 12 条）→「整个工作表」**14 列** |
-| 面板文案 | `通道 本工作表所有组件的通道（13 条）` + `21 行 × 14 列` |
-| 单测 | `Ran 664 tests in 109.972s`，`OK (skipped=28)`（这一票只动前端，没碰解析与导出） |
+| 配对 | `2026_10_07_165605` + `170103`，偏移 `-23.996 s`，`r=1.0000` |
+| 原始 `0x66C` | 18,040 帧；`RL/RR` 解出 `-43.78 … 0 cm`，有连续变化 |
+| 原始 `0x66D` | 28,015 帧；`FR` 解出 `-44.15 … 0.001 cm`、`FL` 解出 `-56.50 … 0.001 cm` |
+| 合并后的前轴 | `FR` 1,858 个不同值、`FL` 1,545 个不同值；不再是大段 0 |
+| 变化范围 | 新旧逐通道对比只变 18 列：16 条真实轮胎温度 + `FR/FL` 前轴高度；其余 469 条可读通道逐点一致 |
+| 距离轴 | `Distance` 保持模板列，速度积分终点约 `3659.7 m`；没有采用 CAN 的 `429496` 异常值 |
+| 文件 | 97,399,322 字节；本地与共享 SHA-256 都是 `272671A68FAFAB6746E58958E4E17E3687B6D236727B879EA409745F8D3F7BA9` |
+| 单测 | `TestPairing` 23 项 OK；完整 `Ran 662 tests in 198.254s`，`OK (skipped=28)` |
 | 解析对照 | `PASS - 0 channel(s) outside tolerance` |
-| 无头 smoke | 两份金标准各 `935 checks`，全过（A120 之后是 920，本次 +15） |
-| 真浏览器 | `444 项检查：444 通过，0 失败`（A120 之后是 437，本次 +7） |
+| 无头 smoke | 两份金标准各 `920 checks`，全过 |
+| 真浏览器 | `429 项检查：429 通过，0 失败` |
 
-> 这一票只动界面这一层（拼参数、档位文案、默认值、预估那一行）：取数、重采样、
-> 落盘全在 `src/i3pro/export.py`，一个字节没改。另外：**只有两份金标准的干净检出**
-> 跑单测是 `Ran 651 tests`、`OK (skipped=45)`——差的那些是缺数据自动 skip 的用例
-> （这份验收所在的工作目录里还有别人在改的一批），不是这一票引进的。
+## A122 · `.csv.gz`：纯文本场次的**只读**压缩容器（本次新增，ADR-0012）
+
+**要解决的问题**：10.25 那批 15 个合并场次合计 2.72 GB，共享目录被顶到 7.3 GB。用户
+问的是"能不能转成 i3pro 能读的 xlsx 来省体积"——实测方向是反的：同内容的 xlsx 更大
+1–8%，而且读一份 290 MB 的要 57.5 s（同内容 CSV 2.6 s）。真正能省的是 gzip。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 新模块 | `i3pro/containers.py`：主名 / 格式后缀 / 压缩后缀 / `open_text` / `open_binary`，全仓唯一出处 |
+| 身份 | 场次名 = **主名**（`X.csv.gz` -> `X`）；`library`、`sidecar.path_of`、`render`、`export`、`store` 全改从这里取 |
+| 读取 | `csvlog.open_session` 按容器分派；`txtlog`、`csvlog.scan_rows`、`motec_csv` 的打开走 `containers.open_text`；pandas 那一步显式 `compression="gzip"` |
+| 拒绝 | `.ld.gz` / `.xlsx.gz` 既不导入也读不了，报错直接说"解压回原样" |
+| 帧表 | `canlog.looks_like_frames` 只认裸 `.csv`（**承重**：场次库启动嗅探不做解压） |
+| 不写 | 产品面没有任何写入口；唯一的写是开发工具 `tools/make_csv_gz.py`（`mtime=0`、不写原文件名，可复现） |
+| 杂项 | `.gitignore` 补 `*.csv.gz`；索引页 accept 列表与 `导入数据.bat` 提示；`tools/verify_ld_vs_csv.py` 的裁判也认 `.csv.gz`；`tools/bus_current.py` 一起认 |
+
+```powershell
+python -m unittest tests.test_i3pro.TestCompressedContainer -v
+python -m unittest discover -s tests -q
+python tools\verify_ld_vs_csv.py
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
+node tools\smoke_viewer.js "out\20260524-耐久正赛.html"
+python tools\verify_clicks.py
+```
+
+压缩形态下的两份金标准实跑（第五件；`_gz_golden\` 与 `_gz_snap_html\` 已留在 `out\`）：
+
+```powershell
+Copy-Item 'i2pro_data\20260524-耐久正赛.ld','i2pro_data\20260524-耐久正赛.csv' 'out\_gz_golden\'
+python tools\make_csv_gz.py 'out\_gz_golden\20260524-耐久正赛.csv'
+Remove-Item 'out\_gz_golden\20260524-耐久正赛.csv'      # 只留 .ld + .csv.gz 当裁判
+$env:I3PRO_DATA='E:\桌面\i3pro\out\_gz_golden'; python tools\verify_ld_vs_csv.py
+Remove-Item Env:I3PRO_DATA
+node tools\smoke_viewer.js "out\_gz_snap_html\20260908-cjh 高避5圈 (csv.gz).html"
+```
+
+**通过判据（本机实测，2026-10-25）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 15 份压缩 | 2724.1 MB -> 339.2 MB（12%），单份 7%–17% |
+| 读回来一样 | 15 份 `.csv.gz` 的 `i3pro info` 与压缩前的 `.csv` 逐字段相同（520 / 516 / 511 / 495 条通道，时长 1435.0 / 1254.0 / … s） |
+| 身份 | 两个容器并存时侧边栏是 `X` 与 `X (csv.gz)`；侧车是 `X.laps.json`，`X.csv.gz.laps.json` 不存在 |
+| 导入 | `场次.csv.gz` 收；撞名得 `场次-1.csv.gz`；`表.xlsx.gz` 当场拒绝 |
+| 可复现 | 同一份 CSV 压两次逐字节相同；gzip 头 `1f8b0800 00000000`（FLG=0、MTIME=0） |
+| 裁判走 gz | `$env:I3PRO_DATA='out\_gz_golden'`（里面只有 `.ld` + `.csv.gz`）跑 `tools\verify_ld_vs_csv.py`：`PASS`，213 条比对、0 条超差 |
+| 快照走 gz | 高避5圈的 CSV 压成 `.csv.gz` 后生成快照：`5 完整圈 · 最快 40.440s`（与裸 CSV 那份一致），`smoke_viewer.js` 935 项全过 |
+| 单测 | `Ran 673 tests in 164.849s`，`OK (skipped=28)`（新增 `TestCompressedContainer` 9 项） |
+| 解析对照 | `PASS - 0 channel(s) outside tolerance` |
+| 无头 smoke | 两份金标准各 `935 checks`，全过 |
+| 真浏览器 | `444 项检查：444 通过，0 失败` |
+| 运行期依赖 | 无新增（`gzip` / `zlib` 是标准库，不走 ADR-0006） |
+| 数据落盘 | 本地 `i2pro_data` 只留 15 份 `.csv.gz`（339.2 MB）；共享 `10.25湾区` 按用户选择同时留 `.csv` 与 `.csv.gz`，两边 15 份 SHA-256 全部一致 |
+
+**为什么没往 `verify_clicks.py` 里加一条**：`.csv.gz` 的差别全在解析那一层，导入走的
+还是同一段 `/api/import`，索引页也不是 `viewer.html`；真浏览器那条测的是"点了才出现"
+的界面状态（假 DOM 看不见面积与遮挡，只有它答得了）。所以这里用单测覆盖读取 / 身份 /
+导入 / 可复现，用"压缩形态下生成快照 + smoke"覆盖端到端。
+
+---
+
+## A121 · 单轮载荷数学通道的锚点：静止门必须排除「通道还没上线」的窗口（本次新增）
+
+按场次本地定义的四条 `X Wheel Load [kg]`（`i2pro_data/<场次>.maths.json`，本地作用域、不进 git）：
+
+```text
+载荷_i [kg] = 静止分配_i + (锚窗电压_i − 电压_i) × 加权斜率_i
+```
+
+* `加权斜率_i`：FR 196.4 / FL 206.1 / RL 196.3 / RR 211.5 kg/V（四角秤 + .ld 自由拟合按误差方差加权）；
+* `静止分配_i`：无驾驶员 FR/FL 42.5、RL/RR 54 kg，车手质量按前后 0.571 分摊（前每角 +0.2145·m，后每角 +0.2855·m）；
+* `锚窗电压_i`：本场静止段的该角平均电压。
+
+**这一条要记的是那个坑：光用 `Vx < 3` 当静止门是不够的。**
+
+日志开头载荷通道还没输出时，读数会是 0 V 或正值——那些窗口也满足「速度 ≈ 0」，
+于是被算进静止平台。实测影响是**每个场次的静止合计差 50–130 kg**，比任何标定误差都大。
+
+| 门 | 静止合计 vs 假设 |
+| --- | --- |
+| `Vx < 3`（太松） | 偏 50–130 kg（`mxy` 实测 161 kg / 假设 253 kg） |
+| `Vx < 3` **且四路载荷都 `\|V\| > 0.05`** | 见下方「通过判据」 |
+
+### 复现
+
+```powershell
+$env:PYTHONIOENCODING = "utf-8"     # 否则中文输出在 GBK 控制台上会崩
+python tools\load_anchors.py "i2pro_data\mxy动态练习八字.csv" --driver 60
+python tools\load_anchors.py "i2pro_data\cjh100限速直线.csv" --driver 49
+python tools\load_anchors.py "i2pro_data\20261018-耐久合并.csv" --driver 54.5
+python tools\load_anchors.py "i2pro_data\80定速滑行.csv" --driver 49 --require FR,RL,RR
+```
+
+`tools\load_anchors.py` 只打印；加 `--write` 才追加进 `<场次>.maths.json`。
+`--require` 是给「某一路硬件坏了」用的（见下）。
+
+### 通过判据（本机实测，2026-10-22）
+
+判据 = 用严格门重算的四角静止载荷，与「无驾驶员四角 + 车手」的分摊值一致。
+
+| 场次 | 车手 | FR | FL | RL | RR | 合计 vs 假设 |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| `mxy动态练习八字` | 60 kg | −0.7 | +0.8 | −1.6 | +0.8 | 252 / 253 kg |
+| `20261018-耐久合并` | 54.5 kg | +2.6 | +0.5 | +0.9 | 0.0 | 252 / 248 kg |
+| `80定速滑行` | 49 kg | +1.0 | 硬件坏 | +2.3 | +0.3 | — |
+| `cjh100限速直线` | 49 kg | **−9.5** | +0.2 | +0.3 | +0.6 | 234 / 242 kg |
+
+（单位 kg，差 = 实测静止 − 假设分配；判据为 |差| ≤ 5 kg/角。）
+
+### 顺带查出来的两个硬件问题
+
+| 场次 | 角 | 现象 |
+| --- | --- | --- |
+| `80定速滑行` | FL | 通道整场坏：`\|V\| > 0.05` 占 **0%**，恒轨到 +6.55 V。该场只出 3 条载荷通道，用 `--require FR,RL,RR` |
+| `cjh100限速直线` | FR | **双态**：t≈310 s 有 0.28 V 台阶，静止读数在 −0.50 V 与 −0.26 V 之间跳（≈55 kg）。上表的 −9.5 kg 差额全部来自它 |
+
+两条都在**前轴**，与 `离地高公式复核.md` 里「前轴两路通道名与实际左右相反」是同一对硬件的第三个问题，建议一起查线束。
+
+### 已知的边界（别把这条当"标定完成"）
+
+1. 上表的 ±1–4 kg 是**对「假设的静止分配」的重复性**，不是对真值的验证。绝对水平仍锚在
+   `E27108车辆参数.txt`（无驾驶员 42.5/54 kg，合计 193 kg）与车手质量上。
+2. `20261018-耐久合并` 是 **cjh(49) 先、jhy(60) 后**的合并场次。11 kg 的车手差摊到每角只有
+   前 2.4 / 后 3.1 kg，小于状态间散布，所以按 54.5 kg 折中。要严格拆需给分界时间，
+   用 `choose(range_is(0, T), cjh式, jhy式)`。
+3. 引擎**不支持 MoTeC 的 `[cm]` 单位标注**，词法阶段直接报错（不是忽略）。从 MoTeC 抄公式要删掉它。
 
 ## A120 · 组件缩放时抬头跟着重排（本次修复）
 
@@ -6040,3 +6211,42 @@ python tools\verify_clicks.py
 | 解析对照 | `PASS - 0 channel(s) outside tolerance` |
 | 无头 smoke | 两份金标准各 `920 checks`，全过 |
 | 真浏览器 | `437 项检查：437 通过，0 失败`（新增 A118 六条 + 两条前置断言） |
+
+## A119 · CSV 里整列为空的通道不再从列表消失（本次修复）
+
+**要解决的问题**：用户打开 `20261018-耐久合并.csv` 时发现“一些通道变没了”。文件
+本身没有丢列：534 个表头列都在，但其中 74 个 `.ld` 模板列整列没有有效样本，
+CSV 读取器把“整列 NaN”当成非数值列静默跳过，界面于是只显示剩下的 463 条（含派生）。
+对照两份原始 `.ld`：475 条通道全在表头里；那 74 条原始值也只有 0 或 `1e-7` 级
+模板噪声，没有真实测量数据被丢。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 读取器 | `csvlog.session_from_frame` 不再跳过整列空的数值列；保留通道，`sample_count` 记文件行数 |
+| 三态 | `channels.valid_count` 返回 0，`channels.state` 为 `empty`，界面灰显并说明“整段没有有效样本” |
+| 报告 | 通道报告带 `has_data=false` 与“通道保留，界面显示为空”，不再写成“跳过（非数值列）” |
+| 速度筛选 | `derive.speed_channel` 先取有限值；全 NaN 的速度模板不会被当成 0 速度，也不触发 `nanmax` 警告 |
+| 旧测试 | Excel 中间空列的断言改为“空列保留成 empty，后面的 B 数值不挪位” |
+
+```powershell
+python -m unittest tests.test_i3pro.TestCsvSession tests.test_i3pro.TestChannelStates tests.test_i3pro.TestXlsxImport -v
+python -m unittest discover -s tests -q
+python tools\verify_ld_vs_csv.py
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
+node tools\smoke_viewer.js "out\20260524-耐久正赛.html"
+python tools\verify_clicks.py
+```
+
+**通过判据（本机实测，2026-10-19）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 20261018 文件 | 未重写；仍是 426,479,171 字节、248,200 行、534 列，SHA-256 `7E89683EF8063463F0EF65543C49403DA742587F4CDA7AFC4D47F1B2524CD858` |
+| 通道 | `csvlog` 读到 **533 条原生通道**，其中 **74 条为 empty**；`i3pro info` 从 463 恢复到 **537 条（含派生）** |
+| 代表性空通道 | `PosLat` / `PosLon` / `AccelX/Y/Z` / `GPS Time` / MTI 四元数与位置 / `Channel 9–16` / `Bus volt` / `Bus curr` 等；都在，`has_data=false` |
+| 真实数据 | 74 条空列在原始 `.ld` 中也都没有有效测量；有实际数据的通道逐点不变 |
+| 空速度 | 全 NaN 的 `Vx KF` 不会生成假距离轴，也不会抛 `RuntimeWarning` |
+| 单测 | `Ran 664 tests in 106.377s`，`OK (skipped=28)` |
+| 解析对照 | `PASS - 0 channel(s) outside tolerance` |
+| 无头 smoke | 两份金标准各 `920 checks`，全过 |
+| 真浏览器 | `429 项检查：429 通过，0 失败` |

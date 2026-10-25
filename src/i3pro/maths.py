@@ -646,6 +646,7 @@ class Context:
 
     time: np.ndarray
     rate: float
+    session: object | None = None
 
     @property
     def dt(self) -> float:
@@ -849,6 +850,25 @@ def _check_arity(name: str, argc: int, text: str) -> None:
     )
 
 
+def _battery_power(ctx: Context) -> np.ndarray:
+    """``battery_power()`` 的求值入口；来源判定留在 ``energy.py``。"""
+    from . import energy
+
+    if ctx.session is None:
+        raise MathError(
+            "battery_power() 需要当前场次，但这次求值没有场次上下文。"
+            "先在场次上打开表达式，或者把这条式子里的 battery_power() 删掉。"
+        )
+    values = energy.battery_power(ctx.session)
+    if values is None:
+        raise MathError(
+            "battery_power() 需要 `Battery Power`，或者 `I Data` 与 `U1 Data` "
+            "两条通道；本场次两套都没有。先导入带电池功率 / IVT 的场次，"
+            "或者把这条表达式删掉。"
+        )
+    return values
+
+
 #: 白名单函数表。键就是表达式里写的名字（大小写敏感，与 i2 Pro 一致）。
 FUNCTIONS: dict[str, _Func] = dict(
     [
@@ -902,6 +922,7 @@ FUNCTIONS: dict[str, _Func] = dict(
         _f("filter_hp0", 2, lambda c, x, f: _zero_phase(c, _as_array(c, x), float(_as_array(c, f)[0]), high=True), "零相位高通：filter_hp0(x, 截止频率Hz)"),
         # 微分 / 积分
         _f("derivative", (1, 2), lambda c, x, w=None: _derivative(c, _as_array(c, x), _window_points(c, w, 3)), "derivative(x, 窗口)：中心差分，整数=点数、小数=秒；省略窗口则用 3 点"),
+        _f("battery_power", 0, _battery_power, "电池功率：优先 Battery Power，缺了用 -I Data×U1 Data；正=放电，负=回充"),
         _f("integrate", (1, 3), lambda c, x, cond=None, reset=None: _integrate(c, _as_array(c, x), cond, reset), "integrate(x, 条件, 复位)：梯形累积积分，后两个参数可省略"),
         # 逻辑 / 选择
         _f("choose", 3, lambda c, cond, a, b: np.where(_as_bool(c, cond), _as_array(c, a), _as_array(c, b)), "条件选择：choose(条件, 真值, 假值)"),
@@ -1368,7 +1389,7 @@ def resolve_all(
     """
     time = timebase.axis(session)
     rate = timebase.rate_of(session)
-    ctx = Context(time=time, rate=rate)
+    ctx = Context(time=time, rate=rate, session=session)
     if session_path is not None:
         path: object = session_path
     else:
@@ -1565,7 +1586,7 @@ def evaluate(
     """在 ``session`` 上直接算一条式子（不求值依赖的定义）。调试与预览用。"""
     time = timebase.axis(session)
     rate = timebase.rate_of(session)
-    ctx = Context(time=time, rate=rate)
+    ctx = Context(time=time, rate=rate, session=session)
     plan = compile_expr(text, known=known_names(session, tuple(extra or {})))
     extra = extra or {}
 

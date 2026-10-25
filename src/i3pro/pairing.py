@@ -183,19 +183,26 @@ def _key(name: str) -> str:
 ZERO_TOLERANCE = 0.01
 
 
-def _empty(values: np.ndarray) -> bool:
+def _empty(values: np.ndarray, *, inclusive: bool = False) -> bool:
     """这一列是不是"占位空列"：全是 NaN，或者全都是 0（含量化底噪）。
 
     C125 的工程里挂着 IVT 的模板通道（``I Data`` / ``U1 Data`` …：单位 A / V，
     名字对得上，但传感器没接上，整段都是 0）。合并时如果让这种空列把帧表里
     **真的有数**的 ``I_Data`` 顶掉，用户拿到的是一个全 0 的母线电流——正是他想
     要的那条通道反而没了。所以空列可以被对面替换掉。
+
+    ``inclusive`` 只给"同名碰撞、对面真的有数"这一步用：实测
+    ``FR/FL Aero Ride Height`` 的模板列恰好是 ``-0.01 … 0``，不含等号的判据会把
+    ``-0.01`` 留成"有数据"，于是 ``0x66D`` 解出来的真实高度被当成重名丢掉。全局
+    判断仍用不含等号的版本，避免把本来有值、恰好落在边界的整段通道提前清空。
     """
     if values.size == 0:
         return True
     finite = values[np.isfinite(values)]
     if finite.size == 0:
         return True
+    if inclusive:
+        return bool(np.all(np.abs(finite) <= ZERO_TOLERANCE))
     return bool(np.all(np.abs(finite) < ZERO_TOLERANCE))
 
 
@@ -754,10 +761,22 @@ def merge_sources(log, sources):
                 # 同名：对面是空的（C125 里没接上的 IVT 模板通道，整段 0）就换成真的
                 # 有数的这一条；真的有数就不动它，把 CAN 的这条记进 skipped。
                 existing = next(name for name in lds if _same_name(name, channel.name))
-                if existing not in placeholder:
+                replaceable = existing in placeholder or _empty(
+                    lds[existing], inclusive=True
+                )
+                # ``Distance`` 不参与替换：记录仪的 ``Distance`` 可能是计数器 /
+                # 无效哨兵（实测这份日志从 0 跳到 429496），而 ``.ld`` 那条空列
+                # 下面有 ``derive.distance_series`` 的速度积分兜底。让它保持空列，
+                # 比把整条距离轴换成 429 km 安全。
+                keep_ld = _key(existing) in ("distance", "distance2")
+                if not replaceable or keep_ld:
                     if channel.name not in skipped:
                         skipped.append(channel.name)
                     continue
+                if existing not in placeholder:
+                    # 边界上的模板列原先按"有 0"摆着；换真值时先把整列清空，
+                    # CAN 没覆盖到的两端才不会被一排假的 0 填住。
+                    columns[existing] = np.full(axis.size, np.nan)
                 hold_into(can_t, values, axis + float(offset_s), columns[existing])
                 if unit:
                     units[existing] = unit

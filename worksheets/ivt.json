@@ -11,6 +11,12 @@
       "w": 12.0,
       "h": 32.75,
       "config": {
+        "channels": [
+          "I_Data",
+          "U1_Data",
+          "U2_Data",
+          "Battery_Power"
+        ],
         "mode": "tiled"
       },
       "pick": {

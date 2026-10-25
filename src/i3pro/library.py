@@ -17,9 +17,14 @@ from urllib.parse import quote
 
 import numpy as np
 
-from . import beacons as beaconsmod, cache, canlog, csvlog, maths, render, sidecar
+from . import beacons as beaconsmod, cache, canlog, containers, csvlog, maths, render, sidecar
 from . import ld as ldmod
 from . import channels as channelsmod
+
+#: 场次库扫哪些文件名。后缀清单只有一个出处（:data:`i3pro.containers.SESSION_FORMATS`），
+#: 压缩容器 ``*.csv.gz`` 由 :meth:`Library._entries` 另外列一条——``*.csv`` 那条 glob
+#: 命不中它（``Path("x.csv.gz").suffix`` 是 ``.gz``），漏了就是"文件在、侧边栏没有"。
+_SESSION_PATTERNS = tuple(f"*{suffix}" for suffix in containers.SESSION_FORMATS)
 
 __all__ = ["SessionLibrary", "UnknownSession", "dumps", "json_safe"]
 
@@ -235,22 +240,29 @@ class SessionLibrary:
                 continue
             # ``.xlsx``（ticket #31）与 ``.txt`` / ``.tsv``（ticket #32）也在里面：
             # 导入进来的场次与 .ld / CSV 是同一种东西，发现逻辑也只有这一处。
-            for pattern in ("*.ld", "*.csv", "*.xlsx", "*.txt", "*.tsv"):
+            # ``*.csv.gz``（ADR-0012）是同一个 CSV 的压缩容器：``*.csv`` 那条
+            # glob 不会顺带命中它（后缀不同），所以要单独列出来。
+            for pattern in (*_SESSION_PATTERNS, "*.csv.gz"):
                 for path in sorted(root.rglob(pattern)):
-                    if path.suffix.lower() == ".csv" and self._is_frame_table(path):
+                    # 帧表不压缩（ADR-0012），所以只有裸 `.csv` 才可能是不是帧表的问题。
+                    if (containers.format_suffix(path) == ".csv"
+                            and not containers.is_compressed(path)
+                            and self._is_frame_table(path)):
                         frames.append(path)
                         continue
-                    name = path.stem
+                    name = containers.session_name(path)
                     if name in found:
                         # Two sources, one stem: keep both, so a CSV export of a
                         # session that also has its .ld is not silently hidden.
-                        name = f"{name} ({path.suffix.lstrip('.').lower()})"
+                        # ``csv.gz`` 与 ``csv`` 同名并存时靠这一截区分（ADR-0012）。
+                        name = f"{name} ({containers.container_tag(path)})"
                     found.setdefault(name, (path, [path]))
         # 记录器在恰好 1,000,000 帧处切文件：9 份其实是 7 次记录（实测），这里把
         # 同一次记录的后续文件并进第一份，侧边栏里就只有一场（ticket #39）。
         for group in self._groups(frames):
             items = [item["path"] for item in group["items"]]
-            name = items[0].stem + (f"+{len(items) - 1}" if len(items) > 1 else "")
+            name = containers.session_name(items[0]) + (
+                f"+{len(items) - 1}" if len(items) > 1 else "")
             if name in found:                      # 同名 .ld 在场时两场都要看得见
                 name = f"{name} (can)"
             found.setdefault(name, (items[0], items))
@@ -417,7 +429,10 @@ class SessionLibrary:
         # 已经把摘要写进 `.can.json` 了，这里先读缓存——源文件 / DBC / 圈侧车
         # 三样指纹都没变就直接用（见 `canlog.cached_summary`）。
         path = self.path_of(name)
-        is_frames = bool(path is not None and path.suffix.lower() == ".csv"
+        # 压缩容器一定不是帧表（帧表不压缩，ADR-0012），先挡掉省一次内容嗅探。
+        is_frames = bool(path is not None
+                         and containers.format_suffix(path) == ".csv"
+                         and not containers.is_compressed(path)
                          and canlog.looks_like_frames(path))
         if is_frames:
             cached = canlog.cached_summary(path, self._dbc_dirs())

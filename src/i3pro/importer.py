@@ -21,6 +21,8 @@ import time
 from pathlib import Path
 from typing import BinaryIO, Iterable
 
+from . import containers
+
 __all__ = ["ALLOWED_SUFFIXES", "safe_name", "unique_target", "store_stream", "import_paths",
            "bring", "stage_stream", "staging_dir", "sweep_staging", "STAGING_PREFIX"]
 
@@ -30,6 +32,11 @@ __all__ = ["ALLOWED_SUFFIXES", "safe_name", "unique_target", "store_stream", "im
 #: treated as a second-class citizen.
 #: ``.xlsx`` joined them in ticket #31 (读 Excel 成场次),同样进侧边栏。
 #: ``.txt`` / ``.tsv`` 是分隔文本（ticket #32）：别的工具导出的表多半长这样。
+#:
+#: 这里列的是**格式**后缀，**不含** ``.gz``：判断名字走
+#: :func:`i3pro.containers.is_importable`（ADR-0012），纯文本容器允许带压缩后缀
+#: （``X.csv.gz``）——"压缩后缀 + 格式后缀"要一起剥掉才算数，直接用
+#: ``Path(name).suffix`` 只会看到 ``.gz``，于是把一份好好的 CSV 挡在门外。
 ALLOWED_SUFFIXES = (".ld", ".ldx", ".csv", ".xlsx", ".txt", ".tsv")
 
 #: 导入预览的暂存目录前缀。暂存在 ``%TEMP%`` 而不是数据根目录里：场次库会**递归**
@@ -44,8 +51,12 @@ def safe_name(name: str) -> str:
         raise ValueError("文件名为空")
     if base.startswith("~$"):
         raise ValueError(f"{base}: Office 临时文件")
-    if Path(base).suffix.lower() not in ALLOWED_SUFFIXES:
-        raise ValueError(f"只接受 {' / '.join(ALLOWED_SUFFIXES)}，收到 {base!r}")
+    if not containers.is_importable(base):
+        raise ValueError(
+            f"只接受 {' / '.join(ALLOWED_SUFFIXES)}，收到 {base!r}。"
+            "纯文本那三种带上 .gz 也算（例如 场次.csv.gz）；"
+            ".ld / .xlsx 压了没用，先解压回原样。"
+        )
     return base
 
 
@@ -54,9 +65,12 @@ def unique_target(directory: Path, name: str) -> Path:
     target = directory / name
     if not target.exists():
         return target
-    stem, suffix = target.stem, target.suffix
+    # 编号加在**主名**上，不是加在最后一段上（ADR-0012）：``X.csv.gz`` 撞名时该得到
+    # ``X-1.csv.gz``，不是 ``X.csv-1.gz``——后者既不像容器，也会让侧边栏多出一场。
+    stem = containers.session_name(name)
+    tail = str(name)[len(stem):]
     for n in range(1, 1000):
-        candidate = directory / f"{stem}-{n}{suffix}"
+        candidate = directory / f"{stem}-{n}{tail}"
         if not candidate.exists():
             return candidate
     raise ValueError(f"{name}: 同名文件太多")
@@ -90,7 +104,8 @@ def store_stream(
     except BaseException:
         temp.unlink(missing_ok=True)
         raise
-    return {"file": target.name, "stem": target.stem, "bytes": written, "path": str(target)}
+    return {"file": target.name, "stem": containers.session_name(target),
+            "bytes": written, "path": str(target)}
 
 
 def _bring(path: Path, directory: Path, move: bool) -> dict:
@@ -103,7 +118,7 @@ def _bring(path: Path, directory: Path, move: bool) -> dict:
     return {
         "source": str(path),
         "file": target.name,
-        "stem": target.stem,
+        "stem": containers.session_name(target),
         "bytes": target.stat().st_size,
         "path": str(target),
     }
@@ -123,7 +138,7 @@ def import_paths(
             candidates = [
                 child
                 for child in sorted(path.rglob("*"))
-                if child.is_file() and child.suffix.lower() in ALLOWED_SUFFIXES
+                if child.is_file() and containers.is_importable(child)
             ]
             if not candidates:
                 suffixes = "/".join(ALLOWED_SUFFIXES)

@@ -1528,6 +1528,42 @@ if (api) {
     api.data.api = apiBase;
   }
 
+  // 22b. energy channels: when the snapshot was rendered with the three global
+  // energy definitions, their units and the Net = Drive - Regen identity must
+  // survive the payload -> viewer path. Older snapshots without them skip.
+  {
+    const energyNames = ["Drive Energy", "Regen Energy", "Net Energy"];
+    const traces = api.data.traces || {};
+    const present = energyNames.filter((name) => !!traces[name]);
+    if (present.length) {
+      check(present.length === energyNames.length,
+        "energy channels are only partly present: " + JSON.stringify(present));
+      for (const name of energyNames) {
+        const meta = (api.data.channels || []).find((item) => item.name === name);
+        check(!!meta && meta.unit === "kWh",
+          name + " is missing from the channel index or its unit is not kWh: "
+          + JSON.stringify(meta));
+      }
+      const batterySheet = (api.data.worksheets || []).find(
+        (sheet) => sheet.name === "Battery");
+      const batteryText = JSON.stringify(batterySheet || {});
+      check(energyNames.every((name) => batteryText.indexOf(name) >= 0),
+        "the Battery worksheet does not reference all energy channels: "
+        + batteryText.slice(0, 200));
+      const drive = traces["Drive Energy"].value || [];
+      const regen = traces["Regen Energy"].value || [];
+      const net = traces["Net Energy"].value || [];
+      const count = Math.min(drive.length, regen.length, net.length);
+      check(count > 1, "energy traces are empty: " + count);
+      let worst = 0;
+      for (let i = 0; i < count; i += 1) {
+        worst = Math.max(worst, Math.abs(net[i] - (drive[i] - regen[i])));
+      }
+      check(worst < 1e-4,
+        "Net Energy is not Drive Energy - Regen Energy, worst=" + worst);
+    }
+  }
+
   // 23. track sections: the list, the edits that reach the sidecar, and the
   // bands on the time axis.
   if (hasDistance && !((api.sectionsState() || {}).config)) {

@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "name": "xhw1",
+  "order": 89,
+  "hints": [],
+  "components": [
+    {
+      "type": "graph",
+      "x": 0.0,
+      "y": 0.0,
+      "w": 8.0,
+      "h": 14.5,
+      "config": {
+        "channels": [
+          "gyrZ MTI",
+          "Vx KF",
+          "Radius",
+          "SW Angle"
+        ],
+        "mode": "tiled",
+        "palette": "default",
+        "colors": {
+          "yaw MTI": "#ff5d6c"
+        }
+      },
+      "pick": {
+        "channels": {
+          "limit": 8
+        }
+      }
+    },
+    {
+      "type": "track",
+      "x": 8.0,
+      "y": 0.0,
+      "w": 4.0,
+      "h": 14.5,
+      "config": {
+        "window": "zoom"
+      }
+    },
+    {
+      "type": "graph",
+      "x": 0.0,
+      "y": 14.5,
+      "w": 12.0,
+      "h": 8.0,
+      "config": {
+        "channels": [
+          "RR Aero Ride Height",
+          "RL Aero Ride Height",
+          "FR Aero Ride Height",
+          "FL Aero Ride Height"
+        ],
+        "mode": "tiled"
+      }
+    }
+  ]
+}

@@ -16,6 +16,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from . import containers
+
 _ENCODINGS = ("utf-8-sig", "gbk", "cp936", "latin-1")
 
 
@@ -46,15 +48,16 @@ class MotecCsv:
 
 
 def _open_text(path: Path):
+    """按容器打开：MoTeC 导出的 CSV 压成 ``.csv.gz`` 也照样能当裁判（ADR-0012）。"""
     for enc in _ENCODINGS:
         try:
-            with path.open("r", encoding=enc, newline="") as fh:
+            with containers.open_text(path, encoding=enc) as fh:
                 head = fh.read(8192)
             if "\ufffd" not in head:
-                return path.open("r", encoding=enc, newline="")
+                return containers.open_text(path, encoding=enc)
         except UnicodeDecodeError:
             continue
-    return path.open("r", encoding="latin-1", newline="")
+    return containers.open_text(path, encoding="latin-1")
 
 
 def read_structure(path: str | Path) -> tuple[dict[str, str], list[str], list[str], int]:

@@ -31,6 +31,7 @@ from . import (
     axes as axesmod,
     beacons as beaconsmod,
     channelref,
+    containers,
     csvlog,
     derive,
     export as exportmod,
@@ -1253,10 +1254,11 @@ class _Call:
 
         五种场次文件（.ld / .csv / 原始 CAN 帧表 / .xlsx / 分隔文本）都走这里，
         不是只认 .ld——导入一份 Excel 却听不到"读成了什么"，用户只能自己去猜。
+        后缀按容器取（ADR-0012），所以 ``X.csv.gz`` 也走这一段。
         """
         summary: dict = {"ok": True, **info}
         target = Path(info["path"])
-        if target.suffix.lower() in (".ld", ".csv", ".xlsx", ".txt", ".tsv"):
+        if containers.is_session(target):
             try:
                 with csvlog.open_session(
                     target, dbc_dir=[self.library.upload_dir() / "dbc"]
@@ -1313,7 +1315,7 @@ class _Call:
             return self._error(400, str(exc))
         except OSError as exc:
             return self._error(500, f"写盘失败: {exc}")
-        if Path(clean).suffix.lower() not in (".csv", ".txt", ".tsv"):
+        if containers.format_suffix(clean) not in (".csv", ".txt", ".tsv"):
             return self._json({"ok": True, "preview": None, **staged})
         try:
             shown = txtlog.preview(Path(staged["path"]), **self.text_options(query))

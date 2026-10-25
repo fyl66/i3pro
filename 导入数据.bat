@@ -1,10 +1,12 @@
 @echo off
 rem ===========================================================================
-rem  i3pro data import  --  drag .ld / .ldx / .csv / .xlsx / .txt / .tsv files (or a folder)
+rem  i3pro data import  --  drag .ld / .ldx / .csv / .csv.gz / .xlsx / .txt / .tsv files (or a folder)
 rem  onto this file.
 rem
 rem  .csv covers both i2 Pro exports and raw CAN frame logs.  A frame log is
 rem  decoded with the DBCs in i2pro_data\dbc -- nothing to configure.
+rem  .csv.gz is the same CSV, gzipped (ADR-0012): i3pro reads it directly, and
+rem  Excel needs it unzipped first -- it is for saving space, not for Excel.
 rem  .xlsx is an Excel table (first sheet that looks like a channel table).
 rem  .txt / .tsv are delimited tables (Tab / comma / semicolon / spaces); run
 rem  "i3pro.cmd import <file> --preview" first to see how one will be read.
@@ -25,13 +27,16 @@ if "%~1"=="" (
   echo   ==============================================================
   echo     i3pro  -  import logs
   echo   ==============================================================
-  echo     Drag one or more .ld / .ldx / .csv / .xlsx / .txt / .tsv files,
+  echo     Drag one or more .ld / .ldx / .csv / .csv.gz / .xlsx / .txt / .tsv files,
   echo     or a folder, onto this file to copy them into:
   echo.
   echo       %~dp0i2pro_data
   echo.
   echo     Raw CAN frame logs -- the .csv with a "CAN" column -- work too:
   echo     they are decoded with the DBCs in %~dp0i2pro_data\dbc
+  echo.
+  echo     .csv.gz = gzipped CSV.  i3pro reads it as-is; to open it in Excel,
+  echo     unzip it first with 7-Zip or gzip.  Compress with tools\make_csv_gz.py.
   echo.
   echo     Excel: the first sheet that looks like a channel table is used;
   echo     pick another one with --sheet "sheet name".

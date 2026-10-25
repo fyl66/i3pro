@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "name": "load",
+  "order": 92,
+  "hints": [],
+  "components": [
+    {
+      "type": "graph",
+      "x": 0.0,
+      "y": 0.0,
+      "w": 12.0,
+      "h": 8.5,
+      "config": {
+        "channels": [
+          "I_Data",
+          "U1_Data",
+          "U2_Data",
+          "Battery_Power"
+        ],
+        "mode": "tiled"
+      },
+      "pick": {
+        "channels": {
+          "limit": 8
+        }
+      }
+    },
+    {
+      "type": "graph",
+      "x": 0.0,
+      "y": 8.5,
+      "w": 8.25,
+      "h": 23.0,
+      "config": {
+        "channels": [
+          "FR Wheel Load",
+          "RL Wheel Load",
+          "FL Wheel Load",
+          "RR Wheel Load"
+        ],
+        "mode": "tiled"
+      }
+    },
+    {
+      "type": "track",
+      "x": 8.25,
+      "y": 8.5,
+      "w": 3.75,
+      "h": 14.25,
+      "config": {
+        "window": "all"
+      }
+    },
+    {
+      "type": "graph",
+      "x": 8.25,
+      "y": 22.75,
+      "w": 3.75,
+      "h": 8.75,
+      "config": {
+        "channels": [
+          "Vx KF"
+        ],
+        "mode": "tiled"
+      }
+    }
+  ]
+}

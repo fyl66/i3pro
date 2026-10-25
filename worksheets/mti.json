@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "name": "mti",
+  "order": 87,
+  "hints": [],
+  "components": [
+    {
+      "type": "graph",
+      "x": 0.0,
+      "y": 0.0,
+      "w": 12.0,
+      "h": 10.0,
+      "config": {
+        "mode": "tiled"
+      },
+      "pick": {
+        "channels": {
+          "limit": 8
+        }
+      }
+    },
+    {
+      "type": "graph",
+      "x": 0.0,
+      "y": 10.0,
+      "w": 12.0,
+      "h": 21.25,
+      "config": {
+        "channels": [
+          "minute MTI",
+          "year MTI",
+          "second MTI",
+          "Timestamp MTI"
+        ],
+        "mode": "tiled"
+      }
+    }
+  ]
+}

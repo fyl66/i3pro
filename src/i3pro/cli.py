@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 
 from . import axes as axesmod
-from . import csvlog, export as exportmod, laps as lapsmod
+from . import containers, csvlog, export as exportmod, laps as lapsmod
 from . import library as librarymod
 from . import derive
 from . import ld as ldmod
@@ -493,7 +493,7 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
         names = library.names()
         if not names:
             where = "、".join(str(d) for d in dirs)
-            print(f"# {where} 里没有 .ld / .csv / .xlsx / .txt / .tsv 场次")
+            print(f"# {where} 里没有 .ld / .csv（含 .csv.gz）/ .xlsx / .txt / .tsv 场次")
             print("# 下一步：把日志拷进这个目录，或双击 导入数据.bat 拖一个进去。")
             return 1
         out.mkdir(parents=True, exist_ok=True)
@@ -606,7 +606,7 @@ def cmd_pair(args: argparse.Namespace) -> int:
             return 1
         wanted = [
             path for path in sorted(source.rglob("*"))
-            if path.is_file() and path.suffix.lower() in importer.ALLOWED_SUFFIXES
+            if path.is_file() and containers.is_importable(path)
         ]
         copied = skipped = 0
         for path in wanted:
@@ -750,7 +750,9 @@ def cmd_import(args: argparse.Namespace) -> int:
 
     for row in imported:
         note = ""
-        suffix = Path(row["file"]).suffix.lower()
+        # 后缀按**容器**取（ADR-0012）：`X.csv.gz` 的逻辑后缀是 `.csv`，下面那几条
+        # "要不要写列映射 / 记解析方式 / 读一遍报通道数"才判断得对。
+        suffix = containers.format_suffix(row["file"])
         if suffix in (".csv", ".xlsx", ".txt", ".tsv") and (
             renames or units or (suffix == ".xlsx" and sheet)
         ):
@@ -812,7 +814,7 @@ def _print_previews(paths, options: dict) -> int:
     bad = 0
     for raw in paths:
         path = Path(raw)
-        if path.is_dir() or path.suffix.lower() not in (".csv", ".txt", ".tsv"):
+        if path.is_dir() or containers.format_suffix(path) not in (".csv", ".txt", ".tsv"):
             continue
         try:
             shown = txtlog.preview(path, **options)

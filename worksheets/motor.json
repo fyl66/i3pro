@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "name": "motor",
+  "order": 88,
+  "hints": [],
+  "components": [
+    {
+      "type": "graph",
+      "x": 0.0,
+      "y": 0.0,
+      "w": 12.0,
+      "h": 35.75,
+      "config": {
+        "channels": [
+          "AMKFR ActualTorqueValue",
+          "AMKFL ActualTorqueValue",
+          "AMKRL ActualTorqueValue",
+          "AMKRR ActualTorqueValue",
+          "AMKFR DCBusVolt",
+          "AMKFL DCBusVolt",
+          "AMKRL DCBusVolt",
+          "AMKRR DCBusVolt",
+          "MCU1 FR ActualVelocity",
+          "MCU2 FL ActualVelocity",
+          "MCU3 RL ActualVelocity",
+          "MCU4 RR ActualVelocity",
+          "MCU1 FR TempMotor",
+          "MCU2 FL TempMotor",
+          "MCU3 RL TempMotor",
+          "MCU4 RR TempMotor",
+          "Vx KF",
+          "MCU1 FR TorqueCurrent",
+          "MCU1 FR ManetizingCurrent",
+          "MCU2 FL TorqueCurrent",
+          "MCU2 FL ManetizingCurrent",
+          "MCU3 RL TorqueCurrent",
+          "MCU3 RL ManetizingCurrent",
+          "MCU4 RR TorqueCurrent",
+          "MCU4 RR ManetizingCurrent",
+          "U1 Data",
+          "I Data",
+          "Drive Energy",
+          "Regen Energy",
+          "Net Energy"
+        ],
+        "mode": "tiled"
+      },
+      "pick": {
+        "channels": {
+          "limit": 8
+        }
+      }
+    }
+  ]
+}

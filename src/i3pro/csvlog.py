@@ -30,7 +30,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import channelpick, channelref, derive, ld as ldmod, sidecar
+from . import channelpick, channelref, containers, derive, ld as ldmod, sidecar
 
 __all__ = ["CsvSession", "read_csv_session", "canonical_names", "ALIASES", "scan_rows",
            "load_map", "save_map", "load_sheet", "load_options", "save_options",
@@ -255,7 +255,7 @@ def scan_rows(path: Path, limit: int = 40) -> list[list[str]]:
     """Decode the first ``limit`` rows, trying the encodings these files use."""
     for encoding in ("utf-8-sig", "gbk", "cp936", "latin-1"):
         try:
-            with path.open("r", encoding=encoding, newline="") as handle:
+            with containers.open_text(path, encoding=encoding) as handle:
                 rows = []
                 for _ in range(limit):
                     line = handle.readline()
@@ -739,10 +739,7 @@ def session_from_frame(
                            "detail": "这一列有非数字的格子"})
             continue
         values = values[good]
-        if values.size and not np.isfinite(values).any():
-            report.append({"column": raw_names[i], "status": "跳过（非数值列）",
-                           "detail": "整列没有可用数值"})
-            continue
+        has_data = bool(values.size and np.isfinite(values).any())
 
         if key in renames:
             name, matched_by = renames[key], "手工指定"
@@ -779,7 +776,10 @@ def session_from_frame(
         report.append({"column": raw_names[i], "status": "通道", "name": name,
                        "matched_by": matched_by, "unit": unit, "rate": rate,
                        "rate_from": rate_from, "warning": warning,
-                       "samples": int(values.size)})
+                       "samples": int(values.size), "has_data": has_data,
+                       **({} if has_data else {
+                           "detail": "整列没有有效数值（通道保留，界面显示为空）"
+                       })})
 
     if not channels:
         raise ValueError(f"{path.name}: 没有可用的通道列")
@@ -795,7 +795,9 @@ def session_from_frame(
         device=meta.get("Device") or {"xlsx": "Excel", "txt": "文本"}.get(fmt, "CSV"),
         log_date=meta.get("Log Date", ""),
         log_time=meta.get("Log Time", ""),
-        event_name=meta.get("Event") or path.stem, report=report,
+        # 事件名（侧边栏/标题里那种"这场叫什么"）取**主名**：`X.csv.gz` 是 `X`，
+        # 不是 `X.csv`（ADR-0012）。
+        event_name=meta.get("Event") or containers.session_name(path), report=report,
         fmt=fmt, sheet=sheet,
     )
 
@@ -813,12 +815,21 @@ def open_session(path: str | Path, *, sources=None, **kwargs):
     ``.txt`` / ``.tsv`` 是纯分隔文本（ticket #32）：分隔符要猜、时间列可能没有，
     但装出来仍然是同一个场次形状。
 
+    后缀一律按**容器**取（ADR-0012）：``X.csv.gz`` 的逻辑后缀是 ``.csv``，压缩
+    后缀只决定"要不要先解压"，不决定读法。
+
     ``sources`` 是"这场次由哪几份文件组成"，**由调用方给**（场次库从它算 ``+N`` 的
     同一处分组拿）。不给时帧表读取器退回"只看同目录的邻居"——单份文件在命令行上
     直接打开时就是这个行为。给与不给必须只影响**成员怎么找**，不影响读法。
     """
     path = Path(path)
-    suffix = path.suffix.lower()
+    suffix = containers.format_suffix(path)
+    if containers.is_compressed(path) and suffix not in containers.COMPRESSIBLE:
+        raise ValueError(
+            f"{path.name}：这个格式不该压（{suffix or '认不出来的格式'}）。"
+            "下一步：解压回原样——`.ld` 是二进制、`.xlsx` 本来就是 zip，再套一层 "
+            "gzip 只会更慢更大；只有 .csv / .txt / .tsv 值得压（ADR-0012）。"
+        )
     if suffix == ".csv":
         from . import canlog
 
@@ -826,7 +837,11 @@ def open_session(path: str | Path, *, sources=None, **kwargs):
         # 读取器认识。两条路都按各自签名过滤，而不是给其中一条写死白名单——写死白名单
         # 的那版把 `dbc_dir` 也转给了通道表读取器，于是**每个 CSV 场次的请求都 500**
         # （真发生过：ticket #38 那次回归，靠恢复金标准数据才暴露出来）。
-        if canlog.looks_like_frames(path):
+        #
+        # 帧表**不压缩**（ADR-0012）：场次库启动时要对每份 `.csv` 做内容嗅探，
+        # 压缩帧表会让那趟扫描变成逐份解压。所以 `.csv.gz` 一律当通道表，连嗅探
+        # 都不做——`canlog.looks_like_frames` 内部也按 `.csv` 严格判断。
+        if not containers.is_compressed(path) and canlog.looks_like_frames(path):
             if sources:
                 # 调用方说了算：给一份就是一份，别再回邻居里扩（那正是"名字说 +N、
                 # 点开只有一半"的来源）。见 canlog.read_can_session 的 discover。

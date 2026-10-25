@@ -1,0 +1,297 @@
+VERSION ""
+
+
+NS_ : 
+	NS_DESC_
+	CM_
+	BA_DEF_
+	BA_
+	VAL_
+	CAT_DEF_
+	CAT_
+	FILTER
+	BA_DEF_DEF_
+	EV_DATA_
+	ENVVAR_DATA_
+	SGTYPE_
+	SGTYPE_VAL_
+	BA_DEF_SGTYPE_
+	BA_SGTYPE_
+	SIG_TYPE_REF_
+	VAL_TABLE_
+	SIG_GROUP_
+	SIG_VALTYPE_
+	SIGTYPE_VALTYPE_
+	BO_TX_BU_
+	BA_DEF_REL_
+	BA_REL_
+	BA_DEF_DEF_REL_
+	BU_SG_REL_
+	BU_EV_REL_
+	BU_BO_REL_
+	SG_MUL_VAL_
+
+BS_:
+
+BU_:
+VAL_TABLE_ MirrorControlDisable 1 "Control disabled" 0 "Condition fulfilled" ;
+VAL_TABLE_ MirrorControlEnable 1 "Condition fulfilled" 0 "Control Disabled" ;
+VAL_TABLE_ DClinkGood34 1 "DC-Link voltage good for inv3+4" 0 "DC-Link voltage low for inv3+4" ;
+VAL_TABLE_ DClinkGood12 1 "DC-Link voltage good for inv1+2" 0 "DC-Link voltage low for inv1+2" ;
+VAL_TABLE_ DeratingIndication 1 "'Is-Max' is limitted" 0 "'Is-Max' is not limitted" ;
+VAL_TABLE_ InverterReady 1 "Ready" 0 "NotReady" ;
+VAL_TABLE_ InverterState 3 "Config values missing" 2 "Error" 1 "Drive" 0 "Idle" ;
+VAL_TABLE_ CurrentControl 1 "Current control" 0 "Speed or torque control" ;
+VAL_TABLE_ ASCallowed 1 "allowed" 0 "not allowed" ;
+VAL_TABLE_ ResetError 1 "reset error" 0 "-" ;
+VAL_TABLE_ EnableInverter 1 "enable control" 0 "disable control" ;
+
+
+BO_ 949 inverter4outboundB: 8 Vector__XXX
+ SG_ SpeedActual : 48|16@1- (1,0) [-32768|32767] "RPM" Vector__XXX
+ SG_ IqActual : 36|12@1- (0.0625,0) [-128|127.9375] "Arms" Vector__XXX
+ SG_ IqSetpoint : 24|12@1- (0.0625,0) [-128|127.9375] "Arms" Vector__XXX
+ SG_ IdActual : 12|12@1- (0.0625,0) [-128|127.9375] "Arms" Vector__XXX
+ SG_ IdSetpoint : 0|12@1- (0.0625,0) [-128|127.9375] "Arms" Vector__XXX
+
+BO_ 933 inverter3outboundB: 8 Vector__XXX
+ SG_ SpeedActual : 48|16@1- (1,0) [-32768|32767] "RPM" Vector__XXX
+ SG_ IqActual : 36|12@1- (0.0625,0) [-128|127.9375] "Arms" Vector__XXX
+ SG_ IqSetpoint : 24|12@1- (0.0625,0) [-128|127.9375] "Arms" Vector__XXX
+ SG_ IdActual : 12|12@1- (0.0625,0) [-128|127.9375] "Arms" Vector__XXX
+ SG_ IdSetpoint : 0|12@1- (0.0625,0) [-128|127.9375] "Arms" Vector__XXX
+
+BO_ 917 inverter2outboundB: 8 Vector__XXX
+ SG_ SpeedActual : 48|16@1- (1,0) [-32768|32767] "RPM" Vector__XXX
+ SG_ IqActual : 36|12@1- (0.0625,0) [-128|127.9375] "Arms" Vector__XXX
+ SG_ IqSetpoint : 24|12@1- (0.0625,0) [-128|127.9375] "Arms" Vector__XXX
+ SG_ IdActual : 12|12@1- (0.0625,0) [-128|127.9375] "Arms" Vector__XXX
+ SG_ IdSetpoint : 0|12@1- (0.0625,0) [-128|127.9375] "Arms" Vector__XXX
+
+BO_ 947 inverter4outboundA: 8 Vector__XXX
+ SG_ TemperaturePowerSwitches : 52|12@1+ (0.0625,0) [0|255.9375] "°C" Vector__XXX
+ SG_ TemperatureMotor : 40|12@1- (0.125,-0) [-256|255.875] "°C" Vector__XXX
+ SG_ TorqueSetpoint : 28|12@1- (0.03125,0) [-64|63.96875] "Nm" Vector__XXX
+ SG_ TorqueActual : 16|12@1- (0.03125,0) [-64|63.96875] "Nm" Vector__XXX
+ SG_ DeratingCurrent : 4|12@1+ (0.03125,0) [0|127.96875] "Arms" Vector__XXX
+ SG_ DeratingIndication : 3|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ InverterReady : 2|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ InverterState : 0|2@1+ (1,0) [0|3] "" Vector__XXX
+
+BO_ 931 inverter3outboundA: 8 Vector__XXX
+ SG_ TemperaturePowerSwitches : 52|12@1+ (0.0625,0) [0|255.9375] "°C" Vector__XXX
+ SG_ TemperatureMotor : 40|12@1- (0.125,-0) [-256|255.875] "°C" Vector__XXX
+ SG_ TorqueSetpoint : 28|12@1- (0.03125,0) [-64|63.96875] "Nm" Vector__XXX
+ SG_ TorqueActual : 16|12@1- (0.03125,0) [-64|63.96875] "Nm" Vector__XXX
+ SG_ DeratingCurrent : 4|12@1+ (0.03125,0) [0|127.96875] "Arms" Vector__XXX
+ SG_ DeratingIndication : 3|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ InverterReady : 2|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ InverterState : 0|2@1+ (1,0) [0|3] "" Vector__XXX
+
+BO_ 915 inverter2outboundA: 8 Vector__XXX
+ SG_ TemperaturePowerSwitches : 52|12@1+ (0.0625,0) [0|255.9375] "°C" Vector__XXX
+ SG_ TemperatureMotor : 40|12@1- (0.125,-0) [-256|255.875] "°C" Vector__XXX
+ SG_ TorqueSetpoint : 28|12@1- (0.03125,0) [-64|63.96875] "Nm" Vector__XXX
+ SG_ TorqueActual : 16|12@1- (0.03125,0) [-64|63.96875] "Nm" Vector__XXX
+ SG_ DeratingCurrent : 4|12@1+ (0.03125,0) [0|127.96875] "Arms" Vector__XXX
+ SG_ DeratingIndication : 3|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ InverterReady : 2|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ InverterState : 0|2@1+ (1,0) [0|3] "" Vector__XXX
+
+BO_ 1024 GeneralOutbound: 8 Vector__XXX
+ SG_ MirrorControlEnable : 50|1@1+ (1,0) [0|0] "" Vector__XXX
+ SG_ MirrorControlDisable : 51|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ DClinkGood34 : 49|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ DClinkGood12 : 48|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ SwitchingFrequency : 32|16@1+ (0.001953125,0) [0|127.998046875] "kHz" Vector__XXX
+ SG_ DClinkVoltage34Actual : 16|16@1+ (0.015625,0) [0|1023.984375] "V" Vector__XXX
+ SG_ DClinkVoltage12Actual : 0|16@1+ (0.015625,0) [0|1023.984375] "V" Vector__XXX
+
+BO_ 901 inverter1outboundB: 8 Vector__XXX
+ SG_ SpeedActual : 48|16@1- (1,0) [-32768|32767] "RPM" Vector__XXX
+ SG_ IqActual : 36|12@1- (0.0625,0) [-128|127.9375] "Arms" Vector__XXX
+ SG_ IqSetpoint : 24|12@1- (0.0625,0) [-128|127.9375] "Arms" Vector__XXX
+ SG_ IdActual : 12|12@1- (0.0625,0) [-128|127.9375] "Arms" Vector__XXX
+ SG_ IdSetpoint : 0|12@1- (0.0625,0) [-128|127.9375] "Arms" Vector__XXX
+
+BO_ 899 inverter1outboundA: 8 Vector__XXX
+ SG_ TemperaturePowerSwitches : 52|12@1+ (0.0625,0) [0|255.9375] "°C" Vector__XXX
+ SG_ TemperatureMotor : 40|12@1- (0.125,-0) [-256|255.875] "°C" Vector__XXX
+ SG_ TorqueSetpoint : 28|12@1- (0.03125,0) [-64|63.96875] "Nm" Vector__XXX
+ SG_ TorqueActual : 16|12@1- (0.03125,0) [-64|63.96875] "Nm" Vector__XXX
+ SG_ DeratingCurrent : 4|12@1+ (0.03125,0) [0|127.96875] "Arms" Vector__XXX
+ SG_ DeratingIndication : 3|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ InverterReady : 2|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ InverterState : 0|2@1+ (1,0) [0|3] "" Vector__XXX
+
+BO_ 438 inverter4setpoints: 8 Vector__XXX
+ SG_ TorqueLimitNegative : 48|16@1- (0.00390625,0) [-128|127.99609375] "Nm" Vector__XXX
+ SG_ TorqueLimitPositive : 32|16@1- (0.00390625,0) [-128|127.99609375] "Nm" Vector__XXX
+ SG_ SpeedSetpoint : 16|16@1- (1,0) [-32768|32767] "RPM" Vector__XXX
+ SG_ CurrentControl : 3|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ ASCallowed : 2|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ ResetError : 1|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ EnableInverter : 0|1@1+ (1,0) [0|1] "" Vector__XXX
+
+BO_ 422 inverter3setpoints: 8 Vector__XXX
+ SG_ TorqueLimitNegative : 48|16@1- (0.00390625,0) [-128|127.99609375] "Nm" Vector__XXX
+ SG_ TorqueLimitPositive : 32|16@1- (0.00390625,0) [-128|127.99609375] "Nm" Vector__XXX
+ SG_ SpeedSetpoint : 16|16@1- (1,0) [-32768|32767] "RPM" Vector__XXX
+ SG_ CurrentControl : 3|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ ASCallowed : 2|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ ResetError : 1|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ EnableInverter : 0|1@1+ (1,0) [0|1] "" Vector__XXX
+
+BO_ 406 inverter2setpoints: 8 Vector__XXX
+ SG_ TorqueLimitNegative : 48|16@1- (0.00390625,0) [-128|127.99609375] "Nm" Vector__XXX
+ SG_ TorqueLimitPositive : 32|16@1- (0.00390625,0) [-128|127.99609375] "Nm" Vector__XXX
+ SG_ SpeedSetpoint : 16|16@1- (1,0) [-32768|32767] "RPM" Vector__XXX
+ SG_ CurrentControl : 3|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ ASCallowed : 2|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ ResetError : 1|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ EnableInverter : 0|1@1+ (1,0) [0|1] "" Vector__XXX
+
+BO_ 390 inverter1setpoints: 8 Vector__XXX
+ SG_ TorqueLimitNegative : 48|16@1- (0.00390625,0) [-128|127.99609375] "Nm" Vector__XXX
+ SG_ TorqueLimitPositive : 32|16@1- (0.00390625,0) [-128|127.99609375] "Nm" Vector__XXX
+ SG_ SpeedSetpoint : 16|16@1- (1,0) [-32768|32767] "RPM" Vector__XXX
+ SG_ CurrentControl : 3|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ ASCallowed : 2|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ ResetError : 1|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ EnableInverter : 0|1@1+ (1,0) [0|1] "" Vector__XXX
+
+
+
+CM_ BO_ 949 "Second status message (outbound message) of inverter 4";
+CM_ SG_ 949 SpeedActual "Actual speed of motor";
+CM_ SG_ 949 IqActual "Actual Iq current";
+CM_ SG_ 949 IqSetpoint "Setpoint for Iq current";
+CM_ SG_ 949 IdActual "Actual Id current";
+CM_ SG_ 949 IdSetpoint "Setpoint for Id current";
+CM_ BO_ 933 "Second status message (outbound message) of inverter 3";
+CM_ SG_ 933 SpeedActual "Actual speed of motor";
+CM_ SG_ 933 IqActual "Actual Iq current";
+CM_ SG_ 933 IqSetpoint "Setpoint for Iq current";
+CM_ SG_ 933 IdActual "Actual Id current";
+CM_ SG_ 933 IdSetpoint "Setpoint for Id current";
+CM_ BO_ 917 "Second status message (outbound message) of inverter 2";
+CM_ SG_ 917 SpeedActual "Actual speed of motor";
+CM_ SG_ 917 IqActual "Actual Iq current";
+CM_ SG_ 917 IqSetpoint "Setpoint for Iq current";
+CM_ SG_ 917 IdActual "Actual Id current";
+CM_ SG_ 917 IdSetpoint "Setpoint for Id current";
+CM_ BO_ 947 "First status message (outbound message) of inverter 4";
+CM_ SG_ 947 TemperaturePowerSwitches "Lowest measured temperature is approx. 27°C";
+CM_ SG_ 947 TemperatureMotor "Values are cut into range between -100 and +155 °C if outside these boundaries.";
+CM_ SG_ 947 TorqueSetpoint "Motor torque setpoint";
+CM_ SG_ 947 TorqueActual "Actual torque of motor";
+CM_ SG_ 947 DeratingCurrent "Maximum allowed current due to derating";
+CM_ SG_ 947 DeratingIndication "1 = Due to derating, the currently permitted inverter/motor output current is lower than the specified value ’Is-Max’ in the config (this does not necessarily mean that the inverter is being derated at this moment)";
+CM_ SG_ 947 InverterReady "1 = Inverter is ready to enter drive state, 0 = Not all conditions are met for the inverter to enter drive state";
+CM_ SG_ 947 InverterState "State of inverter [0 = Idle, 1 = Drive, 2 = Error, 3 = config values missing]";
+CM_ BO_ 931 "First status message (outbound message) of inverter 3";
+CM_ SG_ 931 TemperaturePowerSwitches "Lowest measured temperature is approx. 27°C";
+CM_ SG_ 931 TemperatureMotor "Values are cut into range between -100 and +155 °C if outside these boundaries.";
+CM_ SG_ 931 TorqueSetpoint "Motor torque setpoint";
+CM_ SG_ 931 TorqueActual "Actual torque of motor";
+CM_ SG_ 931 DeratingCurrent "Maximum allowed current due to derating";
+CM_ SG_ 931 DeratingIndication "1 = Due to derating, the currently permitted inverter/motor output current is lower than the specified value ’Is-Max’ in the config (this does not necessarily mean that the inverter is being derated at this moment)";
+CM_ SG_ 931 InverterReady "1 = Inverter is ready to enter drive state, 0 = Not all conditions are met for the inverter to enter drive state";
+CM_ SG_ 931 InverterState "State of inverter [0 = Idle, 1 = Drive, 2 = Error, 3 = config values missing]";
+CM_ BO_ 915 "First status message (outbound message) of inverter 2";
+CM_ SG_ 915 TemperaturePowerSwitches "Lowest measured temperature is approx. 27°C";
+CM_ SG_ 915 TemperatureMotor "Values are cut into range between -100 and +155 °C if outside these boundaries.";
+CM_ SG_ 915 TorqueSetpoint "Motor torque setpoint";
+CM_ SG_ 915 TorqueActual "Actual torque of motor";
+CM_ SG_ 915 DeratingCurrent "Maximum allowed current due to derating";
+CM_ SG_ 915 DeratingIndication "1 = Due to derating, the currently permitted inverter/motor output current is lower than the specified value ’Is-Max’ in the config (this does not necessarily mean that the inverter is being derated at this moment)";
+CM_ SG_ 915 InverterReady "1 = Inverter is ready to enter drive state, 0 = Not all conditions are met for the inverter to enter drive state";
+CM_ SG_ 915 InverterState "State of inverter [0 = Idle, 1 = Drive, 2 = Error, 3 = config values missing]";
+CM_ BO_ 1024 "General status message (outbound message) for all 4 inverters";
+CM_ SG_ 1024 MirrorControlEnable "Mirror of ’Control Enable’ input";
+CM_ SG_ 1024 MirrorControlDisable "Mirror of ’Control Disable’ input";
+CM_ SG_ 1024 DClinkGood34 "Indicates if DC-Link voltage for inverters 3 and 4 is above the minimum value defined in the config";
+CM_ SG_ 1024 DClinkGood12 "Indicates if DC-Link voltage for inverters 1 and 2 is above the minimum value defined in the config";
+CM_ SG_ 1024 SwitchingFrequency "Current switching frequency ranging from 0 to 100kHz.";
+CM_ SG_ 1024 DClinkVoltage34Actual "Current DC link voltage of inverters 3 and 4";
+CM_ SG_ 1024 DClinkVoltage12Actual "Current DC link voltage of inverters 1 and 2";
+CM_ BO_ 901 "Second status message (outbound message) of inverter 1";
+CM_ SG_ 901 SpeedActual "Actual speed of motor";
+CM_ SG_ 901 IqActual "Actual Iq current";
+CM_ SG_ 901 IqSetpoint "Setpoint for Iq current";
+CM_ SG_ 901 IdActual "Actual Id current";
+CM_ SG_ 901 IdSetpoint "Setpoint for Id current";
+CM_ BO_ 899 "First status message (outbound message) of inverter 1";
+CM_ SG_ 899 TemperaturePowerSwitches "Lowest measured temperature is approx. 27°C";
+CM_ SG_ 899 TemperatureMotor "Values are cut into range between -100 and +155 °C if outside these boundaries.";
+CM_ SG_ 899 TorqueSetpoint "Motor torque setpoint";
+CM_ SG_ 899 TorqueActual "Actual torque of motor";
+CM_ SG_ 899 DeratingCurrent "Maximum allowed current due to derating";
+CM_ SG_ 899 DeratingIndication "1 = Due to derating, the currently permitted inverter/motor output current is lower than the specified value ’Is-Max’ in the config (this does not necessarily mean that the inverter is being derated at this moment)";
+CM_ SG_ 899 InverterReady "1 = Inverter is ready to enter drive state, 0 = Not all conditions are met for the inverter to enter drive state";
+CM_ SG_ 899 InverterState "State of inverter [0 = Idle, 1 = Drive, 2 = Error, 3 = config values missing]";
+CM_ BO_ 438 "Control message (inbound message) for inverter 4.";
+CM_ SG_ 438 TorqueLimitNegative "Value will be cut to -64Nm and 63.998046875Nm if outside these boundaries.";
+CM_ SG_ 438 TorqueLimitPositive "Value will be cut to -64Nm and 63.998046875Nm if outside these boundaries.";
+CM_ SG_ 438 SpeedSetpoint "Will be limited to positive values by inverter.";
+CM_ SG_ 438 CurrentControl "Current control mode for test bench operation [1 = current control, 0 = Speed/Torque control] (do not use current mode in car!)";
+CM_ SG_ 438 ASCallowed "ASC allowed [1 = inverter enters ASC mode if necessary conditions are met, 0 = inverter stays in / switches to freewheeling mode during faults]";
+CM_ SG_ 438 ResetError "Reset Error [1 = reset error]";
+CM_ BO_ 422 "Control message (inbound message) for inverter 3.";
+CM_ SG_ 422 TorqueLimitNegative "Value will be cut to -64Nm and 63.998046875Nm if outside these boundaries.";
+CM_ SG_ 422 TorqueLimitPositive "Value will be cut to -64Nm and 63.998046875Nm if outside these boundaries.";
+CM_ SG_ 422 SpeedSetpoint "Will be limited to positive values by inverter.";
+CM_ SG_ 422 CurrentControl "Current control mode for test bench operation [1 = current control, 0 = Speed/Torque control] (do not use current mode in car!)";
+CM_ SG_ 422 ASCallowed "ASC allowed [1 = inverter enters ASC mode if necessary conditions are met, 0 = inverter stays in / switches to freewheeling mode during faults]";
+CM_ SG_ 422 ResetError "Reset Error [1 = reset error]";
+CM_ BO_ 406 "Control message (inbound message) for inverter 2.";
+CM_ SG_ 406 TorqueLimitNegative "Value will be cut to -64Nm and 63.998046875Nm if outside these boundaries.";
+CM_ SG_ 406 TorqueLimitPositive "Value will be cut to -64Nm and 63.998046875Nm if outside these boundaries.";
+CM_ SG_ 406 SpeedSetpoint "Will be limited to positive values by inverter.";
+CM_ SG_ 406 CurrentControl "Current control mode for test bench operation [1 = current control, 0 = Speed/Torque control] (do not use current mode in car!)";
+CM_ SG_ 406 ASCallowed "ASC allowed [1 = inverter enters ASC mode if necessary conditions are met, 0 = inverter stays in / switches to freewheeling mode during faults]";
+CM_ SG_ 406 ResetError "Reset Error [1 = reset error]";
+CM_ BO_ 390 "Control message (inbound message) for inverter 1.";
+CM_ SG_ 390 TorqueLimitNegative "Value will be cut to -64Nm and 63.998046875Nm if outside these boundaries.";
+CM_ SG_ 390 TorqueLimitPositive "Value will be cut to -64Nm and 63.998046875Nm if outside these boundaries.";
+CM_ SG_ 390 SpeedSetpoint "Will be limited to positive values by inverter.";
+CM_ SG_ 390 CurrentControl "Current control mode for test bench operation [1 = current control, 0 = Speed/Torque control] (do not use current mode in car!)";
+CM_ SG_ 390 ASCallowed "ASC allowed [1 = inverter enters ASC mode if necessary conditions are met, 0 = inverter stays in / switches to freewheeling mode during faults]";
+CM_ SG_ 390 ResetError "Reset Error [1 = reset error]";
+BA_DEF_  "MultiplexExtEnabled" ENUM  "No","Yes";
+BA_DEF_  "BusType" STRING ;
+BA_DEF_DEF_  "MultiplexExtEnabled" "No";
+BA_DEF_DEF_  "BusType" "CAN";
+VAL_ 947 DeratingIndication 1 "'Is-Max' is limitted" 0 "'Is-Max' is not limitted" ;
+VAL_ 947 InverterReady 1 "Ready" 0 "NotReady" ;
+VAL_ 947 InverterState 3 "Config values missing" 2 "Error" 1 "Drive" 0 "Idle" ;
+VAL_ 931 DeratingIndication 1 "'Is-Max' is limitted" 0 "'Is-Max' is not limitted" ;
+VAL_ 931 InverterReady 1 "Ready" 0 "NotReady" ;
+VAL_ 931 InverterState 3 "Config values missing" 2 "Error" 1 "Drive" 0 "Idle" ;
+VAL_ 915 DeratingIndication 1 "'Is-Max' is limitted" 0 "'Is-Max' is not limitted" ;
+VAL_ 915 InverterReady 1 "Ready" 0 "NotReady" ;
+VAL_ 915 InverterState 3 "Config values missing" 2 "Error" 1 "Drive" 0 "Idle" ;
+VAL_ 1024 MirrorControlEnable 1 "Condition fulfilled" 0 "Control Disabled" ;
+VAL_ 1024 MirrorControlDisable 1 "Control disabled" 0 "Condition fulfilled" ;
+VAL_ 1024 DClinkGood34 1 "DC-Link voltage good for inv3+4" 0 "DC-Link voltage low for inv3+4" ;
+VAL_ 1024 DClinkGood12 1 "DC-Link voltage good for inv1+2" 0 "DC-Link voltage low for inv1+2" ;
+VAL_ 899 DeratingIndication 1 "'Is-Max' is limitted" 0 "'Is-Max' is not limitted" ;
+VAL_ 899 InverterReady 1 "Ready" 0 "NotReady" ;
+VAL_ 899 InverterState 3 "Config values missing" 2 "Error" 1 "Drive" 0 "Idle" ;
+VAL_ 438 CurrentControl 1 "Current control" 0 "Speed or torque control" ;
+VAL_ 438 ASCallowed 1 "allowed" 0 "not allowed" ;
+VAL_ 438 ResetError 1 "reset error" 0 "-" ;
+VAL_ 438 EnableInverter 1 "enable control" 0 "disable control" ;
+VAL_ 422 CurrentControl 1 "Current control" 0 "Speed or torque control" ;
+VAL_ 422 ASCallowed 1 "allowed" 0 "not allowed" ;
+VAL_ 422 ResetError 1 "reset error" 0 "-" ;
+VAL_ 422 EnableInverter 1 "enable control" 0 "disable control" ;
+VAL_ 406 CurrentControl 1 "Current control" 0 "Speed or torque control" ;
+VAL_ 406 ASCallowed 1 "allowed" 0 "not allowed" ;
+VAL_ 406 ResetError 1 "reset error" 0 "-" ;
+VAL_ 406 EnableInverter 1 "enable control" 0 "disable control" ;
+VAL_ 390 CurrentControl 1 "Current control" 0 "Speed or torque control" ;
+VAL_ 390 ASCallowed 1 "allowed" 0 "not allowed" ;
+VAL_ 390 ResetError 1 "reset error" 0 "-" ;
+VAL_ 390 EnableInverter 1 "enable control" 0 "disable control" ;
+

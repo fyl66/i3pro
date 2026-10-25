@@ -6072,6 +6072,7 @@ python -m unittest tests.test_i3pro.TestStitch -v
 .\i3pro.cmd stitch "i2pro_data\20261025-cjh耐久12圈.csv.gz" "i2pro_data\20261025-jhy耐久12圈.csv.gz"
 .\i3pro.cmd stitch "i2pro_data\20261025-cjh耐久12圈.csv.gz" "i2pro_data\20261025-jhy耐久12圈.csv.gz" --out "out\20261025-耐久合并.csv"
 python out\_stitch_verify.py "out\20261025-耐久合并.csv" "i2pro_data\20261025-cjh耐久12圈.csv.gz" "i2pro_data\20261025-jhy耐久12圈.csv.gz"
+python out\_stitch_hash.py        # 本地 .csv.gz 解压后 = 共享 .csv，压缩字节两边相同
 .\i3pro.cmd info "i2pro_data\20261025-耐久合并.csv.gz"
 python tools\make_csv_gz.py "i2pro_data\20261025-耐久合并.csv" --delete
 python -m unittest discover -s tests -q

@@ -740,6 +740,13 @@ def merge_sources(log, sources):
             # 所以合并场次里这一列从"空"开始，让帧表那条真的把它填满；一条都
             # 填不到时给的是 NaN（"没有数据"），而不是一排看起来像读数的 0。
             columns[channel.name] = np.full(axis.size, np.nan)
+        elif values.size == axis.size:
+            # 采样点与主时间基**一一对应**（都是 100 Hz 一整场）时原样搬。
+            # 这条不是省事：零阶保持的右端是**开**的（`hold_sample` 只认
+            # `at < times[-1]`），照着搬会把最后一个真样本吃掉。实测 10.25 的
+            # 两段耐久：`.ld` 里 `Vx KF` 末值 −0.09，合并产物最后一行却是空行；
+            # 两段接起来之后那一格落在接缝上，距离轴从那里起全是 NaN。
+            columns[channel.name] = values
         else:
             columns[channel.name] = hold_sample(grid, values, axis)
 

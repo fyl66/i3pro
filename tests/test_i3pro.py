@@ -434,6 +434,34 @@ class TestDerived(unittest.TestCase):
             self.assertGreater(span_y, 20)
             self.assertLess(span_x, 2000)  # a test-track sized loop, not a road trip
 
+    def test_一个缺读数的速度样本不会毁掉后面的整条距离轴(self):
+        """距离是**累计**量（`cumsum`）：一个 NaN 会让它之后整条轴全是 NaN。
+
+        实测 10.25 的两段耐久：`.ld`→CSV 合并时零阶保持的右端是开的，产物最后一行
+        是空行；两段接起来之后那一格落在**接缝**上，于是从接缝起每一圈的圈距都是
+        `nan`，`laps` 拿它当中位数、把 50 段全判成不完整。这里用一个 100 Hz、
+        中间空一格的小表钉住"后面照样能算"。
+        """
+        path = scratch("_nan_speed.csv")
+        with path.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.writer(handle, lineterminator="\r\n")
+            writer.writerow(["time_s", "Vx KF"])
+            writer.writerow(["", "km/h"])
+            for index in range(200):
+                writer.writerow([f"{index / 100:.2f}",
+                                 "" if index == 100 else "36"])
+        try:
+            session = csvlog.open_session(path)
+            self.assertEqual(derive.speed_channel(session), "Vx KF")
+            distance = derive.distance_series(session)
+            self.assertTrue(np.isfinite(distance).all(), "一个空样本不该毁掉后半条轴")
+            # 36 km/h = 10 m/s、两秒 ≈ 20 m；空掉的那一个样本扣掉 0.1 m
+            self.assertGreater(float(distance[-1]), 19.8)
+            self.assertLess(float(distance[-1]), 20.0)
+            self.assertGreater(float(distance[101]), float(distance[99]))
+        finally:
+            path.unlink(missing_ok=True)
+
 
 class _NamedLog:
     """只回答"有哪些通道"的最小场次：给名字解析这类纯函数用。"""
@@ -581,6 +609,37 @@ class TestLaps(unittest.TestCase):
                 ),
                 0.6,
             )
+
+
+class TestLapCompleteness(unittest.TestCase):
+    """一条圈算不出来时，别把整张圈速表一起标掉。"""
+
+    @staticmethod
+    def _lap(index: int, seconds: float, distance: float = 900.0):
+        return lapsmod.Lap(
+            index=index, label=str(index + 1),
+            start_time=index * 60.0, end_time=index * 60.0 + seconds,
+            start_distance=0.0, end_distance=distance,
+        )
+
+    def test_一条圈算不出圈距不会把整张表标成不完整(self):
+        """实测 10.25 两段耐久接起来之后：接缝上空一格 → 圈距 nan → `np.median`
+        给出 nan → 两条判据对每一条圈都为假真 → 50 段、0 个完整圈。现在只有算不出
+        来的那一条被标掉，其余照旧。
+        """
+        laps = [self._lap(0, 50.0), self._lap(1, 51.0),
+                self._lap(2, 49.0, distance=float("nan")), self._lap(3, 52.0)]
+        marked = lapsmod._flag_implausible(laps)
+        self.assertEqual([lap.complete for lap in marked],
+                         [True, True, False, True])
+
+    def test_真的不合理的圈照旧被标掉(self):
+        """中位数跳过空值之后，'太长 / 太短' 那条判据一个都不能松。"""
+        laps = [self._lap(0, 50.0), self._lap(1, 51.0), self._lap(2, 49.0),
+                self._lap(3, 400.0), self._lap(4, 50.0, distance=10.0)]
+        marked = lapsmod._flag_implausible(laps)
+        self.assertEqual([lap.complete for lap in marked],
+                         [True, True, True, False, False])
 
 
 class TestDefaultPair(unittest.TestCase):
@@ -12870,6 +12929,19 @@ class TestPairing(unittest.TestCase):
         self.assertIn("Slot_CAN", columns)
         self.assertEqual(list(columns)[0], "Vx KF", "顺序应该是 .ld 的通道在前")
         self.assertEqual(list(columns)[-1], "Slot_CAN", "新加的通道接在后面")
+
+    def test_与主时间基一一对应的通道保留最后一个样本(self):
+        """零阶保持的右端是**开**的，照搬会把最后一个真样本吃掉。
+
+        实测 10.25 的两段耐久：`.ld` 里 `Vx KF` 末值 `−0.09`，合并产物最后一行却是
+        空行；两段接起来之后那一格落在**接缝**上，距离轴从那里起全是 NaN（下游的圈距
+        一并变成 nan）。
+        """
+        log, session = self._merge_fixture()
+        _axis, columns, _units, _skipped = pairing.merge_columns(log, session, 0.0)
+        self.assertAlmostEqual(float(columns["Vx KF"][-1]), 2.0, places=9)
+        self.assertAlmostEqual(float(columns["AngVelX hor"][-1]), 3.0, places=9)
+        self.assertTrue(np.isfinite(columns["Vx KF"]).all(), "整列不该出现空样本")
 
     def test_merged_output_reads_back_as_one_session(self):
         log, session = self._merge_fixture()

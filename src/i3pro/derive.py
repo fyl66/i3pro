@@ -267,6 +267,11 @@ def distance_series(
         if gps is not None:
             return gps
     speed = speed_series(log) / 3.6  # km/h -> m/s
+    # 缺读数的样本按 0 速度算。距离是**累计**量（`cumsum`），一个空样本会让它之后
+    # 整条轴全是 NaN——实测：10.25 的两段耐久接起来之后，接缝上那一格是空行，于是
+    # 从接缝起每一圈的圈距都是 `nan`，`laps` 拿它当中位数、把 50 段全判成不完整。
+    # 一个样本的代价是 0.01 s 的速度（厘米级），比整条轴没了强。
+    speed = np.where(np.isfinite(speed), speed, 0.0)
     # Rolling backwards / GPS jitter would otherwise make the axis shrink.
     speed = np.where(speed < max(min_speed, 0.0), 0.0, speed)
     dt = 1.0 / log.sample_rate

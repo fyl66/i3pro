@@ -595,10 +595,17 @@ def _flag_implausible(laps: list[Lap]) -> list[Lap]:
         return laps
     times = np.array([l.lap_time for l in laps], dtype=float)
     lengths = np.array([l.distance for l in laps], dtype=float)
-    median_time = float(np.median(times))
-    median_len = float(np.median(lengths))
+    # 中位数要**跳过算不出来的那些圈**。一条圈的圈距是 NaN（距离通道里有个空样本）
+    # 时，`np.median` 给出 NaN，下面两条判据于是对**每一条**圈都为假真——整张表被
+    # 整片标成不完整。实测 10.25 两段耐久接起来之后就是这样：50 段、0 个完整圈。
+    # 现在只有算不出来的那一条被标掉，其余照旧。
+    median_time = float(np.nanmedian(times)) if np.isfinite(times).any() else 0.0
+    median_len = float(np.nanmedian(lengths)) if np.isfinite(lengths).any() else 0.0
     for lap in laps:
         if not lap.complete:
+            continue
+        if not np.isfinite(lap.lap_time) or not np.isfinite(lap.distance):
+            lap.complete = False
             continue
         bad_time = not (0.4 * median_time <= lap.lap_time <= 2.5 * median_time)
         bad_length = not (0.35 * median_len <= lap.distance <= 1.6 * median_len)

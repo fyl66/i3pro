@@ -6103,6 +6103,69 @@ python tools\verify_clicks.py
 本身不准，真实停表秒数要靠墙钟，得人给 `--gap`）。它不写侧车、不改任何原件；
 接出来的是一份新的宽表，进 `i2pro_data` 之后就是普通场次。
 
+## A124 · 接缝上那个空样本：距离轴不再是「一个 NaN 之后全是 NaN」（本次修复）
+
+**要解决的问题**：A123 接出来的 `20261025-耐久合并` 一渲染就是
+`50 圈 / **0 完整圈**, 最快 -`，接缝之后每一段的圈距都是 `nan`。一路查下来的链条：
+
+1. `.ld`→CSV 那条合并路（`pairing.merge_sources`）用零阶保持把 `.ld` 的列搬到主时间
+   基上，而零阶保持的右端是**开**的（`hold_sample` 只认 `at < times[-1]`）——采样点
+   与主时间基**一一对应**的列（一整场都是 100 Hz）也照这条规则走，于是**最后一个真样本
+   被吃掉**：实测 `20261025-cjh耐久12圈` 的 `Vx KF` 在 `.ld` 里末值是 `−0.09`，合并
+   产物最后一行却是空的（`U1 Data` / `Battery Power` / `Distance` 同样空）。
+2. 单看一段无所谓（空的是最后一格）。两段**接起来**之后，前半那一格落在**接缝**上：
+   `Vx KF` 在 `t=1434.99 s` 是 NaN。
+3. 距离轴是累计量（`cumsum(speed)·dt`）：一个 NaN 会让它**之后**整条轴全是 NaN →
+   接缝之后那些圈的圈距全是 `nan`。
+4. `laps._flag_implausible` 拿 `np.median(圈距)` 当参照，数组里只要有 NaN，中位数也是
+   NaN，两条判据（圈时 / 圈距的合理带）于是对**每一条**圈都为假真 → 50 段全被标成不完整。
+
+| 改/加 | 内容 |
+| --- | --- |
+| 一一对应就原样搬 | `pairing.merge_sources`：`.ld` 列的点数**等于**主时间基的点数时直接搬，不走零阶保持（右端是开的，会吃掉最后一个真样本） |
+| 累计量不许被一个空样本毁掉 | `derive.distance_series`：非有限的速度样本按 `0 m/s` 算（一个样本 = 0.01 s，代价厘米级），而不是让 `cumsum` 从那里起全变 NaN |
+| 中位数跳过算不出来的圈 | `laps._flag_implausible` 改用 `np.nanmedian`，并显式把「圈时 / 圈距算不出来」的那一条标成不完整，不牵连别人 |
+
+```powershell
+python -m unittest tests.test_i3pro.TestDerived tests.test_i3pro.TestLapCompleteness tests.test_i3pro.TestPairing -v
+python out\_stitch_nan.py
+.\i3pro.cmd laps "i2pro_data\20261025-耐久合并.csv.gz"
+.\i3pro.cmd render "i2pro_data\20261025-耐久合并.csv.gz" --channels "Vx KF,I Data,U1 Data,Battery Power,Drive Energy,Regen Energy,Net Energy,latitude MTI,longitude MTI" --out "out\20261025-耐久合并.html"
+python -m unittest discover -s tests -q
+python tools\verify_ld_vs_csv.py
+node tools\smoke_viewer.js "out\20260908-cjh 高避5圈.html"
+node tools\smoke_viewer.js "out\20260524-耐久正赛.html"
+python tools\verify_clicks.py
+```
+
+**通过判据（本机实测，2026-10-25）**：
+
+| 断言 | 实测 |
+| --- | --- |
+| 合并场次的圈 | 修前 `50 圈 / 0 完整圈, 最快 -`（每段圈距 `nan`）→ 修后 **`50 圈 / 24 完整圈, 最快 19.060s`**，50 段的圈距全部有值（`615.5 / 324.1 / … / 58.0 m`） |
+| 与两段各自单看一致 | `cjh` 单看 `26 圈 / 12 完整圈 / 最快 19.060s`、`jhy` 单看 `25 圈 / 12 完整圈 / 最快 20.000s`——接续没有换门，12 + 12 = 24 个完整圈 |
+| 距离轴 | 合并场次 **22,721.9 m**（= 前半 11,359.37 + 后半 11,362.55），全程有值；两段各自也从「末值 nan」变成全程有值 |
+| 空样本 | 合并产物里 `Vx KF` 的空样本 2 个（`t=1434.99` 与 `2494.99`，都是各段最后一格）；`Distance` 有 106,001 个空（后半那一列模板本来就空——距离轴走速度积分兜底，不认它） |
+| 一一对应 | `TestPairing` 新增：与主时间基等长的列末值保留（`Vx KF` 2.0 / `AngVelX hor` 3.0），整列无空样本 |
+| 一个空样本 | `TestDerived` 新增：100 Hz 小表中间空一格，距离轴仍全程有值、末值 `19.9 m`（36 km/h × 2 s 扣掉一格） |
+| 圈表中位数 | `TestLapCompleteness` 两条：一条圈的圈距是 `nan` 时只标掉它自己（`True/True/False/True`）；真的不合理的圈（400 s / 10 m）照旧被标掉 |
+| 金标准没动 | 两份金标准**重新渲染**后 smoke 各 **935 checks** 全过，圈数一字不差：高避 `7 圈 / 5 完整圈 / 最快 40.440s`、耐久 `26 圈 / 23 完整圈 / 最快 54.900s` |
+| 解析对照 | `PASS - 0 channel(s) outside tolerance` |
+| 单测 | `Ran 692 tests in 117.829s`，`OK (skipped=28)` |
+| 真浏览器 | `444 项检查：444 通过，0 失败` |
+
+**已知边界**：
+
+1. 已经发出去的 15 份 10.25 合并场次，每一份**最后一行**仍然是那个空样本（`pair` 的
+   旧产物）。对分析已经没有影响（距离轴那条修掉了，空的是最后一格），要用现在的
+   `pair` 重跑一遍才会彻底清掉——那会让 A122 里记的 SHA-256 全部过期，留给下一轮。
+2. 这一场的自动门把整圈切成两段（约 38 s + 19 s 一对），所以「最快 19.060 s」是半圈。
+   这与两段各自单看时**完全一样**（`cjh` / `jhy` 单看也是这个门），不是接续带来的；
+   要按整圈计时，在工作区放两个信标即可。
+3. 这一场的快照单独跑 `smoke_viewer.js` 还有 2 条不过：**「通道太少画法测不了」（只
+   渲染了 9 条通道）与「姿态组件的标题没写缺 1 条」**（这辆车没有金标准那套 IMU 名字的
+   姿态通道，README 里已记过这个差异）。这四条回归里的 smoke 只针对两份金标准快照。
+
 ## A122 · `.csv.gz`：纯文本场次的**只读**压缩容器（本次新增，ADR-0012）
 
 **要解决的问题**：10.25 那批 15 个合并场次合计 2.72 GB，共享目录被顶到 7.3 GB。用户

@@ -6068,6 +6068,7 @@ python tools\verify_clicks.py
 python -m i3pro import "E:\桌面\motor\mat\*.mat" --data i2pro_data
 python -m i3pro info "i2pro_data\Ephorus_2026_10_22_20_38_43.mat"
 python -m unittest tests.test_i3pro.TestMatLog -v
+python tools\verify_clicks.py
 ```
 
 **通过判据（本机实测，2026-10-27）**：
@@ -6082,10 +6083,10 @@ python -m unittest tests.test_i3pro.TestMatLog -v
 
 | 断言 | 实测 |
 | --- | --- |
-| 单测 | `TestMatLog` 7 项全过（含真文件用例：387 通道、5 条重名、`t` 时间轴、~100 Hz）；整份 `Ran 699 tests in 113.068s`，`OK (skipped=28)` |
+| 单测 | `TestMatLog` 11 项全过：真文件 387 通道 / 5 条重名 / `t` 时间轴 / ~100 Hz；`char` 不冒充数值；截断文件不静默少列；上传后进侧边栏并能生成渲染载荷。整份 `Ran 703 tests in 118.597s`，`OK (skipped=28)` |
 | 打开 | `i3pro info` 一份 89 MB 日志 **9 s**；第一次进侧边栏后按文件指纹缓存 |
-| 反例 | v7.3（HDF5）头、非数值矩阵都有中文「下一步」，不静默少通道 |
-| 旧场次不受影响 | 解析对照 `PASS - 0 channel(s) outside tolerance`；两份金标准 smoke 各 `935 checks`；真浏览器 `444 项：444 通过，0 失败` |
+| 反例 | v7.3（HDF5）头、真实 `char` 矩阵、截断文件都有中文「下一步」，不静默少通道 |
+| 旧场次不受影响 | 解析对照 `PASS - 0 channel(s) outside tolerance`；两份金标准 smoke 各 `935 checks`；真浏览器 `450 项：450 通过，0 失败`（含 `.mat` 文件选择器 → 侧边栏 → 工作台） |
 
 ## A123 · 接续：接连录下来的几场接成一场（本次新增，`i3pro stitch`）
 

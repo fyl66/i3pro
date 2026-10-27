@@ -13227,8 +13227,10 @@ class TestMatLog(unittest.TestCase):
         return path
 
     @staticmethod
-    def _mat_v5(variables, *, pad=True) -> bytes:
-        """最小 MAT v5 写入器：只写 ``double`` 矩阵，``pad=False`` 模拟 TinyMAT。"""
+    def _mat_v5(
+        variables, *, pad=True, matrix_class=6, data_kind=9, dtype=np.float64
+    ) -> bytes:
+        """最小 MAT v5 写入器；``pad=False`` 模拟 TinyMAT。"""
         import struct
 
         def element(kind, payload):
@@ -13240,11 +13242,11 @@ class TestMatLog(unittest.TestCase):
             return out
 
         def matrix(name, values):
-            values = np.asarray(values, dtype=np.float64)
-            body = element(6, struct.pack("<II", 6, 0))          # mxDOUBLE_CLASS
+            values = np.asarray(values, dtype=dtype)
+            body = element(6, struct.pack("<II", matrix_class, 0))
             body += element(5, struct.pack("<ii", 1, values.size))
             body += element(1, name.encode("latin-1"))
-            body += element(9, values.tobytes(order="F"))
+            body += element(data_kind, values.tobytes(order="F"))
             return element(14, body)
 
         head = (b"MATLAB 5.0 MAT-file, i3pro test".ljust(116, b" ")
@@ -13307,6 +13309,70 @@ class TestMatLog(unittest.TestCase):
             matlog.read_variables(path)
         self.assertIn("数值矩阵", str(caught.exception))
         self.assertIn("下一步", str(caught.exception))
+
+    def test_char_matrix_is_not_mistaken_for_numbers(self):
+        # MATLAB 的 char 也用整数元素存，只看底层 tag 会静默把 "ABC" 读成 65/66/67。
+        blob = self._mat_v5(
+            [("Label", [65, 66, 67])], matrix_class=4, data_kind=4, dtype=np.uint16
+        )
+        with self.assertRaises(ValueError) as caught:
+            matlog.read_variables(self._temp(blob))
+        message = str(caught.exception)
+        self.assertIn("类型 char", message)
+        self.assertIn("下一步", message)
+
+    def test_truncated_file_is_refused_instead_of_dropping_channels(self):
+        blob = self._mat_v5([
+            ("t", [0.0, 0.002, 0.004]),
+            ("Speed_Setpoint_1_RPM", [1.0, 2.0, 3.0]),
+        ])
+        with self.assertRaises(ValueError) as caught:
+            matlog.read_variables(self._temp(blob[:-8]))
+        message = str(caught.exception)
+        self.assertIn("不完整", message)
+        self.assertIn("下一步", message)
+
+    def test_public_api_names_all_exist(self):
+        for name in matlog.__all__:
+            self.assertTrue(hasattr(matlog, name), f"__all__ 里的 {name} 不存在")
+
+    def test_upload_lands_in_sidebar_and_render_payload(self):
+        from i3pro import api as apimod
+
+        time = np.arange(500, dtype=float) * 0.002
+        blob = self._mat_v5([
+            ("t", time),
+            ("Speed_Setpoint_1_RPM", np.linspace(0.0, 499.0, 500)),
+            ("Torque_Limit_positive_1_Nm", np.linspace(10.0, 20.0, 500)),
+        ])
+        with tempfile.TemporaryDirectory(prefix="i3pro-mat-upload-") as directory:
+            library = librarymod.SessionLibrary(
+                [Path(directory)], cache_size=1, maths_root=ROOT
+            )
+            try:
+                api = apimod.Api(library)
+                response = api.handle(
+                    ["upload"], {"name": ["验证用逆变器.mat"]},
+                    "PUT", apimod.Body.of(blob),
+                )
+                body = json.loads(response.body)
+                self.assertEqual(response.status, 200, body)
+                self.assertEqual(body["channels"], 2)
+                self.assertEqual(library.names(), ["验证用逆变器"])
+                page = server.index_page(library)
+                self.assertIn("/session/", page)
+                self.assertIn("验证用逆变器", page)
+
+                log = library.get("验证用逆变器")
+                self.assertEqual(log.metadata()["format"], "mat")
+                payload = render.build_payload(
+                    log, channels=["Speed_Setpoint_1_RPM"], buckets=100
+                )
+                trace = payload["traces"]["Speed_Setpoint_1_RPM"]
+                self.assertGreater(len(trace["time"]), 0)
+                self.assertEqual(len(trace["time"]), len(trace["value"]))
+            finally:
+                library.close()
 
     def test_real_inverter_log_when_present(self):
         files = sorted(DATA.glob("Ephorus_*.mat"))

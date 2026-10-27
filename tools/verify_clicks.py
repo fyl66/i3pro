@@ -30,6 +30,7 @@ import math
 import os
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -53,6 +54,34 @@ DEFAULT_EDGE = [
 # 两边各写一份就是为了**不一致时会红**，而不是为了复用。
 TIME_STEPS = [0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5,
               1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600]
+
+
+def _mat_v5_blob():
+    """一份最小的 MATLAB v5 日志：真时间轴 + RPM/Nm 两条通道。"""
+    import numpy as np
+
+    def element(kind, payload):
+        if len(payload) <= 4:
+            return struct.pack("<HH", kind, len(payload)) + payload.ljust(4, b"\0")
+        out = struct.pack("<II", kind, len(payload)) + payload
+        return out + b"\0" * (-len(payload) % 8)
+
+    def matrix(name, values):
+        values = np.asarray(values, dtype=np.float64)
+        body = element(6, struct.pack("<II", 6, 0))
+        body += element(5, struct.pack("<ii", 1, values.size))
+        body += element(1, name.encode("latin-1"))
+        body += element(9, values.tobytes(order="F"))
+        return element(14, body)
+
+    time = np.arange(500, dtype=float) * 0.002
+    head = (b"MATLAB 5.0 MAT-file, i3pro verify".ljust(116, b" ")
+            + b"\0" * 8 + struct.pack("<H", 0x0100) + b"IM")
+    return head + b"".join([
+        matrix("t", time),
+        matrix("Speed_Setpoint_1_RPM", np.linspace(0.0, 499.0, 500)),
+        matrix("Torque_Limit_positive_1_Nm", np.linspace(10.0, 20.0, 500)),
+    ])
 
 
 def _clock_ladder(step):
@@ -2872,6 +2901,64 @@ class Checker:
             self.browser.shot(os.path.join(ROOT, "out", "shots", "verify-import-view.png"),
                               view)
 
+    def mat_import(self, base_url, work_dir):
+        """#70：`.mat` 从文件选择器上传后必须进侧边栏，并能打开成场次。"""
+        name = "验证用逆变器"
+        blob = base64.b64encode(_mat_v5_blob()).decode("ascii")
+
+        def listed():
+            return ("Array.prototype.some.call(document.querySelectorAll('a'),"
+                    "function(a){return decodeURIComponent(a.getAttribute('href')||'')"
+                    ".indexOf(%r)>=0;})" % name)
+
+        page = self.browser.open(base_url, wait=0.8)
+        accept = self.browser.js(
+            "(document.getElementById('files')||{}).accept||''", page
+        )
+        self.check("#70 导入页的文件选择器收得到 .mat", ".mat" in (accept or ""), accept)
+        self.check("#70 导入前列表里没有这份逆变器日志",
+                   not self.browser.js(listed(), page))
+
+        self.browser.js(
+            "(function(){var b=atob('%s'),a=new Uint8Array(b.length);"
+            "for(var i=0;i<b.length;i++)a[i]=b.charCodeAt(i);"
+            "var f=new File([a],'%s.mat',{type:'application/octet-stream'});"
+            "var d=new DataTransfer();d.items.add(f);"
+            "var el=document.getElementById('files');el.files=d.files;"
+            "el.dispatchEvent(new Event('change'));return true;})()" % (blob, name),
+            page,
+        )
+        appeared = self.browser.wait_for(listed(), page, timeout=30)
+        self.check("#70 用文件选择器上传后，逆变器日志出现在侧边栏", appeared)
+        self.browser.shot(
+            os.path.join(ROOT, "out", "shots", "verify-mat-import.png"), page
+        )
+
+        view = self.browser.open(
+            base_url + "session/" + urllib.parse.quote(name), wait=1.2
+        )
+        ready = self.browser.wait_for(
+            "!!(window.i3pro && i3pro.data && i3pro.data.channels"
+            " && i3pro.data.channels.length)", view
+        )
+        self.check("#70 逆变器场次能打开工作台", ready)
+        if ready:
+            channels = json.loads(self.browser.js(
+                "JSON.stringify((i3pro.data.channels||[]).map(function(c){"
+                "return {name:c.name,unit:c.unit};}))", view
+            ))
+            by_name = {item["name"]: item for item in channels}
+            expected = {"Speed_Setpoint_1_RPM", "Torque_Limit_positive_1_Nm"}
+            self.check("#70 工作台里有 RPM / Nm 两条通道",
+                       expected <= set(by_name), channels)
+            self.check("#70 通道名后缀猜出的单位进了工作台",
+                       by_name.get("Speed_Setpoint_1_RPM", {}).get("unit") == "RPM"
+                       and by_name.get("Torque_Limit_positive_1_Nm", {}).get("unit") == "Nm",
+                       by_name)
+            self.browser.shot(
+                os.path.join(ROOT, "out", "shots", "verify-mat-view.png"), view
+            )
+
     def text_import(self, base_url, work_dir):
         """#32：分隔文本的导入预览——**真鼠标点、真键盘改**，然后看它是不是照改的读。
 
@@ -5446,6 +5533,7 @@ def main(argv=None):
             checker.gps(work_dir, args.session)
             checker.write_seam()
             checker.imports("http://127.0.0.1:%d/" % args.port, work_dir)
+            checker.mat_import("http://127.0.0.1:%d/" % args.port, work_dir)
             checker.text_import("http://127.0.0.1:%d/" % args.port, work_dir)
             # 接着用刚导入的那一场（CSV 场次）验 A77：末尾那句"再应用一次"就是
             # 用户踩到的那一步；这一条必须在 text_import **之后**。

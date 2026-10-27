@@ -20,7 +20,6 @@ TinyMAT 写出。读法与 CSV / Excel 一样收口到 ``csvlog.session_from_fra
 from __future__ import annotations
 
 import hashlib
-import re
 import struct
 import zlib
 from pathlib import Path
@@ -28,10 +27,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import containers, csvlog
+from . import csvlog
 
 __all__ = [
-    "NATIVE_RATE_HZ", "DEFAULT_RATE_HZ", "guess_unit", "quick_summary",
+    "NATIVE_RATE_HZ", "DEFAULT_RATE_HZ", "guess_unit",
     "read_mat_session", "read_variables",
 ]
 
@@ -53,6 +52,10 @@ _CLASSES = {1: "cell", 2: "struct", 3: "object", 4: "char", 5: "sparse",
             6: "double", 7: "single", 8: "int8", 9: "uint8", 10: "int16",
             11: "uint16", 12: "int32", 13: "uint32", 14: "int64", 15: "uint64"}
 
+#: ``mxDOUBLE_CLASS`` … ``mxUINT64_CLASS``。这些类的数组才能当通道；``char``
+#: 虽然也用整数元素存，但它的语义是文本，不能因为底层 tag 可读就混进通道。
+_NUMERIC_CLASSES = frozenset(range(6, 16))
+
 #: 单位后缀。**长的排前面**：``_A_rms`` 要先于 ``_A`` 命中，``_ms`` 要先于 ``_s``。
 _UNIT_SUFFIXES = (
     ("_A_rms", "A"), ("_V_rms", "V"), ("_VAms", "VA/ms"), ("_Nmms", "Nm/ms"),
@@ -60,10 +63,6 @@ _UNIT_SUFFIXES = (
     ("_ns", "ns"), ("_Ohm", "Ohm"), ("_Nm", "Nm"), ("_VA", "VA"),
     ("_ms", "ms"), ("_s", "s"), ("_A", "A"), ("_V", "V"), ("_W", "W"),
 )
-
-#: ``Ephorus_2026_10_22_21_08_32.mat`` —— 文件名带日志起始墙钟。
-_STAMP = re.compile(r"(\d{4})_(\d{2})_(\d{2})_(\d{2})_(\d{2})_(\d{2})")
-
 
 def guess_unit(name: str) -> str:
     """通道名后缀 → 单位（猜）。猜不出来给空串，让人覆盖（ticket #72）。"""
@@ -101,20 +100,29 @@ def _next_pos(buf, start: int, size: int) -> int:
 
 def _read_tag(buf, pos: int):
     """→ ``(类型, 字节数, 数据起点, 下一个元素的起点, 是否小元素)``。"""
+    if pos + 8 > len(buf):
+        raise ValueError(
+            "MAT 文件在元素标签处截断了。下一步：重新从控制器或共享目录拷一份完整文件。"
+        )
     raw = struct.unpack_from("<I", buf, pos)[0]
     if raw >> 16:
         return raw & 0xFFFF, raw >> 16, pos + 4, pos + 8, True
     kind = raw & 0xFFFF
     size = struct.unpack_from("<I", buf, pos + 4)[0]
     start = pos + 8
+    if start + size > len(buf):
+        raise ValueError(
+            f"MAT 文件不完整：字节 {pos} 处的元素声明了 {size} 字节，但文件在这里结束了。"
+            "下一步：重新从控制器或共享目录拷一份完整文件。"
+        )
     return kind, size, start, _next_pos(buf, start, size), False
 
 
 def _parse_matrix(buf, start: int, size: int):
     """一个 ``miMATRIX`` → ``(名字, 类, 维度, 实数块)``。
 
-    实数块是 ``(类型, 字节数, 起点, 所在的缓冲区)``——**不复制**：一份日志解压后
-    有 2 GB 多，只有真的要用某一条通道时才去切它（列表面板只需要表头和 ``t``）。
+    实数块是 ``(类型, 字节数, 起点, 所在的缓冲区)``，解析阶段只记偏移、不另造一份
+    数组；:func:`read_variables` 随后才把每条通道复制成 ``float64`` 装配场次。
     """
     pos, end = start, start + size
     dims: list[int] = []
@@ -138,7 +146,14 @@ def _parse_matrix(buf, start: int, size: int):
 
 def _walk(buf, out: list) -> None:
     pos = 0
-    while pos + 8 <= len(buf):
+    while pos < len(buf):
+        if pos + 8 > len(buf):
+            if any(buf[pos:]):
+                raise ValueError(
+                    f"MAT 文件在字节 {pos} 处截断了，末尾不足一个元素标签。"
+                    "下一步：重新从控制器或共享目录拷一份完整文件。"
+                )
+            return
         kind, size, data, nxt, _small = _read_tag(buf, pos)
         if kind == 15:                                  # miCOMPRESSED
             try:
@@ -184,7 +199,7 @@ def read_variables(path: str | Path) -> tuple[list[tuple[str, np.ndarray]], dict
     duplicates: list[dict] = []
     skipped: list[dict] = []
     for name, cls, dims, real in found:
-        if real is None:
+        if cls not in _NUMERIC_CLASSES or real is None:
             skipped.append({"name": name or "(无名)", "class": _CLASSES.get(cls, str(cls)),
                             "dims": dims})
             continue

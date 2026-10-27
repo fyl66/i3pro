@@ -37,7 +37,7 @@ __all__ = ["ALLOWED_SUFFIXES", "safe_name", "unique_target", "store_stream", "im
 #: :func:`i3pro.containers.is_importable`（ADR-0012），纯文本容器允许带压缩后缀
 #: （``X.csv.gz``）——"压缩后缀 + 格式后缀"要一起剥掉才算数，直接用
 #: ``Path(name).suffix`` 只会看到 ``.gz``，于是把一份好好的 CSV 挡在门外。
-ALLOWED_SUFFIXES = (".ld", ".ldx", ".csv", ".xlsx", ".txt", ".tsv")
+ALLOWED_SUFFIXES = (".ld", ".ldx", ".csv", ".xlsx", ".txt", ".tsv", ".mat")
 
 #: 导入预览的暂存目录前缀。暂存在 ``%TEMP%`` 而不是数据根目录里：场次库会**递归**
 #: 扫 ``*.csv``，把还没确认的文件放在它眼皮底下就会先冒出一个"半成品场次"。

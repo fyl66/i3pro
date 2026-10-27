@@ -861,6 +861,10 @@ def open_session(path: str | Path, *, sources=None, **kwargs):
         from . import xlslog
 
         return xlslog.read_xlsx_session(path, **_accepted_by(xlslog.read_xlsx_session, kwargs))
+    if suffix == ".mat":
+        from . import matlog
+
+        return matlog.read_mat_session(path, **_accepted_by(matlog.read_mat_session, kwargs))
     return ldmod.LogFile.read(path)
 
 

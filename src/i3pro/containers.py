@@ -30,7 +30,7 @@ __all__ = [
 ]
 
 #: 能当"场次容器"的格式后缀。``.ldx`` 不在里面：它跟着 ``.ld`` 走，自己不是场次。
-SESSION_FORMATS = (".ld", ".csv", ".xlsx", ".txt", ".tsv")
+SESSION_FORMATS = (".ld", ".csv", ".xlsx", ".txt", ".tsv", ".mat")
 
 #: 导入白名单：场次容器 + ``.ldx``（MoTeC 的索引文件，跟着 ``.ld`` 一起拷）。
 IMPORTABLE = SESSION_FORMATS + (".ldx",)

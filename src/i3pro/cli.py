@@ -799,7 +799,7 @@ def cmd_stitch(args: argparse.Namespace) -> int:
 
 
 def cmd_import(args: argparse.Namespace) -> int:
-    """把 .ld/.ldx/.csv/.xlsx/.txt/.tsv 复制或移动进数据目录，让它们出现在侧边栏。"""
+    """把 .ld/.ldx/.csv/.xlsx/.txt/.tsv/.mat 复制或移动进数据目录，让它们出现在侧边栏。"""
     from . import importer
 
     destination = Path(args.data)
@@ -817,7 +817,7 @@ def cmd_import(args: argparse.Namespace) -> int:
         # 后缀按**容器**取（ADR-0012）：`X.csv.gz` 的逻辑后缀是 `.csv`，下面那几条
         # "要不要写列映射 / 记解析方式 / 读一遍报通道数"才判断得对。
         suffix = containers.format_suffix(row["file"])
-        if suffix in (".csv", ".xlsx", ".txt", ".tsv") and (
+        if suffix in (".csv", ".xlsx", ".txt", ".tsv", ".mat") and (
             renames or units or (suffix == ".xlsx" and sheet)
         ):
             csvlog.save_map(row["path"], renames, units,
@@ -826,7 +826,7 @@ def cmd_import(args: argparse.Namespace) -> int:
         if suffix in (".csv", ".txt", ".tsv") and options:
             csvlog.save_options(row["path"], **options)
             note += "已记住解析方式 · "
-        if suffix in (".ld", ".csv", ".xlsx", ".txt", ".tsv"):
+        if suffix in (".ld", ".csv", ".xlsx", ".txt", ".tsv", ".mat"):
             try:
                 # 这里**故意**不用 `_session`：导入报告只要原生通道数 / 时长 / 设备，
                 # 挂数学通道是白算一遍（25 场就是好几秒），而且会改"通道 N"那个数。
@@ -1186,7 +1186,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_snapshot)
 
     p = sub.add_parser("import",
-                       help="把 .ld/.ldx/.csv/.xlsx/.txt/.tsv 导入数据目录（可拖拽到 导入数据.bat 上）")
+                       help="把 .ld/.ldx/.csv/.xlsx/.txt/.tsv/.mat 导入数据目录（可拖拽到 导入数据.bat 上）")
     p.add_argument("paths", nargs="+", help="文件或目录，可多个")
     p.add_argument("--data", default="i2pro_data", help="目标数据目录")
     p.add_argument("--move", action="store_true", help="移动而不是复制")

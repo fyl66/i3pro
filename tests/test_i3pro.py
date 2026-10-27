@@ -58,6 +58,7 @@ from i3pro import (  # noqa: E402
     heatmap as heatmapmod,
     cli,
     laps as lapsmod, ld, library as librarymod,
+    matlog,
     maths as mathsmod, motec_csv,
     notes as notesmod, render, report as reportmod, sections as sectionsmod,
     aliases as aliasesmod,
@@ -11168,7 +11169,7 @@ class TestTextImport(unittest.TestCase):
         page = server.index_page(library)
         # `accept` 里必须带上 `.csv.gz`（ADR-0012）：漏了它，压过的场次拖进窗口会被
         # 浏览器直接筛掉，用户看到的是"什么都没发生"。
-        for needle in ('accept=".ld,.ldx,.csv,.csv.gz,.xlsx,.txt,.tsv"', 'id="cardOk"',
+        for needle in ('accept=".ld,.ldx,.csv,.csv.gz,.xlsx,.txt,.tsv,.mat"', 'id="cardOk"',
                        'id="optDelimiter"', 'id="optEncoding"', 'id="optHeader"',
                        'id="optUnitRow"', 'id="optRate"'):
             self.assertIn(needle, page)
@@ -13212,6 +13213,112 @@ class TestStitch(unittest.TestCase):
         self.assertEqual(scheme.starts[0], 0.0)
         self.assertAlmostEqual(scheme.starts[1], float(axis[-1]) + 1.0 / log.sample_rate,
                                places=6)
+
+
+class TestMatLog(unittest.TestCase):
+    """逆变器日志（MATLAB v5 / TinyMAT）——见 ADR-0013、ticket #70。"""
+
+    def _temp(self, blob: bytes) -> Path:
+        handle = tempfile.NamedTemporaryFile(suffix=".mat", delete=False)
+        handle.write(blob)
+        handle.close()
+        path = Path(handle.name)
+        self.addCleanup(path.unlink, missing_ok=True)
+        return path
+
+    @staticmethod
+    def _mat_v5(variables, *, pad=True) -> bytes:
+        """最小 MAT v5 写入器：只写 ``double`` 矩阵，``pad=False`` 模拟 TinyMAT。"""
+        import struct
+
+        def element(kind, payload):
+            if len(payload) <= 4:
+                return struct.pack("<HH", kind, len(payload)) + payload.ljust(4, b"\0")
+            out = struct.pack("<II", kind, len(payload)) + payload
+            if pad:
+                out += b"\0" * (-len(payload) % 8)
+            return out
+
+        def matrix(name, values):
+            values = np.asarray(values, dtype=np.float64)
+            body = element(6, struct.pack("<II", 6, 0))          # mxDOUBLE_CLASS
+            body += element(5, struct.pack("<ii", 1, values.size))
+            body += element(1, name.encode("latin-1"))
+            body += element(9, values.tobytes(order="F"))
+            return element(14, body)
+
+        head = (b"MATLAB 5.0 MAT-file, i3pro test".ljust(116, b" ")
+                + b"\0" * 8 + struct.pack("<H", 0x0100) + b"IM")
+        return head + b"".join(matrix(name, values) for name, values in variables)
+
+    def test_reads_padded_and_unpadded_elements(self):
+        for pad in (True, False):
+            blob = self._mat_v5([
+                ("Speed_Setpoint_1_RPM", [1.0, 2.0, 3.0]),
+                ("Torque_Limit_positive_1_Nm", [0.0, 1.5, 2.5]),
+            ], pad=pad)
+            pairs, info = matlog.read_variables(self._temp(blob))
+            self.assertEqual([name for name, _ in pairs],
+                             ["Speed_Setpoint_1_RPM", "Torque_Limit_positive_1_Nm"],
+                             "补齐=%s" % pad)
+            np.testing.assert_allclose(pairs[0][1], [1.0, 2.0, 3.0])
+            self.assertEqual(info["variables"], 2)
+
+    def test_duplicate_names_keep_every_column(self):
+        blob = self._mat_v5([("Reserved_1", [0.0]), ("Reserved_1", [1.0])])
+        pairs, info = matlog.read_variables(self._temp(blob))
+        self.assertEqual([name for name, _ in pairs], ["Reserved_1", "Reserved_1_2"])
+        self.assertEqual(info["duplicates"][0]["renamed"], "Reserved_1_2")
+
+    def test_unit_suffix_guess(self):
+        self.assertEqual(matlog.guess_unit("Speed_Setpoint_1_RPM"), "RPM")
+        self.assertEqual(matlog.guess_unit("Torque_Limit_positive_1_Nm"), "Nm")
+        self.assertEqual(matlog.guess_unit("Derating_Temp_Motor_Start_degC"), "degC")
+        self.assertEqual(matlog.guess_unit("Is_max_peak_A_rms"), "A",
+                         "_A_rms 必须先于 _A 命中")
+        self.assertEqual(matlog.guess_unit("SomethingElse"), "")
+
+    def test_time_column_drives_decimation(self):
+        time = np.arange(5000, dtype=float) * 0.002        # 500 Hz
+        blob = self._mat_v5([("t", time), ("Speed_Setpoint_1_RPM", np.arange(5000.0))])
+        session = matlog.read_mat_session(self._temp(blob))
+        self.assertEqual(session.header["mat_decimation"], 5)
+        self.assertEqual(session.header["mat_time_column"], "t")
+        self.assertEqual(session.time.size, 1000)
+        self.assertAlmostEqual(session.sample_rate, 100.0, places=3)
+        self.assertEqual([ch.name for ch in session.channels], ["Speed_Setpoint_1_RPM"])
+        self.assertEqual(session.channels[0].unit, "RPM")
+
+    def test_hdf5_points_at_v7(self):
+        path = self._temp(b"\x89HDF\r\n\x1a\n" + b"\0" * 200)
+        with self.assertRaises(ValueError) as caught:
+            matlog.read_variables(path)
+        self.assertIn("v7.3", str(caught.exception))
+
+    def test_non_numeric_variable_says_what_to_do(self):
+        import struct
+        blob = self._mat_v5([])
+        # 一个只有名字、没有数据块的矩阵：读侧必须点名它，而不是静默少一条通道。
+        body = (struct.pack("<II", 6, 8) + struct.pack("<II", 6, 0)
+                + struct.pack("<II", 5, 8) + struct.pack("<ii", 1, 1)
+                + struct.pack("<II", 1, 7) + b"Struct\0")
+        path = self._temp(blob + struct.pack("<II", 14, len(body)) + body)
+        with self.assertRaises(ValueError) as caught:
+            matlog.read_variables(path)
+        self.assertIn("数值矩阵", str(caught.exception))
+        self.assertIn("下一步", str(caught.exception))
+
+    def test_real_inverter_log_when_present(self):
+        files = sorted(DATA.glob("Ephorus_*.mat"))
+        if not files:
+            self.skipTest("i2pro_data 里没有逆变器 .mat（先用 i3pro import 导入一份）")
+        session = matlog.read_mat_session(files[0])
+        self.assertEqual(session.header["mat_variables"], 388)
+        self.assertEqual(len(session.header["mat_duplicates"]), 5)
+        self.assertEqual(len(session.channels), 387)
+        self.assertEqual(session.header["mat_time_column"], "t")
+        self.assertLess(abs(session.sample_rate - 100.0), 1.0)
+        self.assertGreater(session.duration, 1.0)
 
 
 if __name__ == "__main__":

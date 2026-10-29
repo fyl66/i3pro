@@ -1385,7 +1385,7 @@ class Checker:
         last = click_sheet(len(names) - 1)
         self.check("#30 真点最后一套 -> 换成那一套的组件",
                    last["preset"] == names[-1] and last["comps"] > 0
-                   and last["comps"] != first["comps"],
+                   and last["types"] != first["types"],
                    "%s -> %s" % (first, last))
         stored = json.loads(self.js(
             "(function(){var s=i3pro.data.session||'session';var k='i3pro.worksheet.v2:'+s;"

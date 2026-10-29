@@ -126,6 +126,12 @@ MIN_CORRELATION = 0.99
 #: 0.96 掉到 0.22）。加速度是尖的，所以在 Vx 认下来的那座峰附近 ±REFINE_S 里
 #: 用它重新定一次偏移——**Vx 的判据在那条偏移上仍然要过**。
 REFINE_S = 1.0
+
+#: 加速度复核失败后的全局粗搜步长 [s]。Vx 会先挑"点更多的那座峰"（10.29
+#: ``练车3``：错峰 r=1.000、真峰 r=0.9997），如果加速度只在错峰 ±1 s 里微调，
+#: 就永远回不到真峰。所以复核失败时还要在墙钟允许的偏移范围里用 1 s 一格再
+#: 搜一遍；精修仍由 :data:`REFINE_S` / ``step_s`` 负责。
+ACCEL_SEARCH_STEP_S = 1.0
 #: 相关差不到这个值的峰，看成"一样高"：这时候**谁的数据多谁算数**。
 #:
 #: 20 个点的窗口和 300 个点的窗口给出同一个 `r`，说明问题的只有后者。实测
@@ -532,10 +538,24 @@ def align(
             return None
         return lo + np.arange(0.0, span, step)
 
+    def full_window(lag: float):
+        """这个偏移下两边共同覆盖的**完整**区间，不截到 300 s。
+
+        只在墙钟窗与跟随窗都失败后用。实测 10.29 ``练车3`` 的前 300 s 几乎是
+        静止，真实偏移 +992 s 在那里 Vx 只有 0.355、
+        加速度 -0.178；同一偏移改用完整 749 s，Vx 0.9997、加速度 0.9343。
+        截断窗口会把一段本来能认出的真实驾驶淹掉。
+        """
+        lo = max(ld_lo, can_lo - float(lag))
+        hi = min(ld_hi, can_hi - float(lag))
+        if hi - lo < floor:
+            return None
+        return lo + np.arange(0.0, hi - lo, step)
+
     def attempt(window_of, *, by_count: bool, refine: bool) -> Alignment:
         """用一种窗把整个偏移范围搜一遍，给出这一种的结论。"""
-        def score(lag: float) -> tuple[float, int]:
-            at = window_of(lag)
+        def score(lag: float, window_fn=None) -> tuple[float, int]:
+            at = (window_of if window_fn is None else window_fn)(lag)
             if at is None:
                 return -2.0, 0
             ref = hold_sample(ref_t, ref_v, at)
@@ -585,6 +605,35 @@ def align(
         peak = best_lag
         at = window_of(peak)
         accel_r = None if at is None else _accel_correlation(log, session, at, peak)
+        if refine and accel_r is not None and accel_r < MIN_ACCEL_R:
+            # Vx 那座峰加速度不像时，不能只在它旁边微调：还要回到墙钟允许的
+            # 整个范围、用完整共同覆盖窗找加速度自己的峰，并要求 Vx 在同一条
+            # 偏移上也过判据。
+            # 实测 10.29 ``练车3``：Vx 先锁到 +1710.672 s（r=1.000、加速度
+            # -0.030），真偏移 +992 s 的加速度是 0.934、Vx 0.9997。
+            radius = min(reach, float(max_lag_s))
+            fallback: tuple[float, int, float, float] | None = None
+            for distance in np.arange(0.0, radius + 1e-9, ACCEL_SEARCH_STEP_S):
+                lags = (center,) if distance == 0.0 else (
+                    center + distance, center - distance)
+                for lag in lags:
+                    at2 = full_window(float(lag))
+                    if at2 is None:
+                        continue
+                    value = _accel_correlation(log, session, at2, float(lag))
+                    if value is None or value < MIN_ACCEL_R:
+                        continue
+                    check, count = score(float(lag), full_window)
+                    if check < MIN_CORRELATION or count < MIN_COMPARE_POINTS:
+                        continue
+                    row = (float(value), int(count), float(check), float(lag))
+                    if fallback is None or row[:2] > fallback[:2]:
+                        fallback = row
+            if fallback is not None:
+                accel_r, best_count, best_r, best_lag = fallback
+                peak = best_lag
+                window_of = full_window
+                at = window_of(peak)
         if refine and accel_r is not None:
             # 用加速度把偏移钉准（原因见 REFINE_S）：只在这座峰附近 ±REFINE_S 里找，
             # 而且**Vx 的判据在那条偏移上仍要过**——两条通道都得同意才算数。

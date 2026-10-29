@@ -672,6 +672,8 @@ def cmd_pair(args: argparse.Namespace) -> int:
                 mark = "配对" if result.ok else f"不配对（{result.reason}）"
                 if result.ok and result.window == "follow_window":
                     mark = "配对（跟随窗）"
+                elif result.ok and result.window == "full_window":
+                    mark = "配对（全程窗）"
                 print(
                     f"  {candidate.label}  重叠 {candidate.overlap_s:+7.1f} s"
                     f"  墙钟 {expect:+7.1f} s  偏移 {result.offset_s:+7.3f} s"
@@ -697,7 +699,8 @@ def cmd_pair(args: argparse.Namespace) -> int:
         for _ld_path, kept in planned:
             _write_pairing(data, kept, args)
         written = len(planned)
-        print(f"\n写了 {written} 个合并场次到 {data.resolve()}")
+        out_dir = Path(args.out or data).resolve()
+        print(f"\n写了 {written} 个合并场次到 {out_dir}")
         print("下一步: 双击 启动.bat，侧边栏里 <场次>.ld 与 <场次>.csv 并排，"
               "合并场次里两边通道都在。")
     return 0

@@ -12650,6 +12650,51 @@ class TestPairing(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("加速度", result.reason)
 
+    def test_acceleration_can_recover_a_true_offset_from_a_longer_false_speed_peak(self):
+        """速度互相关挑了点更多的错峰时，加速度要能在整段墙钟范围里把它拉回来。
+
+        10.29 中庭 ``练车3`` 实测：真正对应的 CAN 偏移是 +992.0 s（Vx 0.9997、
+        三轴加速度中位数 0.9343），但 Vx 先被 +1710.672 s 的一个更长窗口吸走
+        （r=1.0000、加速度 -0.030）。更麻烦的是，真偏移在 ``.ld`` 开头那段
+        没有辨识度，只有整段共同覆盖才认得出来。这里的合成数据把错峰放在前
+        300 s、真数据放到 300 s 之后，锁住这条回归。
+        """
+        true_offset = 700.0
+        log = self._ld(1200.0, offset=true_offset)
+        at = np.arange(1800.0 * 100.0) / 100.0
+        speed = np.full(at.size, np.nan)
+        accel = np.full(at.size, np.nan)
+        # 前 450 s 复制 ``.ld`` 开头的速度：偏移 0 在旧的 300 s 跟随窗里能
+        # 拿满分；加速度故意不复制，等着第二判据把它拒掉。
+        false = at < 450.0
+        speed[false] = 60.0 + 40.0 * self._wave(at[false] + true_offset)
+        accel[false] = -4.0 * self._wave(at[false] + true_offset + 1.7)
+        # 真数据只从 CAN 的 1000 s 起（对应 ``.ld`` 的 300 s 之后）。偏移
+        # +700 s 在旧的 300 s 跟随窗里完全看不到它；750 s 的完整共同覆盖里
+        # 则有 800 个点，Vx 和加速度都逐点重合。
+        true = at >= 1000.0
+        speed[true] = 60.0 + 40.0 * self._wave(at[true])
+        accel[true] = 4.0 * self._wave(at[true] + 1.7)
+        session = _FakeCan(
+            at,
+            [("Vx_KF", "km/h"), ("accY_MTI", "m/s/s")],
+            {"Vx_KF": speed, "accY_MTI": accel},
+        )
+        candidate = pairing.Candidate(
+            sources=[Path("2026_10_05_165220_ID0001.csv")],
+            window=(self.FRAME_START, self.FRAME_START + timedelta(seconds=1800)),
+            overlap_s=400.0,
+        )
+        result = pairing.align(
+            log, session, expect_s=pairing.expected_offset(self.LD_START, candidate),
+            max_lag_s=pairing.MAX_LAG_S,
+        )
+        self.assertTrue(result.ok, result.reason)
+        self.assertAlmostEqual(result.offset_s, true_offset, places=1)
+        self.assertEqual(result.window, "full_window")
+        self.assertGreater(result.r, 0.99)
+        self.assertGreater(result.accel_r, 0.99)
+
     def _record_at(self, start: datetime, seconds: float = 400.0):
         """一次记录：墙钟窗落在 ``start`` 起、长 ``seconds`` 秒。"""
         name = f"{start:%Y_%m_%d_%H%M%S}_ID0001.csv"
